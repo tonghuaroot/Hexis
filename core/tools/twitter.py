@@ -71,7 +71,7 @@ class SearchTwitterHandler(ToolHandler):
             description=(
                 "Search Twitter/X for recent tweets matching a query. "
                 "Uses automatic fallback across FxTwitter, TwitterAPI.io, Xquik, "
-                "and official X API when keys are available."
+                "official X API, and xAI Search when keys are available."
             ),
             parameters={
                 "type": "object",
