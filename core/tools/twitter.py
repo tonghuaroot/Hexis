@@ -347,18 +347,21 @@ class SearchTwitterHandler(ToolHandler):
                     created_at=t.get("createdAt") or t.get("created_at"),
                     likes=int(
                         metrics.get("like_count")
+                        or t.get("like_count")
                         or t.get("likeCount")
                         or t.get("likes")
                         or 0
                     ),
                     retweets=int(
                         metrics.get("retweet_count")
+                        or t.get("retweet_count")
                         or t.get("retweetCount")
                         or t.get("retweets")
                         or 0,
                     ),
                     replies=int(
                         metrics.get("reply_count")
+                        or t.get("reply_count")
                         or t.get("replyCount")
                         or t.get("replies")
                         or 0

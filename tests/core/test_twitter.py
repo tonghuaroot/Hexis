@@ -188,9 +188,9 @@ class TestTwitterNoAuthRequired:
                     "id": "4",
                     "text": "mapped",
                     "createdAt": "2026-01-01T00:00:00Z",
-                    "likeCount": 4,
-                    "retweetCount": 2,
-                    "replyCount": 1,
+                    "like_count": 4,
+                    "retweet_count": 2,
+                    "reply_count": 1,
                     "author": {"username": "dave"},
                 }
             ],
