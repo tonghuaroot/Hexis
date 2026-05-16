@@ -30,7 +30,7 @@ Get your API key from [Google Cloud Console](https://console.cloud.google.com/) 
 ### Setup
 
 ```bash
-hexis tools set-api-key twitter env:TWITTER_BEARER_TOKEN
+hexis tools set-api-key xquik env:XQUIK_API_KEY
 hexis tools enable twitter_search
 ```
 
@@ -38,7 +38,9 @@ hexis tools enable twitter_search
 |------|--------|-------------|
 | `twitter_search` | 2 | Search tweets and trends |
 
-Get your bearer token from [Twitter Developer Portal](https://developer.twitter.com/).
+`twitter_search` uses FxTwitter first, then falls back to configured API providers:
+TwitterAPI.io (`twitterapi_io`), Xquik (`xquik`), X API v2 (`x_api_bearer`),
+and xAI Search (`xai`). Use the provider key name that matches your account.
 
 ## Fathom
 

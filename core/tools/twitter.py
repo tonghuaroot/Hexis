@@ -3,8 +3,9 @@
 Implements a multi-tier fallback strategy:
 1) FxTwitter (free, unauthenticated)
 2) TwitterAPI.io (if key configured)
-3) Official X API v2 (if bearer token configured)
-4) xAI Search endpoint (best-effort fallback, if key configured)
+3) Xquik (if key configured)
+4) Official X API v2 (if bearer token configured)
+5) xAI Search endpoint (best-effort fallback, if key configured)
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _FXTWITTER_BASE = "https://api.fxtwitter.com"
 _TWITTERAPI_IO_BASE = "https://api.twitterapi.io"
+_XQUIK_BASE = "https://xquik.com/api/v1"
+_XQUIK_API_CONTRACT = "2026-04-29"
 _X_API_BASE = "https://api.twitter.com/2"
 _XAI_SEARCH_BASE = "https://api.x.ai/v1"
 
@@ -67,8 +70,8 @@ class SearchTwitterHandler(ToolHandler):
             name="twitter_search",
             description=(
                 "Search Twitter/X for recent tweets matching a query. "
-                "Uses automatic fallback across FxTwitter, TwitterAPI.io, and "
-                "official X API when keys are available."
+                "Uses automatic fallback across FxTwitter, TwitterAPI.io, Xquik, "
+                "and official X API when keys are available."
             ),
             parameters={
                 "type": "object",
@@ -90,7 +93,9 @@ class SearchTwitterHandler(ToolHandler):
             optional=True,
         )
 
-    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
         try:
             import httpx
         except ImportError:
@@ -109,7 +114,12 @@ class SearchTwitterHandler(ToolHandler):
                 tweets = await self._search_fxtwitter(client, query, max_results)
                 if tweets:
                     return ToolResult.success_result(
-                        {"tweets": tweets, "count": len(tweets), "provider": "fxtwitter", "tier": 1},
+                        {
+                            "tweets": tweets,
+                            "count": len(tweets),
+                            "provider": "fxtwitter",
+                            "tier": 1,
+                        },
                         display_output=f"Found {len(tweets)} tweet(s) for '{query}' (FxTwitter)",
                     )
                 attempts.append("FxTwitter: no results")
@@ -126,7 +136,10 @@ class SearchTwitterHandler(ToolHandler):
             if twitterapi_key:
                 try:
                     tweets = await self._search_twitterapi_io(
-                        client, query, max_results, twitterapi_key,
+                        client,
+                        query,
+                        max_results,
+                        twitterapi_key,
                     )
                     if tweets:
                         return ToolResult.success_result(
@@ -144,7 +157,34 @@ class SearchTwitterHandler(ToolHandler):
             else:
                 attempts.append("TwitterAPI.io: skipped (no API key)")
 
-            # Tier 3: Official X API v2
+            # Tier 3: Xquik
+            xquik_key = await resolve_api_key(
+                context,
+                config_key="xquik",
+                env_names=("XQUIK_API_KEY",),
+            )
+            if xquik_key:
+                try:
+                    tweets = await self._search_xquik(
+                        client, query, max_results, xquik_key
+                    )
+                    if tweets:
+                        return ToolResult.success_result(
+                            {
+                                "tweets": tweets,
+                                "count": len(tweets),
+                                "provider": "xquik",
+                                "tier": 3,
+                            },
+                            display_output=f"Found {len(tweets)} tweet(s) for '{query}' (Xquik)",
+                        )
+                    attempts.append("Xquik: no results")
+                except Exception as e:
+                    attempts.append(f"Xquik: {e}")
+            else:
+                attempts.append("Xquik: skipped (no API key)")
+
+            # Tier 4: Official X API v2
             x_bearer = await resolve_api_key(
                 context,
                 config_key="x_api_bearer",
@@ -152,10 +192,17 @@ class SearchTwitterHandler(ToolHandler):
             )
             if x_bearer:
                 try:
-                    tweets = await self._search_x_api(client, query, max_results, x_bearer)
+                    tweets = await self._search_x_api(
+                        client, query, max_results, x_bearer
+                    )
                     if tweets:
                         return ToolResult.success_result(
-                            {"tweets": tweets, "count": len(tweets), "provider": "x_api_v2", "tier": 3},
+                            {
+                                "tweets": tweets,
+                                "count": len(tweets),
+                                "provider": "x_api_v2",
+                                "tier": 4,
+                            },
                             display_output=f"Found {len(tweets)} tweet(s) for '{query}' (X API v2)",
                         )
                     attempts.append("X API v2: no results")
@@ -164,7 +211,7 @@ class SearchTwitterHandler(ToolHandler):
             else:
                 attempts.append("X API v2: skipped (no bearer token)")
 
-            # Tier 4: xAI Search fallback (best-effort)
+            # Tier 5: xAI Search fallback (best-effort)
             xai_key = await resolve_api_key(
                 context,
                 explicit_resolver=self._api_key_resolver,
@@ -176,7 +223,12 @@ class SearchTwitterHandler(ToolHandler):
                     tweets = await self._search_xai(client, query, max_results, xai_key)
                     if tweets:
                         return ToolResult.success_result(
-                            {"tweets": tweets, "count": len(tweets), "provider": "xai_search", "tier": 4},
+                            {
+                                "tweets": tweets,
+                                "count": len(tweets),
+                                "provider": "xai_search",
+                                "tier": 5,
+                            },
                             display_output=f"Found {len(tweets)} tweet(s) for '{query}' (xAI search)",
                         )
                     attempts.append("xAI search: no results")
@@ -191,7 +243,9 @@ class SearchTwitterHandler(ToolHandler):
             f"Attempts: {' | '.join(attempts)}",
         )
 
-    async def _search_fxtwitter(self, client: Any, query: str, max_results: int) -> list[dict[str, Any]]:
+    async def _search_fxtwitter(
+        self, client: Any, query: str, max_results: int
+    ) -> list[dict[str, Any]]:
         resp = await client.get(
             f"{_FXTWITTER_BASE}/search",
             params={"query": query},
@@ -203,15 +257,17 @@ class SearchTwitterHandler(ToolHandler):
         tweets: list[dict[str, Any]] = []
         for t in tweets_raw[:max_results]:
             author = t.get("author", {}) if isinstance(t.get("author"), dict) else {}
-            tweets.append(_tweet_dict(
-                tweet_id=t.get("id"),
-                text=t.get("text", ""),
-                author=author.get("screen_name") or author.get("name", "unknown"),
-                created_at=t.get("created_at"),
-                likes=int(t.get("likes", 0) or 0),
-                retweets=int(t.get("retweets", 0) or 0),
-                replies=int(t.get("replies", 0) or 0),
-            ))
+            tweets.append(
+                _tweet_dict(
+                    tweet_id=t.get("id"),
+                    text=t.get("text", ""),
+                    author=author.get("screen_name") or author.get("name", "unknown"),
+                    created_at=t.get("created_at"),
+                    likes=int(t.get("likes", 0) or 0),
+                    retweets=int(t.get("retweets", 0) or 0),
+                    replies=int(t.get("replies", 0) or 0),
+                )
+            )
         return tweets
 
     async def _search_twitterapi_io(
@@ -236,15 +292,79 @@ class SearchTwitterHandler(ToolHandler):
         for t in candidates[:max_results]:
             user = t.get("user") or t.get("author") or {}
             metrics = t.get("metrics") or t.get("public_metrics") or {}
-            tweets.append(_tweet_dict(
-                tweet_id=t.get("id") or t.get("tweet_id"),
-                text=t.get("text", ""),
-                author=user.get("username") or user.get("screen_name") or user.get("name", "unknown"),
-                created_at=t.get("created_at"),
-                likes=int(metrics.get("like_count") or t.get("likes") or 0),
-                retweets=int(metrics.get("retweet_count") or t.get("retweets") or 0),
-                replies=int(metrics.get("reply_count") or t.get("replies") or 0),
-            ))
+            tweets.append(
+                _tweet_dict(
+                    tweet_id=t.get("id") or t.get("tweet_id"),
+                    text=t.get("text", ""),
+                    author=user.get("username")
+                    or user.get("screen_name")
+                    or user.get("name", "unknown"),
+                    created_at=t.get("created_at"),
+                    likes=int(metrics.get("like_count") or t.get("likes") or 0),
+                    retweets=int(
+                        metrics.get("retweet_count") or t.get("retweets") or 0
+                    ),
+                    replies=int(metrics.get("reply_count") or t.get("replies") or 0),
+                )
+            )
+        return tweets
+
+    async def _search_xquik(
+        self,
+        client: Any,
+        query: str,
+        max_results: int,
+        api_key: str,
+    ) -> list[dict[str, Any]]:
+        resp = await client.get(
+            f"{_XQUIK_BASE}/x/tweets/search",
+            headers={
+                "x-api-key": api_key,
+                "xquik-api-contract": _XQUIK_API_CONTRACT,
+                "Accept": "application/json",
+            },
+            params={"q": query, "limit": min(max_results, 100), "queryType": "Latest"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        candidates = data.get("tweets") or data.get("results") or data.get("data") or []
+        tweets: list[dict[str, Any]] = []
+        for t in candidates[:max_results]:
+            user = t.get("author") or t.get("user") or {}
+            metrics = t.get("metrics") or t.get("public_metrics") or {}
+            tweets.append(
+                _tweet_dict(
+                    tweet_id=t.get("id") or t.get("tweet_id"),
+                    text=t.get("text", ""),
+                    author=(
+                        user.get("username")
+                        or user.get("userName")
+                        or user.get("screen_name")
+                        or user.get("name", "unknown")
+                    ),
+                    created_at=t.get("createdAt") or t.get("created_at"),
+                    likes=int(
+                        metrics.get("like_count")
+                        or t.get("likeCount")
+                        or t.get("likes")
+                        or 0
+                    ),
+                    retweets=int(
+                        metrics.get("retweet_count")
+                        or t.get("retweetCount")
+                        or t.get("retweets")
+                        or 0,
+                    ),
+                    replies=int(
+                        metrics.get("reply_count")
+                        or t.get("replyCount")
+                        or t.get("replies")
+                        or 0
+                    ),
+                )
+            )
         return tweets
 
     async def _search_x_api(
@@ -280,15 +400,17 @@ class SearchTwitterHandler(ToolHandler):
         for t in (data.get("data") or [])[:max_results]:
             metrics = t.get("public_metrics") or {}
             user = user_map.get(str(t.get("author_id")), {})
-            tweets.append(_tweet_dict(
-                tweet_id=t.get("id"),
-                text=t.get("text", ""),
-                author=user.get("username") or user.get("name", "unknown"),
-                created_at=t.get("created_at"),
-                likes=int(metrics.get("like_count") or 0),
-                retweets=int(metrics.get("retweet_count") or 0),
-                replies=int(metrics.get("reply_count") or 0),
-            ))
+            tweets.append(
+                _tweet_dict(
+                    tweet_id=t.get("id"),
+                    text=t.get("text", ""),
+                    author=user.get("username") or user.get("name", "unknown"),
+                    created_at=t.get("created_at"),
+                    likes=int(metrics.get("like_count") or 0),
+                    retweets=int(metrics.get("retweet_count") or 0),
+                    replies=int(metrics.get("reply_count") or 0),
+                )
+            )
         return tweets
 
     async def _search_xai(
@@ -300,7 +422,10 @@ class SearchTwitterHandler(ToolHandler):
     ) -> list[dict[str, Any]]:
         resp = await client.get(
             f"{_XAI_SEARCH_BASE}/search",
-            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+            },
             params={"q": query, "limit": max_results},
             timeout=20,
         )
@@ -309,15 +434,17 @@ class SearchTwitterHandler(ToolHandler):
         results = data.get("results") or data.get("tweets") or []
         tweets: list[dict[str, Any]] = []
         for r in results[:max_results]:
-            tweets.append(_tweet_dict(
-                tweet_id=r.get("id"),
-                text=r.get("text", ""),
-                author=r.get("author") or "unknown",
-                created_at=r.get("created_at"),
-                likes=int(r.get("likes") or 0),
-                retweets=int(r.get("retweets") or 0),
-                replies=int(r.get("replies") or 0),
-            ))
+            tweets.append(
+                _tweet_dict(
+                    tweet_id=r.get("id"),
+                    text=r.get("text", ""),
+                    author=r.get("author") or "unknown",
+                    created_at=r.get("created_at"),
+                    likes=int(r.get("likes") or 0),
+                    retweets=int(r.get("retweets") or 0),
+                    replies=int(r.get("replies") or 0),
+                )
+            )
         return tweets
 
 
