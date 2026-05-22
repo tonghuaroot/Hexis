@@ -64,4 +64,4 @@ logs/
 # Misc
 .cache/
 .tmp/
-.reference
+.reference/
