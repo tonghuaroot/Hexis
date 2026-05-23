@@ -144,6 +144,25 @@ async def test_recmem_task_retry_uses_next_attempt_at(db_pool):
             assert row["created_at"] == created_at
             assert row["next_attempt_at"] > created_at
             assert row["error"] == "temporary failure"
+
+            stale_task = await conn.fetchval(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, status, started_at, next_attempt_at
+                )
+                VALUES (
+                    'episode_create',
+                    'in_progress',
+                    CURRENT_TIMESTAMP - INTERVAL '30 minutes',
+                    CURRENT_TIMESTAMP + INTERVAL '1 hour'
+                )
+                RETURNING id
+                """
+            )
+            claimed = _json(await conn.fetchval("SELECT claim_recmem_consolidation_task(1)"))
+            assert claimed["id"] == str(stale_task)
+            assert claimed["status"] == "in_progress"
+            assert claimed["attempts"] == 1
         finally:
             await tr.rollback()
 
@@ -391,5 +410,86 @@ async def test_recmem_redaction_invalidates_derived_memory(db_pool):
             assert row["status"] == "active"
             assert row["valid_until"] is not None
             assert row["reason"] == "source_redacted"
+        finally:
+            await tr.rollback()
+
+
+async def test_recmem_rollout_metrics_and_eval_summary(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            raw = _json(await conn.fetchval(
+                "SELECT recmem_ingest_turn('metrics turn', 'ok', NULL, 'metrics-source')"
+            ))
+            eager_id = await _insert_memory(conn, "metrics eager memory", axis=1)
+            event_id = await conn.fetchval(
+                """
+                SELECT record_recmem_rollout_event(
+                    'chat_turn_memory',
+                    NULL,
+                    'metrics-source',
+                    $1::uuid,
+                    'stored',
+                    false,
+                    true,
+                    $2::uuid,
+                    12.5,
+                    NULL,
+                    '{"test": true}'::jsonb
+                )
+                """,
+                raw["unit_id"],
+                eager_id,
+            )
+            comparison_id = await conn.fetchval(
+                """
+                SELECT record_recmem_dual_write_comparison(
+                    'metrics query',
+                    NULL,
+                    ARRAY[$1]::uuid[],
+                    ARRAY[$1, $2]::uuid[],
+                    4.5,
+                    '{}'::jsonb
+                )
+                """,
+                eager_id,
+                raw["unit_id"],
+            )
+            metrics = _json(await conn.fetchval("SELECT get_recmem_rollout_metrics(CURRENT_TIMESTAMP - INTERVAL '1 hour')"))
+
+            assert event_id
+            assert comparison_id
+            assert metrics["rollout_events"]["total"] >= 1
+            assert metrics["dual_write"]["comparisons"] >= 1
+            assert metrics["dual_write"]["avg_overlap_count"] >= 1
+
+            eval_set = await conn.fetchval(
+                "INSERT INTO recmem_eval_sets (name) VALUES ('test-eval') RETURNING id"
+            )
+            item = await conn.fetchval(
+                """
+                INSERT INTO recmem_eval_items (eval_set_id, category, query_text)
+                VALUES ($1, 'preference', 'What fruit?')
+                RETURNING id
+                """,
+                eval_set,
+            )
+            run = await conn.fetchval(
+                "INSERT INTO recmem_eval_runs (eval_set_id, label) VALUES ($1, 'smoke') RETURNING id",
+                eval_set,
+            )
+            await conn.execute(
+                """
+                INSERT INTO recmem_eval_results (run_id, item_id, category, judge_score, verdict)
+                VALUES ($1, $2, 'preference', 0.9, 'pass')
+                """,
+                run,
+                item,
+            )
+            summary = _json(await conn.fetchval("SELECT get_recmem_eval_run_summary($1)", run))
+            assert summary["result_count"] == 1
+            assert summary["avg_judge_score"] == 0.9
+            assert summary["by_category"]["preference"]["count"] == 1
         finally:
             await tr.rollback()

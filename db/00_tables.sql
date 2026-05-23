@@ -281,6 +281,85 @@ CREATE TABLE memory_source_units (
     PRIMARY KEY (memory_id, subconscious_unit_id)
 );
 
+CREATE TABLE recmem_rollout_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    event_type TEXT NOT NULL,
+    session_id UUID,
+    source_identity TEXT,
+    raw_unit_id UUID REFERENCES subconscious_units(id) ON DELETE SET NULL,
+    raw_status TEXT,
+    direct_promoted BOOLEAN DEFAULT FALSE,
+    eager_written BOOLEAN DEFAULT FALSE,
+    eager_memory_id UUID REFERENCES memories(id) ON DELETE SET NULL,
+    duration_ms FLOAT,
+    error TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE recmem_retrieval_comparisons (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    query_hash TEXT NOT NULL,
+    query_text TEXT,
+    session_id UUID,
+    eager_memory_ids UUID[] NOT NULL DEFAULT '{}',
+    recmem_item_ids UUID[] NOT NULL DEFAULT '{}',
+    eager_count INT NOT NULL DEFAULT 0,
+    recmem_count INT NOT NULL DEFAULT 0,
+    overlap_count INT NOT NULL DEFAULT 0,
+    duration_ms FLOAT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE recmem_eval_sets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE recmem_eval_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    eval_set_id UUID NOT NULL REFERENCES recmem_eval_sets(id) ON DELETE CASCADE,
+    category TEXT NOT NULL DEFAULT 'general',
+    query_text TEXT NOT NULL,
+    reference_answer TEXT,
+    session_fixture JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE recmem_eval_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    eval_set_id UUID REFERENCES recmem_eval_sets(id) ON DELETE SET NULL,
+    label TEXT,
+    status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running','completed','failed','abandoned')),
+    baseline_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    recmem_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    started_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMPTZ
+);
+
+CREATE TABLE recmem_eval_results (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    run_id UUID NOT NULL REFERENCES recmem_eval_runs(id) ON DELETE CASCADE,
+    item_id UUID REFERENCES recmem_eval_items(id) ON DELETE SET NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    baseline_answer TEXT,
+    recmem_answer TEXT,
+    baseline_memory_ids UUID[] NOT NULL DEFAULT '{}',
+    recmem_memory_ids UUID[] NOT NULL DEFAULT '{}',
+    judge_score FLOAT CHECK (judge_score IS NULL OR judge_score BETWEEN 0 AND 1),
+    verdict TEXT,
+    notes TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 
 -- ============================================================================
 -- CLUSTERING
@@ -564,6 +643,7 @@ INSERT INTO config (key, value, description) VALUES
     ('chat.inline_subconscious_enabled', 'true'::jsonb, 'Run inline subconscious appraisal during chat'),
     ('memory.recmem_hydrate_enabled', 'false'::jsonb, 'Use RecMem tiered retrieval for chat hydration'),
     ('memory.recmem_dual_write_compare', 'false'::jsonb, 'Log RecMem-vs-eager retrieval candidates during dual-write'),
+    ('memory.recmem_rollout_metrics_enabled', 'false'::jsonb, 'Record RecMem rollout latency/write events'),
     ('memory.recmem_theta_sim', '0.7'::jsonb, 'Similarity threshold for recurrence'),
     ('memory.recmem_theta_sim_merge', '0.78'::jsonb, 'Similarity threshold for merge-first routing'),
     ('memory.recmem_theta_count', '5'::jsonb, 'Recurrence count threshold'),

@@ -1178,6 +1178,219 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION record_recmem_rollout_event(
+    p_event_type TEXT,
+    p_session_id UUID DEFAULT NULL,
+    p_source_identity TEXT DEFAULT NULL,
+    p_raw_unit_id UUID DEFAULT NULL,
+    p_raw_status TEXT DEFAULT NULL,
+    p_direct_promoted BOOLEAN DEFAULT FALSE,
+    p_eager_written BOOLEAN DEFAULT FALSE,
+    p_eager_memory_id UUID DEFAULT NULL,
+    p_duration_ms FLOAT DEFAULT NULL,
+    p_error TEXT DEFAULT NULL,
+    p_metadata JSONB DEFAULT '{}'::jsonb
+) RETURNS UUID AS $$
+DECLARE
+    new_id UUID;
+BEGIN
+    INSERT INTO recmem_rollout_events (
+        event_type,
+        session_id,
+        source_identity,
+        raw_unit_id,
+        raw_status,
+        direct_promoted,
+        eager_written,
+        eager_memory_id,
+        duration_ms,
+        error,
+        metadata
+    )
+    VALUES (
+        COALESCE(NULLIF(trim(p_event_type), ''), 'unknown'),
+        p_session_id,
+        NULLIF(trim(COALESCE(p_source_identity, '')), ''),
+        p_raw_unit_id,
+        p_raw_status,
+        COALESCE(p_direct_promoted, FALSE),
+        COALESCE(p_eager_written, FALSE),
+        p_eager_memory_id,
+        p_duration_ms,
+        p_error,
+        COALESCE(p_metadata, '{}'::jsonb)
+    )
+    RETURNING id INTO new_id;
+
+    RETURN new_id;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION record_recmem_dual_write_comparison(
+    p_query_text TEXT,
+    p_session_id UUID DEFAULT NULL,
+    p_eager_memory_ids UUID[] DEFAULT '{}',
+    p_recmem_item_ids UUID[] DEFAULT '{}',
+    p_duration_ms FLOAT DEFAULT NULL,
+    p_metadata JSONB DEFAULT '{}'::jsonb
+) RETURNS UUID AS $$
+DECLARE
+    new_id UUID;
+    eager_ids UUID[] := COALESCE(p_eager_memory_ids, '{}'::uuid[]);
+    recmem_ids UUID[] := COALESCE(p_recmem_item_ids, '{}'::uuid[]);
+    overlap INT;
+BEGIN
+    SELECT COUNT(DISTINCT eager_id)::int
+    INTO overlap
+    FROM unnest(eager_ids) AS eager_id
+    WHERE eager_id = ANY(recmem_ids);
+
+    INSERT INTO recmem_retrieval_comparisons (
+        query_hash,
+        query_text,
+        session_id,
+        eager_memory_ids,
+        recmem_item_ids,
+        eager_count,
+        recmem_count,
+        overlap_count,
+        duration_ms,
+        metadata
+    )
+    VALUES (
+        encode(digest(COALESCE(p_query_text, ''), 'sha256'), 'hex'),
+        p_query_text,
+        p_session_id,
+        eager_ids,
+        recmem_ids,
+        cardinality(eager_ids),
+        cardinality(recmem_ids),
+        COALESCE(overlap, 0),
+        p_duration_ms,
+        COALESCE(p_metadata, '{}'::jsonb)
+    )
+    RETURNING id INTO new_id;
+
+    RETURN new_id;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION get_recmem_rollout_metrics(
+    p_since TIMESTAMPTZ DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+    since_time TIMESTAMPTZ := COALESCE(p_since, CURRENT_TIMESTAMP - INTERVAL '7 days');
+BEGIN
+    RETURN jsonb_build_object(
+        'period_start', since_time,
+        'period_end', CURRENT_TIMESTAMP,
+        'raw_units', (
+            SELECT jsonb_build_object(
+                'total', COUNT(*),
+                'pending_embedding', COUNT(*) FILTER (WHERE embedding_status = 'pending'),
+                'embedded', COUNT(*) FILTER (WHERE embedding_status = 'embedded'),
+                'failed_embedding', COUNT(*) FILTER (WHERE embedding_status = 'failed'),
+                'raw_only', COUNT(*) FILTER (WHERE route_status = 'raw_only'),
+                'merge_queued', COUNT(*) FILTER (WHERE route_status = 'merge_queued'),
+                'merged', COUNT(*) FILTER (WHERE route_status = 'merged'),
+                'create_queued', COUNT(*) FILTER (WHERE route_status = 'create_queued'),
+                'episode_created', COUNT(*) FILTER (WHERE route_status = 'episode_created'),
+                'route_failed', COUNT(*) FILTER (WHERE route_status = 'route_failed')
+            )
+            FROM subconscious_units
+            WHERE created_at >= since_time
+        ),
+        'tasks', (
+            SELECT jsonb_build_object(
+                'pending', COUNT(*) FILTER (WHERE status = 'pending'),
+                'in_progress', COUNT(*) FILTER (WHERE status = 'in_progress'),
+                'completed', COUNT(*) FILTER (WHERE status = 'completed'),
+                'failed', COUNT(*) FILTER (WHERE status = 'failed'),
+                'dropped', COUNT(*) FILTER (WHERE status = 'dropped')
+            )
+            FROM recmem_consolidation_tasks
+            WHERE created_at >= since_time
+        ),
+        'rollout_events', (
+            SELECT jsonb_build_object(
+                'total', COUNT(*),
+                'avg_duration_ms', AVG(duration_ms),
+                'raw_stored', COUNT(*) FILTER (WHERE raw_status = 'stored'),
+                'raw_duplicate', COUNT(*) FILTER (WHERE raw_status = 'duplicate'),
+                'direct_promoted', COUNT(*) FILTER (WHERE direct_promoted),
+                'eager_written', COUNT(*) FILTER (WHERE eager_written),
+                'errors', COUNT(*) FILTER (WHERE error IS NOT NULL)
+            )
+            FROM recmem_rollout_events
+            WHERE created_at >= since_time
+        ),
+        'dual_write', (
+            SELECT jsonb_build_object(
+                'comparisons', COUNT(*),
+                'avg_duration_ms', AVG(duration_ms),
+                'avg_eager_count', AVG(eager_count),
+                'avg_recmem_count', AVG(recmem_count),
+                'avg_overlap_count', AVG(overlap_count),
+                'divergence_rate',
+                    CASE WHEN COUNT(*) > 0
+                         THEN COUNT(*) FILTER (WHERE eager_memory_ids <> recmem_item_ids)::float / COUNT(*)::float
+                         ELSE 0 END
+            )
+            FROM recmem_retrieval_comparisons
+            WHERE created_at >= since_time
+        ),
+        'unhealthy_count', (
+            SELECT COUNT(*)
+            FROM recmem_unhealthy_items()
+        )
+    );
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE FUNCTION get_recmem_eval_run_summary(
+    p_run_id UUID
+) RETURNS JSONB AS $$
+BEGIN
+    RETURN (
+        SELECT jsonb_build_object(
+            'run_id', r.id,
+            'status', r.status,
+            'label', r.label,
+            'eval_set_id', r.eval_set_id,
+            'started_at', r.started_at,
+            'completed_at', r.completed_at,
+            'result_count', (
+                SELECT COUNT(*)
+                FROM recmem_eval_results
+                WHERE run_id = r.id
+            ),
+            'avg_judge_score', (
+                SELECT AVG(judge_score)
+                FROM recmem_eval_results
+                WHERE run_id = r.id
+            ),
+            'by_category', COALESCE((
+                SELECT jsonb_object_agg(
+                    s.category,
+                    jsonb_build_object(
+                        'count', s.count,
+                        'avg_judge_score', s.avg_judge_score
+                    )
+                )
+                FROM (
+                    SELECT category, COUNT(*) AS count, AVG(judge_score) AS avg_judge_score
+                    FROM recmem_eval_results
+                    WHERE run_id = r.id
+                    GROUP BY category
+                ) s
+            ), '{}'::jsonb)
+        )
+        FROM recmem_eval_runs r
+        WHERE r.id = p_run_id
+    );
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 CREATE OR REPLACE FUNCTION has_pending_recmem_consolidation()
 RETURNS BOOLEAN AS $$
     SELECT EXISTS (
