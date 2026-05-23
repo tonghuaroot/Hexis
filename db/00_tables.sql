@@ -637,6 +637,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.recall_min_trust_level', '0'::jsonb, 'Minimum trust_level to include in recall (0 disables filtering)'),
     ('memory.worldview_support_threshold', '0.8'::jsonb, 'Similarity threshold for SUPPORTS alignment edges'),
     ('memory.worldview_contradict_threshold', '-0.5'::jsonb, 'Similarity threshold for CONTRADICTS alignment edges'),
+    ('memory.recmem_rollout_phase', '0'::jsonb, 'Last operator-applied RecMem rollout phase'),
     ('memory.recmem_enabled', 'false'::jsonb, 'Use RecMem raw-turn ingestion for chat memory'),
     ('chat.eager_memory_enabled', 'true'::jsonb, 'Write ordinary chat turns directly to long-term memory'),
     ('chat.recmem_salience_direct_promote', 'true'::jsonb, 'Promote high-salience turns directly alongside raw ingest'),
