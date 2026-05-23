@@ -7,6 +7,7 @@ These wrap the existing CognitiveMemory API.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID
 
@@ -19,6 +20,31 @@ from .base import (
     ToolResult,
     ToolSpec,
 )
+
+
+async def _try_db_memory_tool(tool_name: str, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult | None:
+    pool = context.registry.pool if context.registry else None
+    if not pool:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT execute_memory_tool($1::text, $2::jsonb)",
+                tool_name,
+                json.dumps(arguments),
+            )
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(payload, dict) and "success" in payload:
+            if payload.get("success"):
+                return ToolResult.success_result(payload.get("output"), payload.get("display_output"))
+            try:
+                error_type = ToolErrorType(payload.get("error_type") or ToolErrorType.EXECUTION_FAILED.value)
+            except ValueError:
+                error_type = ToolErrorType.EXECUTION_FAILED
+            return ToolResult.error_result(payload.get("error") or "Memory tool failed", error_type)
+    except Exception:
+        return None
+    return None
 
 
 class RecallHandler(ToolHandler):
@@ -102,6 +128,9 @@ class RecallHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
+        db_result = await _try_db_memory_tool("recall", arguments, context)
+        if db_result is not None:
+            return db_result
         from core.cognitive_memory_api import MemoryType
         from datetime import datetime, timezone
 
@@ -280,6 +309,9 @@ class RememberHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
+        db_result = await _try_db_memory_tool("remember", arguments, context)
+        if db_result is not None:
+            return db_result
         content = arguments["content"]
         memory_type = arguments.get("type", "episodic")
         importance = arguments.get("importance", 0.5)
@@ -348,6 +380,9 @@ class SenseMemoryAvailabilityHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
+        db_result = await _try_db_memory_tool("sense_memory_availability", arguments, context)
+        if db_result is not None:
+            return db_result
         query = arguments["query"]
 
         try:

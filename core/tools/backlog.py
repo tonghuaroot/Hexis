@@ -130,6 +130,26 @@ class ManageBacklogHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
+        pool = context.registry.pool if context.registry else None
+        if pool:
+            try:
+                async with pool.acquire() as conn:
+                    raw = await conn.fetchval(
+                        "SELECT execute_backlog_tool($1::jsonb, $2::jsonb)",
+                        json.dumps(arguments),
+                        json.dumps({"tool_context": context.tool_context.value}),
+                    )
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(payload, dict) and "success" in payload:
+                    if payload.get("success"):
+                        return ToolResult.success_result(payload.get("output"), payload.get("display_output"))
+                    return ToolResult.error_result(
+                        payload.get("error") or "Backlog tool failed",
+                        ToolErrorType(payload.get("error_type") or ToolErrorType.EXECUTION_FAILED.value),
+                    )
+            except Exception:
+                logger.debug("DB backlog tool failed; falling back to compatibility path", exc_info=True)
+
         action = arguments.get("action", "")
         if action not in _VALID_ACTIONS:
             return ToolResult.error_result(
@@ -137,7 +157,6 @@ class ManageBacklogHandler(ToolHandler):
                 ToolErrorType.INVALID_PARAMS,
             )
 
-        pool = context.registry.pool if context.registry else None
         if not pool:
             return ToolResult.error_result(
                 "Database pool not available",

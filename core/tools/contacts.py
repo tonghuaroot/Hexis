@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from .base import (
     ToolCategory,
+    ToolErrorType,
     ToolExecutionContext,
     ToolHandler,
     ToolResult,
@@ -24,6 +25,31 @@ if TYPE_CHECKING:
     import asyncpg
 
 logger = logging.getLogger(__name__)
+
+
+async def _try_db_contact_tool(tool_name: str, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult | None:
+    pool = context.registry.pool if context.registry else None
+    if not pool:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT execute_contact_tool($1::text, $2::jsonb)",
+                tool_name,
+                json.dumps(arguments),
+            )
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(payload, dict) and "success" in payload:
+            if payload.get("success"):
+                return ToolResult.success_result(payload.get("output"), payload.get("display_output"))
+            try:
+                error_type = ToolErrorType(payload.get("error_type") or ToolErrorType.EXECUTION_FAILED.value)
+            except ValueError:
+                error_type = ToolErrorType.EXECUTION_FAILED
+            return ToolResult.error_result(payload.get("error") or "Contact tool failed", error_type)
+    except Exception:
+        logger.debug("DB contact tool failed; falling back to compatibility path", exc_info=True)
+    return None
 
 
 def _contact_to_dict(row: Any) -> dict[str, Any]:
@@ -77,6 +103,9 @@ class SearchContactsHandler(ToolHandler):
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> ToolResult:
+        db_result = await _try_db_contact_tool("search_contacts", arguments, context)
+        if db_result is not None:
+            return db_result
         pool: asyncpg.Pool = context.registry.pool
         query = arguments.get("query", "").strip()
         limit = min(arguments.get("limit", 20), 100)
@@ -131,6 +160,9 @@ class GetContactHandler(ToolHandler):
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> ToolResult:
+        db_result = await _try_db_contact_tool("get_contact", arguments, context)
+        if db_result is not None:
+            return db_result
         pool: asyncpg.Pool = context.registry.pool
         contact_id = arguments.get("id")
         email = arguments.get("email", "").strip()
@@ -191,6 +223,9 @@ class CreateContactHandler(ToolHandler):
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> ToolResult:
+        db_result = await _try_db_contact_tool("create_contact", arguments, context)
+        if db_result is not None:
+            return db_result
         pool: asyncpg.Pool = context.registry.pool
         name = arguments.get("name", "").strip()
         if not name:
@@ -251,6 +286,9 @@ class UpdateContactHandler(ToolHandler):
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> ToolResult:
+        db_result = await _try_db_contact_tool("update_contact", arguments, context)
+        if db_result is not None:
+            return db_result
         pool: asyncpg.Pool = context.registry.pool
         contact_id = arguments.get("id")
         if not contact_id:
@@ -315,6 +353,9 @@ class MergeContactsHandler(ToolHandler):
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> ToolResult:
+        db_result = await _try_db_contact_tool("merge_contacts", arguments, context)
+        if db_result is not None:
+            return db_result
         pool: asyncpg.Pool = context.registry.pool
         keep_id = arguments.get("keep_id")
         remove_id = arguments.get("remove_id")

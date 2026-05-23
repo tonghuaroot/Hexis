@@ -98,6 +98,22 @@ class ManageGoalsHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
+        pool = context.registry.pool if context.registry else None
+        if pool:
+            try:
+                async with pool.acquire() as conn:
+                    raw = await conn.fetchval("SELECT execute_goals_tool($1::jsonb)", json.dumps(arguments))
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(payload, dict) and "success" in payload:
+                    if payload.get("success"):
+                        return ToolResult.success_result(payload.get("output"), payload.get("display_output"))
+                    return ToolResult.error_result(
+                        payload.get("error") or "Goal tool failed",
+                        ToolErrorType(payload.get("error_type") or ToolErrorType.EXECUTION_FAILED.value),
+                    )
+            except Exception:
+                logger.debug("DB goals tool failed; falling back to compatibility path", exc_info=True)
+
         action = arguments.get("action", "")
         if action not in _VALID_ACTIONS:
             return ToolResult.error_result(
@@ -105,7 +121,6 @@ class ManageGoalsHandler(ToolHandler):
                 ToolErrorType.INVALID_PARAMS,
             )
 
-        pool = context.registry.pool if context.registry else None
         if not pool:
             return ToolResult.error_result(
                 "Database pool not available",

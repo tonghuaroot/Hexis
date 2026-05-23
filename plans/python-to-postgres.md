@@ -24,7 +24,7 @@ Last updated: 2026-05-23
 | Slice 3: RecMem, Rollout, Eval, and Subconscious Completion | Complete | Added DB-owned RecMem task context/output normalization, eval execution, rollout phase gates/status, subconscious normalization/RPE application, thin Python wrappers, and focused DB/service tests. |
 | Slice 4: Tool Catalog, Tool Policy, Workflow, and Scheduling | Complete | Added DB-owned tool catalog/spec/policy functions, schedule parsing/action functions, workflow layer/template/step-state functions, Python wrappers, and focused tool/cron/workflow tests. |
 | Slice 5: Agent Loop and External Calls | Complete | Added DB-owned agent turn state/step/result/event functions, external-call dispatch/result helpers, AgentLoop state wrappers, external-call resolver delegation, and focused DB/agent/external-call tests. |
-| Slice 6: Tool-By-Tool Side-Effect Thinning | Not started | Pending Slice 5. |
+| Slice 6: Tool-By-Tool Side-Effect Thinning | Complete | Added DB-native execution helpers for memory, goals, backlog, and contacts; schedule was already DB-owned in Slice 4. Python handlers now delegate to SQL first with compatibility fallbacks and focused DB/tool tests. |
 
 ## Key Architecture Changes
 
