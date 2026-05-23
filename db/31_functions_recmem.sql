@@ -320,7 +320,7 @@ BEGIN
         IF _recmem_pending_queue_depth() >= queue_max THEN
             UPDATE subconscious_units
             SET route_status = 'raw_only',
-                route_result = jsonb_build_object(
+                route_result = route_result || jsonb_build_object(
                     'decision', 'raw_only',
                     'reason', 'queue_full',
                     'nearest_memory_id', nearest_memory_id,
@@ -375,7 +375,7 @@ BEGIN
 
         UPDATE subconscious_units
         SET route_status = 'merge_queued',
-            route_result = jsonb_build_object(
+            route_result = route_result || jsonb_build_object(
                 'decision', 'merge_queued',
                 'task_id', task_id,
                 'target_memory_id', nearest_memory_id,
@@ -414,7 +414,7 @@ BEGIN
     IF COALESCE(recurrence_count, 0) < theta_count THEN
         UPDATE subconscious_units
         SET route_status = 'raw_only',
-            route_result = jsonb_build_object(
+            route_result = route_result || jsonb_build_object(
                 'decision', 'raw_only',
                 'recurrence_count', COALESCE(recurrence_count, 0),
                 'max_similarity', max_neighbor_similarity
@@ -435,7 +435,7 @@ BEGIN
     IF overlaps_open_create THEN
         UPDATE subconscious_units
         SET route_status = 'raw_only',
-            route_result = jsonb_build_object(
+            route_result = route_result || jsonb_build_object(
                 'decision', 'raw_only',
                 'reason', 'open_create_overlap',
                 'recurrence_count', recurrence_count
@@ -448,7 +448,7 @@ BEGIN
     IF _recmem_pending_queue_depth() >= queue_max THEN
         UPDATE subconscious_units
         SET route_status = 'raw_only',
-            route_result = jsonb_build_object(
+            route_result = route_result || jsonb_build_object(
                 'decision', 'raw_only',
                 'reason', 'queue_full_create_paused',
                 'recurrence_count', recurrence_count
@@ -478,7 +478,7 @@ BEGIN
 
     UPDATE subconscious_units
     SET route_status = 'create_queued',
-        route_result = jsonb_build_object(
+        route_result = route_result || jsonb_build_object(
             'decision', 'create_queued',
             'task_id', task_id,
             'recurrence_count', recurrence_count,

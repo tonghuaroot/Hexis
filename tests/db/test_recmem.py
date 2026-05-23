@@ -237,6 +237,114 @@ async def test_recmem_route_merge_raw_only_and_create_paths(db_pool):
             await tr.rollback()
 
 
+async def test_recmem_merge_rejection_falls_back_to_recurrence_create(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.execute("SELECT set_config('memory.recmem_theta_count', '3'::jsonb)")
+            target_mem = await _insert_memory(conn, "existing rejected episode", axis=1)
+            units = [
+                await _insert_embedded_unit(conn, f"merge-reject-{idx}", axis=1, route_status="raw_only")
+                for idx in range(3)
+            ]
+            await conn.execute(
+                "UPDATE subconscious_units SET route_status = 'merge_queued' WHERE id = $1",
+                units[0],
+            )
+            merge_task = await conn.fetchval(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, trigger_unit_id, target_memory_id, source_unit_ids
+                )
+                VALUES ('episode_merge', $1, $2, ARRAY[$1]::uuid[])
+                RETURNING id
+                """,
+                units[0],
+                target_mem,
+            )
+
+            result = _json(await conn.fetchval(
+                "SELECT apply_recmem_episode_merge($1::uuid, NULL, false)",
+                merge_task,
+            ))
+            completed_merge = await conn.fetchrow(
+                "SELECT status, result FROM recmem_consolidation_tasks WHERE id = $1",
+                merge_task,
+            )
+            create_tasks = await conn.fetch(
+                """
+                SELECT id, source_unit_ids
+                FROM recmem_consolidation_tasks
+                WHERE task_type = 'episode_create'
+                  AND status = 'pending'
+                """
+            )
+            statuses = await conn.fetch(
+                "SELECT id, route_status, route_result FROM subconscious_units WHERE id = ANY($1::uuid[])",
+                units,
+            )
+
+            assert result["merged"] is False
+            assert completed_merge["status"] == "completed"
+            assert _json(completed_merge["result"])["merged"] is False
+            assert len(create_tasks) == 1
+            assert set(create_tasks[0]["source_unit_ids"]) == set(units)
+            assert {row["route_status"] for row in statuses} == {"create_queued"}
+            rejected = [_json(row["route_result"]) for row in statuses if row["id"] == units[0]][0]
+            assert rejected["decision"] == "create_queued"
+            assert rejected["merge_rejected"] is True
+            assert rejected["merge_rejected_target_memory_id"] == str(target_mem)
+        finally:
+            await tr.rollback()
+
+
+async def test_recmem_open_create_overlap_suppresses_duplicate_create(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT set_config('memory.recmem_theta_count', '3'::jsonb)")
+            units = [
+                await _insert_embedded_unit(conn, f"overlap-create-{idx}", axis=2, route_status="raw_only")
+                for idx in range(3)
+            ]
+            await conn.execute(
+                "UPDATE subconscious_units SET route_status = 'routing' WHERE id = $1",
+                units[0],
+            )
+            open_task = await conn.fetchval(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, trigger_unit_id, source_unit_ids, status
+                )
+                VALUES ('episode_create', $1, ARRAY[$2]::uuid[], 'pending')
+                RETURNING id
+                """,
+                units[1],
+                units[1],
+            )
+
+            result = _json(await conn.fetchval("SELECT recmem_route_unit($1::uuid)", units[0]))
+            task_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM recmem_consolidation_tasks WHERE task_type = 'episode_create'"
+            )
+            route_row = await conn.fetchrow(
+                "SELECT route_status, route_result FROM subconscious_units WHERE id = $1",
+                units[0],
+            )
+
+            assert open_task
+            assert result["status"] == "raw_only"
+            assert result["reason"] == "open_create_overlap"
+            assert task_count == 1
+            assert route_row["route_status"] == "raw_only"
+            assert _json(route_row["route_result"])["reason"] == "open_create_overlap"
+        finally:
+            await tr.rollback()
+
+
 async def test_recmem_task_claim_and_apply_transitions(db_pool):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()

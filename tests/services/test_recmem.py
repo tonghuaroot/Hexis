@@ -119,6 +119,70 @@ async def test_recmem_consolidation_worker_create_and_refine(db_pool, monkeypatc
             await tr.rollback()
 
 
+async def test_recmem_consolidation_worker_retries_failed_llm_call(db_pool, monkeypatch):
+    async def fake_chat_json(**_kwargs):
+        raise RuntimeError("llm unavailable")
+
+    async def fake_load_llm_config(_conn, *_args, **_kwargs):
+        return {"provider": "test", "model": "test"}
+
+    monkeypatch.setattr(recmem, "chat_json", fake_chat_json)
+    monkeypatch.setattr(recmem, "load_llm_config", fake_load_llm_config)
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            source_unit = await conn.fetchval(
+                """
+                INSERT INTO subconscious_units (
+                    content, user_text, assistant_text, embedding_status,
+                    route_status, idempotency_key
+                )
+                VALUES (
+                    'User: worker retry\n\nAssistant: ok',
+                    'worker retry',
+                    'ok',
+                    'embedded',
+                    'create_queued',
+                    'worker:retry'
+                )
+                RETURNING id
+                """
+            )
+            task_id = await conn.fetchval(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, trigger_unit_id, source_unit_ids
+                )
+                VALUES ('episode_create', $1, ARRAY[$1]::uuid[])
+                RETURNING id
+                """,
+                source_unit,
+            )
+
+            result = await recmem.run_recmem_consolidation_step(conn)
+            task = await conn.fetchrow(
+                """
+                SELECT status, attempts, started_at, next_attempt_at, completed_at, error
+                FROM recmem_consolidation_tasks
+                WHERE id = $1
+                """,
+                task_id,
+            )
+
+            assert result["task_id"] == str(task_id)
+            assert "llm unavailable" in result["error"]
+            assert task["status"] == "pending"
+            assert task["attempts"] == 1
+            assert task["started_at"] is None
+            assert task["completed_at"] is None
+            assert task["next_attempt_at"] is not None
+            assert task["error"] == "llm unavailable"
+        finally:
+            await tr.rollback()
+
+
 async def test_maintenance_worker_runs_due_recmem_sweep(db_pool, monkeypatch):
     sweep_calls = []
 
