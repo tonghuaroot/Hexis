@@ -29,6 +29,7 @@ from services.prompt_resources import (
 
 if TYPE_CHECKING:
     import asyncpg
+    from core.agent_loop import AgentLoopResult
     from core.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -335,7 +336,6 @@ async def run_agent(
     - Heartbeat: finite budget, planning enabled, continuation nudges
     """
     from core.agent_api import db_dsn_from_env
-    from core.agent_loop import AgentLoopResult
     from core.cognitive_memory_api import CognitiveMemory, format_context_for_prompt
 
     dsn = dsn or db_dsn_from_env()
@@ -381,27 +381,31 @@ async def run_agent(
         # 3. Run subconscious pre-phase
         subconscious_output = SubconsciousOutput()
         try:
-            if on_event:
-                await on_event(AgentEventData(
-                    event=AgentEvent.PHASE_CHANGE,
-                    data={"phase": "subconscious", "status": "start"},
-                ))
+            inline_enabled = True
+            if mode == "chat":
+                inline_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.inline_subconscious_enabled'), true)"))
+            if inline_enabled:
+                if on_event:
+                    await on_event(AgentEventData(
+                        event=AgentEvent.PHASE_CHANGE,
+                        data={"phase": "subconscious", "status": "start"},
+                    ))
 
-            # For heartbeat, use the heartbeat context as memory context
-            sub_memory_ctx = memory_context
-            if mode == "heartbeat" and heartbeat_context:
-                from services.heartbeat_prompt import build_heartbeat_decision_prompt
-                sub_memory_ctx = build_heartbeat_decision_prompt(heartbeat_context)
+                # For heartbeat, use the heartbeat context as memory context
+                sub_memory_ctx = memory_context
+                if mode == "heartbeat" and heartbeat_context:
+                    from services.heartbeat_prompt import build_heartbeat_decision_prompt
+                    sub_memory_ctx = build_heartbeat_decision_prompt(heartbeat_context)
 
-            subconscious_output = await run_subconscious_appraisal(
-                conn, user_message, sub_memory_ctx,
-            )
+                subconscious_output = await run_subconscious_appraisal(
+                    conn, user_message, sub_memory_ctx,
+                )
 
-            if on_event:
-                await on_event(AgentEventData(
-                    event=AgentEvent.PHASE_CHANGE,
-                    data={"phase": "subconscious", "status": "end"},
-                ))
+                if on_event:
+                    await on_event(AgentEventData(
+                        event=AgentEvent.PHASE_CHANGE,
+                        data={"phase": "subconscious", "status": "end"},
+                    ))
         except Exception as exc:
             logger.warning("Subconscious pre-phase failed: %s", exc)
 
@@ -566,17 +570,19 @@ async def stream_agent(
         # Run subconscious
         subconscious_output = SubconsciousOutput()
         try:
-            yield AgentEventData(
-                event=AgentEvent.PHASE_CHANGE,
-                data={"phase": "subconscious", "status": "start"},
-            )
-            subconscious_output = await run_subconscious_appraisal(
-                conn, user_message, memory_context,
-            )
-            yield AgentEventData(
-                event=AgentEvent.PHASE_CHANGE,
-                data={"phase": "subconscious", "status": "end"},
-            )
+            inline_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.inline_subconscious_enabled'), true)"))
+            if inline_enabled:
+                yield AgentEventData(
+                    event=AgentEvent.PHASE_CHANGE,
+                    data={"phase": "subconscious", "status": "start"},
+                )
+                subconscious_output = await run_subconscious_appraisal(
+                    conn, user_message, memory_context,
+                )
+                yield AgentEventData(
+                    event=AgentEvent.PHASE_CHANGE,
+                    data={"phase": "subconscious", "status": "end"},
+                )
         except Exception as exc:
             logger.warning("Subconscious pre-phase failed: %s", exc)
 

@@ -26,6 +26,11 @@ from core.state import (
 from services.external_calls import ExternalCallProcessor
 from services.heartbeat_agentic import finalize_heartbeat, run_agentic_heartbeat
 from services.heartbeat_runner import execute_heartbeat_decision
+from services.recmem import (
+    run_recmem_consolidation_step,
+    run_recmem_embed_step,
+    run_recmem_route_step,
+)
 from services.reconsolidation import run_reconsolidation_step
 from services.subconscious import run_subconscious_decider
 
@@ -458,6 +463,27 @@ class MaintenanceWorker:
             if not result.get("skipped"):
                 logger.info(f"Reconsolidation step: {result}")
 
+    async def _run_recmem_if_enabled(self) -> None:
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            recmem_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_enabled'), false)"))
+            if recmem_enabled:
+                embed_result = await run_recmem_embed_step(conn)
+                if not embed_result.get("skipped"):
+                    logger.info("RecMem embed step: %s", embed_result)
+                route_result = await run_recmem_route_step(conn)
+                if not route_result.get("skipped"):
+                    logger.info("RecMem route step: %s", route_result)
+
+            worker_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_worker_enabled'), false)"))
+            if worker_enabled:
+                task_batch_size = int(await conn.fetchval("SELECT COALESCE(get_config_int('memory.recmem_task_batch_size'), 3)") or 3)
+                for _ in range(max(task_batch_size, 1)):
+                    result = await run_recmem_consolidation_step(conn)
+                    if result.get("skipped"):
+                        break
+
     async def run(self) -> None:
         self.running = True
         logger.info("Maintenance worker starting...")
@@ -477,6 +503,7 @@ class MaintenanceWorker:
                     await self._run_maintenance_if_due()
                     await self._run_subconscious_if_due()
                     await self._run_reconsolidation_if_pending()
+                    await self._run_recmem_if_enabled()
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")
                 await asyncio.sleep(POLL_INTERVAL)

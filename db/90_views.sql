@@ -239,4 +239,27 @@ UNION ALL
 SELECT
     'subconscious_maintenance'::text AS task_type,
     CASE WHEN should_run_maintenance() THEN 1 ELSE 0 END AS pending_count,
-    'Run subconscious maintenance tick (consolidate + prune)'::text AS description;
+    'Run subconscious maintenance tick (consolidate + prune)'::text AS description
+UNION ALL
+SELECT
+    'recmem_embedding'::text AS task_type,
+    COUNT(*)::int AS pending_count,
+    'Embed pending RecMem raw units'::text AS description
+FROM subconscious_units
+WHERE embedding_status = 'pending'
+UNION ALL
+SELECT
+    'recmem_routing'::text AS task_type,
+    COUNT(*)::int AS pending_count,
+    'Route embedded RecMem raw units'::text AS description
+FROM subconscious_units
+WHERE embedding_status = 'embedded'
+  AND route_status = 'unrouted'
+UNION ALL
+SELECT
+    'recmem_consolidation'::text AS task_type,
+    COUNT(*)::int AS pending_count,
+    'Process pending RecMem consolidation tasks'::text AS description
+FROM recmem_consolidation_tasks
+WHERE status = 'pending'
+  AND next_attempt_at <= CURRENT_TIMESTAMP;

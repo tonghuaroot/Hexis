@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
@@ -211,7 +212,14 @@ async def _flush_trimmed_to_memory(
         from core.cognitive_memory_api import CognitiveMemory, MemoryType
 
         async with CognitiveMemory.connect(dsn) as mem:
-            for user_text, assistant_text in pairs:
+            recmem_enabled = False
+            try:
+                async with mem._pool.acquire() as conn:
+                    recmem_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_enabled'), false)"))
+            except Exception:
+                recmem_enabled = False
+
+            for idx, (user_text, assistant_text) in enumerate(pairs):
                 # Estimate importance -- only store if worth remembering
                 combined = (user_text + " " + assistant_text).lower()
                 importance = 0.3  # baseline for compaction-saved memories
@@ -230,22 +238,36 @@ async def _flush_trimmed_to_memory(
                 if importance < 0.4 and len(user_text) + len(assistant_text) < 100:
                     continue
 
-                content = f"User: {user_text}\n\nAssistant: {assistant_text}"
-                await mem.remember(
-                    content,
-                    type=MemoryType.EPISODIC,
-                    importance=importance,
-                    emotional_valence=0.0,
-                    context={"type": "conversation", "source": "compaction_flush"},
-                    source_attribution={
-                        "kind": "compaction_flush",
-                        "ref": session_id,
-                        "label": "pre-compaction memory flush",
-                        "observed_at": datetime.now(timezone.utc).isoformat(),
-                        "trust": 0.85,
-                    },
-                    trust_level=0.85,
-                )
+                source_attr = {
+                    "kind": "compaction_flush",
+                    "ref": session_id,
+                    "label": "pre-compaction memory flush",
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                    "trust": 0.85,
+                }
+
+                if recmem_enabled:
+                    digest = hashlib.sha256(f"{user_text}\x1e{assistant_text}".encode("utf-8")).hexdigest()[:16]
+                    await mem.remember_turn_raw(
+                        user_text,
+                        assistant_text,
+                        session_id=session_id,
+                        source_identity=f"compaction:{session_id}:{idx}:{digest}",
+                        importance=importance,
+                        source_attribution=source_attr,
+                        metadata={"type": "conversation", "source": "compaction_flush"},
+                    )
+                else:
+                    content = f"User: {user_text}\n\nAssistant: {assistant_text}"
+                    await mem.remember(
+                        content,
+                        type=MemoryType.EPISODIC,
+                        importance=importance,
+                        emotional_valence=0.0,
+                        context={"type": "conversation", "source": "compaction_flush"},
+                        source_attribution=source_attr,
+                        trust_level=0.85,
+                    )
                 stored += 1
 
         if stored:

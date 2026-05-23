@@ -7,6 +7,9 @@ CREATE INDEX IF NOT EXISTS idx_config_key_pattern ON config (key text_pattern_op
 CREATE INDEX idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX idx_memories_status ON memories (status);
 CREATE INDEX idx_memories_type ON memories (type);
+CREATE INDEX IF NOT EXISTS idx_memories_validity
+    ON memories (valid_until)
+    WHERE valid_until IS NOT NULL;
 CREATE INDEX idx_memories_content ON memories USING GIN (content gin_trgm_ops);
 CREATE INDEX idx_memories_content_fts ON memories USING GIN (to_tsvector('english', content));
 CREATE INDEX idx_memories_importance ON memories (importance DESC) WHERE status = 'active';
@@ -27,6 +30,44 @@ CREATE INDEX idx_memories_emotional_pattern_created ON memories (created_at DESC
       AND metadata->'supporting_evidence'->>'kind' = 'emotional_pattern';
 CREATE INDEX idx_working_memory_expiry ON working_memory (expiry);
 CREATE INDEX idx_working_memory_embedding ON working_memory USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_embedding
+    ON subconscious_units USING hnsw (embedding vector_cosine_ops)
+    WHERE embedding IS NOT NULL AND status = 'active';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_embed_pending
+    ON subconscious_units (created_at)
+    WHERE embedding_status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_embed_claimed
+    ON subconscious_units (embedding_claimed_at)
+    WHERE embedding_status = 'in_progress';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_route_pending
+    ON subconscious_units (last_routed_at NULLS FIRST, created_at)
+    WHERE embedding_status = 'embedded' AND route_status = 'unrouted';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_route_claimed
+    ON subconscious_units (last_routed_at)
+    WHERE route_status = 'routing';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_raw_only
+    ON subconscious_units (last_routed_at)
+    WHERE route_status = 'raw_only' AND consolidated_at IS NULL AND status = 'active';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_status_created
+    ON subconscious_units (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_session_created
+    ON subconscious_units (session_id, created_at DESC)
+    WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_metadata
+    ON subconscious_units USING GIN (metadata);
+CREATE INDEX IF NOT EXISTS idx_recmem_tasks_pending
+    ON recmem_consolidation_tasks (next_attempt_at, created_at)
+    WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_recmem_tasks_in_progress
+    ON recmem_consolidation_tasks (started_at)
+    WHERE status = 'in_progress';
+CREATE INDEX IF NOT EXISTS idx_recmem_tasks_open_create_sources
+    ON recmem_consolidation_tasks USING GIN (source_unit_ids)
+    WHERE status IN ('pending','in_progress') AND task_type = 'episode_create';
+CREATE INDEX IF NOT EXISTS idx_recmem_tasks_status_type
+    ON recmem_consolidation_tasks (status, task_type, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_memory_source_units_source
+    ON memory_source_units (subconscious_unit_id);
 CREATE INDEX idx_clusters_centroid ON clusters USING hnsw (centroid_embedding vector_cosine_ops);
 CREATE INDEX idx_clusters_type ON clusters (cluster_type);
 CREATE INDEX idx_episodes_time_range ON episodes USING GIST (time_range);

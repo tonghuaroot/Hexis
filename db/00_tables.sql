@@ -180,6 +180,9 @@ CREATE TABLE memories (
     status memory_status DEFAULT 'active',
     content TEXT NOT NULL,
     embedding vector(768) NOT NULL,
+    valid_from TIMESTAMPTZ,
+    valid_until TIMESTAMPTZ,
+    superseded_by UUID REFERENCES memories(id) ON DELETE SET NULL,
     importance FLOAT DEFAULT 0.5,
     source_attribution JSONB NOT NULL DEFAULT '{}'::jsonb,
     trust_level FLOAT NOT NULL DEFAULT 0.5 CHECK (trust_level >= 0 AND trust_level <= 1),
@@ -201,6 +204,81 @@ CREATE UNLOGGED TABLE working_memory (
     last_accessed TIMESTAMPTZ,
     promote_to_long_term BOOLEAN NOT NULL DEFAULT FALSE,
     expiry TIMESTAMPTZ
+);
+
+CREATE TABLE subconscious_units (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    session_id UUID,
+    source_identity TEXT,
+    turn_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    content TEXT NOT NULL,
+    user_text TEXT,
+    assistant_text TEXT,
+
+    embedding vector(768),
+    embedded_at TIMESTAMPTZ,
+    embedding_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (embedding_status IN ('pending','in_progress','embedded','failed')),
+    embedding_claimed_at TIMESTAMPTZ,
+    embedding_attempts INT NOT NULL DEFAULT 0,
+
+    route_status TEXT NOT NULL DEFAULT 'unrouted'
+        CHECK (route_status IN (
+            'unrouted','routing',
+            'raw_only',
+            'merge_queued','merged',
+            'create_queued','episode_created',
+            'route_failed'
+        )),
+    last_routed_at TIMESTAMPTZ,
+    route_attempts INT NOT NULL DEFAULT 0,
+    route_result JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    importance FLOAT DEFAULT 0.3 CHECK (importance BETWEEN 0 AND 1),
+    source_attribution JSONB NOT NULL DEFAULT '{}'::jsonb,
+    trust_level FLOAT NOT NULL DEFAULT 0.95 CHECK (trust_level BETWEEN 0 AND 1),
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active','redacted','archived')),
+    recurrence_cluster_id UUID,
+    consolidated_at TIMESTAMPTZ,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    idempotency_key TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE recmem_consolidation_tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','in_progress','completed','failed','dropped')),
+    task_type TEXT NOT NULL,
+    trigger_unit_id UUID REFERENCES subconscious_units(id) ON DELETE SET NULL,
+    target_memory_id UUID REFERENCES memories(id) ON DELETE SET NULL,
+    source_unit_ids UUID[] NOT NULL DEFAULT '{}',
+    recurrence_count INT NOT NULL DEFAULT 0,
+    max_similarity FLOAT,
+    attempts INT NOT NULL DEFAULT 0,
+    error TEXT,
+    task_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result JSONB,
+    dropped_reason TEXT,
+    CONSTRAINT recmem_task_type_known
+        CHECK (task_type IN ('episode_merge','episode_create','semantic_refine'))
+);
+
+CREATE TABLE memory_source_units (
+    memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    subconscious_unit_id UUID NOT NULL REFERENCES subconscious_units(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'source'
+        CHECK (role IN ('source','direct_promotion','merge_addition')),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (memory_id, subconscious_unit_id)
 );
 
 
@@ -331,6 +409,11 @@ BEGIN
     );
     EXECUTE format(
         'ALTER TABLE working_memory ALTER COLUMN embedding TYPE vector(%s) USING embedding::vector(%s)',
+        dim,
+        dim
+    );
+    EXECUTE format(
+        'ALTER TABLE subconscious_units ALTER COLUMN embedding TYPE vector(%s) USING embedding::vector(%s)',
         dim,
         dim
     );
@@ -474,7 +557,40 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('memory.recall_min_trust_level', '0'::jsonb, 'Minimum trust_level to include in recall (0 disables filtering)'),
     ('memory.worldview_support_threshold', '0.8'::jsonb, 'Similarity threshold for SUPPORTS alignment edges'),
-    ('memory.worldview_contradict_threshold', '-0.5'::jsonb, 'Similarity threshold for CONTRADICTS alignment edges')
+    ('memory.worldview_contradict_threshold', '-0.5'::jsonb, 'Similarity threshold for CONTRADICTS alignment edges'),
+    ('memory.recmem_enabled', 'false'::jsonb, 'Use RecMem raw-turn ingestion for chat memory'),
+    ('chat.eager_memory_enabled', 'true'::jsonb, 'Write ordinary chat turns directly to long-term memory'),
+    ('chat.recmem_salience_direct_promote', 'true'::jsonb, 'Promote high-salience turns directly alongside raw ingest'),
+    ('chat.inline_subconscious_enabled', 'true'::jsonb, 'Run inline subconscious appraisal during chat'),
+    ('memory.recmem_hydrate_enabled', 'false'::jsonb, 'Use RecMem tiered retrieval for chat hydration'),
+    ('memory.recmem_dual_write_compare', 'false'::jsonb, 'Log RecMem-vs-eager retrieval candidates during dual-write'),
+    ('memory.recmem_theta_sim', '0.7'::jsonb, 'Similarity threshold for recurrence'),
+    ('memory.recmem_theta_sim_merge', '0.78'::jsonb, 'Similarity threshold for merge-first routing'),
+    ('memory.recmem_theta_count', '5'::jsonb, 'Recurrence count threshold'),
+    ('memory.recmem_top_k', '20'::jsonb, 'Top-k subconscious neighbors checked for recurrence'),
+    ('memory.recmem_sub_limit', '10'::jsonb, 'Subconscious retrieval budget'),
+    ('memory.recmem_epi_limit', '5'::jsonb, 'Episodic retrieval budget'),
+    ('memory.recmem_sem_limit', '10'::jsonb, 'Semantic retrieval budget'),
+    ('memory.recmem_embed_batch_size', '32'::jsonb, 'Units embedded per nearline batch'),
+    ('memory.recmem_embed_interval_ms', '2000'::jsonb, 'Nearline embed pass interval'),
+    ('memory.recmem_embed_claim_timeout_s', '120'::jsonb, 'Stale embedding claim timeout'),
+    ('memory.recmem_embed_max_attempts', '3'::jsonb, 'Max embedding attempts before marking failed'),
+    ('memory.recmem_route_batch_size', '32'::jsonb, 'Units routed per nearline batch'),
+    ('memory.recmem_route_claim_timeout_s', '60'::jsonb, 'Stale routing claim timeout'),
+    ('memory.recmem_route_max_attempts', '3'::jsonb, 'Max routing attempts before marking failed'),
+    ('memory.recmem_worker_enabled', 'false'::jsonb, 'Process RecMem consolidation tasks'),
+    ('memory.recmem_task_batch_size', '3'::jsonb, 'Consolidation tasks per worker tick'),
+    ('memory.recmem_task_claim_timeout_s', '600'::jsonb, 'Stale consolidation task timeout'),
+    ('memory.recmem_task_max_attempts', '3'::jsonb, 'Max attempts before a task is marked failed'),
+    ('memory.recmem_task_backoff_base_s', '30'::jsonb, 'Base seconds for exponential backoff on retry'),
+    ('memory.recmem_queue_max', '5000'::jsonb, 'Pending consolidation queue cap'),
+    ('memory.recmem_queue_alert', '1000'::jsonb, 'Alert threshold for pending queue depth'),
+    ('memory.recmem_sweep_age_days', '14'::jsonb, 'Periodic sweep age for unconsolidated units'),
+    ('memory.recmem_sweep_batch_size', '100'::jsonb, 'Max units re-routed per sweep run'),
+    ('memory.recmem_sweep_min_rerouting_age_days', '7'::jsonb, 'Skip units routed within this window')
+ON CONFLICT (key) DO NOTHING;
+INSERT INTO config (key, value, description) VALUES
+    ('llm.recmem', 'null'::jsonb, 'Optional LLM override for RecMem consolidation prompts')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('heartbeat.use_rlm', 'true'::jsonb, 'Enable RLM loop for heartbeat decisions'),

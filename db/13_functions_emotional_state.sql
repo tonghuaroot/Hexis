@@ -268,6 +268,7 @@ BEGIN
     INTO estimated_count, top_similarity
     FROM memories
     WHERE status = 'active'
+      AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP)
       AND embedding IS NOT NULL
       AND embedding <> zero_vec
       AND (1 - (embedding <=> query_emb)) > 0.5
@@ -360,6 +361,7 @@ BEGIN
             to_jsonb(COALESCE((metadata->>'activation_boost')::float, 0) + 0.2)
         )
         WHERE status = 'active'
+          AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP)
           AND (1 - (embedding <=> pending.query_embedding)) > 0.6;
 
         UPDATE memory_activation
@@ -405,6 +407,7 @@ BEGIN
     RETURN QUERY
     SELECT * FROM memories
     WHERE status = 'active'
+      AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP)
       AND (metadata->>'activation_boost')::float > 0.3
     ORDER BY (metadata->>'activation_boost')::float DESC
     LIMIT GREATEST(1, COALESCE(p_limit, 3));

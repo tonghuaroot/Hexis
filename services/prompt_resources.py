@@ -21,6 +21,9 @@ RLM_SLOW_INGEST_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "rlm
 CONVERSATION_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "conversation.md"
 CHANNEL_CONTEXT_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "channel_context.md"
 RLM_RECONSOLIDATION_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "rlm_reconsolidation_system.md"
+RECMEM_EPISODE_MERGE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_episode_merge.md"
+RECMEM_EPISODE_CREATE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_episode_create.md"
+RECMEM_SEMANTIC_REFINE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_semantic_refine.md"
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,24 @@ def load_heartbeat_agentic_prompt() -> str:
         "You are an autonomous agent in a heartbeat cycle. "
         "Use the tools provided to take actions within your energy budget."
     )
+
+
+def load_recmem_episode_merge_prompt() -> str:
+    if RECMEM_EPISODE_MERGE_PROMPT_PATH.exists():
+        return RECMEM_EPISODE_MERGE_PROMPT_PATH.read_text(encoding="utf-8")
+    return "Merge a raw conversation turn into an existing episodic memory. Respond with JSON."
+
+
+def load_recmem_episode_create_prompt() -> str:
+    if RECMEM_EPISODE_CREATE_PROMPT_PATH.exists():
+        return RECMEM_EPISODE_CREATE_PROMPT_PATH.read_text(encoding="utf-8")
+    return "Create compact episodic memories from recurrent raw conversation turns. Respond with JSON."
+
+
+def load_recmem_semantic_refine_prompt() -> str:
+    if RECMEM_SEMANTIC_REFINE_PROMPT_PATH.exists():
+        return RECMEM_SEMANTIC_REFINE_PROMPT_PATH.read_text(encoding="utf-8")
+    return "Extract grounded, atomic semantic facts from an episodic memory and source turns. Respond with JSON."
 
 
 def load_heartbeat_task_mode_prompt() -> str:

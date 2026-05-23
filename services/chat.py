@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
@@ -13,6 +14,45 @@ from core.tools import create_default_registry, ToolContext, ToolExecutionContex
 from services.agent import run_agent, stream_agent
 
 logger = logging.getLogger(__name__)
+
+
+async def _log_dual_write_comparison(
+    mem_client: CognitiveMemory,
+    *,
+    query: str,
+    session_id: str | None,
+) -> None:
+    try:
+        eager = await mem_client.recall(query, limit=10, include_partial=False)
+        recmem = await mem_client.hydrate_recmem(query, session_id=session_id)
+        logger.info(
+            "RecMem dual-write comparison: session=%s eager=%s recmem=%s",
+            session_id,
+            [str(m.id) for m in eager.memories],
+            [str(m.id) for m in recmem],
+        )
+    except Exception:
+        logger.debug("RecMem dual-write comparison failed", exc_info=True)
+
+
+def _schedule_dual_write_comparison(
+    mem_client: CognitiveMemory,
+    *,
+    query: str,
+    session_id: str | None,
+) -> None:
+    try:
+        task = asyncio.create_task(_log_dual_write_comparison(mem_client, query=query, session_id=session_id))
+    except RuntimeError:
+        return
+
+    def _consume_exception(done: asyncio.Task[None]) -> None:
+        try:
+            done.exception()
+        except asyncio.CancelledError:
+            pass
+
+    task.add_done_callback(_consume_exception)
 
 
 async def _build_system_prompt(
@@ -75,6 +115,8 @@ async def _remember_conversation(
     *,
     user_message: str,
     assistant_message: str,
+    session_id: str | None = None,
+    source_identity: str | None = None,
 ) -> None:
     if not user_message and not assistant_message:
         return
@@ -87,16 +129,70 @@ async def _remember_conversation(
         "observed_at": datetime.now(timezone.utc).isoformat(),
         "trust": 0.95,
     }
-    await mem_client.remember(
-        content,
-        type=MemoryType.EPISODIC,
-        importance=importance,
-        emotional_valence=0.0,
-        context={"type": "conversation"},
-        source_attribution=source_attribution,
-        source_references=None,
-        trust_level=0.95,
-    )
+    recmem_enabled = False
+    eager_enabled = True
+    salience_promote = True
+    dual_compare = False
+    try:
+        async with mem_client._pool.acquire() as conn:
+            recmem_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_enabled'), false)"))
+            eager_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.eager_memory_enabled'), true)"))
+            salience_promote = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.recmem_salience_direct_promote'), true)"))
+            dual_compare = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_dual_write_compare'), false)"))
+    except Exception:
+        recmem_enabled = False
+        eager_enabled = True
+
+    raw: dict[str, Any] | None = None
+    if recmem_enabled:
+        raw = await mem_client.remember_turn_raw(
+            user_message,
+            assistant_message,
+            session_id=session_id,
+            source_identity=source_identity,
+            importance=importance,
+            source_attribution=source_attribution,
+            metadata={"type": "conversation"},
+        )
+
+    promoted = False
+    if recmem_enabled and salience_promote and importance >= 0.8:
+        mem_id = await mem_client.remember(
+            content,
+            type=MemoryType.EPISODIC,
+            importance=importance,
+            emotional_valence=0.0,
+            context={"type": "conversation", "recmem": {"direct_promoted": True}},
+            source_attribution=source_attribution,
+            source_references=None,
+            trust_level=0.95,
+        )
+        promoted = True
+        if raw and raw.get("unit_id"):
+            await mem_client.link_to_source_unit(mem_id, raw["unit_id"], role="direct_promotion")
+
+    if eager_enabled and not promoted:
+        await mem_client.remember(
+            content,
+            type=MemoryType.EPISODIC,
+            importance=importance,
+            emotional_valence=0.0,
+            context={"type": "conversation"},
+            source_attribution=source_attribution,
+            source_references=None,
+            trust_level=0.95,
+        )
+
+    if recmem_enabled and eager_enabled and dual_compare:
+        _schedule_dual_write_comparison(mem_client, query=user_message, session_id=session_id)
+
+
+def _conversation_source_identity(session_id: str | None, history: list[dict[str, Any]] | None, user_message: str, assistant_message: str) -> str | None:
+    if not session_id:
+        return None
+    digest = hashlib.sha256(f"{user_message}\x1e{assistant_message}".encode("utf-8")).hexdigest()[:16]
+    turn_index = len(history or [])
+    return f"chat:{session_id}:{turn_index}:{digest}"
 
 
 async def _build_execution_context(
@@ -177,6 +273,8 @@ async def chat_turn(
                 mem_client,
                 user_message=user_message,
                 assistant_message=assistant_text,
+                session_id=session_id,
+                source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
             )
         else:
             async with CognitiveMemory.connect(dsn) as mem_client:
@@ -184,6 +282,8 @@ async def chat_turn(
                     mem_client,
                     user_message=user_message,
                     assistant_message=assistant_text,
+                    session_id=session_id,
+                    source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
                 )
         new_history = list(history)
         new_history.append({"role": "user", "content": user_message})
@@ -217,7 +317,13 @@ async def chat_turn(
         assistant_text = loop_result.text
 
         async with CognitiveMemory.connect(dsn) as mem_client:
-            await _remember_conversation(mem_client, user_message=user_message, assistant_message=assistant_text)
+            await _remember_conversation(
+                mem_client,
+                user_message=user_message,
+                assistant_message=assistant_text,
+                session_id=session_id,
+                source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
+            )
 
         new_history = list(history)
         new_history.append({"role": "user", "content": user_message})
@@ -286,6 +392,8 @@ async def stream_chat_turn(
                     mem_client,
                     user_message=user_message,
                     assistant_message=full_text,
+                    session_id=session_id,
+                    source_identity=_conversation_source_identity(session_id, history, user_message, full_text),
                 )
     finally:
         if own_pool:

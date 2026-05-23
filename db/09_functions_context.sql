@@ -121,6 +121,7 @@ BEGIN
         FROM memories m
         WHERE m.type = 'goal'
           AND m.status = 'active'
+          AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
           AND m.metadata->>'priority' IN ('active', 'queued')
         ORDER BY m.metadata->>'priority', (m.metadata->>'last_touched')::timestamptz DESC;
     ELSE
@@ -140,6 +141,7 @@ BEGIN
         FROM memories m
         WHERE m.type = 'goal'
           AND m.status = 'active'
+          AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
           AND m.metadata->>'priority' = p_priority::text
         ORDER BY (m.metadata->>'last_touched')::timestamptz DESC;
     END IF;
@@ -160,7 +162,9 @@ BEGIN
                 'source_attribution', m.source_attribution
             ) as obj
             FROM memories m
-            WHERE m.type = 'episodic' AND m.status = 'active'
+            WHERE m.type = 'episodic'
+              AND m.status = 'active'
+              AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
             ORDER BY m.created_at DESC
             LIMIT p_limit
         ) sub
@@ -185,7 +189,9 @@ BEGIN
                 'content_length', length(m.content)
             ) as obj
             FROM memories m
-            WHERE m.type = 'episodic' AND m.status = 'active'
+            WHERE m.type = 'episodic'
+              AND m.status = 'active'
+              AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
             ORDER BY m.created_at DESC
             LIMIT p_limit
         ) sub
@@ -254,10 +260,11 @@ BEGIN
         m.content,
         m.metadata->>'category' as category,
         (m.metadata->>'confidence')::float as confidence
-    FROM memories m
-    WHERE m.type = 'worldview'
-      AND m.status = 'active'
-      AND COALESCE((m.metadata->>'confidence')::float, 0.0) > COALESCE(p_min_confidence, 0.5)
+        FROM memories m
+        WHERE m.type = 'worldview'
+          AND m.status = 'active'
+          AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
+          AND COALESCE((m.metadata->>'confidence')::float, 0.0) > COALESCE(p_min_confidence, 0.5)
     ORDER BY (m.metadata->>'confidence')::float DESC, m.importance DESC
     LIMIT p_limit;
 END;

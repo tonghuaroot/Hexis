@@ -14,9 +14,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
-from typing import Any, AsyncIterator, Iterable, Optional
+from typing import Any, AsyncIterator, Iterable
 from uuid import UUID
 
 import asyncpg
@@ -73,6 +73,9 @@ class Memory:
     source_attribution: dict[str, Any] | None = None  # primary provenance (DB-stored JSON)
     created_at: datetime | None = None
     emotional_valence: float | None = None
+    tier: str | None = None
+    source_unit_ids: list[UUID] | None = None
+    valid_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,15 @@ def _to_jsonb_arg(val: Any) -> Any:
     return val
 
 
+def _uuid_text_or_none(val: UUID | str | None) -> str | None:
+    if val is None:
+        return None
+    try:
+        return str(UUID(str(val)))
+    except Exception:
+        return None
+
+
 def _cypher_escape(value: str) -> str:
     return value.replace("'", "''")
 
@@ -206,6 +218,7 @@ class CognitiveMemory:
         include_emotional_state: bool = True,
         include_goals: bool = False,
         include_drives: bool = True,
+        session_id: UUID | str | None = None,
     ) -> HydratedContext:
         """
         Hydrate a query with relevant context for RAG prompt augmentation.
@@ -217,9 +230,18 @@ class CognitiveMemory:
         """
         import asyncio as _aio
 
+        use_recmem = False
+        try:
+            async with self._pool.acquire() as conn:
+                use_recmem = bool(await conn.fetchval("SELECT get_config_bool('memory.recmem_hydrate_enabled')"))
+        except Exception:
+            use_recmem = False
+
         # Run independent queries in parallel on separate connections for ~60% latency reduction
         async def _fetch_memories():
             async with self._pool.acquire() as conn:
+                if use_recmem:
+                    return await self._recall_recmem(conn, query, memory_limit, session_id=session_id)
                 return await self._recall_memories(conn, query, memory_limit)
 
         async def _fetch_partial():
@@ -428,6 +450,97 @@ class CognitiveMemory:
                 )
 
             return memory_id
+
+    async def remember_turn_raw(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        session_id: UUID | str | None = None,
+        source_identity: str | None = None,
+        turn_at: datetime | None = None,
+        importance: float = 0.3,
+        source_attribution: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with self._pool.acquire() as conn:
+            raw = await conn.fetchval(
+                """
+                SELECT recmem_ingest_turn(
+                    $1::text,
+                    $2::text,
+                    $3::uuid,
+                    $4::text,
+                    COALESCE($5::timestamptz, CURRENT_TIMESTAMP),
+                    $6::float,
+                    $7::jsonb,
+                    $8::jsonb
+                )
+                """,
+                user_text,
+                assistant_text,
+                _uuid_text_or_none(session_id),
+                source_identity,
+                turn_at,
+                float(importance),
+                _to_jsonb_arg(source_attribution),
+                _to_jsonb_arg(metadata or {}),
+            )
+            result = _coerce_json(raw) if raw is not None else {}
+            return dict(result) if isinstance(result, dict) else {}
+
+    async def hydrate_recmem(
+        self,
+        query: str,
+        *,
+        sub_limit: int | None = None,
+        epi_limit: int | None = None,
+        sem_limit: int | None = None,
+        session_id: UUID | str | None = None,
+    ) -> list[Memory]:
+        async with self._pool.acquire() as conn:
+            return await self._recall_recmem(
+                conn,
+                query,
+                max(sub_limit or 10, (epi_limit or 5) + (sem_limit or 10)),
+                sub_limit=sub_limit,
+                epi_limit=epi_limit,
+                sem_limit=sem_limit,
+                session_id=session_id,
+            )
+
+    async def link_to_source_unit(
+        self,
+        memory_id: UUID | str,
+        unit_id: UUID | str,
+        role: str = "direct_promotion",
+    ) -> bool:
+        async with self._pool.acquire() as conn:
+            return bool(
+                await conn.fetchval(
+                    "SELECT link_memory_to_source_unit($1::uuid, $2::uuid, $3::text)",
+                    str(memory_id),
+                    str(unit_id),
+                    role,
+                )
+            )
+
+    async def redact_unit(
+        self,
+        unit_id: UUID | str,
+        *,
+        reason: str | None = None,
+        cascade: bool = True,
+    ) -> dict[str, Any]:
+        async with self._pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT recmem_redact_unit($1::uuid, $2::text, $3::boolean)",
+                str(unit_id),
+                reason,
+                cascade,
+            )
+            result = _coerce_json(raw) if raw is not None else {}
+            return dict(result) if isinstance(result, dict) else {}
 
     async def add_source(self, memory_id: UUID, source: dict[str, Any]) -> None:
         """Attach an additional source reference to a semantic memory and recompute trust."""
@@ -1005,6 +1118,62 @@ class CognitiveMemory:
             )
         return memories
 
+    async def _recall_recmem(
+        self,
+        conn: asyncpg.Connection,
+        query: str,
+        limit: int,
+        *,
+        sub_limit: int | None = None,
+        epi_limit: int | None = None,
+        sem_limit: int | None = None,
+        session_id: UUID | str | None = None,
+    ) -> list[Memory]:
+        rows = await conn.fetch(
+            """
+            SELECT *
+            FROM recmem_recall_context(
+                $1::text,
+                $2::int,
+                $3::int,
+                $4::int,
+                $5::uuid
+            )
+            """,
+            query,
+            int(sub_limit if sub_limit is not None else min(max(limit, 1), 10)),
+            int(epi_limit if epi_limit is not None else max(1, min(limit, 5))),
+            int(sem_limit if sem_limit is not None else max(1, min(limit * 2, 10))),
+            _uuid_text_or_none(session_id),
+        )
+
+        derived_sources: set[UUID] = set()
+        for row in rows:
+            if row["tier"] != "subconscious":
+                derived_sources.update(row["source_unit_ids"] or [])
+
+        memories: list[Memory] = []
+        for row in rows:
+            if row["tier"] == "subconscious" and row["item_id"] in derived_sources:
+                continue
+            raw_type = row["memory_type"] or MemoryType.EPISODIC.value
+            memories.append(
+                Memory(
+                    id=row["item_id"],
+                    type=MemoryType(raw_type),
+                    content=row["content"],
+                    importance=0.3,
+                    similarity=float(row["score"]) if row["score"] is not None else None,
+                    source="recmem",
+                    trust_level=float(row["trust_level"]) if row["trust_level"] is not None else None,
+                    source_attribution=_coerce_json(row["source_attribution"]) if row["source_attribution"] is not None else None,
+                    created_at=row["created_at"],
+                    tier=row["tier"],
+                    source_unit_ids=list(row["source_unit_ids"] or []),
+                )
+            )
+        return memories
+
     async def _find_partial_activations(self, conn: asyncpg.Connection, query: str) -> list[PartialActivation]:
         rows = await conn.fetch("SELECT * FROM find_partial_activations($1::text)", query)
         out: list[PartialActivation] = []
@@ -1061,6 +1230,9 @@ class CognitiveMemory:
             else None,
             created_at=row["created_at"] if "created_at" in row else None,
             emotional_valence=row["emotional_valence"] if "emotional_valence" in row else None,
+            tier=row["tier"] if "tier" in row else None,
+            source_unit_ids=list(row["source_unit_ids"] or []) if "source_unit_ids" in row else None,
+            valid_until=row["valid_until"] if "valid_until" in row else None,
         )
 
 
@@ -1102,6 +1274,18 @@ class CognitiveMemorySync:
 
     def remember(self, content: str, **kwargs: Any) -> UUID:
         return self._loop.run_until_complete(self._async.remember(content, **kwargs))
+
+    def remember_turn_raw(self, user_text: str, assistant_text: str, **kwargs: Any) -> dict[str, Any]:
+        return self._loop.run_until_complete(self._async.remember_turn_raw(user_text, assistant_text, **kwargs))
+
+    def hydrate_recmem(self, query: str, **kwargs: Any) -> list[Memory]:
+        return self._loop.run_until_complete(self._async.hydrate_recmem(query, **kwargs))
+
+    def link_to_source_unit(self, memory_id: UUID | str, unit_id: UUID | str, role: str = "direct_promotion") -> bool:
+        return self._loop.run_until_complete(self._async.link_to_source_unit(memory_id, unit_id, role))
+
+    def redact_unit(self, unit_id: UUID | str, **kwargs: Any) -> dict[str, Any]:
+        return self._loop.run_until_complete(self._async.redact_unit(unit_id, **kwargs))
 
     def remember_batch(self, memories: Iterable[MemoryInput]) -> list[UUID]:
         return self._loop.run_until_complete(self._async.remember_batch(memories))
@@ -1248,19 +1432,39 @@ def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5
     parts: list[str] = []
 
     if context.memories:
-        parts.append("## Relevant Memories")
-        for m in context.memories[:max_memories]:
-            score = f" (score: {m.similarity:.2f})" if m.similarity is not None else ""
-            trust = f", trust: {m.trust_level:.2f}" if m.trust_level is not None else ""
-            src_kind = ""
-            if m.source_attribution and isinstance(m.source_attribution, dict):
-                kind = m.source_attribution.get("kind")
-                ref = m.source_attribution.get("ref")
-                if kind and ref:
-                    src_kind = f", source: {kind} ({ref})"
-                elif kind:
-                    src_kind = f", source: {kind}"
-            parts.append(f"- {m.content}{score}{trust}{src_kind}")
+        if any(m.tier for m in context.memories):
+            tier_titles = {
+                "subconscious": "## Subconscious Raw Turns",
+                "episodic": "## Episodic Memories",
+                "semantic": "## Semantic Facts",
+            }
+            emitted: set[str] = set()
+            for tier in ("subconscious", "episodic", "semantic", None):
+                group = [m for m in context.memories[:max_memories] if m.tier == tier]
+                if not group:
+                    continue
+                title = tier_titles.get(tier, "## Relevant Memories")
+                if title not in emitted:
+                    parts.append(title)
+                    emitted.add(title)
+                for m in group:
+                    score = f" (score: {m.similarity:.2f})" if m.similarity is not None else ""
+                    trust = f", trust: {m.trust_level:.2f}" if m.trust_level is not None else ""
+                    parts.append(f"- {m.content}{score}{trust}")
+        else:
+            parts.append("## Relevant Memories")
+            for m in context.memories[:max_memories]:
+                score = f" (score: {m.similarity:.2f})" if m.similarity is not None else ""
+                trust = f", trust: {m.trust_level:.2f}" if m.trust_level is not None else ""
+                src_kind = ""
+                if m.source_attribution and isinstance(m.source_attribution, dict):
+                    kind = m.source_attribution.get("kind")
+                    ref = m.source_attribution.get("ref")
+                    if kind and ref:
+                        src_kind = f", source: {kind} ({ref})"
+                    elif kind:
+                        src_kind = f", source: {kind}"
+                parts.append(f"- {m.content}{score}{trust}{src_kind}")
 
     if context.partial_activations:
         parts.append("\n## Vague Recollections (tip-of-tongue)")
