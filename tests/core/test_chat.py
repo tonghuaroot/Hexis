@@ -46,8 +46,10 @@ class _RememberMem:
         self.raw_calls = []
         self.remember_calls = []
         self.link_calls = []
+        self.hydrate_recmem_calls = []
         self.recall_started = asyncio.Event()
         self.recall_release = asyncio.Event()
+        self.hydrate_recmem_started = asyncio.Event()
 
     async def remember_turn_raw(self, *args, **kwargs):
         self.raw_calls.append((args, kwargs))
@@ -66,7 +68,9 @@ class _RememberMem:
         await self.recall_release.wait()
         return RecallResult(memories=[], partial_activations=[], query="q")
 
-    async def hydrate_recmem(self, *_args, **_kwargs):
+    async def hydrate_recmem(self, *args, **kwargs):
+        self.hydrate_recmem_calls.append((args, kwargs))
+        self.hydrate_recmem_started.set()
         return [
             Memory(
                 id=uuid4(),
@@ -96,6 +100,7 @@ async def test_remember_conversation_direct_promotion_suppresses_legacy_eager():
     assert len(mem.raw_calls) == 1
     assert len(mem.remember_calls) == 1
     assert len(mem.link_calls) == 1
+    assert mem.remember_calls[0][1]["context"]["recmem"]["direct_promoted"] is True
 
 
 async def test_remember_conversation_dual_write_comparison_is_nonblocking():
@@ -120,7 +125,9 @@ async def test_remember_conversation_dual_write_comparison_is_nonblocking():
     assert len(mem.remember_calls) == 1
     await asyncio.wait_for(mem.recall_started.wait(), timeout=1.0)
     mem.recall_release.set()
-    await asyncio.sleep(0)
+    await asyncio.wait_for(mem.hydrate_recmem_started.wait(), timeout=1.0)
+    assert len(mem.hydrate_recmem_calls) == 1
+    assert mem.hydrate_recmem_calls[0][0][0] == "ordinary chat"
 
 
 async def test_build_system_prompt_includes_profile():

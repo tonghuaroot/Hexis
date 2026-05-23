@@ -46,6 +46,25 @@ class _Conn:
         return self.fetch_rows
 
 
+async def _stub_get_embedding(conn):
+    await conn.execute(
+        """
+        CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
+        RETURNS vector[] AS $$
+            SELECT COALESCE(
+                array_agg((
+                    array_fill(0.0::float, ARRAY[0]) ||
+                    ARRAY[1.0::float] ||
+                    array_fill(0.0::float, ARRAY[embedding_dimension() - 1])
+                )::vector),
+                ARRAY[]::vector[]
+            )
+            FROM unnest(text_contents)
+        $$ LANGUAGE sql;
+        """
+    )
+
+
 async def test_remember_turn_raw_passes_sql_args():
     unit_id = uuid4()
     conn = _Conn()
@@ -137,3 +156,75 @@ async def test_link_and_redact_unit_call_recmem_sql():
     assert result["redacted_unit_id"] == str(unit_id)
     assert "link_memory_to_source_unit" in conn.fetchval_calls[0][0]
     assert "recmem_redact_unit" in conn.fetchval_calls[1][0]
+
+
+async def test_recmem_api_redaction_excludes_invalidated_memory_from_hydration(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            mem = CognitiveMemory(_Pool(conn))
+            raw = await mem.remember_turn_raw(
+                "hidden preference",
+                "noted",
+                source_identity="api-redaction-source",
+            )
+            raw_id = raw["unit_id"]
+            await conn.execute(
+                """
+                UPDATE subconscious_units
+                SET embedding = (
+                        array_fill(0.0::float, ARRAY[0]) ||
+                        ARRAY[1.0::float] ||
+                        array_fill(0.0::float, ARRAY[embedding_dimension() - 1])
+                    )::vector,
+                    embedding_status = 'embedded'
+                WHERE id = $1::uuid
+                """,
+                raw_id,
+            )
+            invalidated_memory_id = await conn.fetchval(
+                """
+                SELECT create_memory_with_embedding(
+                    'episodic'::memory_type,
+                    'hidden preference derived episode',
+                    (
+                        array_fill(0.0::float, ARRAY[0]) ||
+                        ARRAY[1.0::float] ||
+                        array_fill(0.0::float, ARRAY[embedding_dimension() - 1])
+                    )::vector,
+                    0.7,
+                    NULL,
+                    0.95
+                )
+                """
+            )
+            visible_memory_id = await conn.fetchval(
+                """
+                SELECT create_memory_with_embedding(
+                    'semantic'::memory_type,
+                    'visible preference survives redaction',
+                    (
+                        array_fill(0.0::float, ARRAY[0]) ||
+                        ARRAY[1.0::float] ||
+                        array_fill(0.0::float, ARRAY[embedding_dimension() - 1])
+                    )::vector,
+                    0.7,
+                    NULL,
+                    0.95
+                )
+                """
+            )
+            await mem.link_to_source_unit(invalidated_memory_id, raw_id, role="source")
+
+            redaction = await mem.redact_unit(raw_id, reason="api integration", cascade=True)
+            hydrated = await mem.hydrate_recmem("hidden preference", sub_limit=5, epi_limit=5, sem_limit=5)
+            hydrated_ids = {memory.id for memory in hydrated}
+
+            assert redaction["redacted_unit_id"] == str(raw_id)
+            assert invalidated_memory_id not in hydrated_ids
+            assert raw_id not in {str(memory.id) for memory in hydrated}
+            assert visible_memory_id in hydrated_ids
+        finally:
+            await tr.rollback()
