@@ -1427,6 +1427,154 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql STABLE;
 
+CREATE OR REPLACE FUNCTION get_recmem_eval_quality_gate(
+    p_run_id UUID,
+    p_overall_max_regression FLOAT DEFAULT 0.015,
+    p_category_max_regression FLOAT DEFAULT 0.05
+) RETURNS JSONB AS $$
+DECLARE
+    overall_baseline FLOAT;
+    overall_recmem FLOAT;
+    overall_regression FLOAT;
+    worst_category_regression FLOAT;
+    total_items INT;
+    judged_items INT;
+    regression_items INT;
+    gate_passed BOOLEAN;
+    categories JSONB;
+BEGIN
+    SELECT
+        COUNT(*)::int,
+        COUNT(*) FILTER (WHERE metadata ? 'baseline_hit_rate' AND metadata ? 'recmem_hit_rate')::int,
+        COUNT(*) FILTER (WHERE verdict = 'regression')::int,
+        AVG(NULLIF(metadata->>'baseline_hit_rate', 'null')::float),
+        AVG(NULLIF(metadata->>'recmem_hit_rate', 'null')::float)
+    INTO total_items, judged_items, regression_items, overall_baseline, overall_recmem
+    FROM recmem_eval_results
+    WHERE run_id = p_run_id;
+
+    overall_regression := GREATEST(COALESCE(overall_baseline, 0) - COALESCE(overall_recmem, 0), 0);
+
+    WITH category_scores AS (
+        SELECT
+            category,
+            COUNT(*) AS count,
+            AVG(NULLIF(metadata->>'baseline_hit_rate', 'null')::float) AS baseline_hit_rate,
+            AVG(NULLIF(metadata->>'recmem_hit_rate', 'null')::float) AS recmem_hit_rate
+        FROM recmem_eval_results
+        WHERE run_id = p_run_id
+          AND metadata ? 'baseline_hit_rate'
+          AND metadata ? 'recmem_hit_rate'
+        GROUP BY category
+    ),
+    scored AS (
+        SELECT
+            category,
+            count,
+            baseline_hit_rate,
+            recmem_hit_rate,
+            GREATEST(COALESCE(baseline_hit_rate, 0) - COALESCE(recmem_hit_rate, 0), 0) AS regression
+        FROM category_scores
+    )
+    SELECT
+        COALESCE(MAX(regression), 0),
+        COALESCE(
+            jsonb_object_agg(
+                category,
+                jsonb_build_object(
+                    'count', count,
+                    'baseline_hit_rate', baseline_hit_rate,
+                    'recmem_hit_rate', recmem_hit_rate,
+                    'regression', regression,
+                    'passed', regression <= COALESCE(p_category_max_regression, 0.05)
+                )
+            ),
+            '{}'::jsonb
+        )
+    INTO worst_category_regression, categories
+    FROM scored;
+
+    gate_passed := COALESCE(judged_items, 0) > 0
+        AND overall_regression <= COALESCE(p_overall_max_regression, 0.015)
+        AND COALESCE(worst_category_regression, 0) <= COALESCE(p_category_max_regression, 0.05);
+
+    RETURN jsonb_build_object(
+        'run_id', p_run_id,
+        'passed', gate_passed,
+        'total_items', COALESCE(total_items, 0),
+        'judged_items', COALESCE(judged_items, 0),
+        'regression_items', COALESCE(regression_items, 0),
+        'overall_baseline_hit_rate', overall_baseline,
+        'overall_recmem_hit_rate', overall_recmem,
+        'overall_regression', overall_regression,
+        'overall_max_regression', COALESCE(p_overall_max_regression, 0.015),
+        'worst_category_regression', COALESCE(worst_category_regression, 0),
+        'category_max_regression', COALESCE(p_category_max_regression, 0.05),
+        'categories', COALESCE(categories, '{}'::jsonb)
+    );
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE FUNCTION get_recmem_phase5_readiness(
+    p_run_id UUID DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+    selected_run_id UUID;
+    run_status TEXT;
+    gate JSONB;
+    unhealthy_count INT;
+BEGIN
+    IF p_run_id IS NULL THEN
+        SELECT id INTO selected_run_id
+        FROM recmem_eval_runs
+        WHERE status = 'completed'
+        ORDER BY completed_at DESC NULLS LAST, started_at DESC
+        LIMIT 1;
+    ELSE
+        selected_run_id := p_run_id;
+    END IF;
+
+    IF selected_run_id IS NULL THEN
+        RETURN jsonb_build_object(
+            'ready', false,
+            'reason', 'no_completed_eval_run'
+        );
+    END IF;
+
+    SELECT status INTO run_status
+    FROM recmem_eval_runs
+    WHERE id = selected_run_id;
+
+    IF run_status <> 'completed' THEN
+        RETURN jsonb_build_object(
+            'ready', false,
+            'reason', 'eval_run_not_completed',
+            'run_id', selected_run_id,
+            'status', run_status
+        );
+    END IF;
+
+    gate := get_recmem_eval_quality_gate(selected_run_id);
+    SELECT COUNT(*)::int INTO unhealthy_count FROM recmem_unhealthy_items();
+
+    RETURN jsonb_build_object(
+        'ready',
+            COALESCE((gate->>'passed')::boolean, false)
+            AND COALESCE(unhealthy_count, 0) = 0,
+        'run_id', selected_run_id,
+        'quality_gate', gate,
+        'unhealthy_count', COALESCE(unhealthy_count, 0),
+        'hydrate_enabled', COALESCE(get_config_bool('memory.recmem_hydrate_enabled'), false),
+        'recommendation',
+            CASE
+                WHEN COALESCE((gate->>'passed')::boolean, false) IS FALSE THEN 'keep_recmem_hydrate_disabled_quality_gate_failed'
+                WHEN COALESCE(unhealthy_count, 0) > 0 THEN 'keep_recmem_hydrate_disabled_unhealthy_items'
+                ELSE 'eligible_to_enable_memory.recmem_hydrate_enabled'
+            END
+    );
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 CREATE OR REPLACE FUNCTION has_pending_recmem_consolidation()
 RETURNS BOOLEAN AS $$
     SELECT EXISTS (

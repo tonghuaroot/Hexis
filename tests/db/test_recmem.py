@@ -523,3 +523,63 @@ async def test_recmem_sweep_schedule_state(db_pool):
             assert await conn.fetchval("SELECT should_run_recmem_sweep()") is True
         finally:
             await tr.rollback()
+
+
+async def test_recmem_eval_quality_gate_and_phase5_readiness(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            eval_set = await conn.fetchval(
+                "INSERT INTO recmem_eval_sets (name) VALUES ('gate-eval') RETURNING id"
+            )
+            passing_run = await conn.fetchval(
+                """
+                INSERT INTO recmem_eval_runs (eval_set_id, label, status, completed_at)
+                VALUES ($1, 'passing', 'completed', CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                eval_set,
+            )
+            await conn.execute(
+                """
+                INSERT INTO recmem_eval_results (
+                    run_id, category, judge_score, verdict, metadata
+                )
+                VALUES
+                    ($1, 'preference', 1.0, 'pass', '{"baseline_hit_rate": 1.0, "recmem_hit_rate": 1.0}'::jsonb),
+                    ($1, 'temporal', 0.95, 'pass', '{"baseline_hit_rate": 0.95, "recmem_hit_rate": 0.95}'::jsonb)
+                """,
+                passing_run,
+            )
+
+            gate = _json(await conn.fetchval("SELECT get_recmem_eval_quality_gate($1)", passing_run))
+            readiness = _json(await conn.fetchval("SELECT get_recmem_phase5_readiness($1)", passing_run))
+            assert gate["passed"] is True
+            assert readiness["ready"] is True
+            assert readiness["recommendation"] == "eligible_to_enable_memory.recmem_hydrate_enabled"
+
+            failing_run = await conn.fetchval(
+                """
+                INSERT INTO recmem_eval_runs (eval_set_id, label, status, completed_at)
+                VALUES ($1, 'failing', 'completed', CURRENT_TIMESTAMP)
+                RETURNING id
+                """,
+                eval_set,
+            )
+            await conn.execute(
+                """
+                INSERT INTO recmem_eval_results (
+                    run_id, category, judge_score, verdict, metadata
+                )
+                VALUES ($1, 'preference', 0.5, 'regression', '{"baseline_hit_rate": 1.0, "recmem_hit_rate": 0.5}'::jsonb)
+                """,
+                failing_run,
+            )
+            failing_gate = _json(await conn.fetchval("SELECT get_recmem_eval_quality_gate($1)", failing_run))
+            failing_readiness = _json(await conn.fetchval("SELECT get_recmem_phase5_readiness($1)", failing_run))
+            assert failing_gate["passed"] is False
+            assert failing_readiness["ready"] is False
+            assert failing_readiness["recommendation"] == "keep_recmem_hydrate_disabled_quality_gate_failed"
+        finally:
+            await tr.rollback()
