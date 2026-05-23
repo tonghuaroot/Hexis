@@ -69,22 +69,6 @@ async def test_load_recmem_task_context_is_db_owned(db_pool):
             await tr.rollback()
 
 
-async def test_rollout_phase_config_and_status_are_db_owned(db_pool):
-    async with db_pool.acquire() as conn:
-        tr = conn.transaction()
-        await tr.start()
-        try:
-            status = await conn.fetchval("SELECT apply_recmem_rollout_phase(2, NULL, false)")
-            status = _coerce_json(status)
-
-            assert status["applied_phase"] == 2
-            assert status["phase"] == 2
-            assert status["configs"]["memory.recmem_enabled"] is True
-            assert status["configs"]["memory.recmem_dual_write_compare"] is True
-            assert await conn.fetchval("SELECT infer_recmem_rollout_phase()") == 2
-        finally:
-            await tr.rollback()
-
 
 async def test_subconscious_observation_normalization_and_rpe_in_db(db_pool):
     async with db_pool.acquire() as conn:

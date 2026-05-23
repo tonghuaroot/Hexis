@@ -64,37 +64,6 @@ def _make_handler(
     return _Handler()
 
 
-# ============================================================================
-# Unit tests: _estimate_importance
-# ============================================================================
-
-
-class TestEstimateImportance:
-    def test_default_importance(self):
-        from services.chat import _estimate_importance
-
-        val = _estimate_importance("hello", "hi there")
-        assert 0.15 <= val <= 1.0
-        assert val == 0.5
-
-    def test_long_messages_raise_importance(self):
-        from services.chat import _estimate_importance
-
-        val = _estimate_importance("a" * 250, "short")
-        assert val >= 0.7
-
-    def test_learning_signals_raise_importance(self):
-        from services.chat import _estimate_importance
-
-        val = _estimate_importance("remember this fact", "noted")
-        assert val >= 0.8
-
-    def test_clamped_range(self):
-        from services.chat import _estimate_importance
-
-        val = _estimate_importance("", "")
-        assert 0.15 <= val <= 1.0
-
 
 # ============================================================================
 # Unit tests: _extract_allowed_tools

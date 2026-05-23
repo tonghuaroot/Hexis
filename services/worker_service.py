@@ -468,28 +468,24 @@ class MaintenanceWorker:
         if not self.pool:
             return
         async with self.pool.acquire() as conn:
-            recmem_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_enabled'), false)"))
-            if recmem_enabled:
-                embed_result = await run_recmem_embed_step(conn)
-                if not embed_result.get("skipped"):
-                    logger.info("RecMem embed step: %s", embed_result)
-                route_result = await run_recmem_route_step(conn)
-                if not route_result.get("skipped"):
-                    logger.info("RecMem route step: %s", route_result)
-                should_sweep = bool(await conn.fetchval("SELECT should_run_recmem_sweep()"))
-                if should_sweep:
-                    sweep_result = await run_recmem_sweep_step(conn)
-                    await conn.fetchval("SELECT mark_recmem_sweep_run($1::jsonb)", json.dumps(sweep_result))
-                    if sweep_result.get("processed", 0):
-                        logger.info("RecMem sweep step: %s", sweep_result)
+            embed_result = await run_recmem_embed_step(conn)
+            if not embed_result.get("skipped"):
+                logger.info("RecMem embed step: %s", embed_result)
+            route_result = await run_recmem_route_step(conn)
+            if not route_result.get("skipped"):
+                logger.info("RecMem route step: %s", route_result)
+            should_sweep = bool(await conn.fetchval("SELECT should_run_recmem_sweep()"))
+            if should_sweep:
+                sweep_result = await run_recmem_sweep_step(conn)
+                await conn.fetchval("SELECT mark_recmem_sweep_run($1::jsonb)", json.dumps(sweep_result))
+                if sweep_result.get("processed", 0):
+                    logger.info("RecMem sweep step: %s", sweep_result)
 
-            worker_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_worker_enabled'), false)"))
-            if worker_enabled:
-                task_batch_size = int(await conn.fetchval("SELECT COALESCE(get_config_int('memory.recmem_task_batch_size'), 3)") or 3)
-                for _ in range(max(task_batch_size, 1)):
-                    result = await run_recmem_consolidation_step(conn)
-                    if result.get("skipped"):
-                        break
+            task_batch_size = int(await conn.fetchval("SELECT COALESCE(get_config_int('memory.recmem_task_batch_size'), 3)") or 3)
+            for _ in range(max(task_batch_size, 1)):
+                result = await run_recmem_consolidation_step(conn)
+                if result.get("skipped"):
+                    break
 
     async def run(self) -> None:
         self.running = True

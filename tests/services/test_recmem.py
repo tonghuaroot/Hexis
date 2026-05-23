@@ -204,12 +204,8 @@ async def test_maintenance_worker_runs_due_recmem_sweep(db_pool, monkeypatch):
     worker.pool = db_pool
 
     async with db_pool.acquire() as conn:
-        old_recmem = await conn.fetchval("SELECT value FROM config WHERE key = 'memory.recmem_enabled'")
-        old_worker = await conn.fetchval("SELECT value FROM config WHERE key = 'memory.recmem_worker_enabled'")
         old_interval = await conn.fetchval("SELECT value FROM config WHERE key = 'memory.recmem_sweep_interval_seconds'")
         old_state = await conn.fetchval("SELECT value FROM state WHERE key = 'recmem_state'")
-        await conn.execute("SELECT set_config('memory.recmem_enabled', 'true'::jsonb)")
-        await conn.execute("SELECT set_config('memory.recmem_worker_enabled', 'false'::jsonb)")
         await conn.execute("SELECT set_config('memory.recmem_sweep_interval_seconds', '86400'::jsonb)")
         await conn.execute("DELETE FROM state WHERE key = 'recmem_state'")
 
@@ -221,14 +217,6 @@ async def test_maintenance_worker_runs_due_recmem_sweep(db_pool, monkeypatch):
             assert await conn.fetchval("SELECT should_run_recmem_sweep()") is False
     finally:
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE config SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE key = 'memory.recmem_enabled'",
-                old_recmem,
-            )
-            await conn.execute(
-                "UPDATE config SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE key = 'memory.recmem_worker_enabled'",
-                old_worker,
-            )
             await conn.execute(
                 "UPDATE config SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE key = 'memory.recmem_sweep_interval_seconds'",
                 old_interval,

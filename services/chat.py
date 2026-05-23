@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import hashlib
 import json
-import time
-from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 from uuid import UUID
 
@@ -19,145 +16,6 @@ from services.agent import run_agent, stream_agent
 logger = logging.getLogger(__name__)
 
 
-def _uuid_text_or_none(val: str | None) -> str | None:
-    if val is None:
-        return None
-    try:
-        return str(UUID(str(val)))
-    except Exception:
-        return None
-
-
-async def _record_recmem_rollout_event(
-    *,
-    mem_client: CognitiveMemory | None = None,
-    dsn: str | None = None,
-    event_type: str,
-    session_id: str | None,
-    source_identity: str | None,
-    raw_unit_id: str | None,
-    raw_status: str | None,
-    direct_promoted: bool,
-    eager_written: bool,
-    eager_memory_id: str | None,
-    duration_ms: float | None,
-    error: str | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    async def _write(client: CognitiveMemory) -> None:
-        async with client._pool.acquire() as conn:
-            await conn.fetchval(
-                """
-                SELECT record_recmem_rollout_event(
-                    $1::text, $2::uuid, $3::text, $4::uuid, $5::text,
-                    $6::boolean, $7::boolean, $8::uuid, $9::float,
-                    $10::text, $11::jsonb
-                )
-                """,
-                event_type,
-                _uuid_text_or_none(session_id),
-                source_identity,
-                raw_unit_id,
-                raw_status,
-                direct_promoted,
-                eager_written,
-                eager_memory_id,
-                duration_ms,
-                error,
-                json.dumps(metadata or {}),
-            )
-
-    try:
-        if dsn:
-            async with CognitiveMemory.connect(dsn) as client:
-                await _write(client)
-        elif mem_client is not None:
-            await _write(mem_client)
-    except Exception:
-        logger.debug("RecMem rollout event recording failed", exc_info=True)
-
-
-def _schedule_recmem_rollout_event(**kwargs: Any) -> None:
-    try:
-        task = asyncio.create_task(_record_recmem_rollout_event(**kwargs))
-    except RuntimeError:
-        return
-
-    def _consume_exception(done: asyncio.Task[None]) -> None:
-        try:
-            done.exception()
-        except asyncio.CancelledError:
-            pass
-
-    task.add_done_callback(_consume_exception)
-
-
-async def _log_dual_write_comparison(
-    mem_client: CognitiveMemory | None = None,
-    *,
-    dsn: str | None = None,
-    query: str,
-    session_id: str | None,
-) -> None:
-    async def _compare(client: CognitiveMemory) -> None:
-        started = time.perf_counter()
-        eager = await client.recall(query, limit=10, include_partial=False)
-        recmem = await client.hydrate_recmem(query, session_id=session_id)
-        duration_ms = (time.perf_counter() - started) * 1000
-        eager_ids = [m.id for m in eager.memories]
-        recmem_ids = [m.id for m in recmem]
-        async with client._pool.acquire() as conn:
-            await conn.fetchval(
-                """
-                SELECT record_recmem_dual_write_comparison(
-                    $1::text, $2::uuid, $3::uuid[], $4::uuid[], $5::float, $6::jsonb
-                )
-                """,
-                query,
-                _uuid_text_or_none(session_id),
-                eager_ids,
-                recmem_ids,
-                duration_ms,
-                json.dumps({"source": "chat"}),
-            )
-        logger.info(
-            "RecMem dual-write comparison: session=%s eager=%s recmem=%s",
-            session_id,
-            [str(mid) for mid in eager_ids],
-            [str(mid) for mid in recmem_ids],
-        )
-
-    try:
-        if dsn:
-            async with CognitiveMemory.connect(dsn) as client:
-                await _compare(client)
-        elif mem_client is not None:
-            await _compare(mem_client)
-    except Exception:
-        logger.debug("RecMem dual-write comparison failed", exc_info=True)
-
-
-def _schedule_dual_write_comparison(
-    mem_client: CognitiveMemory | None = None,
-    *,
-    dsn: str | None = None,
-    query: str,
-    session_id: str | None,
-) -> None:
-    try:
-        task = asyncio.create_task(_log_dual_write_comparison(mem_client, dsn=dsn, query=query, session_id=session_id))
-    except RuntimeError:
-        return
-
-    def _consume_exception(done: asyncio.Task[None]) -> None:
-        try:
-            done.exception()
-        except asyncio.CancelledError:
-            pass
-
-    task.add_done_callback(_consume_exception)
-
-
 async def _build_system_prompt(
     agent_profile: dict[str, Any],
     registry: ToolRegistry | None = None,
@@ -168,30 +26,6 @@ async def _build_system_prompt(
     return await build_system_prompt(
         "chat", registry, agent_profile, is_group=is_group,
     )
-
-
-def _estimate_importance(user_message: str, assistant_message: str) -> float:
-    importance = 0.5
-    combined = (user_message + "\n" + assistant_message).lower()
-    learning_signals = [
-        "remember",
-        "don't forget",
-        "important",
-        "note that",
-        "my name is",
-        "i prefer",
-        "i like",
-        "i don't like",
-        "always",
-        "never",
-        "make sure",
-        "keep in mind",
-    ]
-    if len(user_message) > 200 or len(assistant_message) > 500:
-        importance = max(importance, 0.7)
-    if any(signal in combined for signal in learning_signals):
-        importance = max(importance, 0.8)
-    return max(0.15, min(float(importance), 1.0))
 
 
 def _extract_allowed_tools(raw_tools: Any) -> list[str] | None:

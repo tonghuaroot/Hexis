@@ -230,19 +230,9 @@ class CognitiveMemory:
         """
         import asyncio as _aio
 
-        use_recmem = False
-        try:
-            async with self._pool.acquire() as conn:
-                use_recmem = bool(await conn.fetchval("SELECT get_config_bool('memory.recmem_hydrate_enabled')"))
-        except Exception:
-            use_recmem = False
-
-        # Run independent queries in parallel on separate connections for ~60% latency reduction
         async def _fetch_memories():
             async with self._pool.acquire() as conn:
-                if use_recmem:
-                    return await self._recall_recmem(conn, query, memory_limit, session_id=session_id)
-                return await self._recall_memories(conn, query, memory_limit)
+                return await self._recall_recmem(conn, query, memory_limit, session_id=session_id)
 
         async def _fetch_partial():
             if not include_partial:

@@ -74,16 +74,10 @@ DECLARE
     source_attribution JSONB;
     metadata JSONB;
     session_uuid UUID;
-    recmem_enabled BOOLEAN;
-    eager_enabled BOOLEAN;
-    salience_promote BOOLEAN;
-    dual_compare BOOLEAN;
-    rollout_metrics BOOLEAN;
     raw JSONB;
     raw_unit_id UUID;
-    eager_memory_id UUID;
+    promoted_memory_id UUID;
     promoted BOOLEAN := FALSE;
-    eager_written BOOLEAN := FALSE;
     duration_ms FLOAT;
 BEGIN
     IF COALESCE(p_user_text, '') = '' AND COALESCE(p_assistant_text, '') = '' THEN
@@ -108,28 +102,20 @@ BEGIN
     );
     session_uuid := _db_brain_try_uuid(p_session_id);
 
-    recmem_enabled := COALESCE(get_config_bool('memory.recmem_enabled'), false);
-    eager_enabled := COALESCE(get_config_bool('chat.eager_memory_enabled'), true);
-    salience_promote := COALESCE(get_config_bool('chat.recmem_salience_direct_promote'), true);
-    dual_compare := COALESCE(get_config_bool('memory.recmem_dual_write_compare'), false);
-    rollout_metrics := COALESCE(get_config_bool('memory.recmem_rollout_metrics_enabled'), false);
+    raw := recmem_ingest_turn(
+        p_user_text,
+        p_assistant_text,
+        session_uuid,
+        p_source_identity,
+        CURRENT_TIMESTAMP,
+        importance,
+        source_attribution,
+        metadata
+    );
+    raw_unit_id := _db_brain_try_uuid(raw->>'unit_id');
 
-    IF recmem_enabled THEN
-        raw := recmem_ingest_turn(
-            p_user_text,
-            p_assistant_text,
-            session_uuid,
-            p_source_identity,
-            CURRENT_TIMESTAMP,
-            importance,
-            source_attribution,
-            metadata
-        );
-        raw_unit_id := _db_brain_try_uuid(raw->>'unit_id');
-    END IF;
-
-    IF recmem_enabled AND salience_promote AND importance >= 0.8 THEN
-        eager_memory_id := create_episodic_memory(
+    IF importance >= 0.8 THEN
+        promoted_memory_id := create_episodic_memory(
             content,
             NULL,
             jsonb_build_object('type', 'conversation', 'recmem', jsonb_build_object('direct_promoted', true)),
@@ -142,69 +128,19 @@ BEGIN
         );
         promoted := TRUE;
         IF raw_unit_id IS NOT NULL THEN
-            PERFORM link_memory_to_source_unit(eager_memory_id, raw_unit_id, 'direct_promotion');
+            PERFORM link_memory_to_source_unit(promoted_memory_id, raw_unit_id, 'direct_promotion');
         END IF;
     END IF;
 
-    IF eager_enabled AND NOT promoted THEN
-        eager_memory_id := create_episodic_memory(
-            content,
-            NULL,
-            jsonb_build_object('type', 'conversation'),
-            NULL,
-            0.0,
-            CURRENT_TIMESTAMP,
-            importance,
-            source_attribution,
-            0.95
-        );
-        eager_written := TRUE;
-    END IF;
-
     duration_ms := EXTRACT(EPOCH FROM (clock_timestamp() - started_at)) * 1000.0;
-
-    IF rollout_metrics THEN
-        PERFORM record_recmem_rollout_event(
-            'chat_turn_memory',
-            session_uuid,
-            p_source_identity,
-            raw_unit_id,
-            raw->>'status',
-            promoted,
-            eager_written,
-            eager_memory_id,
-            duration_ms,
-            NULL,
-            jsonb_build_object(
-                'importance', importance,
-                'recmem_enabled', recmem_enabled,
-                'eager_enabled', eager_enabled,
-                'db_owned', true
-            )
-        );
-    END IF;
-
-    IF recmem_enabled AND eager_enabled AND dual_compare THEN
-        PERFORM enqueue_external_driver_call(
-            'recmem_dual_write_comparison',
-            jsonb_build_object(
-                'query', p_user_text,
-                'session_id', p_session_id,
-                'source_identity', p_source_identity
-            )
-        );
-    END IF;
 
     RETURN jsonb_build_object(
         'raw', COALESCE(raw, '{}'::jsonb),
         'raw_unit_id', raw_unit_id,
         'direct_promoted', promoted,
-        'eager_written', eager_written,
-        'eager_memory_id', eager_memory_id,
+        'promoted_memory_id', promoted_memory_id,
         'importance', importance,
-        'duration_ms', duration_ms,
-        'recmem_enabled', recmem_enabled,
-        'eager_enabled', eager_enabled
+        'duration_ms', duration_ms
     );
 END;
 $$;

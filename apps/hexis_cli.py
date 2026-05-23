@@ -204,7 +204,6 @@ _HELP_GROUPS = [
     ]),
     ("Memory & Goals", [
         ("recall", "Search memories by semantic query"),
-        ("recmem", "Manage RecMem rollout"),
         ("goals", "Manage agent goals"),
         ("ingest", "Ingest documents and knowledge"),
         ("schedule", "Manage scheduled tasks"),
@@ -420,29 +419,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     config.set_defaults(func="config")
 
-    # -- RecMem rollout operations --
-    recmem = sub.add_parser("recmem", parents=[_db], help="Manage RecMem rollout")
-    recmem_sub = recmem.add_subparsers(dest="recmem_command")
-
-    recmem_status = recmem_sub.add_parser("status", parents=[_db], help="Show RecMem rollout status")
-    recmem_status.add_argument("--json", action="store_true", help="Output JSON")
-    recmem_status.add_argument("--eval-run-id", help="Eval run UUID to use for Phase 5 readiness")
-    recmem_status.set_defaults(func="recmem_status")
-
-    recmem_phase = recmem_sub.add_parser("phase", parents=[_db], help="Apply a RecMem rollout phase")
-    recmem_phase.add_argument("phase", type=int, choices=[0, 1, 2, 3, 4, 5, 6], help="Phase number to apply")
-    recmem_phase.add_argument("--eval-run-id", help="Eval run UUID to use for Phase 5 readiness")
-    recmem_phase.add_argument("--force", action="store_true", help="Bypass Phase 5 readiness gate")
-    recmem_phase.add_argument("--json", action="store_true", help="Output JSON")
-    recmem_phase.set_defaults(func="recmem_phase")
-
-    recmem_eval = recmem_sub.add_parser("eval", parents=[_db], help="Run a persisted RecMem retrieval eval set")
-    recmem_eval.add_argument("eval_set", help="Eval set name or UUID")
-    recmem_eval.add_argument("--label", help="Optional eval run label")
-    recmem_eval.add_argument("--limit", type=int, default=10, help="Candidate limit per retrieval path")
-    recmem_eval.set_defaults(func="recmem_eval")
-
-    recmem.set_defaults(func="recmem")
 
     # -- Auth (OAuth / subscription flows) --
     auth = sub.add_parser("auth", parents=[_db], help="Manage provider authentication (OAuth)")
@@ -1576,57 +1552,6 @@ def _get_dsn(args) -> str:
     return db_dsn_from_env()
 
 
-async def _recmem_cli(dsn: str, args) -> int:
-    import asyncpg
-
-    from services.recmem_eval import run_recmem_eval_set
-    from services.recmem_rollout import (
-        apply_recmem_rollout_phase,
-        get_recmem_rollout_status,
-        print_recmem_status_text,
-    )
-
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
-    try:
-        async with pool.acquire() as conn:
-            if args.func in {"recmem", "recmem_status"}:
-                payload = await get_recmem_rollout_status(conn, eval_run_id=getattr(args, "eval_run_id", None))
-                if getattr(args, "json", False):
-                    sys.stdout.write(json.dumps(payload, default=str, indent=2, sort_keys=True) + "\n")
-                else:
-                    print_recmem_status_text(payload)
-                return 0
-            if args.func == "recmem_phase":
-                try:
-                    payload = await apply_recmem_rollout_phase(
-                        conn,
-                        args.phase,
-                        eval_run_id=args.eval_run_id,
-                        force=args.force,
-                    )
-                except RuntimeError as exc:
-                    _print_err(f"error: {exc}")
-                    return 1
-                if args.json:
-                    sys.stdout.write(json.dumps(payload, default=str, indent=2, sort_keys=True) + "\n")
-                else:
-                    sys.stdout.write(f"Applied RecMem phase {args.phase}\n")
-                    print_recmem_status_text(payload)
-                return 0
-            if args.func == "recmem_eval":
-                payload = await run_recmem_eval_set(
-                    conn,
-                    args.eval_set,
-                    label=args.label,
-                    limit=args.limit,
-                )
-                sys.stdout.write(json.dumps(payload, default=str, indent=2, sort_keys=True) + "\n")
-                return 0
-    finally:
-        await pool.close()
-
-    _print_err(f"Unknown RecMem command: {args.func}")
-    return 1
 
 
 async def _channels_status(dsn: str, as_json: bool) -> int:
@@ -2857,11 +2782,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _print_rich_status(payload)
         return 0
-    if func in {"recmem", "recmem_status", "recmem_phase", "recmem_eval"}:
-        dsn = _get_dsn(args)
-        return asyncio.run(_recmem_cli(dsn, args))
     if func == "config":
-        # Default: 'hexis config' → config show (redacted)
         dsn = _get_dsn(args)
         cfg = asyncio.run(cli_api.config_rows(dsn, wait_seconds=args.wait_seconds))
         cfg = _redact_config(cfg)

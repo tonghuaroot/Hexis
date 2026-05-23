@@ -522,93 +522,11 @@ async def test_recmem_redaction_invalidates_derived_memory(db_pool):
             await tr.rollback()
 
 
-async def test_recmem_rollout_metrics_and_eval_summary(db_pool):
-    async with db_pool.acquire() as conn:
-        tr = conn.transaction()
-        await tr.start()
-        try:
-            raw = _json(await conn.fetchval(
-                "SELECT recmem_ingest_turn('metrics turn', 'ok', NULL, 'metrics-source')"
-            ))
-            eager_id = await _insert_memory(conn, "metrics eager memory", axis=1)
-            event_id = await conn.fetchval(
-                """
-                SELECT record_recmem_rollout_event(
-                    'chat_turn_memory',
-                    NULL,
-                    'metrics-source',
-                    $1::uuid,
-                    'stored',
-                    false,
-                    true,
-                    $2::uuid,
-                    12.5,
-                    NULL,
-                    '{"test": true}'::jsonb
-                )
-                """,
-                raw["unit_id"],
-                eager_id,
-            )
-            comparison_id = await conn.fetchval(
-                """
-                SELECT record_recmem_dual_write_comparison(
-                    'metrics query',
-                    NULL,
-                    ARRAY[$1]::uuid[],
-                    ARRAY[$1, $2]::uuid[],
-                    4.5,
-                    '{}'::jsonb
-                )
-                """,
-                eager_id,
-                raw["unit_id"],
-            )
-            metrics = _json(await conn.fetchval("SELECT get_recmem_rollout_metrics(CURRENT_TIMESTAMP - INTERVAL '1 hour')"))
-
-            assert event_id
-            assert comparison_id
-            assert metrics["rollout_events"]["total"] >= 1
-            assert metrics["dual_write"]["comparisons"] >= 1
-            assert metrics["dual_write"]["avg_overlap_count"] >= 1
-
-            eval_set = await conn.fetchval(
-                "INSERT INTO recmem_eval_sets (name) VALUES ('test-eval') RETURNING id"
-            )
-            item = await conn.fetchval(
-                """
-                INSERT INTO recmem_eval_items (eval_set_id, category, query_text)
-                VALUES ($1, 'preference', 'What fruit?')
-                RETURNING id
-                """,
-                eval_set,
-            )
-            run = await conn.fetchval(
-                "INSERT INTO recmem_eval_runs (eval_set_id, label) VALUES ($1, 'smoke') RETURNING id",
-                eval_set,
-            )
-            await conn.execute(
-                """
-                INSERT INTO recmem_eval_results (run_id, item_id, category, judge_score, verdict)
-                VALUES ($1, $2, 'preference', 0.9, 'pass')
-                """,
-                run,
-                item,
-            )
-            summary = _json(await conn.fetchval("SELECT get_recmem_eval_run_summary($1)", run))
-            assert summary["result_count"] == 1
-            assert summary["avg_judge_score"] == 0.9
-            assert summary["by_category"]["preference"]["count"] == 1
-        finally:
-            await tr.rollback()
-
-
 async def test_recmem_sweep_schedule_state(db_pool):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()
         await tr.start()
         try:
-            await conn.execute("SELECT set_config('memory.recmem_enabled', 'true'::jsonb)")
             await conn.execute("SELECT set_config('memory.recmem_sweep_interval_seconds', '86400'::jsonb)")
             await conn.execute("DELETE FROM state WHERE key = 'recmem_state'")
 
@@ -633,61 +551,3 @@ async def test_recmem_sweep_schedule_state(db_pool):
             await tr.rollback()
 
 
-async def test_recmem_eval_quality_gate_and_phase5_readiness(db_pool):
-    async with db_pool.acquire() as conn:
-        tr = conn.transaction()
-        await tr.start()
-        try:
-            eval_set = await conn.fetchval(
-                "INSERT INTO recmem_eval_sets (name) VALUES ('gate-eval') RETURNING id"
-            )
-            passing_run = await conn.fetchval(
-                """
-                INSERT INTO recmem_eval_runs (eval_set_id, label, status, completed_at)
-                VALUES ($1, 'passing', 'completed', CURRENT_TIMESTAMP)
-                RETURNING id
-                """,
-                eval_set,
-            )
-            await conn.execute(
-                """
-                INSERT INTO recmem_eval_results (
-                    run_id, category, judge_score, verdict, metadata
-                )
-                VALUES
-                    ($1, 'preference', 1.0, 'pass', '{"baseline_hit_rate": 1.0, "recmem_hit_rate": 1.0}'::jsonb),
-                    ($1, 'temporal', 0.95, 'pass', '{"baseline_hit_rate": 0.95, "recmem_hit_rate": 0.95}'::jsonb)
-                """,
-                passing_run,
-            )
-
-            gate = _json(await conn.fetchval("SELECT get_recmem_eval_quality_gate($1)", passing_run))
-            readiness = _json(await conn.fetchval("SELECT get_recmem_phase5_readiness($1)", passing_run))
-            assert gate["passed"] is True
-            assert readiness["ready"] is True
-            assert readiness["recommendation"] == "eligible_to_enable_memory.recmem_hydrate_enabled"
-
-            failing_run = await conn.fetchval(
-                """
-                INSERT INTO recmem_eval_runs (eval_set_id, label, status, completed_at)
-                VALUES ($1, 'failing', 'completed', CURRENT_TIMESTAMP)
-                RETURNING id
-                """,
-                eval_set,
-            )
-            await conn.execute(
-                """
-                INSERT INTO recmem_eval_results (
-                    run_id, category, judge_score, verdict, metadata
-                )
-                VALUES ($1, 'preference', 0.5, 'regression', '{"baseline_hit_rate": 1.0, "recmem_hit_rate": 0.5}'::jsonb)
-                """,
-                failing_run,
-            )
-            failing_gate = _json(await conn.fetchval("SELECT get_recmem_eval_quality_gate($1)", failing_run))
-            failing_readiness = _json(await conn.fetchval("SELECT get_recmem_phase5_readiness($1)", failing_run))
-            assert failing_gate["passed"] is False
-            assert failing_readiness["ready"] is False
-            assert failing_readiness["recommendation"] == "keep_recmem_hydrate_disabled_quality_gate_failed"
-        finally:
-            await tr.rollback()

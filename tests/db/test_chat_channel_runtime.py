@@ -29,13 +29,9 @@ async def _stub_get_embedding(conn):
     )
 
 
-async def test_record_chat_turn_memory_db_owns_direct_promotion(db_pool):
+async def test_record_chat_turn_memory_always_uses_recmem(db_pool):
     async with db_pool.acquire() as conn:
         await _stub_get_embedding(conn)
-        await conn.execute("SELECT set_config('memory.recmem_enabled', 'true'::jsonb)")
-        await conn.execute("SELECT set_config('chat.eager_memory_enabled', 'true'::jsonb)")
-        await conn.execute("SELECT set_config('chat.recmem_salience_direct_promote', 'true'::jsonb)")
-        await conn.execute("SELECT set_config('memory.recmem_dual_write_compare', 'false'::jsonb)")
 
         raw = await conn.fetchval(
             "SELECT record_chat_turn_memory($1, $2, $3, $4, '{}'::jsonb)",
@@ -47,14 +43,32 @@ async def test_record_chat_turn_memory_db_owns_direct_promotion(db_pool):
         result = _json(raw)
 
         assert result["direct_promoted"] is True
-        assert result["eager_written"] is False
         assert result["raw"]["status"] == "stored"
+        assert result["promoted_memory_id"] is not None
         linked = await conn.fetchval(
             "SELECT COUNT(*) FROM memory_source_units WHERE memory_id = $1::uuid AND subconscious_unit_id = $2::uuid",
-            result["eager_memory_id"],
+            result["promoted_memory_id"],
             result["raw_unit_id"],
         )
         assert int(linked) == 1
+
+
+async def test_record_chat_turn_memory_low_importance_no_promotion(db_pool):
+    async with db_pool.acquire() as conn:
+        await _stub_get_embedding(conn)
+
+        raw = await conn.fetchval(
+            "SELECT record_chat_turn_memory($1, $2, $3, $4, '{}'::jsonb)",
+            "hi",
+            "hello",
+            str(uuid4()),
+            f"test:chat:{uuid4()}",
+        )
+        result = _json(raw)
+
+        assert result["direct_promoted"] is False
+        assert result["promoted_memory_id"] is None
+        assert result["raw"]["status"] == "stored"
 
 
 async def test_prepare_and_finalize_channel_turn_db_lifecycle(db_pool):

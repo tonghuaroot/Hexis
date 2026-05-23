@@ -8410,7 +8410,7 @@ async def test_worker_tasks_view_contains_all_tasks(db_pool):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT task_type, pending_count FROM worker_tasks")
         task_types = {r["task_type"] for r in rows}
-        assert task_types == {"heartbeat", "subconscious_maintenance"}
+        assert task_types == {"heartbeat", "subconscious_maintenance", "recmem_embedding", "recmem_routing", "recmem_consolidation", "recmem_sweep"}
         for r in rows:
             assert isinstance(r["pending_count"], int)
 
