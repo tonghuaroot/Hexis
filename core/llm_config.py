@@ -72,14 +72,18 @@ async def _load_google_antigravity(conn, cfg: dict[str, Any]) -> None:
     cfg.setdefault("endpoint", CODE_ASSIST_ENDPOINTS[0])
 
 
-async def _load_anthropic_setup_token(conn, cfg: dict[str, Any]) -> None:
-    """Fallback loader for 'anthropic' provider when no env API key is available."""
-    from core.auth.anthropic_setup_token import load_credentials
+async def _load_anthropic_credentials(conn, cfg: dict[str, Any]) -> None:
+    """Resolve Anthropic credentials from all available sources.
 
-    creds = load_credentials()
-    if creds:
-        cfg["api_key"] = creds.token
-        cfg["auth_mode"] = "setup-token"
+    Priority: Hexis PKCE OAuth > Claude Code creds > setup token > env API key.
+    """
+    from core.auth.anthropic_oauth import resolve_anthropic_token
+
+    token, auth_mode = await resolve_anthropic_token()
+    if token:
+        cfg["api_key"] = token
+        if auth_mode:
+            cfg["auth_mode"] = auth_mode
 
 
 _PROVIDER_CONFIG_LOADERS: dict[
@@ -134,15 +138,7 @@ async def load_llm_config(
     if loader:
         await loader(conn, cfg)
     elif provider == "anthropic" and not cfg.get("api_key"):
-        # Check for env-var API key first; fall back to setup-token
-        resolved = None
-        env_name = str(cfg.get("api_key_env") or "").strip()
-        if env_name:
-            resolved = os.getenv(env_name)
-        if not resolved:
-            resolved = os.getenv("ANTHROPIC_API_KEY")
-        if not resolved:
-            await _load_anthropic_setup_token(conn, cfg)
+        await _load_anthropic_credentials(conn, cfg)
 
     return normalize_llm_config(cfg, default_model=default_model)
 
