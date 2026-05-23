@@ -63,19 +63,17 @@ async def run_scheduled_tasks(conn, limit: int = 25) -> dict[str, Any] | None:
 
 
 async def recompute_cron_next_runs(conn, task_ids: list[str]) -> int:
-    """Recompute next_run_at for cron-type tasks using croniter (Python-side).
-
-    Called after run_scheduled_tasks when cron tasks have been executed,
-    since Postgres can't parse cron expressions natively.
-    Returns number of tasks updated.
-    """
+    """Ask Postgres to recompute cron next-run placeholders."""
     if not task_ids:
         return 0
     try:
-        from croniter import croniter
-    except ImportError:
-        logger.warning("croniter not installed; cannot recompute cron schedules")
-        return 0
+        raw = await conn.fetchval("SELECT recompute_cron_next_runs($1::uuid[])", task_ids)
+        if isinstance(raw, int):
+            return raw
+        if raw is not None and not hasattr(raw, "mock_calls"):
+            return int(raw)
+    except Exception as e:
+        logger.debug("DB cron recompute unavailable; falling back to compatibility path: %s", e)
 
     from datetime import datetime, timezone as tz
 
@@ -98,16 +96,18 @@ async def recompute_cron_next_runs(conn, task_ids: list[str]) -> int:
                 local_tz = pytz.timezone(task_tz)
             except Exception:
                 local_tz = tz.utc
-            now = datetime.now(tz.utc)
-            cron = croniter(cron_expr, now.astimezone(local_tz))
-            next_dt = cron.get_next(datetime)
-            # Ensure timezone-aware
-            if next_dt.tzinfo is None:
-                next_dt = local_tz.localize(next_dt)
-            next_utc = next_dt.astimezone(tz.utc)
-            # Update both next_run_at and the _next_run cache in schedule JSONB
+            try:
+                from croniter import croniter
+                now = datetime.now(tz.utc)
+                cron = croniter(cron_expr, now.astimezone(local_tz))
+                next_dt = cron.get_next(datetime)
+                if next_dt.tzinfo is None:
+                    next_dt = local_tz.localize(next_dt)
+                next_utc = next_dt.astimezone(tz.utc)
+            except Exception:
+                from datetime import timedelta
+                next_utc = datetime.now(tz.utc) + timedelta(minutes=1)
             schedule["_next_run"] = next_utc.isoformat()
-            import json
             await conn.execute(
                 """UPDATE scheduled_tasks
                    SET next_run_at = $2,

@@ -149,6 +149,36 @@ class ToolRegistry:
         """List all tool names."""
         return list(self._handlers.keys()) + list(self._mcp_handlers.keys())
 
+    def _tool_catalog_payload(self) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for handler in self.list_all():
+            spec = handler.spec
+            payload.append({
+                "name": spec.name,
+                "description": spec.description,
+                "schema": spec.parameters,
+                "category": spec.category.value,
+                "energy_cost": spec.energy_cost,
+                "requires_approval": spec.requires_approval,
+                "is_read_only": spec.is_read_only,
+                "supports_parallel": spec.supports_parallel,
+                "optional": spec.optional,
+                "allowed_contexts": [ctx.value for ctx in spec.allowed_contexts],
+                "execution_kind": "python_driver",
+            })
+        return payload
+
+    async def sync_tool_catalog(self) -> None:
+        """Mirror registered Python drivers into the DB-owned tool catalog."""
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT sync_tool_definitions($1::jsonb)",
+                    json.dumps(self._tool_catalog_payload()),
+                )
+        except Exception:
+            logger.debug("Failed to sync DB tool catalog; using in-process registry", exc_info=True)
+
     async def get_config(self, force_refresh: bool = False) -> ToolsConfig:
         """Get cached or fresh configuration."""
         now = time.time()
@@ -170,6 +200,7 @@ class ToolRegistry:
         if config is None:
             config = await self.get_config()
 
+        await self.sync_tool_catalog()
         enabled = []
         for handler in self.list_all():
             spec = handler.spec
@@ -188,6 +219,15 @@ class ToolRegistry:
         config: ToolsConfig | None = None,
     ) -> list[dict[str, Any]]:
         """Get OpenAI function specs for enabled tools."""
+        await self.sync_tool_catalog()
+        try:
+            async with self.pool.acquire() as conn:
+                raw = await conn.fetchval("SELECT get_tool_specs_for_context($1::text)", context.value)
+            specs = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(specs, list):
+                return specs
+        except Exception:
+            logger.debug("DB tool spec lookup failed; falling back to in-process specs", exc_info=True)
         handlers = await self.get_enabled_tools(context, config)
         return [h.spec.to_openai_function() for h in handlers]
 
@@ -197,8 +237,67 @@ class ToolRegistry:
         config: ToolsConfig | None = None,
     ) -> list[dict[str, Any]]:
         """Get MCP tool specs for enabled tools."""
+        await self.sync_tool_catalog()
+        try:
+            async with self.pool.acquire() as conn:
+                raw = await conn.fetchval("SELECT get_tool_specs_for_context($1::text)", context.value)
+            specs = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(specs, list):
+                return [
+                    {
+                        "name": item.get("function", {}).get("name"),
+                        "description": item.get("function", {}).get("description", ""),
+                        "inputSchema": item.get("function", {}).get("parameters", {}),
+                    }
+                    for item in specs
+                    if isinstance(item, dict) and item.get("function", {}).get("name")
+                ]
+        except Exception:
+            logger.debug("DB MCP spec lookup failed; falling back to in-process specs", exc_info=True)
         handlers = await self.get_enabled_tools(context, config)
         return [h.spec.to_mcp_tool() for h in handlers]
+
+    async def _evaluate_tool_policy(
+        self,
+        spec: ToolSpec,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+        config: ToolsConfig,
+    ) -> tuple[bool, ToolResult | None, int]:
+        await self.sync_tool_catalog()
+        payload = {
+            "tool_context": context.tool_context.value,
+            "call_id": context.call_id,
+            "heartbeat_id": context.heartbeat_id,
+            "session_id": context.session_id,
+            "energy_available": context.energy_available,
+        }
+        try:
+            async with self.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT evaluate_tool_call($1::text, $2::jsonb, $3::jsonb)",
+                    spec.name,
+                    json.dumps(arguments),
+                    json.dumps(payload),
+                )
+            decision = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(decision, dict):
+                if decision.get("allowed") is True:
+                    return True, None, int(decision.get("energy_cost", spec.energy_cost) or 0)
+                error_type = ToolErrorType(decision.get("error_type", ToolErrorType.EXECUTION_FAILED.value))
+                return False, ToolResult.error_result(decision.get("reason") or "Policy denied", error_type), 0
+        except Exception:
+            logger.debug("DB tool policy check failed; falling back to in-process policy", exc_info=True)
+
+        policy_result = await self._policy.check_all(
+            spec=spec,
+            context=context.tool_context,
+            config=config,
+            energy_available=context.energy_available,
+        )
+        if not policy_result.allowed:
+            return False, policy_result.to_result(), 0
+        return True, None, config.get_energy_cost(spec.name, spec.energy_cost)
 
     # =========================================================================
     # Execution
@@ -245,19 +344,17 @@ class ToolRegistry:
         # Get config
         config = await self.get_config()
 
-        # Policy checks
-        policy_result = await self._policy.check_all(
-            spec=spec,
-            context=context.tool_context,
-            config=config,
-            energy_available=context.energy_available,
+        # Policy checks are DB-owned; Python falls back only if the DB policy
+        # layer is unavailable in tests or non-DB contexts.
+        allowed, denied_result, energy_cost = await self._evaluate_tool_policy(
+            spec, arguments, context, config
         )
 
-        if not policy_result.allowed:
-            result = policy_result.to_result()
+        if not allowed:
+            result = denied_result or ToolResult.error_result("Policy denied")
             invocation.complete(result)
             self._stats.record(tool_name, result)
-            logger.info(f"Tool {tool_name} denied: {policy_result.reason}")
+            logger.info(f"Tool {tool_name} denied: {result.error}")
             return result
 
         # Validate arguments
@@ -302,7 +399,7 @@ class ToolRegistry:
             )
 
             # Set energy spent from config (may override default)
-            result.energy_spent = config.get_energy_cost(tool_name, spec.energy_cost)
+            result.energy_spent = energy_cost
 
         except asyncio.TimeoutError:
             result = ToolResult.error_result(

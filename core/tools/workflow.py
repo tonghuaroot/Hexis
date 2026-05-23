@@ -294,9 +294,10 @@ class WorkflowHandler(ToolHandler):
                 ToolErrorType.INVALID_PARAMS,
             )
 
-        # Build dependency layers
+        # Build dependency layers in DB; Python fallback keeps mocked/non-DB
+        # contexts compatible.
         try:
-            layers = _topological_layers(plan.steps)
+            layers = await self._build_layers(registry, plan)
         except ValueError as e:
             return ToolResult.error_result(str(e), ToolErrorType.INVALID_PARAMS)
 
@@ -431,6 +432,60 @@ class WorkflowHandler(ToolHandler):
         results = await asyncio.gather(*tasks)
         return list(zip(layer, results))
 
+    async def _build_layers(
+        self,
+        registry: "ToolRegistry",
+        plan: WorkflowPlan,
+    ) -> list[list[WorkflowStep]]:
+        try:
+            async with registry.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT workflow_plan_layers($1::jsonb)",
+                    json.dumps(plan.to_dict()),
+                )
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(payload, list):
+                return [
+                    [
+                        WorkflowStep(
+                            name=step["name"],
+                            tool=step["tool"],
+                            arguments=step.get("arguments", {}),
+                            depends_on=step.get("depends_on", []),
+                            on_error=step.get("on_error", "stop"),
+                            max_retries=step.get("max_retries", 1),
+                        )
+                        for step in layer
+                    ]
+                    for layer in payload
+                ]
+        except Exception as exc:
+            message = str(exc)
+            if "Circular dependency" in message or "unknown step" in message or "unique" in message:
+                raise ValueError(message) from exc
+            logger.debug("DB workflow layer planning unavailable; falling back to Python", exc_info=True)
+        return _topological_layers(plan.steps)
+
+    async def _resolve_step_arguments(
+        self,
+        registry: "ToolRegistry",
+        arguments: dict[str, Any],
+        step_outputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            async with registry.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT resolve_workflow_templates($1::jsonb, $2::jsonb)",
+                    json.dumps(arguments),
+                    json.dumps(step_outputs),
+                )
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            logger.debug("DB workflow template resolution unavailable; falling back to Python", exc_info=True)
+        return _resolve_templates(arguments, step_outputs)
+
     async def _execute_step(
         self,
         step: WorkflowStep,
@@ -439,7 +494,7 @@ class WorkflowHandler(ToolHandler):
         parent_context: ToolExecutionContext,
     ) -> WorkflowStepResult:
         """Execute a single workflow step with retry support."""
-        resolved_args = _resolve_templates(step.arguments, step_outputs)
+        resolved_args = await self._resolve_step_arguments(registry, step.arguments, step_outputs)
         retries = 0
         max_attempts = step.max_retries if step.on_error == "retry" else 1
 
@@ -499,17 +554,14 @@ class WorkflowHandler(ToolHandler):
         """Insert workflow_executions row, return its ID."""
         try:
             async with registry.pool.acquire() as conn:
-                row = await conn.fetchval(
-                    """
-                    INSERT INTO workflow_executions (name, plan, status, session_id)
-                    VALUES ($1, $2::jsonb, 'running', $3)
-                    RETURNING id
-                    """,
-                    plan.name,
+                raw = await conn.fetchval(
+                    "SELECT create_workflow_execution($1::jsonb, $2::jsonb)",
                     json.dumps(plan.to_dict()),
-                    session_id,
+                    json.dumps({"session_id": session_id}),
                 )
-                return row
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(payload, dict) and payload.get("workflow_id"):
+                    return uuid.UUID(str(payload["workflow_id"]))
         except Exception:
             logger.debug("workflow_executions table not available, skipping tracking")
             return None

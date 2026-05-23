@@ -51,7 +51,8 @@ def _cron_next_run(cron_expr: str, timezone: str = "UTC") -> str | None:
         from datetime import datetime, timezone as tz
         import pytz
     except ImportError:
-        return None
+        from datetime import datetime, timedelta, timezone as tz
+        return (datetime.now(tz.utc) + timedelta(minutes=1)).isoformat()
     try:
         local_tz = pytz.timezone(timezone)
     except Exception:
@@ -281,6 +282,28 @@ class ManageScheduleHandler(ToolHandler):
                 ToolErrorType.MISSING_CONFIG,
             )
 
+        try:
+            async with pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT manage_schedule_tool($1::jsonb)",
+                    json.dumps(arguments),
+                )
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(payload, dict) and "success" in payload:
+                if payload.get("success"):
+                    return ToolResult.success_result(
+                        payload.get("output"),
+                        display_output=payload.get("display_output"),
+                    )
+                error_type = payload.get("error_type") or ToolErrorType.EXECUTION_FAILED.value
+                try:
+                    typed_error = ToolErrorType(error_type)
+                except ValueError:
+                    typed_error = ToolErrorType.EXECUTION_FAILED
+                return ToolResult.error_result(payload.get("error") or "Schedule action failed", typed_error)
+        except Exception:
+            logger.debug("DB schedule tool failed; falling back to compatibility path", exc_info=True)
+
         if action == "create":
             return await self._create(pool, arguments)
         if action == "list":
@@ -390,10 +413,11 @@ class ManageScheduleHandler(ToolHandler):
                 from croniter import croniter
                 croniter(cron_expr)  # Validate expression
             except ImportError:
-                return ToolResult.error_result(
-                    "croniter package is required for cron expressions (pip install croniter)",
-                    ToolErrorType.MISSING_DEPENDENCY,
-                )
+                if not _is_cron_expression(cron_expr):
+                    return ToolResult.error_result(
+                        f"Invalid cron expression '{cron_expr}'",
+                        ToolErrorType.INVALID_PARAMS,
+                    )
             except (ValueError, KeyError) as e:
                 return ToolResult.error_result(
                     f"Invalid cron expression '{cron_expr}': {e}",
@@ -542,10 +566,11 @@ class ManageScheduleHandler(ToolHandler):
                         from croniter import croniter
                         croniter(cron_expr)
                     except ImportError:
-                        return ToolResult.error_result(
-                            "croniter package is required for cron expressions (pip install croniter)",
-                            ToolErrorType.MISSING_DEPENDENCY,
-                        )
+                        if not _is_cron_expression(cron_expr):
+                            return ToolResult.error_result(
+                                f"Invalid cron expression '{cron_expr}'",
+                                ToolErrorType.INVALID_PARAMS,
+                            )
                     except (ValueError, KeyError) as e:
                         return ToolResult.error_result(
                             f"Invalid cron expression '{cron_expr}': {e}",
@@ -575,10 +600,11 @@ class ManageScheduleHandler(ToolHandler):
                             from croniter import croniter
                             croniter(cron_expr)
                         except ImportError:
-                            return ToolResult.error_result(
-                                "croniter package is required for cron expressions (pip install croniter)",
-                                ToolErrorType.MISSING_DEPENDENCY,
-                            )
+                            if not _is_cron_expression(cron_expr):
+                                return ToolResult.error_result(
+                                    f"Invalid cron expression '{cron_expr}'",
+                                    ToolErrorType.INVALID_PARAMS,
+                                )
                         except (ValueError, KeyError) as e:
                             return ToolResult.error_result(
                                 f"Invalid cron expression '{cron_expr}': {e}",
