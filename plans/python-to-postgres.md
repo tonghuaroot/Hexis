@@ -23,7 +23,7 @@ Last updated: 2026-05-23
 | Slice 2: Chat, Channel, and Memory Turn Lifecycle | Complete | Added DB-owned chat memory recording, channel prepare/finalize/flush functions, Python wrappers, and focused DB/core tests. |
 | Slice 3: RecMem, Rollout, Eval, and Subconscious Completion | Complete | Added DB-owned RecMem task context/output normalization, eval execution, rollout phase gates/status, subconscious normalization/RPE application, thin Python wrappers, and focused DB/service tests. |
 | Slice 4: Tool Catalog, Tool Policy, Workflow, and Scheduling | Complete | Added DB-owned tool catalog/spec/policy functions, schedule parsing/action functions, workflow layer/template/step-state functions, Python wrappers, and focused tool/cron/workflow tests. |
-| Slice 5: Agent Loop and External Calls | Not started | Pending Slice 4. |
+| Slice 5: Agent Loop and External Calls | Complete | Added DB-owned agent turn state/step/result/event functions, external-call dispatch/result helpers, AgentLoop state wrappers, external-call resolver delegation, and focused DB/agent/external-call tests. |
 | Slice 6: Tool-By-Tool Side-Effect Thinning | Not started | Pending Slice 5. |
 
 ## Key Architecture Changes

@@ -166,6 +166,7 @@ class AgentLoop:
         self._continuations_used: int = 0
         self._plan_text: str = ""
         self._phases_completed: list[str] = []
+        self._turn_id: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -184,6 +185,7 @@ class AgentLoop:
         messages.append({"role": "user", "content": user_message})
 
         tools = await self.config.registry.get_specs(self.config.tool_context)
+        await self._start_turn(user_message, messages)
 
         await self._emit(AgentEvent.LOOP_START, {
             "tool_context": self.config.tool_context.value,
@@ -213,6 +215,7 @@ class AgentLoop:
             "energy_spent": result.energy_spent,
             "timed_out": result.timed_out,
         })
+        await self._finish_turn(result)
 
         return result
 
@@ -350,6 +353,16 @@ class AgentLoop:
         cfg = self.config
 
         while True:
+            db_step = await self._next_agent_step()
+            if db_step.get("action") == "stop":
+                reason = db_step.get("reason") or "completed"
+                if reason == "energy":
+                    await self._emit(AgentEvent.ENERGY_EXHAUSTED, {
+                        "budget": cfg.energy_budget,
+                        "spent": self._energy_spent,
+                    })
+                return self._make_result(messages, reason)
+
             # Check iteration limit
             if cfg.max_iterations is not None and self._iteration_count >= cfg.max_iterations:
                 return self._make_result(messages, "max_iterations")
@@ -374,6 +387,7 @@ class AgentLoop:
 
             text = response.get("content", "") or ""
             tool_calls = response.get("tool_calls") or []
+            await self._apply_llm_result(response)
 
             if text:
                 self._last_text = text
@@ -457,6 +471,7 @@ class AgentLoop:
                 # Execute tool via registry (policy + hooks + audit)
                 result = await cfg.registry.execute(tool_name, arguments, exec_ctx)
                 self._energy_spent += result.energy_spent
+                await self._apply_tool_result(call_id, tool_name, result)
 
                 await self._emit(AgentEvent.TOOL_RESULT, {
                     "tool_name": tool_name,
@@ -606,8 +621,121 @@ class AgentLoop:
 
         return ctx
 
+    def _session_uuid_or_none(self) -> str | None:
+        if not self.config.session_id:
+            return None
+        try:
+            return str(uuid.UUID(str(self.config.session_id)))
+        except Exception:
+            return None
+
+    async def _start_turn(self, user_message: str, messages: list[dict[str, Any]]) -> None:
+        try:
+            async with self.config.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT start_agent_turn($1::text, $2::text, $3::uuid, $4::jsonb)",
+                    self.config.tool_context.value,
+                    user_message,
+                    self._session_uuid_or_none(),
+                    json.dumps({
+                        "messages": messages,
+                        "energy_budget": self.config.energy_budget,
+                        "max_iterations": self.config.max_iterations,
+                        "max_continuations": self.config.max_continuations,
+                        "heartbeat_id": self.config.heartbeat_id,
+                    }),
+                )
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(payload, dict) and payload.get("turn_id"):
+                self._turn_id = str(payload["turn_id"])
+        except Exception:
+            logger.debug("DB agent turn start unavailable; continuing without DB turn state", exc_info=True)
+
+    async def _next_agent_step(self) -> dict[str, Any]:
+        if not self._turn_id:
+            return {"action": "llm"}
+        try:
+            async with self.config.pool.acquire() as conn:
+                raw = await conn.fetchval("SELECT next_agent_step($1::uuid)", self._turn_id)
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            return payload if isinstance(payload, dict) else {"action": "llm"}
+        except Exception:
+            logger.debug("DB agent next step unavailable; using local loop policy", exc_info=True)
+            return {"action": "llm"}
+
+    async def _apply_llm_result(self, response: dict[str, Any]) -> None:
+        if not self._turn_id:
+            return
+        try:
+            async with self.config.pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT apply_agent_llm_result($1::uuid, $2::jsonb)",
+                    self._turn_id,
+                    json.dumps({
+                        "content": response.get("content", "") or "",
+                        "tool_calls": response.get("tool_calls") or [],
+                    }),
+                )
+        except Exception:
+            logger.debug("DB agent LLM result apply failed", exc_info=True)
+
+    async def _apply_tool_result(self, call_id: str, tool_name: str, result: Any) -> None:
+        if not self._turn_id:
+            return
+        try:
+            async with self.config.pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT apply_agent_tool_result($1::uuid, $2::text, $3::jsonb)",
+                    self._turn_id,
+                    call_id,
+                    json.dumps({
+                        "tool_name": tool_name,
+                        "success": result.success,
+                        "output": result.output,
+                        "display_output": result.display_output,
+                        "model_output": result.to_model_output(),
+                        "error": result.error,
+                        "error_type": result.error_type.value if result.error_type else None,
+                        "energy_spent": result.energy_spent,
+                        "duration_seconds": result.duration_seconds,
+                    }),
+                )
+        except Exception:
+            logger.debug("DB agent tool result apply failed", exc_info=True)
+
+    async def _finish_turn(self, result: AgentLoopResult) -> None:
+        if not self._turn_id:
+            return
+        try:
+            async with self.config.pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT finish_agent_turn($1::uuid, $2::jsonb)",
+                    self._turn_id,
+                    json.dumps({
+                        "status": "completed",
+                        "stopped_reason": result.stopped_reason,
+                        "text": result.text,
+                        "iterations": result.iterations,
+                        "energy_spent": result.energy_spent,
+                        "timed_out": result.timed_out,
+                    }),
+                )
+        except Exception:
+            logger.debug("DB agent finish failed", exc_info=True)
+
     async def _emit(self, event: AgentEvent, data: dict[str, Any] | None = None) -> None:
         """Emit an event via the configured callback."""
+        if self._turn_id:
+            try:
+                async with self.config.pool.acquire() as conn:
+                    await conn.fetchval(
+                        "SELECT record_agent_turn_event($1::uuid, $2::text, $3::jsonb)",
+                        self._turn_id,
+                        event.value,
+                        json.dumps(data or {}),
+                    )
+            except Exception:
+                logger.debug("DB agent event record failed", exc_info=True)
         if self.config.on_event:
             try:
                 await self.config.on_event(AgentEventData(

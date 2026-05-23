@@ -33,16 +33,39 @@ class ExternalCallProcessor:
         self._tool_registry = registry
 
     async def apply_result(self, conn, call: dict[str, Any], output: dict[str, Any]) -> dict[str, Any]:
-        return await apply_external_call_result(conn, call=call, output=output)
+        try:
+            resolved = await self._resolve_call(conn, {"call_type": call.get("call_type"), "input": call.get("input", call)})
+            fn = "apply_tool_use_result" if resolved.get("call_type") == "tool_use" else "apply_think_result"
+            raw = await conn.fetchval(
+                f"SELECT {fn}($1::jsonb, $2::jsonb)",
+                json.dumps(call),
+                json.dumps(output),
+            )
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        except Exception:
+            return await apply_external_call_result(conn, call=call, output=output)
 
     async def process_call_payload(self, conn, call_type: str, call_input: dict[str, Any]) -> dict[str, Any]:
-        if call_type == "think":
-            return await self._process_think_call(conn, call_input)
-        if call_type == "tool_use":
-            return await self._process_tool_use_call(conn, call_input)
-        if call_type == "embed":
+        resolved = await self._resolve_call(conn, {"call_type": call_type, "input": call_input})
+        resolved_type = resolved.get("call_type") or call_type
+        resolved_input = resolved.get("input") if isinstance(resolved.get("input"), dict) else call_input
+        if resolved_type == "think":
+            return await self._process_think_call(conn, resolved_input)
+        if resolved_type == "tool_use":
+            return await self._process_tool_use_call(conn, resolved_input)
+        if resolved_type == "embed":
             raise RuntimeError("external_calls type 'embed' is unsupported; use get_embedding(text[]) inside Postgres")
-        return {"error": f"Unsupported call_type: {call_type}"}
+        return {"error": f"Unsupported call_type: {resolved_type}"}
+
+    async def _resolve_call(self, conn, call: dict[str, Any]) -> dict[str, Any]:
+        try:
+            raw = await conn.fetchval("SELECT resolve_external_call_kind($1::jsonb)", json.dumps(call))
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            return dict(parsed) if isinstance(parsed, dict) else call
+        except Exception:
+            logger.debug("DB external-call resolver unavailable; using local call type", exc_info=True)
+            return call
 
     async def _process_tool_use_call(self, conn, call_input: dict[str, Any]) -> dict[str, Any]:
         """Process a tool_use external call."""
