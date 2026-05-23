@@ -493,3 +493,33 @@ async def test_recmem_rollout_metrics_and_eval_summary(db_pool):
             assert summary["by_category"]["preference"]["count"] == 1
         finally:
             await tr.rollback()
+
+
+async def test_recmem_sweep_schedule_state(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT set_config('memory.recmem_enabled', 'true'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_sweep_interval_seconds', '86400'::jsonb)")
+            await conn.execute("DELETE FROM state WHERE key = 'recmem_state'")
+
+            assert await conn.fetchval("SELECT should_run_recmem_sweep()") is True
+            state = _json(await conn.fetchval("SELECT mark_recmem_sweep_run('{\"processed\": 2}'::jsonb)"))
+            assert state["last_sweep_result"]["processed"] == 2
+            assert await conn.fetchval("SELECT should_run_recmem_sweep()") is False
+
+            await conn.execute(
+                """
+                UPDATE state
+                SET value = jsonb_set(
+                    value,
+                    '{last_sweep_at}',
+                    to_jsonb((CURRENT_TIMESTAMP - INTERVAL '2 days')::text)
+                )
+                WHERE key = 'recmem_state'
+                """
+            )
+            assert await conn.fetchval("SELECT should_run_recmem_sweep()") is True
+        finally:
+            await tr.rollback()

@@ -85,6 +85,14 @@ SELECT
     s.updated_at
 FROM state s
 WHERE s.key = 'maintenance_state';
+CREATE VIEW recmem_state AS
+SELECT
+    1 as id,
+    (s.value->>'last_sweep_at')::timestamptz as last_sweep_at,
+    COALESCE(s.value->'last_sweep_result', '{}'::jsonb) as last_sweep_result,
+    s.updated_at
+FROM state s
+WHERE s.key = 'recmem_state';
 CREATE VIEW active_goals AS
 SELECT
     id,
@@ -277,4 +285,9 @@ SELECT
     'Process pending RecMem consolidation tasks'::text AS description
 FROM recmem_consolidation_tasks
 WHERE status = 'pending'
-  AND next_attempt_at <= CURRENT_TIMESTAMP;
+  AND next_attempt_at <= CURRENT_TIMESTAMP
+UNION ALL
+SELECT
+    'recmem_sweep'::text AS task_type,
+    CASE WHEN should_run_recmem_sweep() THEN 1 ELSE 0 END AS pending_count,
+    'Re-route old RecMem raw-only units'::text AS description;

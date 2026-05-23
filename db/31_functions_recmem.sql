@@ -1067,6 +1067,42 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION should_run_recmem_sweep()
+RETURNS BOOLEAN AS $$
+DECLARE
+    state_doc JSONB := COALESCE(get_state('recmem_state'), '{}'::jsonb);
+    last_run TIMESTAMPTZ := NULLIF(state_doc->>'last_sweep_at', '')::timestamptz;
+    interval_seconds FLOAT := COALESCE(get_config_float('memory.recmem_sweep_interval_seconds'), 86400);
+BEGIN
+    IF COALESCE(get_config_bool('memory.recmem_enabled'), FALSE) IS FALSE THEN
+        RETURN FALSE;
+    END IF;
+
+    IF last_run IS NULL THEN
+        RETURN TRUE;
+    END IF;
+
+    RETURN CURRENT_TIMESTAMP >= last_run + (interval_seconds || ' seconds')::interval;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE FUNCTION mark_recmem_sweep_run(
+    p_result JSONB DEFAULT '{}'::jsonb
+) RETURNS JSONB AS $$
+DECLARE
+    merged JSONB;
+BEGIN
+    merged := COALESCE(get_state('recmem_state'), '{}'::jsonb)
+        || jsonb_build_object(
+            'last_sweep_at', CURRENT_TIMESTAMP,
+            'last_sweep_result', COALESCE(p_result, '{}'::jsonb)
+        );
+
+    PERFORM set_state('recmem_state', merged);
+    RETURN merged;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION recmem_unhealthy_items()
 RETURNS TABLE (
     kind TEXT,

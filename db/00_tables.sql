@@ -667,6 +667,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.recmem_queue_alert', '1000'::jsonb, 'Alert threshold for pending queue depth'),
     ('memory.recmem_sweep_age_days', '14'::jsonb, 'Periodic sweep age for unconsolidated units'),
     ('memory.recmem_sweep_batch_size', '100'::jsonb, 'Max units re-routed per sweep run'),
+    ('memory.recmem_sweep_interval_seconds', '86400'::jsonb, 'Seconds between RecMem raw-only recurrence sweeps'),
     ('memory.recmem_sweep_min_rerouting_age_days', '7'::jsonb, 'Skip units routed within this window')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES

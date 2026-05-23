@@ -30,6 +30,7 @@ from services.recmem import (
     run_recmem_consolidation_step,
     run_recmem_embed_step,
     run_recmem_route_step,
+    run_recmem_sweep_step,
 )
 from services.reconsolidation import run_reconsolidation_step
 from services.subconscious import run_subconscious_decider
@@ -475,6 +476,12 @@ class MaintenanceWorker:
                 route_result = await run_recmem_route_step(conn)
                 if not route_result.get("skipped"):
                     logger.info("RecMem route step: %s", route_result)
+                should_sweep = bool(await conn.fetchval("SELECT should_run_recmem_sweep()"))
+                if should_sweep:
+                    sweep_result = await run_recmem_sweep_step(conn)
+                    await conn.fetchval("SELECT mark_recmem_sweep_run($1::jsonb)", json.dumps(sweep_result))
+                    if sweep_result.get("processed", 0):
+                        logger.info("RecMem sweep step: %s", sweep_result)
 
             worker_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_worker_enabled'), false)"))
             if worker_enabled:
