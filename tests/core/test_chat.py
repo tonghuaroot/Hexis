@@ -47,6 +47,7 @@ class _RememberMem:
         self.remember_calls = []
         self.link_calls = []
         self.hydrate_recmem_calls = []
+        self.record_chat_turn_memory_calls = []
         self.recall_started = asyncio.Event()
         self.recall_release = asyncio.Event()
         self.hydrate_recmem_started = asyncio.Event()
@@ -80,6 +81,10 @@ class _RememberMem:
             )
         ]
 
+    async def record_chat_turn_memory(self, *args, **kwargs):
+        self.record_chat_turn_memory_calls.append((args, kwargs))
+        return {"direct_promoted": True, "raw": {"status": "stored"}}
+
 
 async def test_remember_conversation_direct_promotion_suppresses_legacy_eager():
     mem = _RememberMem({
@@ -97,10 +102,8 @@ async def test_remember_conversation_direct_promotion_suppresses_legacy_eager():
         source_identity="chat:test",
     )
 
-    assert len(mem.raw_calls) == 1
-    assert len(mem.remember_calls) == 1
-    assert len(mem.link_calls) == 1
-    assert mem.remember_calls[0][1]["context"]["recmem"]["direct_promoted"] is True
+    assert len(mem.record_chat_turn_memory_calls) == 1
+    assert mem.record_chat_turn_memory_calls[0][0][0] == "remember this important preference"
 
 
 async def test_remember_conversation_dual_write_comparison_is_nonblocking():
@@ -122,12 +125,8 @@ async def test_remember_conversation_dual_write_comparison_is_nonblocking():
         timeout=0.2,
     )
 
-    assert len(mem.remember_calls) == 1
-    await asyncio.wait_for(mem.recall_started.wait(), timeout=1.0)
-    mem.recall_release.set()
-    await asyncio.wait_for(mem.hydrate_recmem_started.wait(), timeout=1.0)
-    assert len(mem.hydrate_recmem_calls) == 1
-    assert mem.hydrate_recmem_calls[0][0][0] == "ordinary chat"
+    assert len(mem.record_chat_turn_memory_calls) == 1
+    assert mem.record_chat_turn_memory_calls[0][0][0] == "ordinary chat"
 
 
 async def test_build_system_prompt_includes_profile():

@@ -224,106 +224,13 @@ async def _remember_conversation(
 ) -> None:
     if not user_message and not assistant_message:
         return
-    started = time.perf_counter()
-    content = f"User: {user_message}\n\nAssistant: {assistant_message}"
-    importance = _estimate_importance(user_message, assistant_message)
-    source_attribution = {
-        "kind": "conversation",
-        "ref": "conversation_turn",
-        "label": "conversation turn",
-        "observed_at": datetime.now(timezone.utc).isoformat(),
-        "trust": 0.95,
-    }
-    recmem_enabled = False
-    eager_enabled = True
-    salience_promote = True
-    dual_compare = False
-    rollout_metrics = False
-    try:
-        async with mem_client._pool.acquire() as conn:
-            recmem_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_enabled'), false)"))
-            eager_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.eager_memory_enabled'), true)"))
-            salience_promote = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.recmem_salience_direct_promote'), true)"))
-            dual_compare = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_dual_write_compare'), false)"))
-            rollout_metrics = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('memory.recmem_rollout_metrics_enabled'), false)"))
-    except Exception:
-        recmem_enabled = False
-        eager_enabled = True
-
-    raw: dict[str, Any] | None = None
-    eager_memory_id = None
-    error: str | None = None
-    if recmem_enabled:
-        try:
-            raw = await mem_client.remember_turn_raw(
-                user_message,
-                assistant_message,
-                session_id=session_id,
-                source_identity=source_identity,
-                importance=importance,
-                source_attribution=source_attribution,
-                metadata={"type": "conversation"},
-            )
-        except Exception as exc:
-            error = str(exc)
-            raise
-
-    promoted = False
-    if recmem_enabled and salience_promote and importance >= 0.8:
-        mem_id = await mem_client.remember(
-            content,
-            type=MemoryType.EPISODIC,
-            importance=importance,
-            emotional_valence=0.0,
-            context={"type": "conversation", "recmem": {"direct_promoted": True}},
-            source_attribution=source_attribution,
-            source_references=None,
-            trust_level=0.95,
-        )
-        promoted = True
-        eager_memory_id = mem_id
-        if raw and raw.get("unit_id"):
-            await mem_client.link_to_source_unit(mem_id, raw["unit_id"], role="direct_promotion")
-
-    eager_written = False
-    if eager_enabled and not promoted:
-        eager_memory_id = await mem_client.remember(
-            content,
-            type=MemoryType.EPISODIC,
-            importance=importance,
-            emotional_valence=0.0,
-            context={"type": "conversation"},
-            source_attribution=source_attribution,
-            source_references=None,
-            trust_level=0.95,
-        )
-        eager_written = True
-
-    duration_ms = (time.perf_counter() - started) * 1000
-    if rollout_metrics:
-        _schedule_recmem_rollout_event(
-            mem_client=None if background_dsn else mem_client,
-            dsn=background_dsn,
-            event_type="chat_turn_memory",
-            session_id=session_id,
-            source_identity=source_identity,
-            raw_unit_id=str(raw.get("unit_id")) if raw and raw.get("unit_id") else None,
-            raw_status=raw.get("status") if raw else None,
-            direct_promoted=promoted,
-            eager_written=eager_written,
-            eager_memory_id=str(eager_memory_id) if eager_memory_id else None,
-            duration_ms=duration_ms,
-            error=error,
-            metadata={"importance": importance, "recmem_enabled": recmem_enabled, "eager_enabled": eager_enabled},
-        )
-
-    if recmem_enabled and eager_enabled and dual_compare:
-        _schedule_dual_write_comparison(
-            None if background_dsn else mem_client,
-            dsn=background_dsn,
-            query=user_message,
-            session_id=session_id,
-        )
+    await mem_client.record_chat_turn_memory(
+        user_message,
+        assistant_message,
+        session_id=session_id,
+        source_identity=source_identity,
+        context={"metadata": {"type": "conversation"}},
+    )
 
 
 def _conversation_source_identity(session_id: str | None, history: list[dict[str, Any]] | None, user_message: str, assistant_message: str) -> str | None:

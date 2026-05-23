@@ -489,6 +489,35 @@ class CognitiveMemory:
             result = _coerce_json(raw) if raw is not None else {}
             return dict(result) if isinstance(result, dict) else {}
 
+    async def record_chat_turn_memory(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        session_id: UUID | str | None = None,
+        source_identity: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with self._pool.acquire() as conn:
+            raw = await conn.fetchval(
+                """
+                SELECT record_chat_turn_memory(
+                    $1::text,
+                    $2::text,
+                    $3::text,
+                    $4::text,
+                    $5::jsonb
+                )
+                """,
+                user_text,
+                assistant_text,
+                str(session_id) if session_id is not None else None,
+                source_identity,
+                _to_jsonb_arg(context or {}),
+            )
+            result = _coerce_json(raw) if raw is not None else {}
+            return dict(result) if isinstance(result, dict) else {}
+
     async def hydrate_recmem(
         self,
         query: str,

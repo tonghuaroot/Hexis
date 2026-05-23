@@ -20,7 +20,7 @@ Last updated: 2026-05-23
 | --- | --- | --- |
 | Slice 0: Guardrails and Inventory | Complete | Added `assert_db_brain_ready(false)`, an advisory Python-domain-logic audit script, an inventory document, and first tests. |
 | Slice 1: Runtime Tables, Prompt Store, and LLM Task Framework | Complete | Added runtime tables, prompt rendering, LLM task-kind registration/request building, external-driver queue functions, and DB tests. |
-| Slice 2: Chat, Channel, and Memory Turn Lifecycle | Not started | Pending Slice 1. |
+| Slice 2: Chat, Channel, and Memory Turn Lifecycle | Complete | Added DB-owned chat memory recording, channel prepare/finalize/flush functions, Python wrappers, and focused DB/core tests. |
 | Slice 3: RecMem, Rollout, Eval, and Subconscious Completion | Not started | Pending Slice 2. |
 | Slice 4: Tool Catalog, Tool Policy, Workflow, and Scheduling | Not started | Pending Slice 3. |
 | Slice 5: Agent Loop and External Calls | Not started | Pending Slice 4. |
