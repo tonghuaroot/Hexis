@@ -6,98 +6,11 @@ import argparse
 import asyncio
 import json
 from typing import Any
-from uuid import UUID
 
 import asyncpg
 
 from core.agent_api import db_dsn_from_env, pool_sizes_from_env
 from services.recmem_eval import run_recmem_eval_set
-
-
-ROLL_OUT_CONFIG_KEYS = (
-    "memory.recmem_rollout_phase",
-    "memory.recmem_enabled",
-    "chat.eager_memory_enabled",
-    "chat.recmem_salience_direct_promote",
-    "chat.inline_subconscious_enabled",
-    "memory.recmem_hydrate_enabled",
-    "memory.recmem_dual_write_compare",
-    "memory.recmem_rollout_metrics_enabled",
-    "memory.recmem_worker_enabled",
-)
-
-PHASE_CONFIGS: dict[int, dict[str, Any]] = {
-    0: {
-        "memory.recmem_rollout_phase": 0,
-        "memory.recmem_enabled": False,
-        "chat.eager_memory_enabled": True,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": False,
-        "memory.recmem_dual_write_compare": False,
-        "memory.recmem_rollout_metrics_enabled": False,
-        "memory.recmem_worker_enabled": False,
-    },
-    1: {
-        "memory.recmem_rollout_phase": 1,
-        "memory.recmem_enabled": False,
-        "chat.eager_memory_enabled": True,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": False,
-        "memory.recmem_dual_write_compare": False,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": False,
-    },
-    2: {
-        "memory.recmem_rollout_phase": 2,
-        "memory.recmem_enabled": True,
-        "chat.eager_memory_enabled": True,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": False,
-        "memory.recmem_dual_write_compare": True,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": False,
-    },
-    3: {
-        "memory.recmem_rollout_phase": 3,
-        "memory.recmem_enabled": True,
-        "chat.eager_memory_enabled": False,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": False,
-        "memory.recmem_dual_write_compare": False,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": False,
-    },
-    4: {
-        "memory.recmem_rollout_phase": 4,
-        "memory.recmem_enabled": True,
-        "chat.eager_memory_enabled": False,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": False,
-        "memory.recmem_dual_write_compare": False,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": True,
-    },
-    5: {
-        "memory.recmem_rollout_phase": 5,
-        "memory.recmem_enabled": True,
-        "chat.eager_memory_enabled": False,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": True,
-        "memory.recmem_dual_write_compare": False,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": True,
-    },
-    6: {
-        "memory.recmem_rollout_phase": 6,
-        "memory.recmem_enabled": True,
-        "chat.eager_memory_enabled": False,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": True,
-        "memory.recmem_dual_write_compare": False,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": True,
-    },
-}
 
 
 def _coerce_json(value: Any) -> Any:
@@ -109,110 +22,42 @@ def _coerce_json(value: Any) -> Any:
     return value
 
 
-def _uuid_or_none(value: str | UUID | None) -> UUID | None:
-    if value is None:
-        return None
-    return value if isinstance(value, UUID) else UUID(str(value))
-
-
-def infer_recmem_rollout_phase(configs: dict[str, Any]) -> int | None:
-    """Infer the closest named rollout phase from active config toggles."""
-    comparable = {key: configs.get(key) for key in ROLL_OUT_CONFIG_KEYS if key in configs}
-    for phase in sorted(PHASE_CONFIGS.keys(), reverse=True):
-        expected = PHASE_CONFIGS[phase]
-        if all(comparable.get(key) == value for key, value in expected.items()):
-            return phase
-    return None
-
-
-async def _fetch_config(conn: asyncpg.Connection, key: str) -> Any:
-    return _coerce_json(await conn.fetchval("SELECT get_config($1)", key))
-
-
-async def _fetch_configs(conn: asyncpg.Connection) -> dict[str, Any]:
-    return {key: await _fetch_config(conn, key) for key in ROLL_OUT_CONFIG_KEYS}
-
-
-async def _fetch_health(conn: asyncpg.Connection) -> dict[str, Any]:
-    row = await conn.fetchrow("SELECT * FROM recmem_rollout_health")
-    if not row:
-        return {}
-    return {key: _coerce_json(row[key]) for key in row.keys()}
-
-
-async def _fetch_latest_eval_run_id(conn: asyncpg.Connection) -> UUID | None:
-    return await conn.fetchval(
-        """
-        SELECT id
-        FROM recmem_eval_runs
-        WHERE status = 'completed'
-        ORDER BY completed_at DESC NULLS LAST, started_at DESC
-        LIMIT 1
-        """
-    )
-
-
 async def get_recmem_rollout_status(
     conn: asyncpg.Connection,
     *,
-    eval_run_id: str | UUID | None = None,
+    eval_run_id: str | None = None,
 ) -> dict[str, Any]:
-    """Return config, health, metrics, and Phase 5 readiness in one payload."""
-    selected_eval_run_id = _uuid_or_none(eval_run_id) or await _fetch_latest_eval_run_id(conn)
-    configs = await _fetch_configs(conn)
-    health = await _fetch_health(conn)
-    metrics = _coerce_json(
-        await conn.fetchval(
-            "SELECT get_recmem_rollout_metrics(CURRENT_TIMESTAMP - INTERVAL '7 days')"
-        )
-    )
-    readiness = _coerce_json(
-        await conn.fetchval("SELECT get_recmem_phase5_readiness($1::uuid)", selected_eval_run_id)
-    )
-    return {
-        "phase": infer_recmem_rollout_phase(configs),
-        "configs": configs,
-        "health": health,
-        "metrics_7d": metrics,
-        "phase5_readiness": readiness,
-    }
+    """Return config, health, metrics, and Phase 5 readiness from SQL."""
+    raw = await conn.fetchval("SELECT get_recmem_rollout_status($1::uuid)", eval_run_id)
+    result = _coerce_json(raw)
+    return dict(result) if isinstance(result, dict) else {}
 
 
 async def apply_recmem_rollout_phase(
     conn: asyncpg.Connection,
     phase: int,
     *,
-    eval_run_id: str | UUID | None = None,
+    eval_run_id: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Apply a named rollout phase.
-
-    Phase 5 and 6 enable RecMem retrieval, so they require the SQL readiness
-    gate unless ``force`` is passed by an operator.
-    """
-    if phase not in PHASE_CONFIGS:
-        raise ValueError(f"Unknown RecMem rollout phase: {phase}")
-
-    selected_eval_run_id = _uuid_or_none(eval_run_id) or await _fetch_latest_eval_run_id(conn)
-    readiness = None
-    if phase >= 5 and not force:
-        readiness = _coerce_json(
-            await conn.fetchval("SELECT get_recmem_phase5_readiness($1::uuid)", selected_eval_run_id)
-        )
-        if not isinstance(readiness, dict) or readiness.get("ready") is not True:
-            reason = readiness.get("reason") if isinstance(readiness, dict) else "readiness_unavailable"
-            raise RuntimeError(f"Phase {phase} requires a passing readiness gate: {reason}")
-
-    for key, value in PHASE_CONFIGS[phase].items():
-        await conn.execute("SELECT set_config($1, $2::jsonb)", key, json.dumps(value))
-
-    status = await get_recmem_rollout_status(conn, eval_run_id=selected_eval_run_id)
-    status["applied_phase"] = phase
-    if readiness is not None:
-        status["preflight_readiness"] = readiness
-    if force and phase >= 5:
-        status["forced"] = True
-    return status
+    """Apply a named rollout phase through the DB-owned readiness gate."""
+    try:
+        async with conn.transaction():
+            raw = await conn.fetchval(
+                "SELECT apply_recmem_rollout_phase($1::int, $2::uuid, $3::boolean)",
+                int(phase),
+                eval_run_id,
+                bool(force),
+            )
+    except asyncpg.PostgresError as exc:
+        message = str(exc)
+        if "Unknown RecMem rollout phase" in message:
+            raise ValueError(message) from exc
+        if "requires a passing readiness gate" in message:
+            raise RuntimeError(message) from exc
+        raise
+    result = _coerce_json(raw)
+    return dict(result) if isinstance(result, dict) else {}
 
 
 async def _with_conn(dsn: str, coro_name: str, *args: Any, **kwargs: Any) -> Any:
@@ -302,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--eval-run-id", help="Eval run UUID to use for Phase 5 readiness")
 
     phase = sub.add_parser("phase", help="Apply a RecMem rollout phase")
-    phase.add_argument("phase", type=int, choices=sorted(PHASE_CONFIGS), help="Phase number to apply")
+    phase.add_argument("phase", type=int, choices=range(0, 7), help="Phase number to apply")
     phase.add_argument("--eval-run-id", help="Eval run UUID to use for Phase 5 readiness")
     phase.add_argument("--force", action="store_true", help="Bypass Phase 5 readiness gate")
     phase.add_argument("--json", action="store_true", help="Output JSON")

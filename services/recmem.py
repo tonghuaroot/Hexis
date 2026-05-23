@@ -102,55 +102,9 @@ async def run_recmem_sweep_step(conn) -> dict[str, Any]:
 
 
 async def _load_task_context(conn, task: dict[str, Any]) -> dict[str, Any]:
-    source_ids = [str(v) for v in _as_list(task.get("source_unit_ids"))]
-    sources = await conn.fetch(
-        """
-        SELECT id, content, user_text, assistant_text, turn_at
-        FROM subconscious_units
-        WHERE id = ANY($1::uuid[])
-        ORDER BY turn_at, created_at
-        """,
-        source_ids,
-    )
-    target = None
-    if task.get("target_memory_id"):
-        target = await conn.fetchrow(
-            "SELECT id, content, type::text, trust_level FROM memories WHERE id = $1::uuid",
-            str(task["target_memory_id"]),
-        )
-    return {
-        "task": task,
-        "sources": [dict(row) for row in sources],
-        "target_memory": dict(target) if target else None,
-    }
-
-
-def _normalize_episodes(doc: Any) -> list[dict[str, Any]]:
-    if isinstance(doc, dict):
-        raw = doc.get("episodes", [])
-    else:
-        raw = doc
-    episodes: list[dict[str, Any]] = []
-    for item in _as_list(raw):
-        if isinstance(item, str):
-            episodes.append({"content": item})
-        elif isinstance(item, dict) and (item.get("content") or item.get("episode")):
-            episodes.append(item)
-    return episodes
-
-
-def _normalize_facts(doc: Any) -> list[dict[str, Any]]:
-    if isinstance(doc, dict):
-        raw = doc.get("facts", [])
-    else:
-        raw = doc
-    facts: list[dict[str, Any]] = []
-    for item in _as_list(raw):
-        if isinstance(item, str):
-            facts.append({"content": item})
-        elif isinstance(item, dict) and (item.get("content") or item.get("fact")):
-            facts.append(item)
-    return facts
+    raw = await conn.fetchval("SELECT load_recmem_task_context($1::uuid)", str(task["id"]))
+    context = _coerce_json(raw)
+    return dict(context) if isinstance(context, dict) else {"task": task, "sources": [], "target_memory": None}
 
 
 async def _handle_episode_merge(conn, task: dict[str, Any], llm_config: dict[str, Any]) -> dict[str, Any]:
@@ -191,11 +145,12 @@ async def _handle_episode_create(conn, task: dict[str, Any], llm_config: dict[st
         response_format={"type": "json_object"},
         fallback={"episodes": []},
     )
-    episodes = _normalize_episodes(doc)
+    normalized = await conn.fetchval("SELECT normalize_recmem_episode_output($1::jsonb)", json.dumps(doc or {}))
+    episodes = _coerce_json(normalized)
     result_raw = await conn.fetchval(
         "SELECT apply_recmem_episode_create($1::uuid, $2::jsonb)",
         str(task["id"]),
-        json.dumps(episodes),
+        json.dumps(_as_list(episodes)),
     )
     result = _coerce_json(result_raw)
     return dict(result) if isinstance(result, dict) else {}
@@ -214,11 +169,12 @@ async def _handle_semantic_refine(conn, task: dict[str, Any], llm_config: dict[s
         response_format={"type": "json_object"},
         fallback={"facts": []},
     )
-    facts = _normalize_facts(doc)
+    normalized = await conn.fetchval("SELECT normalize_recmem_fact_output($1::jsonb)", json.dumps(doc or {}))
+    facts = _coerce_json(normalized)
     result_raw = await conn.fetchval(
         "SELECT apply_recmem_semantic_facts($1::uuid, $2::jsonb)",
         str(task["id"]),
-        json.dumps(facts),
+        json.dumps(_as_list(facts)),
     )
     result = _coerce_json(result_raw)
     return dict(result) if isinstance(result, dict) else {}

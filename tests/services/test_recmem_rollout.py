@@ -5,32 +5,7 @@ import pytest
 from services.recmem_rollout import (
     apply_recmem_rollout_phase,
     get_recmem_rollout_status,
-    infer_recmem_rollout_phase,
 )
-
-
-def test_infer_recmem_rollout_phase_matches_named_configs():
-    assert infer_recmem_rollout_phase({
-        "memory.recmem_rollout_phase": 2,
-        "memory.recmem_enabled": True,
-        "chat.eager_memory_enabled": True,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": False,
-        "memory.recmem_dual_write_compare": True,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": False,
-    }) == 2
-
-    assert infer_recmem_rollout_phase({
-        "memory.recmem_rollout_phase": 6,
-        "memory.recmem_enabled": True,
-        "chat.eager_memory_enabled": False,
-        "chat.inline_subconscious_enabled": True,
-        "memory.recmem_hydrate_enabled": True,
-        "memory.recmem_dual_write_compare": False,
-        "memory.recmem_rollout_metrics_enabled": True,
-        "memory.recmem_worker_enabled": True,
-    }) == 6
 
 
 @pytest.mark.asyncio(loop_scope="session")
