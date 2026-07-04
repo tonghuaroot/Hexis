@@ -22,8 +22,19 @@ from textual.widgets import (
     Static,
 )
 from textual.worker import Worker, WorkerState
+from rich.style import Style
+from rich.text import Text
 
+from apps.tui.design import COLORS
 from apps.tui.init_widgets import BigFiveSliders, CharacterPreview, StepBar
+
+
+def _teal(text: str) -> Text:
+    return Text(text, style=Style(color=COLORS["teal"], bold=True))
+
+
+def _plain(text: str, token: str = "text") -> Text:
+    return Text(text, style=Style(color=COLORS[token]))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -160,6 +171,7 @@ class LLMConfigScreen(Screen):
                 placeholder="e.g. OPENAI_API_KEY",
                 id="api-key-env",
             )
+            yield Static("", id="llm-status", classes="hint")
 
         with Horizontal(classes="button-bar"):
             yield Button("Next", id="next", classes="primary")
@@ -291,67 +303,79 @@ class LLMConfigScreen(Screen):
         )
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "next":
-            state = _state(self)
-            conn = _conn(self)
+        if event.button.id != "next":
+            return
+        state = _state(self)
 
-            state.provider = self._selected_provider()
-            state.model = self.query_one("#model", Input).value.strip()
-            state.endpoint = self.query_one("#endpoint", Input).value.strip()
-            state.api_key_env = self.query_one("#api-key-env", Input).value.strip()
-            if state.provider in _OAUTH_PROVIDERS:
-                # OAuth providers don't use API key env vars in llm config.
-                state.api_key_env = ""
+        state.provider = self._selected_provider()
+        state.model = self.query_one("#model", Input).value.strip()
+        state.endpoint = self.query_one("#endpoint", Input).value.strip()
+        state.api_key_env = self.query_one("#api-key-env", Input).value.strip()
+        if state.provider in _OAUTH_PROVIDERS:
+            # OAuth providers don't use API key env vars in llm config.
+            state.api_key_env = ""
 
-            # Subconscious defaults to same config
-            state.sub_provider = state.provider
-            state.sub_model = state.model
-            state.sub_endpoint = state.endpoint
-            state.sub_key_env = state.api_key_env
+        # Subconscious defaults to same config
+        state.sub_provider = state.provider
+        state.sub_model = state.model
+        state.sub_endpoint = state.endpoint
+        state.sub_key_env = state.api_key_env
 
-            # Save to DB
-            heartbeat_config = {
-                "provider": state.provider,
-                "model": state.model,
-                "endpoint": state.endpoint,
-                "api_key_env": state.api_key_env,
-            }
-            subconscious_config = {
-                "provider": state.sub_provider,
-                "model": state.sub_model,
-                "endpoint": state.sub_endpoint,
-                "api_key_env": state.sub_key_env,
-            }
+        self._hb_config = {
+            "provider": state.provider,
+            "model": state.model,
+            "endpoint": state.endpoint,
+            "api_key_env": state.api_key_env,
+        }
+        self._sub_config = {
+            "provider": state.sub_provider,
+            "model": state.sub_model,
+            "endpoint": state.sub_endpoint,
+            "api_key_env": state.sub_key_env,
+        }
 
-            try:
-                await self._ensure_provider_auth(state.provider)
-                await conn.fetchval(
-                    "SELECT init_llm_config($1::jsonb, $2::jsonb)",
-                    json.dumps(heartbeat_config),
-                    json.dumps(subconscious_config),
-                )
-                await conn.execute(
-                    "SELECT set_config('llm.heartbeat', $1::jsonb)",
-                    json.dumps(heartbeat_config),
-                )
-                await conn.execute(
-                    "SELECT set_config('llm.chat', $1::jsonb)",
-                    json.dumps(heartbeat_config),
-                )
-                await conn.execute(
-                    "SELECT set_config('llm.subconscious', $1::jsonb)",
-                    json.dumps(subconscious_config),
-                )
-            except RuntimeError as e:
-                from apps.tui.dialogs import ErrorDialog
-                await self.app.push_screen(ErrorDialog("Auth Error", str(e)))
-                return
-            except Exception as e:
-                from apps.tui.dialogs import ErrorDialog
-                await self.app.push_screen(ErrorDialog("DB Error", str(e)))
-                return
+        # Run auth + persistence off the UI thread so the form never freezes
+        # (OAuth can block on a browser round-trip).
+        self.query_one("#next", Button).disabled = True
+        status = self.query_one("#llm-status", Static)
+        if state.provider in _OAUTH_PROVIDERS:
+            status.update(Text("Authorizing… a browser window may open — finish login there.",
+                               style=Style(color=COLORS["accent"])))
+        else:
+            status.update(Text("Saving configuration…", style=Style(color=COLORS["dim"])))
+        self.run_worker(self._authorize_and_save(), name="llm-auth", exclusive=True)
 
+    async def _authorize_and_save(self) -> None:
+        state = _state(self)
+        conn = _conn(self)
+        await self._ensure_provider_auth(state.provider)
+        await conn.fetchval(
+            "SELECT init_llm_config($1::jsonb, $2::jsonb)",
+            json.dumps(self._hb_config),
+            json.dumps(self._sub_config),
+        )
+        await conn.execute(
+            "SELECT set_config('llm.heartbeat', $1::jsonb)", json.dumps(self._hb_config)
+        )
+        await conn.execute(
+            "SELECT set_config('llm.chat', $1::jsonb)", json.dumps(self._hb_config)
+        )
+        await conn.execute(
+            "SELECT set_config('llm.subconscious', $1::jsonb)", json.dumps(self._sub_config)
+        )
+
+    async def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "llm-auth":
+            return
+        if event.state == WorkerState.SUCCESS:
             self.app.switch_screen(ChoosePathScreen())
+        elif event.state == WorkerState.ERROR:
+            err = event.worker.error
+            self.query_one("#next", Button).disabled = False
+            self.query_one("#llm-status", Static).update("")
+            from apps.tui.dialogs import ErrorDialog
+            title = "Auth Error" if isinstance(err, RuntimeError) else "DB Error"
+            await self.app.push_screen(ErrorDialog(title, str(err)))
 
 
 # ── 3. Choose Path ───────────────────────────────────────────────────────────
@@ -740,7 +764,7 @@ class ConsentScreen(Screen):
     _countdown: int = 10
 
     def compose(self) -> ComposeResult:
-        yield StepBar(current=2)
+        yield StepBar(current=3)
         with Vertical(classes="consent-container", id="consent-loading"):
             yield LoadingIndicator()
             yield Static(
@@ -748,7 +772,10 @@ class ConsentScreen(Screen):
                 id="consent-status",
             )
         with VerticalScroll(classes="consent-result", id="consent-result"):
-            yield RichLog(id="consent-log", wrap=True, markup=True)
+            # markup=False → the agent's reasoning/signature (model output, may
+            # contain brackets) is written as Rich Text, never re-parsed.
+            yield RichLog(id="consent-log", wrap=True, markup=False)
+        yield Static("", id="consent-countdown")
         with Horizontal(classes="button-bar"):
             yield Button("Exit Now", id="exit-now", classes="primary", disabled=True)
 
@@ -826,27 +853,27 @@ class ConsentScreen(Screen):
         state.consent_memories = memories
 
         if reasoning:
-            log.write("[#3c6f64]Reasoning:[/#3c6f64]")
-            log.write(reasoning)
+            log.write(_teal("Reasoning:"))
+            log.write(_plain(str(reasoning)))
             log.write("")
 
         if signature:
-            log.write("[#3c6f64]Signature:[/#3c6f64]")
-            log.write(signature)
+            log.write(_teal("Signature:"))
+            log.write(_plain(str(signature)))
             log.write("")
 
         if memories:
-            log.write("[#3c6f64]Initial Memories:[/#3c6f64]")
+            log.write(_teal("Initial Memories:"))
             for m in memories:
                 mtype = m.get("type", "?")
                 mcontent = m.get("content", "")
                 mimp = m.get("importance", "")
                 imp_str = f" (importance: {mimp})" if mimp else ""
-                log.write(f"  [{mtype}] {mcontent}{imp_str}")
+                log.write(_plain(f"  [{mtype}] {mcontent}{imp_str}"))
             log.write("")
 
         if decision == "consent":
-            log.write("[green]Consent granted[/green]")
+            log.write(Text("Consent granted", style=Style(color=COLORS["ok"], bold=True)))
             # Show agent name + next steps, then auto-exit
             agent_name = "Hexis"
             conn = _conn(self)
@@ -858,31 +885,36 @@ class ConsentScreen(Screen):
                 pass
             state.final_agent_name = agent_name
             log.write("")
-            log.write(f"[bold #d8774f]{agent_name} is ready![/bold #d8774f]")
+            log.write(Text(f"{agent_name} is ready!", style=Style(color=COLORS["accent"], bold=True)))
             log.write("")
-            log.write("[#3c6f64]Next steps:[/#3c6f64]")
-            log.write("  [bold]hexis chat[/bold]    \u2014 Say hello")
-            log.write("  [bold]hexis status[/bold]  \u2014 Check agent status")
-            log.write("  [bold]hexis start[/bold]   \u2014 Enable heartbeat")
-            log.write("")
+            log.write(_teal("Next steps:"))
+            log.write(_plain("  hexis chat    \u2014 Say hello"))
+            log.write(_plain("  hexis status  \u2014 Check agent status"))
+            log.write(_plain("  hexis start   \u2014 Enable heartbeat"))
             self._countdown = 10
-            log.write(f"Exiting in {self._countdown}s...")
+            self._render_countdown()
             self.query_one("#exit-now", Button).disabled = False
             self.set_timer(1.0, self._tick_countdown)
         elif decision == "decline":
-            log.write("[red]Consent declined.[/red] The agent chose not to initialize.")
+            log.write(Text("Consent declined \u2014 the agent chose not to initialize.",
+                           style=Style(color=COLORS["danger"], bold=True)))
             self.query_one("#exit-now", Button).disabled = False
         else:
-            log.write("[yellow]Consent abstained.[/yellow]")
+            log.write(Text("Consent abstained.", style=Style(color=COLORS["warn"], bold=True)))
             self.query_one("#exit-now", Button).disabled = False
+
+    def _render_countdown(self) -> None:
+        self.query_one("#consent-countdown", Static).update(
+            Text(f"Exiting in {self._countdown}s\u2026  (press Exit Now to leave immediately)",
+                 style=Style(color=COLORS["dim"]))
+        )
 
     def _tick_countdown(self) -> None:
         self._countdown -= 1
         if self._countdown <= 0:
             self.app.exit(0)
             return
-        log = self.query_one("#consent-log", RichLog)
-        log.write(f"Exiting in {self._countdown}s...")
+        self._render_countdown()  # updates one line in place, no log spam
         self.set_timer(1.0, self._tick_countdown)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:

@@ -94,6 +94,12 @@ class HexisInitApp(App):
         self._argv = argv or []
         self._conn: Any = None
 
+    def get_css_variables(self) -> dict[str, str]:
+        from apps.tui.design import CSS_VARS
+        variables = super().get_css_variables()
+        variables.update(CSS_VARS)
+        return variables
+
     async def on_mount(self) -> None:
         load_dotenv()
         from core.agent_api import db_dsn_from_env, ensure_schema_has_config, _connect_with_retry
@@ -114,13 +120,26 @@ class HexisInitApp(App):
 
         self.state.dsn = dsn or db_dsn_from_env()
         self.state.wait_seconds = wait_seconds
+        await self._attempt_connect()
+
+    async def _attempt_connect(self) -> None:
+        from core.agent_api import ensure_schema_has_config, _connect_with_retry
 
         try:
-            await ensure_schema_has_config(self.state.dsn, wait_seconds=wait_seconds)
-            self._conn = await _connect_with_retry(self.state.dsn, wait_seconds=wait_seconds)
+            await ensure_schema_has_config(self.state.dsn, wait_seconds=self.state.wait_seconds)
+            self._conn = await _connect_with_retry(self.state.dsn, wait_seconds=self.state.wait_seconds)
         except Exception as e:
             from apps.tui.dialogs import ErrorDialog
-            await self.push_screen(ErrorDialog("Connection Error", str(e)))
+
+            def _on_choice(retry: bool | None) -> None:
+                if retry:
+                    self.call_later(self._attempt_connect)
+                else:
+                    self.exit(1)
+
+            await self.push_screen(
+                ErrorDialog("Connection Error", str(e), retry_label="Retry"), _on_choice
+            )
             return
 
         from apps.tui.init_screens import LLMConfigScreen
