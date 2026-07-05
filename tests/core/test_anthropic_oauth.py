@@ -87,3 +87,32 @@ def test_credentials_from_value_rejects_incomplete():
     assert credentials_from_value({"access": "tok"}) is None
     assert credentials_from_value(None) is None
     assert credentials_from_value("not json") is None
+
+
+# ── Hexis-owned store only (no Claude Code / Keychain / env borrowing) ─────────
+
+def test_resolve_uses_only_hexis_store(monkeypatch):
+    """resolve_anthropic_token must ignore Claude Code creds and env tokens."""
+    import asyncio
+
+    from core.auth import anthropic_oauth as mod
+
+    # A Claude Code login + env token both exist...
+    monkeypatch.setattr(mod, "read_claude_code_credentials",
+                        lambda: {"accessToken": "sk-ant-oat01-CLAUDECODE", "expiresAt": 0})
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-ENVTOKEN")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api-ENVKEY")
+
+    # ...but Hexis's own store is empty → resolves to nothing.
+    monkeypatch.setattr(mod, "load_credentials", lambda: None)
+    monkeypatch.setattr("core.auth.anthropic_setup_token.load_credentials", lambda: None)
+    token, mode = asyncio.run(mod.resolve_anthropic_token())
+    assert token is None and mode == "", (token, mode)
+
+    # With a Hexis-native token present, that (and only that) is returned.
+    creds = mod.AnthropicOAuthCredentials(
+        access="sk-ant-oat01-HEXISOWN", refresh="r", expires_ms=now_ms() + 3_600_000,
+    )
+    monkeypatch.setattr(mod, "load_credentials", lambda: creds)
+    token, mode = asyncio.run(mod.resolve_anthropic_token())
+    assert token == "sk-ant-oat01-HEXISOWN" and mode == "setup-token"

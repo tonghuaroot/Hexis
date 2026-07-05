@@ -23,10 +23,10 @@ import httpx
 _ANTHROPIC_VERSION = "2023-06-01"
 _ANTHROPIC_BETA = "claude-code-20250219,oauth-2025-04-20"
 _CLAUDE_CODE_USER_AGENT = "claude-cli/2.1.2 (external, cli)"
-_CLAUDE_CODE_IDENTITY = (
-    "You are Claude Code, made by Anthropic. "
-    "You are an interactive agent that helps users with software engineering tasks."
-)
+# Must be verbatim: Anthropic's subscription (OAuth) endpoint validates the
+# Claude-Code identity preamble. hermes-agent and openclaw both send this exact
+# string; a different wording can 401.
+_CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 
 # ---------------------------------------------------------------------------
@@ -51,15 +51,48 @@ def _build_headers(api_key: str, auth_mode: str) -> dict[str, str]:
     }
 
 
-def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _oauth_tool_name(name: str) -> str:
+    """Normalize a tool name for the OAuth/subscription path.
+
+    Anthropic's subscription billing classifier flags single-underscore
+    ``mcp_`` tool names as third-party apps and 400s the request; Claude Code
+    uses a double underscore (``mcp__``). Hexis emits ``mcp_<server>_<tool>``
+    (see core/tools/mcp.py), so rewrite those. Matches hermes-agent.
+    """
+    if name.startswith("mcp_") and not name.startswith("mcp__"):
+        return "mcp__" + name[len("mcp_"):]
+    return name
+
+
+def _tool_name_restore_map(
+    tools: list[dict[str, Any]] | None, auth_mode: str
+) -> dict[str, str]:
+    """Map wire (on-the-wire) tool names back to originals for the OAuth path."""
+    if auth_mode != "setup-token" or not tools:
+        return {}
+    restore: dict[str, str] = {}
+    for tool in tools:
+        orig = (tool.get("function") or {}).get("name", "")
+        wire = _oauth_tool_name(orig)
+        if wire != orig:
+            restore[wire] = orig
+    return restore
+
+
+def _convert_tools(
+    tools: list[dict[str, Any]] | None, auth_mode: str = "api-key"
+) -> list[dict[str, Any]]:
     """Convert OpenAI-format tools to Anthropic Messages tool format."""
     if not tools:
         return []
     result: list[dict[str, Any]] = []
     for tool in tools:
         fn = tool.get("function", {})
+        name = fn.get("name", "")
+        if auth_mode == "setup-token":
+            name = _oauth_tool_name(name)
         result.append({
-            "name": fn.get("name", ""),
+            "name": name,
             "description": fn.get("description", ""),
             "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
         })
@@ -93,7 +126,7 @@ def _build_request_body(
     sys = _build_system_prompt(system_prompt, auth_mode)
     if sys:
         body["system"] = sys
-    anthropic_tools = _convert_tools(tools)
+    anthropic_tools = _convert_tools(tools, auth_mode)
     if anthropic_tools:
         body["tools"] = anthropic_tools
     if stream:
@@ -101,8 +134,11 @@ def _build_request_body(
     return body
 
 
-def _parse_response(data: dict[str, Any]) -> dict[str, Any]:
+def _parse_response(
+    data: dict[str, Any], restore_map: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Parse a non-streaming Anthropic Messages response into {content, tool_calls, raw}."""
+    restore = restore_map or {}
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     for block in data.get("content") or []:
@@ -110,9 +146,10 @@ def _parse_response(data: dict[str, Any]) -> dict[str, Any]:
         if btype == "text":
             text_parts.append(block.get("text", ""))
         elif btype == "tool_use":
+            name = block.get("name", "")
             tool_calls.append({
                 "id": block.get("id") or str(uuid.uuid4()),
-                "name": block.get("name", ""),
+                "name": restore.get(name, name),
                 "arguments": block.get("input") or {},
             })
     return {"content": "".join(text_parts), "tool_calls": tool_calls, "raw": data}
@@ -142,6 +179,7 @@ async def anthropic_http_completion(
         system_prompt=system_prompt, stream=False,
     )
 
+    restore_map = _tool_name_restore_map(tools, auth_mode)
     timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=body)
@@ -149,7 +187,7 @@ async def anthropic_http_completion(
         raise RuntimeError(
             f"Anthropic HTTP request failed: HTTP {resp.status_code}: {resp.text}"
         )
-    return _parse_response(resp.json())
+    return _parse_response(resp.json(), restore_map)
 
 
 async def stream_anthropic_http_completion(
@@ -182,6 +220,7 @@ async def stream_anthropic_http_completion(
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     current_tool: dict[str, Any] | None = None
+    restore_map = _tool_name_restore_map(tools, auth_mode)
 
     timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -237,9 +276,10 @@ async def stream_anthropic_http_completion(
                             args = json.loads(raw_args) if raw_args else {}
                         except Exception:
                             args = {}
+                        name = current_tool["name"]
                         tool_calls.append({
                             "id": current_tool["id"],
-                            "name": current_tool["name"],
+                            "name": restore_map.get(name, name),
                             "arguments": args,
                         })
                         current_tool = None

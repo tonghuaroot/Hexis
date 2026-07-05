@@ -141,3 +141,36 @@ async def test_anthropic_http_error_raises():
                 messages=[{"role": "user", "content": "Hello"}],
                 tools=None,
             )
+
+
+# ── OAuth parity with hermes-agent / openclaw ─────────────────────────────────
+
+def test_oauth_identity_is_canonical_claude_code_string():
+    from core.providers.anthropic_http import _CLAUDE_CODE_IDENTITY, _build_system_prompt
+    # Must match hermes-agent / openclaw verbatim (Anthropic validates it).
+    assert _CLAUDE_CODE_IDENTITY == "You are Claude Code, Anthropic's official CLI for Claude."
+    sysp = _build_system_prompt("real prompt", "setup-token")
+    assert sysp.startswith(_CLAUDE_CODE_IDENTITY)
+    assert "real prompt" in sysp
+    # api-key path is untouched
+    assert _build_system_prompt("real prompt", "api-key") == "real prompt"
+
+
+def test_oauth_mcp_tool_name_normalized_and_restored():
+    from core.providers.anthropic_http import _oauth_tool_name, _tool_name_restore_map
+    assert _oauth_tool_name("mcp_github_create_issue") == "mcp__github_create_issue"
+    assert _oauth_tool_name("mcp__already") == "mcp__already"
+    assert _oauth_tool_name("recall") == "recall"
+
+    tools = [{"function": {"name": "mcp_gh_open", "description": "", "parameters": {}}},
+             {"function": {"name": "recall", "description": "", "parameters": {}}}]
+    # outbound: renamed only on the OAuth path
+    assert [t["name"] for t in _convert_tools(tools, "setup-token")] == ["mcp__gh_open", "recall"]
+    assert [t["name"] for t in _convert_tools(tools, "api-key")] == ["mcp_gh_open", "recall"]
+    # inbound: response tool name restored to the original
+    restore = _tool_name_restore_map(tools, "setup-token")
+    parsed = _parse_response(
+        {"content": [{"type": "tool_use", "id": "1", "name": "mcp__gh_open", "input": {}}]},
+        restore,
+    )
+    assert parsed["tool_calls"][0]["name"] == "mcp_gh_open"
