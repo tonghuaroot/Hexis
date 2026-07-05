@@ -4,8 +4,21 @@ export const runtime = "nodejs";
 
 const DEFAULT_HOST = "http://127.0.0.1:11434";
 
-export async function GET() {
-  const host = process.env.OLLAMA_HOST || process.env.OLLAMA_URL || DEFAULT_HOST;
+// Honor the endpoint the user typed in the init form (?endpoint=...), stripping
+// any path so the base host is used. Falls back to env, then localhost.
+function hostFromEndpoint(endpoint: string | null): string | null {
+  if (!endpoint) return null;
+  const m = endpoint.trim().match(/^(https?:\/\/[^/]+)/);
+  return m ? m[1] : null;
+}
+
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const host =
+    hostFromEndpoint(searchParams.get("endpoint")) ||
+    process.env.OLLAMA_HOST ||
+    process.env.OLLAMA_URL ||
+    DEFAULT_HOST;
   try {
     const client = new Ollama({ host });
     const response = await client.list();

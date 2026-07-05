@@ -39,7 +39,13 @@ const moodColors: Record<string, string> = {
   withdrawn: "error",
 };
 
-export function Sidebar() {
+export function Sidebar({
+  open = false,
+  onClose,
+}: {
+  open?: boolean;
+  onClose?: () => void;
+} = {}) {
   const pathname = usePathname();
   const [status, setStatus] = useState<StatusData>({});
 
@@ -60,7 +66,11 @@ export function Sidebar() {
   useGatewayEvents(loadStatus);
 
   return (
-    <aside className="fixed left-0 top-0 z-20 flex h-screen w-56 flex-col border-r border-[var(--outline)] bg-[var(--surface)] px-4 py-6">
+    <aside
+      className={`fixed left-0 top-0 z-40 flex h-screen w-56 flex-col border-r border-[var(--outline)] bg-[var(--surface)] px-4 py-6 transition-transform lg:translate-x-0 ${
+        open ? "translate-x-0" : "-translate-x-full"
+      }`}
+    >
       {/* Logo / Agent name */}
       <div className="mb-8">
         <p className="text-xs uppercase tracking-[0.3em] text-[var(--teal)]">
@@ -82,13 +92,14 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onClick={onClose}
               className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition ${
                 isActive
                   ? "bg-[var(--surface-strong)] font-medium text-[var(--foreground)]"
                   : "text-[var(--ink-soft)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)]"
               }`}
             >
-              <span className="text-base">{item.icon}</span>
+              <span className="text-base" aria-hidden="true">{item.icon}</span>
               {item.label}
             </Link>
           );
@@ -119,6 +130,7 @@ export function Sidebar() {
         {/* Heartbeat indicator */}
         <div className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
           <span
+            aria-hidden="true"
             className={`inline-block h-2 w-2 rounded-full ${
               status.heartbeat_paused
                 ? "bg-amber-400"
