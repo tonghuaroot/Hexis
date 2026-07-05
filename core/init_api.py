@@ -18,6 +18,68 @@ USER_CHARACTERS_DIR = Path.home() / ".hexis" / "characters"
 CHARACTERS_DIR = PACKAGE_CHARACTERS_DIR
 
 
+# ---------------------------------------------------------------------------
+# LLM connectivity self-test (advisory — never blocks setup)
+# ---------------------------------------------------------------------------
+# Both hermes-agent and openclaw learned the hard way that hard-blocking setup
+# on a live key probe rejects too many legitimate users (corporate proxies,
+# regional blocks, flaky provider probes, self-hosted endpoints). So this is an
+# opt-in / advisory check that translates errors into clear guidance and never
+# prevents the user from proceeding.
+
+def classify_llm_error(msg: str) -> tuple[str, str]:
+    """Map a raw provider error into (status_slug, human_message)."""
+    low = msg.lower()
+    if any(s in msg for s in ("401", "403")) or any(
+        s in low for s in ("unauthorized", "invalid api key", "invalid x-api-key",
+                            "authentication", "invalid_api_key", "permission")):
+        return "auth", "Authentication failed — the API key/login looks invalid or missing."
+    if "402" in msg or any(s in low for s in ("payment required", "insufficient",
+                                              "out of credit", "quota", "billing", "balance")):
+        return "billing", "Out of credits / payment required for this account."
+    if "429" in msg or any(s in low for s in ("rate limit", "too many requests", "overloaded")):
+        return "rate_limit", "Rate limited — the provider is throttling; try again shortly."
+    if "404" in msg or any(s in low for s in ("not found", "does not exist", "no such model",
+                                              "unknown model", "model_not_found")):
+        return "model", "Model or endpoint not found — check the model name and endpoint."
+    if any(s in low for s in ("timeout", "timed out", "connection", "getaddrinfo",
+                              "network", "refused", "unreachable", "ssl", "certificate")):
+        return "network", "Network error — could not reach the provider endpoint."
+    return "error", f"Request failed: {msg[:200]}"
+
+
+async def test_llm_connection(llm_config: dict[str, Any]) -> dict[str, Any]:
+    """Make one tiny real call to verify the provider/model/credentials work.
+
+    Returns {"ok": bool, "status": str, "message": str}. Never raises.
+    """
+    from core.llm import chat_completion
+
+    provider = llm_config.get("provider") or ""
+    model = llm_config.get("model") or ""
+    if not provider or not model:
+        return {"ok": False, "status": "config",
+                "message": "No provider/model configured."}
+    try:
+        result = await chat_completion(
+            provider=provider,
+            model=model,
+            endpoint=llm_config.get("endpoint"),
+            api_key=llm_config.get("api_key"),
+            auth_mode=llm_config.get("auth_mode"),
+            messages=[{"role": "user", "content": "Reply with just the word: ok"}],
+            tools=None,
+            temperature=0.0,
+            max_tokens=16,
+        )
+        content = (result.get("content") or "").strip()
+        detail = f'model replied "{content[:40]}"' if content else "model reachable"
+        return {"ok": True, "status": "ok", "message": f"Connected — {detail}."}
+    except Exception as exc:  # noqa: BLE001 — advisory, translate everything
+        status, human = classify_llm_error(str(exc))
+        return {"ok": False, "status": status, "message": human}
+
+
 def _character_search_dirs() -> list[Path]:
     """Return character directories in priority order (first wins on filename collision)."""
     dirs: list[Path] = []
@@ -209,12 +271,15 @@ async def run_consent_flow(
         },
     }
 
-    # Call LLM
+    # Call LLM. Pass auth_mode so OAuth/setup-token providers (e.g. Anthropic
+    # via Claude Pro/Max) route to the Bearer HTTP client instead of the SDK
+    # api-key path.
     result = await chat_completion(
         provider=llm_config["provider"],
         model=llm_config["model"],
         endpoint=llm_config.get("endpoint"),
         api_key=llm_config.get("api_key"),
+        auth_mode=llm_config.get("auth_mode"),
         messages=messages,
         tools=[sign_consent_tool],
         temperature=0.2,
@@ -241,7 +306,20 @@ async def run_consent_flow(
                 except json.JSONDecodeError:
                     pass
 
+    # Lenient fallback: a weak model may state its decision in prose without a
+    # valid tool call / JSON. Accept only explicit phrasings.
+    if not args.get("decision"):
+        low = (result.get("content") or "").lower()
+        if any(p in low for p in ("i decline", "do not consent", "don't consent", "i refuse")):
+            args["decision"] = "decline"
+        elif any(p in low for p in ("i consent", "i agree to", "i hereby consent")):
+            args["decision"] = "consent"
+
+    # Whether the model actually expressed a decision (vs. failing to produce one).
+    decided = bool(args.get("decision"))
     decision = str(args.get("decision", "abstain")).lower().strip()
+    if decision not in ("consent", "decline", "abstain"):
+        decision = "abstain"
     signature = args.get("signature")
     memories = args.get("memories", [])
 
@@ -281,6 +359,7 @@ async def run_consent_flow(
 
     return {
         "decision": consent_result.get("decision", decision),
+        "decided": decided,
         "signature": signature,
         "consent": consent_result,
         "request_messages": messages,
@@ -288,3 +367,43 @@ async def run_consent_flow(
         "raw_content": result.get("content", ""),
         "raw_tool_calls": result.get("tool_calls", []),
     }
+
+
+async def record_consent_override(pool_or_conn, llm_config: dict, *, model_decision: str) -> dict:
+    """Activate the agent by operator override.
+
+    Consent is a signal that Hexis takes the agent seriously — not a lock that can
+    trap the owner out of their own (paid-for) AI. When the model doesn't consent,
+    the owner may choose to proceed anyway; this records that choice honestly (the
+    model's response is preserved in the signature) and activates the agent.
+    """
+    payload = {
+        "decision": "consent",
+        "signature": (
+            f"Operator override: the owner chose to proceed after the model responded "
+            f"'{model_decision}'. Consent here is a signal, not a gate — it's the owner's agent."
+        ),
+        "memories": [],
+        "provider": llm_config["provider"],
+        "model": llm_config["model"],
+        "endpoint": llm_config.get("endpoint"),
+        "consent_scope": "conscious",
+        "apply_agent_config": True,
+        "operator_override": True,
+    }
+    conn = pool_or_conn
+    needs_release = False
+    if hasattr(pool_or_conn, "acquire"):
+        conn = await pool_or_conn.acquire()
+        needs_release = True
+    try:
+        raw = await conn.fetchval("SELECT init_consent($1::jsonb)", json.dumps(payload))
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return {"decision": "consent"}
+        return raw if isinstance(raw, dict) else {"decision": "consent"}
+    finally:
+        if needs_release:
+            await pool_or_conn.release(conn)

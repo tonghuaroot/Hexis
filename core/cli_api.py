@@ -14,14 +14,15 @@ from core.cognitive_memory_api import CognitiveMemory, MemoryType
 logger = logging.getLogger(__name__)
 
 
-def embedding_service_diagnosis(url: str | None) -> tuple[str, list[str]]:
+def embedding_service_diagnosis(url: str | None, model: str | None = None) -> tuple[str, list[str]]:
     """Identify the embedding backend from its URL and return (name, fix_steps)."""
     url = (url or "").lower()
+    emb_model = model or "embeddinggemma:300m-qat-q4_0"
     if ":11434" in url:
         return "Ollama", [
             "Install Ollama — https://ollama.com/download",
             "Start it:       ollama serve",
-            "Pull the model:  ollama pull embeddinggemma:300m-qat-q4_0",
+            f"Pull the model:  ollama pull {emb_model}",
         ]
     if "embeddings:" in url or "text-embeddings" in url:
         return "TEI (Text Embeddings Inference)", [
@@ -248,13 +249,22 @@ async def demo(dsn: str | None = None, *, wait_seconds: int = 30) -> dict[str, A
         hydrate = await mem.hydrate("Summarize what we know about the user", include_goals=False)
         working_hits = await mem.search_working("temporary context", limit=5)
 
-        return {
-            "remembered_ids": [str(m1), str(m2)],
-            "working_memory_id": str(held),
-            "recall_count": len(recall.memories),
-            "hydrate_memory_count": len(hydrate.memories),
-            "working_search_count": len(working_hits),
-        }
+    # A health check must not leave demo rows in the agent's real memory (Bar #5).
+    # The working-memory entry auto-expires via its TTL; delete the persistent ones.
+    cleanup = await _connect_with_retry(dsn, wait_seconds=wait_seconds)
+    try:
+        await cleanup.execute("DELETE FROM memories WHERE id = ANY($1::uuid[])", [m1, m2])
+    finally:
+        await cleanup.close()
+
+    return {
+        "remembered_ids": [str(m1), str(m2)],
+        "cleaned_up": True,
+        "working_memory_id": str(held),
+        "recall_count": len(recall.memories),
+        "hydrate_memory_count": len(hydrate.memories),
+        "working_search_count": len(working_hits),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +291,15 @@ async def doctor_payload(
     dsn: str | None = None,
     *,
     wait_seconds: int = 10,
+    check_llm: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Run comprehensive health checks and return a list of check results.
 
     Each result: {"label": str, "status": "OK"|"WARN"|"FAIL", "detail": Any}
+
+    ``check_llm`` opt-in makes one real LLM call to verify provider/model/key
+    (skipped by default so a health check never silently spends a token).
     """
     dsn = dsn or db_dsn_from_env()
     checks: list[dict[str, Any]] = []
@@ -294,7 +308,12 @@ async def doctor_payload(
     try:
         conn = await _connect_with_retry(dsn, wait_seconds=wait_seconds)
     except Exception as exc:
-        checks.append({"label": "PostgreSQL", "status": "FAIL", "detail": str(exc)})
+        low = str(exc).lower()
+        if any(s in low for s in ("connect", "refused", "timed out", "timeout")):
+            detail = "database not reachable — is the stack running? Run `hexis up`, then retry."
+        else:
+            detail = str(exc)
+        checks.append({"label": "PostgreSQL", "status": "FAIL", "detail": detail})
         return checks  # Can't do anything else without DB
 
     try:
@@ -317,7 +336,7 @@ async def doctor_payload(
                     "detail": f"healthy — {emb_model} via {emb_url}",
                 })
             else:
-                svc_name, steps = embedding_service_diagnosis(emb_url)
+                svc_name, steps = embedding_service_diagnosis(emb_url, emb_model)
                 fix = "; ".join(steps)
                 checks.append({
                     "label": "Embeddings",
@@ -542,6 +561,28 @@ async def doctor_payload(
                 })
         except Exception as exc:
             checks.append({"label": "Memory", "status": "FAIL", "detail": str(exc)})
+
+        # 12. LLM connectivity (opt-in: makes one real call)
+        if check_llm:
+            try:
+                from core.init_api import test_llm_connection
+                from core.llm_config import load_llm_config
+                llm_config = await load_llm_config(conn, "llm.chat", fallback_key="llm")
+                result = await test_llm_connection(llm_config)
+                model = f"{llm_config.get('provider', '?')}/{llm_config.get('model', '?')}"
+                checks.append({
+                    "label": "LLM",
+                    "status": "OK" if result["ok"] else "FAIL",
+                    "detail": f"{model} — {result['message']}",
+                })
+            except Exception as exc:
+                checks.append({"label": "LLM", "status": "FAIL", "detail": str(exc)})
+        else:
+            checks.append({
+                "label": "LLM",
+                "status": "WARN",
+                "detail": "not tested (run 'hexis doctor --llm' for a live connectivity check)",
+            })
 
     finally:
         await conn.close()

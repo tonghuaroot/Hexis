@@ -68,6 +68,10 @@ class InitState:
     consent_reasoning: str = ""
     consent_signature: str = ""
     consent_memories: list[dict[str, Any]] = field(default_factory=list)
+    # When the agent refuses consent, the user can change the model and retry;
+    # this flag routes the LLM screen straight back to consent (identity is
+    # already persisted) instead of re-walking the whole wizard.
+    retry_consent: bool = False
 
     # Final
     final_agent_name: str = ""
@@ -93,12 +97,23 @@ class HexisInitApp(App):
         self.state = InitState()
         self._argv = argv or []
         self._conn: Any = None
+        # Set by the final consent screen so the CLI can hand off to chat / ui
+        # after init exits: "chat" | "ui" | None.
+        self.next_action: str | None = None
 
     def get_css_variables(self) -> dict[str, str]:
         from apps.tui.design import CSS_VARS
         variables = super().get_css_variables()
         variables.update(CSS_VARS)
         return variables
+
+    def run(self, **kwargs):
+        # Keyboard-only by default: don't capture the mouse, so the terminal's
+        # native click-drag text selection / copy keeps working. Set
+        # HEXIS_TUI_MOUSE=1 to re-enable mouse interaction.
+        import os
+        kwargs.setdefault("mouse", os.getenv("HEXIS_TUI_MOUSE", "") == "1")
+        return super().run(**kwargs)
 
     async def on_mount(self) -> None:
         load_dotenv()
@@ -142,8 +157,32 @@ class HexisInitApp(App):
             )
             return
 
-        from apps.tui.init_screens import LLMConfigScreen
-        await self.push_screen(LLMConfigScreen())
+        await self._start_wizard()
+
+    async def _start_wizard(self) -> None:
+        """If an agent is already configured, offer keep-or-reconfigure first."""
+        from apps.tui.init_screens import LLMConfigScreen, ReconfigureScreen
+
+        summary: dict[str, Any] | None = None
+        try:
+            configured = bool(await self._conn.fetchval("SELECT is_agent_configured()"))
+            if configured:
+                raw = await self._conn.fetchval("SELECT get_init_profile()")
+                profile = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                llm = await self._conn.fetchval("SELECT get_config('llm.chat')")
+                llm = json.loads(llm) if isinstance(llm, str) else (llm or {})
+                summary = {
+                    "name": (profile.get("agent", {}) or {}).get("name", "your agent"),
+                    "provider": llm.get("provider", "?"),
+                    "model": llm.get("model", "?"),
+                }
+        except Exception:
+            summary = None
+
+        if summary is not None:
+            await self.push_screen(ReconfigureScreen(summary))
+        else:
+            await self.push_screen(LLMConfigScreen())
 
     @property
     def conn(self) -> Any:

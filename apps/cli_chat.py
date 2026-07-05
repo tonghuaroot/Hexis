@@ -1,18 +1,21 @@
 """Hexis CLI chat — streaming conversation via AgentLoop.
 
-Supports:
-  - Token-by-token streaming with rich rendering
+A plain, line-based streaming REPL: your terminal owns the mouse/scrollback/copy,
+Ctrl+C interrupts a reply. Features:
+  - Token-by-token streaming; leaked <think>/tool-call scaffolding is stripped
+    from the visible output (not just from what's persisted)
   - Tool call visibility as inline dim text
-  - Markdown rendering for assistant responses
-  - Slash commands: /clear, /recall <q>, /status, /quit, /verbose, /debug
-  - --verbose flag to show hydrated context and tool I/O
-  - --debug flag to also dump the full system prompt and LLM request
+  - Slash commands (type /help for the full list)
+  - --verbose shows hydrated context and tool I/O
+  - --debug also dumps the system prompt and LLM request
+  - --greet seeds a first "wake up" turn (used right after init)
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 import uuid
@@ -21,6 +24,51 @@ from typing import Any
 from dotenv import load_dotenv
 
 from apps.cli_theme import console, err_console
+
+logger = logging.getLogger(__name__)
+
+# Single source of truth for slash commands (drives /help + the greeting).
+COMMANDS: list[tuple[str, str]] = [
+    ("/help", "show this list"),
+    ("/recall <q>", "search long-term memory"),
+    ("/status", "agent status — energy, mood, consent"),
+    ("/tools", "list available tools"),
+    ("/history", "show this session's turns"),
+    ("/clear", "reset local context (keeps long-term memory)"),
+    ("/verbose", "toggle context + tool I/O"),
+    ("/debug", "toggle full debug"),
+    ("/prompt", "print the system prompt"),
+    ("/quit", "exit (or Ctrl+C)"),
+]
+
+
+def _print_commands() -> None:
+    console.print("[muted]Commands:[/muted]")
+    for name, desc in COMMANDS:
+        console.print(f"  [teal]{name:<12}[/teal] [muted]{desc}[/muted]")
+    console.print()
+
+
+async def _approve_tool(tool_name: str, arguments: dict[str, Any]) -> bool:
+    """Human [y/N] gate for side-effecting tools (email, DMs, shell, …).
+
+    A person being at the keyboard is NOT approval of a specific irreversible
+    act (Bar #2). Denies on EOF/Ctrl+C — the safe default.
+    """
+    console.print()
+    console.print(f"[warn]⚠ The agent wants to run:[/warn] [bold]{tool_name}[/bold]")
+    args_preview = _fmt_json(arguments, 600)
+    if args_preview and args_preview not in ("{}", "null"):
+        console.print(f"[muted]{args_preview}[/muted]")
+    try:
+        console.print("[accent]Allow this? [y/N][/accent] ", end="")
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        console.print("\n[muted]Denied.[/muted]")
+        return False
+    approved = answer in ("y", "yes")
+    console.print("[ok]Allowed.[/ok]" if approved else "[muted]Denied.[/muted]")
+    return approved
 
 
 def _fmt_json(obj: Any, max_len: int = 400) -> str:
@@ -60,22 +108,36 @@ def _print_debug_panel(title: str, content: str, *, style: str = "blue") -> None
     ))
 
 
-async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False) -> int:
+async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
+                    greet: bool = False) -> int:
     import asyncpg
+    from apps.tui.textkit import strip_scaffolding
+    from apps.tui.tips import mark_seen, random_tip, seen
     from core.agent_api import get_agent_profile_context
     from core.agent_loop import AgentEvent
     from core.cognitive_memory_api import CognitiveMemory
     from core.llm_config import load_llm_config
     from core.tools import ToolContext, create_default_registry
     from services.agent import stream_agent
-    from services.chat import _build_system_prompt, _remember_conversation
+    from services.chat import _build_system_prompt, _remember_conversation, _conversation_source_identity
     from rich.panel import Panel
     from rich.table import Table
 
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=5)
     history: list[dict[str, Any]] = []
+    # One stable id for the whole REPL session so per-turn memory dedup works
+    # (the per-turn stream session id below is separate — it keys each agent run).
+    chat_session_id = str(uuid.uuid4())
 
     try:
+        # First-run detection — an unconfigured agent can't answer.
+        async with pool.acquire() as conn:
+            try:
+                if not bool(await conn.fetchval("SELECT is_agent_configured()")):
+                    return 2
+            except Exception:
+                pass  # never block chat on this probe
+
         # Load config once
         async with pool.acquire() as conn:
             llm_config = await load_llm_config(conn, "llm.chat", fallback_key="llm")
@@ -96,7 +158,11 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False) -> 
             mode_flags.append("debug")
         if mode_flags:
             console.print(f"[muted]Mode: {', '.join(mode_flags)} — showing {'full prompt + ' if debug else ''}hydrated context and tool I/O[/muted]")
-        console.print("[muted]Type /quit to exit, /clear to reset, /recall <q> to search, /verbose or /debug to toggle[/muted]\n")
+        console.print("[muted]Type /help for commands. Ctrl+C interrupts a reply; again (or /quit) to exit.[/muted]")
+        if not seen("chat.opened"):
+            mark_seen("chat.opened")
+            console.print("[muted]This is a normal terminal — select text to copy, scroll with your terminal.[/muted]")
+        console.print(f"[muted]{random_tip()}[/muted]\n")
 
         # Debug: show system prompt and LLM config on startup
         if debug:
@@ -112,112 +178,122 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False) -> 
             )
 
         while True:
-            try:
-                console.print("[accent]you:[/accent] ", end="")
-                user_input = input().strip()
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n[muted]Goodbye.[/muted]")
-                break
+            was_greet = False
+            if greet:
+                # Seed the first turn so the agent wakes and (with consent, no
+                # external lookups) offers to learn who you are.
+                greet = False
+                was_greet = True
+                user_input = (
+                    "Hi — this is the first time we're talking. Please introduce "
+                    "yourself briefly, and if you'd like, feel free to ask a little "
+                    "about me — only what I choose to share, and without looking "
+                    "anything up unless I say it's okay."
+                )
+                console.print(f"[accent]you:[/accent] [dim]{user_input}[/dim]")
+            else:
+                try:
+                    console.print("[accent]you:[/accent] ", end="")
+                    user_input = input().strip()
+                except (EOFError, KeyboardInterrupt):
+                    console.print("\n[muted]Goodbye.[/muted]")
+                    break
 
             if not user_input:
                 continue
 
-            # Slash commands
+            # Slash commands — one failing command must never crash the session.
             if user_input.startswith("/"):
                 cmd_parts = user_input.split(maxsplit=1)
                 cmd = cmd_parts[0].lower()
+                try:
+                    if cmd in ("/quit", "/exit"):
+                        console.print("[muted]Goodbye.[/muted]")
+                        break
 
-                if cmd in ("/quit", "/exit"):
-                    console.print("[muted]Goodbye.[/muted]")
-                    break
+                    elif cmd == "/help":
+                        _print_commands()
 
-                elif cmd == "/clear":
-                    history.clear()
-                    console.print("[muted]Conversation cleared.[/muted]\n")
-                    continue
+                    elif cmd == "/clear":
+                        history.clear()
+                        console.print("[muted]Local context reset (long-term memories are kept).[/muted]\n")
 
-                elif cmd == "/recall":
-                    query = cmd_parts[1] if len(cmd_parts) > 1 else ""
-                    if not query:
-                        err_console.print("[fail]Usage: /recall <query>[/fail]")
-                        continue
-                    async with CognitiveMemory.connect(dsn) as mem:
-                        result = await mem.recall(query, limit=5)
-                    if not result.memories:
-                        console.print("[muted]No memories found.[/muted]\n")
-                    else:
-                        for m in result.memories:
-                            content = m.content[:100] + "..." if len(m.content) > 100 else m.content
-                            console.print(f"  [teal]{m.type}[/teal] {content} [muted](sim: {m.similarity:.2f})[/muted]")
-                        console.print()
-                    continue
+                    elif cmd == "/recall":
+                        query = cmd_parts[1] if len(cmd_parts) > 1 else ""
+                        if not query:
+                            err_console.print("[fail]Usage: /recall <query>[/fail]")
+                        else:
+                            async with CognitiveMemory.connect(dsn) as mem:
+                                result = await mem.recall(query, limit=5)
+                            if not result.memories:
+                                console.print("[muted]No memories found.[/muted]\n")
+                            else:
+                                for m in result.memories:
+                                    content = m.content[:100] + "..." if len(m.content) > 100 else m.content
+                                    console.print(f"  [teal]{m.type}[/teal] {content} [muted](sim: {m.similarity:.2f})[/muted]")
+                                console.print()
 
-                elif cmd == "/status":
-                    from core.cli_api import status_payload_rich
-                    from apps.hexis_cli import _print_rich_status
-                    payload = await status_payload_rich(dsn)
-                    _print_rich_status(payload)
-                    continue
+                    elif cmd == "/status":
+                        from core.cli_api import status_payload_rich
+                        from apps.hexis_cli import _print_rich_status
+                        payload = await status_payload_rich(dsn)
+                        _print_rich_status(payload)
 
-                elif cmd == "/verbose":
-                    verbose = not verbose
-                    console.print(f"[muted]Verbose mode: {'on' if verbose else 'off'}[/muted]\n")
-                    continue
+                    elif cmd == "/verbose":
+                        verbose = not verbose
+                        console.print(f"[muted]Verbose mode: {'on' if verbose else 'off'}[/muted]\n")
 
-                elif cmd == "/debug":
-                    debug = not debug
-                    verbose = verbose or debug  # debug implies verbose
-                    console.print(f"[muted]Debug mode: {'on' if debug else 'off'} (verbose: {'on' if verbose else 'off'})[/muted]\n")
-                    if debug:
+                    elif cmd == "/debug":
+                        debug = not debug
+                        verbose = verbose or debug  # debug implies verbose
+                        console.print(f"[muted]Debug mode: {'on' if debug else 'off'} (verbose: {'on' if verbose else 'off'})[/muted]\n")
+                        if debug:
+                            _print_debug_panel(
+                                f"System Prompt ({len(system_prompt)} chars)",
+                                system_prompt, style="magenta",
+                            )
+
+                    elif cmd == "/prompt":
                         _print_debug_panel(
                             f"System Prompt ({len(system_prompt)} chars)",
-                            system_prompt,
-                            style="magenta",
+                            system_prompt, style="magenta",
                         )
-                    continue
 
-                elif cmd == "/prompt":
-                    _print_debug_panel(
-                        f"System Prompt ({len(system_prompt)} chars)",
-                        system_prompt,
-                        style="magenta",
-                    )
-                    continue
-
-                elif cmd == "/tools":
-                    specs = await registry.get_specs(ToolContext.CHAT)
-                    table = Table(title="Available Tools", show_lines=False, border_style="dim")
-                    table.add_column("Name", style="teal")
-                    table.add_column("Description", style="dim", max_width=80)
-                    for spec in specs:
-                        func = spec.get("function", {})
-                        table.add_row(func.get("name", "?"), _truncate(func.get("description", ""), 80))
-                    console.print(table)
-                    console.print()
-                    continue
-
-                elif cmd == "/history":
-                    if not history:
-                        console.print("[muted]No conversation history yet.[/muted]\n")
-                    else:
-                        for i, msg in enumerate(history):
-                            role = msg["role"]
-                            content = _truncate(msg["content"], 120)
-                            console.print(f"  [dim]{i}[/dim] [teal]{role}[/teal]: {content}")
+                    elif cmd == "/tools":
+                        specs = await registry.get_specs(ToolContext.CHAT)
+                        table = Table(title="Available Tools", show_lines=False, border_style="dim")
+                        table.add_column("Name", style="teal")
+                        table.add_column("Description", style="dim", max_width=80)
+                        for spec in specs:
+                            func = spec.get("function", {})
+                            table.add_row(func.get("name", "?"), _truncate(func.get("description", ""), 80))
+                        console.print(table)
                         console.print()
-                    continue
 
-                else:
-                    err_console.print(f"[fail]Unknown command: {cmd}[/fail]")
-                    err_console.print("[muted]Commands: /quit /clear /recall /status /verbose /debug /prompt /tools /history[/muted]")
-                    continue
+                    elif cmd == "/history":
+                        if not history:
+                            console.print("[muted]No conversation history yet.[/muted]\n")
+                        else:
+                            for i, msg in enumerate(history):
+                                console.print(f"  [dim]{i}[/dim] [teal]{msg['role']}[/teal]: {_truncate(msg['content'], 120)}")
+                            console.print()
+
+                    else:
+                        err_console.print(f"[fail]Unknown command: {cmd}[/fail]")
+                        _print_commands()
+                except Exception as e:
+                    err_console.print(f"[fail]{cmd} failed: {e}[/fail]")
+                    err_console.print("[muted]Your conversation is intact — try again or /help.[/muted]")
+                continue
 
             # Normal message — stream response via unified agent runner
             # (subconscious pre-phase → memory hydration → conscious loop)
             session_id = str(uuid.uuid4())
 
             try:
-                full_text = ""
+                raw_buf = ""   # full raw model output
+                shown = ""     # what we've actually printed (scaffolding-stripped)
+                turn_timed_out = False
                 tool_calls_log: list[dict[str, Any]] = []
 
                 # Debug: show conversation history being sent
@@ -242,6 +318,7 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False) -> 
                     session_id=session_id,
                     agent_profile=agent_profile,
                     dsn=dsn,
+                    on_approval=_approve_tool,
                 ):
                     if event.event == AgentEvent.PHASE_CHANGE:
                         phase = event.data.get("phase", "")
@@ -260,9 +337,19 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False) -> 
                     elif event.event == AgentEvent.TEXT_DELTA:
                         text = event.data.get("text", "")
                         if text:
-                            full_text += text
-                            sys.stdout.write(text)
-                            sys.stdout.flush()
+                            raw_buf += text
+                            # Strip leaked <think>/tool-call scaffolding from what the
+                            # user SEES, not just from what we persist. Streaming-safe:
+                            # only emit newly-revealed prose (partial tags are held back).
+                            visible = strip_scaffolding(raw_buf)[0]
+                            if visible.startswith(shown):
+                                new = visible[len(shown):]
+                                if new:
+                                    sys.stdout.write(new)
+                                    sys.stdout.flush()
+                                    shown = visible
+                            else:
+                                shown = visible
 
                     elif event.event == AgentEvent.TOOL_START:
                         tool_name = event.data.get("tool_name", "tool")
@@ -295,14 +382,14 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False) -> 
                             console.print(f"\n  [dim]Loop started: {tool_count} tools, energy={energy}[/dim]")
 
                     elif event.event == AgentEvent.LOOP_END:
+                        turn_timed_out = bool(event.data.get("timed_out", False))
                         if debug:
                             reason = event.data.get("stopped_reason", "?")
                             iters = event.data.get("iterations", 0)
                             energy_spent = event.data.get("energy_spent", 0)
-                            timed_out = event.data.get("timed_out", False)
                             console.print(
                                 f"  [dim]Loop ended: reason={reason}, iterations={iters}, "
-                                f"energy_spent={energy_spent}{', TIMED OUT' if timed_out else ''}[/dim]"
+                                f"energy_spent={energy_spent}{', TIMED OUT' if turn_timed_out else ''}[/dim]"
                             )
 
                     elif event.event == AgentEvent.ERROR:
@@ -320,26 +407,60 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False) -> 
                     )
                     console.print(f"[dim]Tool calls this turn:\n{summary}[/dim]")
 
+                clean_text = strip_scaffolding(raw_buf)[0].strip() if raw_buf else ""
+
+                if turn_timed_out:
+                    console.print("[warn](response timed out — the reply above may be incomplete)[/warn]")
+
+                # Empty response — say so, don't poison history with a blank turn.
+                if not clean_text:
+                    console.print(
+                        "[muted](the model returned an empty response — try rephrasing, "
+                        "or check the connection with `hexis doctor --llm`)[/muted]\n"
+                    )
+                    continue
+
                 console.print()
 
-                # Update history
-                history.append({"role": "user", "content": user_input})
-                history.append({"role": "assistant", "content": full_text})
+                # Update history. On the first-run greet, keep the agent's intro
+                # for context but do NOT record the fabricated wake-nudge as the
+                # user's words (in history or in long-term memory).
+                if not was_greet:
+                    history.append({"role": "user", "content": user_input})
+                history.append({"role": "assistant", "content": clean_text})
 
-                # Memory formation
-                if full_text:
-                    try:
-                        async with CognitiveMemory.connect(dsn) as mem_client:
-                            await _remember_conversation(
-                                mem_client,
-                                user_message=user_input,
-                                assistant_message=full_text,
-                            )
-                    except Exception:
-                        pass
+                if was_greet:
+                    continue
 
+                # Memory formation (advisory — never blocks, but fails loud in logs).
+                # Pass a stable dedup key so an identical turn isn't stored twice.
+                src_id = _conversation_source_identity(
+                    chat_session_id, history, user_input, clean_text
+                )
+                try:
+                    async with CognitiveMemory.connect(dsn) as mem_client:
+                        await _remember_conversation(
+                            mem_client,
+                            user_message=user_input,
+                            assistant_message=clean_text,
+                            session_id=chat_session_id,
+                            source_identity=src_id,
+                        )
+                except Exception:
+                    logger.warning("memory formation failed", exc_info=True)
+                    if debug:
+                        err_console.print("[muted](memory not stored this turn — see logs)[/muted]")
+
+            except KeyboardInterrupt:
+                sys.stdout.write("\n")
+                console.print("[muted](interrupted)[/muted]\n")
+                continue
             except Exception as e:
-                err_console.print(f"\n[fail]Error: {e}[/fail]\n")
+                err_console.print(f"\n[fail]Something went wrong: {e}[/fail]")
+                err_console.print(
+                    "[muted]Your conversation is intact. Try again, or run "
+                    "`hexis doctor --llm` to check the model connection.[/muted]\n"
+                )
 
     finally:
         await pool.close()
@@ -355,6 +476,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dsn", default=None, help="Postgres DSN; defaults to POSTGRES_* env vars")
     p.add_argument("-v", "--verbose", action="store_true", help="Show hydrated context and tool I/O")
     p.add_argument("-d", "--debug", action="store_true", help="Full debug: system prompt, enriched messages, LLM config, tool specs")
+    p.add_argument("--greet", action="store_true", help="Seed a first 'wake up' turn (used right after init)")
     return p
 
 
@@ -368,13 +490,28 @@ def main(argv: list[str] | None = None) -> int:
     debug = args.debug
 
     try:
-        return asyncio.run(_run_chat(dsn, verbose=verbose, debug=debug))
+        rc = asyncio.run(_run_chat(dsn, verbose=verbose, debug=debug, greet=args.greet))
     except KeyboardInterrupt:
         console.print("\n[muted]Goodbye.[/muted]")
         return 0
     except Exception as e:
         err_console.print(f"[fail]Chat failed: {e}[/fail]")
         return 1
+
+    # First-run: agent not configured → offer setup (sync layer, no nested loop).
+    if rc == 2:
+        console.print("\n[warn]No agent is configured yet.[/warn]")
+        try:
+            console.print("[accent]Run setup (hexis init) now? [Y/n][/accent] ", end="")
+            answer = input().strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            answer = "n"
+        if answer in ("", "y", "yes"):
+            from apps import hexis_init
+            return hexis_init.main([])
+        console.print("[muted]Run `hexis init` to set up your agent.[/muted]")
+        return 0
+    return rc
 
 
 if __name__ == "__main__":

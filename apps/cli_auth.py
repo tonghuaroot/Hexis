@@ -620,8 +620,12 @@ async def _anthropic_status(dsn: str, wait_seconds: int, *, as_json: bool) -> in
         now = int(time.time() * 1000)
         expires_in_s = int((expires_at - now) / 1000) if expires_at else None
         sources.append({
+            # Detected, but Hexis does NOT use Claude Code's login (it manages
+            # its own store). Don't report it as "configured".
             "type": "claude_code",
-            "configured": True,
+            "configured": False,
+            "used_by_runtime": False,
+            "note": "detected but not used — run `hexis auth anthropic login`",
             "expires_in_seconds": expires_in_s,
             "source": cc_creds.get("source", "unknown"),
             "token_preview": cc_creds.get("accessToken", "")[-6:],
@@ -642,16 +646,20 @@ async def _anthropic_status(dsn: str, wait_seconds: int, *, as_json: bool) -> in
             sys.stdout.write("Anthropic: not configured\n")
         return 0
 
+    # "configured" for Hexis means a source the runtime actually uses.
+    usable = bool(oauth_creds or setup_creds)
     if as_json:
-        sys.stdout.write(json.dumps({"configured": True, "sources": sources}, indent=2, sort_keys=True) + "\n")
+        sys.stdout.write(json.dumps({"configured": usable, "sources": sources}, indent=2, sort_keys=True) + "\n")
     else:
+        if not usable:
+            sys.stdout.write("Anthropic: not logged in to Hexis. Run `hexis auth anthropic login`.\n")
         for src in sources:
             t = src["type"]
             if t == "oauth_pkce":
                 sys.stdout.write(f"  OAuth PKCE: expires_in={src['expires_in_seconds']}s\n")
             elif t == "claude_code":
                 exp = f" expires_in={src['expires_in_seconds']}s" if src.get("expires_in_seconds") is not None else ""
-                sys.stdout.write(f"  Claude Code: source={src['source']}{exp}\n")
+                sys.stdout.write(f"  Claude Code: detected but NOT used by Hexis ({src['source']}{exp})\n")
             elif t == "setup_token":
                 sys.stdout.write(f"  Setup token: {src['token_prefix']}\n")
     return 0
@@ -693,7 +701,11 @@ async def _chutes_login(dsn: str, wait_seconds: int, args: Any) -> int:
 
     client_id = getattr(args, "client_id", None) or os.getenv("CHUTES_CLIENT_ID", "")
     if not client_id:
-        _print_err("Chutes requires CHUTES_CLIENT_ID env var or --client-id flag.")
+        _print_err(
+            "Chutes OAuth needs a client id. Create one at https://chutes.ai (developer "
+            "settings), then set CHUTES_CLIENT_ID (or pass --client-id). Alternatively, "
+            "use Chutes as an OpenAI-compatible endpoint with an API key."
+        )
         return 1
 
     redirect_uri = os.getenv("CHUTES_REDIRECT_URI", "http://localhost:11435/auth/callback")

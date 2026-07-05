@@ -7,9 +7,16 @@ from __future__ import annotations
 
 import os
 
-from apps.tui import activity, textkit
+from apps.tui import activity, model_catalog, textkit
 from apps.tui.chat_widgets import COMMANDS, StreamingBlock, ToolTree
-from apps.tui.init_widgets import BigFiveSliders, CharacterPreview, StepBar, TraitSlider
+from apps.tui.init_widgets import (
+    BigFiveSliders,
+    CharacterPreview,
+    ModelCombo,
+    ModelMenu,
+    StepBar,
+    TraitSlider,
+)
 from apps.tui.status_bar import StatusBar
 
 
@@ -20,8 +27,38 @@ def test_widgets_accept_id_kwarg():
     assert StepBar(current=3, id="steps").id == "steps"
     assert TraitSlider(value=0.5, id="trait-openness").id == "trait-openness"
     assert BigFiveSliders(id="bf").id == "bf"
+    assert ModelCombo(id="model").id == "model"
+    assert ModelMenu(id="model-menu").id == "model-menu"
     assert StreamingBlock() is not None
     assert ToolTree() is not None
+
+
+# ── Model catalog (models.dev parsing) ────────────────────────────────────────
+
+def test_model_catalog_filters_nonchat_and_sorts_newest_first():
+    block = {"models": {
+        "a": {"id": "chat-new", "last_updated": "2025-06-01", "modalities": {"output": ["text"]}},
+        "b": {"id": "chat-old", "last_updated": "2024-01-01", "modalities": {"output": ["text"]}},
+        "c": {"id": "text-embedding-3", "modalities": {"output": ["text"]}},   # embedding id
+        "d": {"id": "img-gen", "modalities": {"output": ["image"]}},           # non-text output
+    }}
+    assert model_catalog.chat_models(block) == ["chat-new", "chat-old"]
+
+
+def test_model_catalog_provider_mapping():
+    slugs = model_catalog.PROVIDER_SLUG
+    assert slugs["gemini"] == "google"
+    assert slugs["grok"] == "xai"
+    assert slugs["anthropic"] == "anthropic"
+    # ollama is fetched locally (/api/tags), not via models.dev
+    assert "ollama" not in slugs
+
+
+def test_model_menu_filter_and_suppress():
+    menu = ModelMenu(id="model-menu")
+    menu.populate(["gpt-5.2", "gpt-4o", "claude-sonnet-5"])
+    assert menu._all == ["gpt-5.2", "gpt-4o", "claude-sonnet-5"]
+    assert menu._suppress is False
 
 
 # ── Scaffolding strip ─────────────────────────────────────────────────────────
@@ -151,3 +188,23 @@ def test_commands_are_well_formed():
     assert all(c.startswith("/") and desc for c, desc in COMMANDS)
     names = [c for c, _ in COMMANDS]
     assert "/help" in names and "/recall" in names and "/quit" in names
+
+
+# ── Anthropic OAuth provider wiring ───────────────────────────────────────────
+
+def test_anthropic_oauth_provider_registered():
+    from apps.tui import model_catalog
+    from apps.tui.init_screens import (
+        _DEFAULT_MODELS, _OAUTH_PROVIDERS, _PROVIDER_ENV_VARS,
+        _PROVIDER_OPTIONS, _persisted_provider,
+    )
+    # wizard-only alias maps to the real "anthropic" id for the LLM layer
+    assert _persisted_provider("anthropic-oauth") == "anthropic"
+    assert _persisted_provider("openai") == "openai"
+    # registered as an OAuth provider option with a claude default + no env key
+    assert ("Claude Pro/Max (Anthropic OAuth)", "anthropic-oauth") in _PROVIDER_OPTIONS
+    assert "anthropic-oauth" in _OAUTH_PROVIDERS
+    assert _PROVIDER_ENV_VARS["anthropic-oauth"] == ""
+    assert _DEFAULT_MODELS["anthropic-oauth"].startswith("claude-")
+    # model dropdown resolves to the anthropic catalog
+    assert model_catalog.PROVIDER_SLUG["anthropic-oauth"] == "anthropic"

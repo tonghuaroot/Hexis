@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from apps.hexis_init import (
-    _DEFAULT_MODELS,
     _PROVIDER_ENV_VARS,
     _write_env_var,
     build_parser,
@@ -122,9 +121,19 @@ def test_build_parser_defaults():
 # ---------------------------------------------------------------------------
 
 
-def test_default_models_has_all_providers():
+def test_default_models_derive_from_live_catalog():
+    """Defaults are no longer hardcoded per provider — they come from the live
+    models.dev catalog via model_catalog.recommended_default (Bar #1)."""
+    from apps.tui import model_catalog
+
+    # Every non-Ollama provider maps to a models.dev slug (Ollama is local-only).
     for provider in _PROVIDER_ENV_VARS:
-        assert provider in _DEFAULT_MODELS, f"Missing default model for {provider}"
+        if provider == "ollama":
+            continue
+        assert provider in model_catalog.PROVIDER_SLUG, f"No catalog slug for {provider}"
+    # The flagship heuristic picks a sensible non-variant default.
+    assert model_catalog.recommended_default(
+        "openai", ["gpt-5.5-pro", "gpt-5.5", "gpt-5.4-mini"]) == "gpt-5.5"
 
 
 # ---------------------------------------------------------------------------

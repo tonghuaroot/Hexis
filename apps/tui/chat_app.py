@@ -22,6 +22,7 @@ from apps.tui.chat_widgets import COMMANDS, Composer, SlashMenu, Transcript
 from apps.tui.design import COLORS, GLYPHS
 from apps.tui.status_bar import StatusBar
 from apps.tui.theme import hexis_theme
+from apps.tui.tips import mark_seen, random_tip, seen
 
 
 class ChatScreen(Screen):
@@ -31,7 +32,22 @@ class ChatScreen(Screen):
         Binding("ctrl+c", "interrupt_or_quit", "Interrupt / Quit", priority=True),
         Binding("ctrl+l", "clear_chat", "Clear"),
         Binding("ctrl+t", "toggle_thinking", "Thinking"),
+        # Keyboard scrolling (mouse wheel is off so the terminal owns the mouse
+        # for text selection / copy).
+        Binding("pageup", "scroll_transcript('page_up')", "Scroll up", show=False),
+        Binding("pagedown", "scroll_transcript('page_down')", "Scroll down", show=False),
+        Binding("ctrl+home", "scroll_transcript('home')", "Top", show=False),
+        Binding("ctrl+end", "scroll_transcript('end')", "Bottom", show=False),
     ]
+
+    def action_scroll_transcript(self, how: str) -> None:
+        tr = self.query_one(Transcript)
+        {
+            "page_up": tr.scroll_page_up,
+            "page_down": tr.scroll_page_down,
+            "home": tr.scroll_home,
+            "end": tr.scroll_end,
+        }.get(how, lambda: None)()
 
     def __init__(self) -> None:
         super().__init__()
@@ -47,6 +63,7 @@ class ChatScreen(Screen):
         self._queued: list[str] = []
         self._tool_count = 0
         self._flush_timer: Any = None
+        self._greet = False
 
     def compose(self) -> ComposeResult:
         yield Static("", id="chat-header")
@@ -63,7 +80,31 @@ class ChatScreen(Screen):
         self.query_one(SlashMenu).display = False
         status = self.query_one(StatusBar)
         status.update_state(model=app.model_name, mood=self._mood)
+        self.query_one(Transcript).write_info(
+            "Keyboard-only — type to chat, / for commands, PageUp/PageDown to "
+            "scroll. Drag with the mouse to select & copy text."
+        )
+        # First-ever open: a one-time contextual hint (show-once).
+        if not seen("chat.opened"):
+            mark_seen("chat.opened")
+            self.query_one(Transcript).write_info(
+                "First time here — Ctrl+C interrupts a reply, Ctrl+T toggles the "
+                "agent's thinking, /help lists everything."
+            )
+        self.query_one(Transcript).write_info(random_tip())
         await self._refresh_energy()
+        # First-run: seed a wake-up turn so the agent greets and (with consent,
+        # no external lookups) offers to learn who you are.
+        if self._greet:
+            self.run_worker(self._seed_greet(), name="greet", exit_on_error=False)
+
+    async def _seed_greet(self) -> None:
+        await self._send_message(
+            "Hi — this is the first time we're talking. Please introduce yourself "
+            "briefly, and if you'd like, feel free to ask a little about me — only "
+            "what I choose to share, and without looking anything up unless I say "
+            "it's okay."
+        )
         self.query_one(Composer).focus()
 
     def _render_header(self) -> None:
@@ -216,7 +257,10 @@ class ChatScreen(Screen):
         self._current_turn.show_reasoning(self._show_reasoning)
         self.query_one(StatusBar).set_busy("thinking")
         self._flush_timer = self.set_interval(0.1, self._flush)
-        self.run_worker(self._stream_response(text), name="chat-stream", exclusive=True)
+        # exit_on_error=False → an LLM/stream failure shows as an error line
+        # instead of crashing the chat app (on_worker_state_changed handles it).
+        self.run_worker(self._stream_response(text), name="chat-stream",
+                        exclusive=True, exit_on_error=False)
 
     async def _flush(self) -> None:
         if self._current_turn is not None:
@@ -311,7 +355,7 @@ class ChatScreen(Screen):
             if final_text:
                 self.run_worker(
                     self._remember(self._pending_user, final_text),
-                    name="chat-remember",
+                    name="chat-remember", exit_on_error=False,
                 )
 
         await self._refresh_energy()
@@ -376,12 +420,23 @@ class HexisChatApp(App):
         self.dsn: str = ""
         self._verbose = False
         self._debug = False
+        self._greet = False  # --greet: seed a first "wake up" turn on first run
+        # Set to "init" when a first-run chat should hand off to setup.
+        self.next_action: str | None = None
 
     def get_css_variables(self) -> dict[str, str]:
         from apps.tui.design import CSS_VARS
         variables = super().get_css_variables()
         variables.update(CSS_VARS)
         return variables
+
+    def run(self, **kwargs):
+        # Keyboard-only by default: don't capture the mouse, so the terminal's
+        # native click-drag text selection / copy keeps working. Set
+        # HEXIS_TUI_MOUSE=1 to re-enable mouse interaction.
+        import os
+        kwargs.setdefault("mouse", os.getenv("HEXIS_TUI_MOUSE", "") == "1")
+        return super().run(**kwargs)
 
     async def on_mount(self) -> None:
         load_dotenv()
@@ -404,13 +459,21 @@ class HexisChatApp(App):
                 self._debug = True
                 self._verbose = True
                 i += 1
+            elif a == "--greet":
+                self._greet = True
+                i += 1
             else:
                 i += 1
 
         self.dsn = dsn or db_dsn_from_env()
+        configured = True
         try:
             self.pool = await asyncpg.create_pool(self.dsn, min_size=2, max_size=5)
             async with self.pool.acquire() as conn:
+                try:
+                    configured = bool(await conn.fetchval("SELECT is_agent_configured()"))
+                except Exception:
+                    configured = True  # never block chat on this probe
                 llm_config = await load_llm_config(conn, "llm.chat", fallback_key="llm")
             self.model_name = llm_config.get("model", "") if isinstance(llm_config, dict) else ""
             self.registry = create_default_registry(self.pool)
@@ -423,9 +486,29 @@ class HexisChatApp(App):
             await self.push_screen(ErrorDialog("Connection Error", str(e)))
             return
 
+        # First-run detection: an empty chat on an unconfigured agent just fails
+        # at the first message. Offer setup instead.
+        if not configured:
+            from apps.tui.dialogs import ConfirmDialog
+
+            def _decide(run_init: bool | None) -> None:
+                if run_init:
+                    self.next_action = "init"
+                self.exit(0)
+
+            await self.push_screen(
+                ConfirmDialog(
+                    "Not set up yet",
+                    "No agent is configured. Run setup (hexis init) now?",
+                ),
+                _decide,
+            )
+            return
+
         screen = ChatScreen()
         screen._verbose = self._verbose
         screen._debug = self._debug
+        screen._greet = self._greet
         await self.push_screen(screen)
 
     async def on_unmount(self) -> None:

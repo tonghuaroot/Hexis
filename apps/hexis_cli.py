@@ -396,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", parents=[_db], help="Diagnose common issues")
     doctor.add_argument("--json", action="store_true", help="Output JSON")
     doctor.add_argument("--demo", action="store_true", help="Run end-to-end sanity check against the DB")
+    doctor.add_argument("--llm", action="store_true", help="Make one real LLM call to verify provider/model/key")
     doctor.set_defaults(func="doctor")
 
     # Hidden alias: 'demo' → 'doctor --demo'
@@ -689,6 +690,21 @@ async def _tools_list(dsn: str, context_filter: str | None, as_json: bool) -> in
         await pool.close()
 
 
+def _check_tool_name(pool, tool_name: str) -> bool:
+    """Validate a tool name against the registry so typos don't silently
+    'succeed' (Bar #4, #8). Returns True if valid; prints guidance if not."""
+    from core.tools import create_default_registry
+    import difflib
+
+    names = sorted(h.spec.name for h in create_default_registry(pool).list_all())
+    if tool_name in names:
+        return True
+    close = difflib.get_close_matches(tool_name, names, n=3)
+    hint = f" Did you mean: {', '.join(close)}?" if close else ""
+    _print_err(f"Unknown tool '{tool_name}'.{hint} Run `hexis tools list` to see them all.")
+    return False
+
+
 async def _tools_enable(dsn: str, tool_name: str) -> int:
     """Enable a tool."""
     import asyncpg
@@ -696,6 +712,8 @@ async def _tools_enable(dsn: str, tool_name: str) -> int:
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
     try:
+        if not _check_tool_name(pool, tool_name):
+            return 1
         config = await load_tools_config(pool)
 
         # Add to enabled list (or create it)
@@ -709,7 +727,8 @@ async def _tools_enable(dsn: str, tool_name: str) -> int:
             config.disabled.remove(tool_name)
 
         await save_tools_config(pool, config)
-        sys.stdout.write(f"Enabled tool: {tool_name}\n")
+        from apps.cli_theme import console as _con
+        _con.print(f"[ok]✔[/ok] Enabled tool: [bold]{tool_name}[/bold]")
         return 0
     finally:
         await pool.close()
@@ -722,6 +741,8 @@ async def _tools_disable(dsn: str, tool_name: str) -> int:
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
     try:
+        if not _check_tool_name(pool, tool_name):
+            return 1
         config = await load_tools_config(pool)
 
         # Add to disabled list
@@ -733,7 +754,8 @@ async def _tools_disable(dsn: str, tool_name: str) -> int:
             config.enabled.remove(tool_name)
 
         await save_tools_config(pool, config)
-        sys.stdout.write(f"Disabled tool: {tool_name}\n")
+        from apps.cli_theme import console as _con
+        _con.print(f"[ok]✔[/ok] Disabled tool: [bold]{tool_name}[/bold]")
         return 0
     finally:
         await pool.close()
@@ -752,7 +774,8 @@ async def _tools_set_api_key(dsn: str, key_name: str, value: str) -> int:
 
         # Redact display value
         display_val = value if value.startswith("env:") else "***"
-        sys.stdout.write(f"Set API key: {key_name} = {display_val}\n")
+        from apps.cli_theme import console as _con
+        _con.print(f"[ok]✔[/ok] Set API key: [bold]{key_name}[/bold] = [muted]{display_val}[/muted]")
         return 0
     finally:
         await pool.close()
@@ -765,10 +788,13 @@ async def _tools_set_cost(dsn: str, tool_name: str, cost: int) -> int:
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
     try:
+        if not _check_tool_name(pool, tool_name):
+            return 1
         config = await load_tools_config(pool)
         config.costs[tool_name] = cost
         await save_tools_config(pool, config)
-        sys.stdout.write(f"Set energy cost: {tool_name} = {cost}\n")
+        from apps.cli_theme import console as _con
+        _con.print(f"[ok]✔[/ok] Set energy cost: [bold]{tool_name}[/bold] = [bold]{cost}[/bold]")
         return 0
     finally:
         await pool.close()
@@ -1008,7 +1034,7 @@ async def _instance_delete(name: str, force: bool, reason: str | None) -> int:
         sys.stdout.flush()
         try:
             confirmation = input()
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
             _print_err("Aborted.")
             return 1
 
@@ -1600,7 +1626,10 @@ async def _channels_status(dsn: str, as_json: bool) -> int:
         return 0
     except Exception as e:
         if "channel_sessions" in str(e):
-            _print_err("Channel tables not found. Bounce the DB to apply schema: docker-compose down -v && docker-compose build db && docker-compose up -d")
+            _print_err(
+                "Channel tables not found — your schema is out of date. "
+                "Run `hexis reset` to rebuild it (it will confirm before wiping data)."
+            )
         else:
             _print_err(f"Error: {e}")
         return 1
@@ -1747,6 +1776,9 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             sys.stdout.write("Start with: hexis channels start --channel matrix\n")
 
         return 0
+    except (KeyboardInterrupt, EOFError):
+        _print_err("Aborted.")
+        return 1
     except Exception as e:
         _print_err(f"Error: {e}")
         return 1
@@ -2122,6 +2154,28 @@ async def _schedule_delete(dsn: str, task_id: str, force: bool) -> int:
         await pool.close()
 
 
+def _port_ready(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> bool:
+    """True if something accepts a TCP connection on host:port."""
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_port_ready(port: int, host: str = "127.0.0.1", overall: float = 45.0) -> bool:
+    """Poll until the port accepts connections (or time out). Beats a fixed
+    sleep before opening a browser at a cold Next.js build (Bar #4)."""
+    import time as _time
+    deadline = _time.monotonic() + overall
+    while _time.monotonic() < deadline:
+        if _port_ready(port, host):
+            return True
+        _time.sleep(0.4)
+    return False
+
+
 def _handle_ui(stack_root: Path, port: int, no_open: bool) -> int:
     """Start the Next.js web dashboard."""
     import threading
@@ -2228,11 +2282,11 @@ def _handle_ui(stack_root: Path, port: int, no_open: bool) -> int:
     from apps.cli_theme import console
     console.print(f"\n[accent]Starting web dashboard on port {port}...[/accent]")
 
-    # Open browser after a short delay
+    # Open the browser only once the server actually responds — not on a timer.
     if not no_open:
         def _open_browser():
-            time.sleep(3)
-            webbrowser.open(f"http://localhost:{port}")
+            if _wait_port_ready(port):
+                webbrowser.open(f"http://localhost:{port}")
         t = threading.Thread(target=_open_browser, daemon=True)
         t.start()
 
@@ -2330,11 +2384,11 @@ def _handle_ui_container(
         _print_err("Failed to start UI container.")
         return rc
 
-    # Open browser after a short delay
+    # Open the browser only once the server actually responds — not on a timer.
     if not no_open:
         def _open_browser():
-            time.sleep(3)
-            webbrowser.open(f"http://localhost:{port}")
+            if _wait_port_ready(port):
+                webbrowser.open(f"http://localhost:{port}")
         t = threading.Thread(target=_open_browser, daemon=True)
         t.start()
 
@@ -2350,6 +2404,29 @@ def _handle_ui_container(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Top-level guard: turn stack-down / unhandled errors into one actionable
+    line instead of a raw traceback (Experience Bar #8, #4)."""
+    try:
+        return _dispatch(argv)
+    except KeyboardInterrupt:
+        _print_err("Aborted.")
+        return 130
+    except Exception as e:  # noqa: BLE001
+        low = str(e).lower()
+        if any(s in low for s in (
+            "postgres", "connection refused", "connect call failed",
+            "failed to connect", "timed out connecting", "timeouterror",
+        )) or isinstance(e, (ConnectionError, TimeoutError)):
+            _print_err(
+                "Can't reach the database. Is the stack running? "
+                "Try `hexis up`, then `hexis doctor`."
+            )
+        else:
+            _print_err(f"Error: {e}")
+        return 1
+
+
+def _dispatch(argv: list[str] | None = None) -> int:
     load_dotenv()
 
     # Some commands intentionally forward argv to another module (init/chat/ingest/etc).
@@ -2413,29 +2490,9 @@ def main(argv: list[str] | None = None) -> int:
 
         fwd_argv = cmd_argv[1:]
 
-        # Launch Textual TUI for chat and init (unless non-interactive)
-        if cmd == "chat":
-            try:
-                from apps.tui.chat_app import HexisChatApp
-                tui_argv = [a for a in fwd_argv if a != "--"]
-                app = HexisChatApp(tui_argv)
-                app.run()
-                return 0
-            except ImportError:
-                pass
-
-        if cmd == "init":
-            _noninteractive_flags = {"--api-key", "--provider", "--character"}
-            has_noninteractive = any(f in fwd_argv for f in _noninteractive_flags)
-            if not has_noninteractive:
-                try:
-                    from apps.tui.init_app import HexisInitApp
-                    tui_argv = [a for a in fwd_argv if a != "--"]
-                    app = HexisInitApp(tui_argv)
-                    app.run()
-                    return 0
-                except ImportError:
-                    pass
+        # chat and init use line-based CLIs (apps.cli_chat / apps.hexis_init) —
+        # keyboard-first, native terminal, Ctrl+C exits. They are reached via the
+        # forward_map below.
 
         if cmd == "ingest":
             # UX/backwards-compat: accept `hexis ingest --file foo.md` by auto-inserting
@@ -2539,7 +2596,13 @@ def main(argv: list[str] | None = None) -> int:
         if not is_source:
             from apps.cli_theme import console
             console.print("[accent]Pulling Docker images...[/accent]")
-            run_compose(compose_cmd or [], compose_file, stack_root, ["pull"], env_file)
+            pull_rc = run_compose(compose_cmd or [], compose_file, stack_root, ["pull"], env_file)
+            if pull_rc != 0:
+                console.print(
+                    "[warn]⚠ Image pull failed[/warn] — check your network, `docker login`, "
+                    "or a registry rate limit. Continuing with cached images; if `up` reports a "
+                    "missing image, that's the cause."
+                )
         # Build compose args: --profile flags must come before the subcommand
         compose_extra: list[str] = []
         for profile in args.profile:
@@ -2559,9 +2622,10 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:
                 pass  # never block startup
 
-            console.print("  [accent]hexis ui[/accent]     Open the web dashboard")
+            # A fresh agent must be configured before chat/ui are useful — lead with it.
+            console.print("  [accent]hexis init[/accent]   Configure the agent (start here)")
             console.print("  [accent]hexis chat[/accent]   Chat in the terminal")
-            console.print("  [accent]hexis init[/accent]   Configure the agent")
+            console.print("  [accent]hexis ui[/accent]     Open the web dashboard")
             console.print()
         return rc
     if func == "down":
@@ -2605,14 +2669,6 @@ def main(argv: list[str] | None = None) -> int:
         return run_compose(compose_cmd or [], compose_file, stack_root, log_args, env_file)
     if func == "chat":
         fwd_argv = list(args.args or [])
-        try:
-            from apps.tui.chat_app import HexisChatApp
-            tui_argv = [a for a in fwd_argv if a != "--"]
-            app = HexisChatApp(tui_argv)
-            app.run()
-            return 0
-        except ImportError:
-            pass  # textual not installed, fall through
         return _run_module("apps.cli_chat", fwd_argv)
     if func == "ingest":
         argv = list(args.args or [])
@@ -2630,18 +2686,6 @@ def main(argv: list[str] | None = None) -> int:
         return _run_module("apps.worker", args.args)
     if func == "init":
         fwd_argv = list(args.args or [])
-        # Non-interactive flags bypass TUI automatically
-        _noninteractive_flags = {"--api-key", "--provider", "--character"}
-        has_noninteractive = any(f in fwd_argv for f in _noninteractive_flags)
-        if not has_noninteractive:
-            try:
-                from apps.tui.init_app import HexisInitApp
-                tui_argv = [a for a in fwd_argv if a != "--"]
-                app = HexisInitApp(tui_argv)
-                app.run()
-                return 0
-            except ImportError:
-                pass  # textual not installed, fall through
         return _run_module("apps.hexis_init", fwd_argv)
     if func == "mcp":
         return _run_module("apps.hexis_mcp_server", args.args)
@@ -2660,6 +2704,12 @@ def main(argv: list[str] | None = None) -> int:
         return _handle_ui_container(compose_cmd_ui, compose_file, stack_root, env_file, args.port, args.no_open)
     if func == "open":
         import webbrowser
+        if not _port_ready(args.port):
+            _print_err(
+                f"Nothing is listening on http://localhost:{args.port}. "
+                "Start the dashboard first with `hexis ui`."
+            )
+            return 1
         webbrowser.open(f"http://localhost:{args.port}")
         return 0
     if func == "start":
@@ -2701,7 +2751,8 @@ def main(argv: list[str] | None = None) -> int:
         from rich.live import Live
 
         with Live(Spinner("dots", text="Running diagnostics..."), console=_con, transient=True):
-            checks = asyncio.run(cli_api.doctor_payload(dsn, wait_seconds=args.wait_seconds))
+            checks = asyncio.run(cli_api.doctor_payload(
+                dsn, wait_seconds=args.wait_seconds, check_llm=bool(getattr(args, "llm", False))))
 
         if args.json:
             sys.stdout.write(json.dumps(checks, indent=2) + "\n")
@@ -2783,11 +2834,13 @@ def main(argv: list[str] | None = None) -> int:
             _print_rich_status(payload)
         return 0
     if func == "config":
-        dsn = _get_dsn(args)
-        cfg = asyncio.run(cli_api.config_rows(dsn, wait_seconds=args.wait_seconds))
-        cfg = _redact_config(cfg)
-        sys.stdout.write(json.dumps(cfg, indent=2, sort_keys=True) + "\n")
-        return 0
+        # Bare `config` shows the grouped table like `config show` (not raw JSON),
+        # matching how `goals`/`schedule`/`channels` default to their list view.
+        if not hasattr(args, "no_redact"):
+            args.no_redact = False
+        if not hasattr(args, "json"):
+            args.json = False
+        func = "config_show"
     if func == "config_show":
         dsn = _get_dsn(args)
         cfg = asyncio.run(cli_api.config_rows(dsn, wait_seconds=args.wait_seconds))
@@ -2923,7 +2976,8 @@ def main(argv: list[str] | None = None) -> int:
         dsn = _get_dsn(args)
         return asyncio.run(_schedule_delete(dsn, args.task_id, args.force))
 
-    _print_err("Unknown command")
+    _print_err(f"Unknown command: {func}")
+    _print_grouped_help()
     return 2
 
 

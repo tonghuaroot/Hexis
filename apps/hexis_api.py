@@ -481,6 +481,49 @@ async def _apply_existing_consent(conn, record: dict[str, Any]) -> dict[str, Any
     return {"status": next_status}
 
 
+class InitConsentOverrideRequest(BaseModel):
+    role: Literal["conscious", "subconscious"] = "conscious"
+    llm: ConsentLlmConfig | None = None
+    model_decision: str = "decline"
+
+
+@app.post("/api/init/consent/override")
+async def init_consent_override(req: InitConsentOverrideRequest):
+    """Owner override: proceed and activate even though the model didn't consent.
+
+    Consent is a signal, not a lock — it's the owner's AI. The model's response is
+    preserved in the recorded signature; the owner's choice to proceed is explicit.
+    """
+    pool = _pool
+    if pool is None:
+        return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
+
+    from core.llm import normalize_provider
+    from core.init_api import record_consent_override
+
+    llm = req.llm or ConsentLlmConfig()
+    provider = normalize_provider((llm.provider or "").strip().lower() or "openai")
+    model = (llm.model or "").strip()
+    endpoint = (llm.endpoint or "").strip() or None
+    if provider in {"anthropic", "grok", "gemini"}:
+        endpoint = None
+    if not model:
+        return JSONResponse({"error": "Missing model"}, status_code=400)
+
+    async with pool.acquire() as conn:
+        result = await record_consent_override(
+            conn,
+            {"provider": provider, "model": model, "endpoint": endpoint},
+            model_decision=(req.model_decision or "decline"),
+        )
+        status_raw = await conn.fetchval("SELECT get_init_status() as status")
+        status = (
+            status_raw if isinstance(status_raw, dict)
+            else (json.loads(status_raw) if isinstance(status_raw, str) else {})
+        )
+    return JSONResponse({"decision": "consent", "override": True, "result": result, "status": status})
+
+
 @app.post("/api/init/consent/request")
 async def init_consent_request(req: InitConsentRequest):
     pool = _pool

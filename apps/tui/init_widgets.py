@@ -11,7 +11,8 @@ from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Label, RichLog, Static
+from textual.widgets import Input, Label, OptionList, RichLog, Static
+from textual.widgets.option_list import Option
 
 from apps.tui.design import COLORS, GLYPHS
 
@@ -158,3 +159,90 @@ class CharacterPreview(Static):
                 line.append(bar, style=Style(color=COLORS["accent"]))
                 line.append(f" {val:.2f}", style=Style(color=COLORS["dim"]))
                 log.write(line)
+
+
+# ── Model combobox (dropdown + free typing) ──────────────────────────────────
+
+class ModelMenu(OptionList):
+    """Inline, filterable dropdown of candidate model ids for ModelCombo."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._all: list[str] = []
+        # Set before a programmatic value fill so the resulting Input.Changed
+        # doesn't immediately re-open the just-dismissed dropdown.
+        self._suppress = False
+
+    def on_mount(self) -> None:
+        self.display = False
+
+    def populate(self, models: list[str]) -> None:
+        self._all = list(models)
+
+    def apply_filter(self, text: str) -> None:
+        needle = (text or "").strip().lower()
+        matches = [m for m in self._all if needle in m.lower()] if needle else list(self._all)
+        matches = matches[:80]
+        self.clear_options()
+        for m in matches:
+            self.add_option(Option(m, id=m))
+        self.display = bool(matches)
+        if matches:
+            self.highlighted = 0
+
+    def hide(self) -> None:
+        self.display = False
+
+    def current(self) -> str | None:
+        if not self.display or self.highlighted is None:
+            return None
+        try:
+            return self.get_option_at_index(self.highlighted).id
+        except Exception:
+            return None
+
+    def move(self, delta: int) -> None:
+        if not self.option_count:
+            return
+        self.highlighted = ((self.highlighted or 0) + delta) % self.option_count
+
+
+class ModelCombo(Input):
+    """Model-name input with an attached ModelMenu dropdown; free-text is fine."""
+
+    def _menu(self) -> "ModelMenu | None":
+        try:
+            return self.screen.query_one("#model-menu", ModelMenu)
+        except Exception:
+            return None
+
+    def on_key(self, event: Any) -> None:
+        menu = self._menu()
+        if menu is None:
+            return
+        if event.key == "escape" and menu.display:
+            menu.hide()
+            event.prevent_default()
+        elif event.key == "down":
+            if not menu.display and menu._all:
+                menu.apply_filter(self.value)
+            else:
+                menu.move(1)
+            event.prevent_default()
+        elif event.key == "up" and menu.display:
+            menu.move(-1)
+            event.prevent_default()
+        elif event.key == "enter" and menu.display:
+            choice = menu.current()
+            if choice:
+                menu._suppress = True
+                self.value = choice
+                self.cursor_position = len(self.value)
+                menu.hide()
+                event.prevent_default()
+                event.stop()
+
+    def on_blur(self) -> None:
+        menu = self._menu()
+        if menu is not None:
+            menu.hide()

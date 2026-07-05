@@ -31,20 +31,9 @@ from apps.cli_theme import console, err_console, heading, make_panel, make_table
 # Non-interactive helpers
 # ---------------------------------------------------------------------------
 
-_DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-20250514",
-    "openai": "gpt-4o",
-    "openai-codex": "gpt-5.2",
-    "grok": "grok-3",
-    "gemini": "gemini-2.5-flash",
-    "ollama": "llama3.1",
-    "chutes": "deepseek-ai/DeepSeek-V3-0324",
-    "github-copilot": "gpt-4o",
-    "qwen-portal": "qwen-max-latest",
-    "minimax-portal": "MiniMax-M1",
-    "google-gemini-cli": "gemini-2.5-flash",
-    "google-antigravity": "gemini-2.5-flash",
-}
+# Default models are NOT hardcoded here — they derive from the live catalog
+# (apps/tui/model_catalog.py: models.dev + recommended_default), the single
+# source of truth shared with the interactive wizard (Bar #1).
 
 _PROVIDER_ENV_VARS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -103,6 +92,7 @@ async def _ensure_oauth_login(
     *,
     wait_seconds: int,
     allow_manual_fallback: bool = True,
+    non_interactive: bool = False,
 ) -> None:
     """
     Ensure OAuth/device-code/token credentials exist for the given provider.
@@ -131,6 +121,13 @@ async def _ensure_oauth_login(
     existing = load_fn()
     if existing:
         return
+
+    # Non-interactive (CI/scripts) must not open a browser or block on a paste.
+    if non_interactive:
+        raise RuntimeError(
+            f"Not logged in to {provider}. Run `hexis auth {provider} login` first, "
+            "then re-run init."
+        )
 
     display = provider.replace("-", " ").title()
     console.print(f"[muted]Starting {display} login...[/muted]")
@@ -186,9 +183,11 @@ async def _load_llm_config_for_consent(
     wait_seconds: int,
     provider: str,
     model: str,
+    non_interactive: bool = False,
 ) -> dict[str, Any]:
     if provider in _OAUTH_PROVIDERS:
-        await _ensure_oauth_login(provider, dsn, conn, wait_seconds=wait_seconds)
+        await _ensure_oauth_login(provider, dsn, conn, wait_seconds=wait_seconds,
+                                  non_interactive=non_interactive)
 
     from core.llm_config import load_llm_config
 
@@ -279,8 +278,11 @@ def _ensure_embedding_model() -> None:
         if model.split(":")[0] in result.stdout:
             console.print(f"[ok]\u2714[/ok] Embedding model [bold]{model}[/bold] present")
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        console.print(
+            f"[warn]\u26a0[/warn] Couldn't query Ollama ({exc}). Is it running? "
+            "Try `ollama serve`. Attempting to pull anyway\u2026"
+        )
 
     console.print(f"[muted]Pulling embedding model {model}...[/muted]")
     try:
@@ -305,17 +307,39 @@ async def _run_init_noninteractive(args: argparse.Namespace) -> int:
         else:
             provider = "ollama"
     provider = _normalize_provider_name(provider)
+    # "anthropic-oauth" is a wizard alias; the LLM layer knows "anthropic".
+    persist_provider = "anthropic" if provider == "anthropic-oauth" else provider
 
-    if provider not in (_OAUTH_PROVIDERS | {"ollama"}) and not args.api_key:
+    _no_key_needed = _OAUTH_PROVIDERS | {"ollama", "anthropic-oauth"}
+    if provider not in _no_key_needed and not args.api_key:
         err_console.print(f"[fail]--api-key required for provider '{provider}'[/fail]")
         return 1
 
-    # 2. Resolve model
-    model = args.model or _DEFAULT_MODELS.get(provider, "gpt-4o")
-    api_key_env = _PROVIDER_ENV_VARS.get(provider, "")
+    # OAuth providers can't do a browser login non-interactively — require the
+    # user to have logged in already, and fail fast with the exact command.
+    if provider == "anthropic-oauth":
+        from core.auth.anthropic_oauth import load_credentials as _load_ant
+        if not _load_ant():
+            err_console.print("[fail]Not logged in to Anthropic (Claude Pro/Max). "
+                              "Run `hexis auth anthropic login` first, then re-run init.[/fail]")
+            return 1
+
+    # 2. Resolve model — derive from the live catalog (not a stale hard-code).
+    model = args.model
+    if not model:
+        from apps.tui import model_catalog
+        try:
+            catalog = await model_catalog.fetch_models(provider)
+        except Exception:
+            catalog = []
+        model = model_catalog.recommended_default(provider, catalog)
+        if not model:
+            err_console.print(f"[fail]Could not determine a default model for '{provider}'. Pass --model.[/fail]")
+            return 1
+    api_key_env = "" if provider in _no_key_needed else _PROVIDER_ENV_VARS.get(provider, "")
 
     console.print(make_panel(
-        f"[key]Provider:[/key] {provider}\n"
+        f"[key]Provider:[/key] {persist_provider}\n"
         f"[key]Model:[/key]    {model}",
         title="Non-Interactive Init",
     ))
@@ -353,7 +377,7 @@ async def _run_init_noninteractive(args: argparse.Namespace) -> int:
     try:
         # 7. Save LLM config
         heartbeat_config = {
-            "provider": provider,
+            "provider": persist_provider,
             "model": model,
             "endpoint": "",
             "api_key_env": api_key_env,
@@ -396,10 +420,11 @@ async def _run_init_noninteractive(args: argparse.Namespace) -> int:
             conn,
             dsn=dsn,
             wait_seconds=wait_seconds,
-            provider=provider,
+            provider=persist_provider,
             model=model,
+            non_interactive=True,
         )
-        consented = await _run_consent(conn, llm_config)
+        consented = await _run_consent(conn, llm_config, interactive=False)
         if not consented:
             return 1
 
@@ -481,7 +506,8 @@ def _prompt_int(label: str, *, default: int, min_value: int | None = None) -> in
         return value
 
 
-def _prompt_float(label: str, *, default: float, min_value: float | None = None) -> float:
+def _prompt_float(label: str, *, default: float, min_value: float | None = None,
+                  max_value: float | None = None) -> float:
     while True:
         raw = _prompt(label, default=str(default), required=True)
         try:
@@ -491,6 +517,9 @@ def _prompt_float(label: str, *, default: float, min_value: float | None = None)
             continue
         if min_value is not None and value < min_value:
             err_console.print(f"[fail]Must be >= {min_value}.[/fail]")
+            continue
+        if max_value is not None and value > max_value:
+            err_console.print(f"[fail]Must be <= {max_value}.[/fail]")
             continue
         return value
 
@@ -506,23 +535,14 @@ def _prompt_yes_no(label: str, *, default: bool) -> bool:
         err_console.print("[fail]Enter y/n.[/fail]")
 
 
-def _prompt_choice(label: str, options: list[str], *, default: int = 1) -> int:
-    """Prompt user to pick from a numbered list. Returns 1-based index."""
-    console.print(f"\n[accent]{label}[/accent]\n")
-    for i, option in enumerate(options, 1):
-        marker = "[accent]\u25b8[/accent]" if i == default else " "
-        console.print(f"  {marker} [bold]{i:>2}.[/bold] {option}")
-    console.print()
-    while True:
-        raw = _prompt("Choice", default=str(default))
-        try:
-            choice = int(raw)
-        except ValueError:
-            err_console.print(f"[fail]Enter 1-{len(options)}.[/fail]")
-            continue
-        if 1 <= choice <= len(options):
-            return choice
-        err_console.print(f"[fail]Enter 1-{len(options)}.[/fail]")
+async def _prompt_choice(label: str, options: list[str], *, default: int = 1) -> int:
+    """Arrow-key select from *options*. Returns the 1-based index chosen.
+
+    Async so it runs in the wizard's event loop (questionary's sync API would
+    try to start a nested loop). Ctrl+C raises KeyboardInterrupt → ``main`` exits.
+    """
+    from apps.cli_prompts import select_index
+    return await select_index(label, options, default=default)
 
 
 def _prompt_list(label: str, *, default: list[str] | None = None) -> list[str]:
@@ -543,43 +563,87 @@ async def _configure_llm(conn: Any, *, dsn: str, wait_seconds: int) -> dict[str,
     console.print(f"\n{_step_bar(0)}\n")
     heading("LLM Configuration")
 
-    provider = _prompt(
-        "Provider (openai, openai-codex, anthropic, ollama, chutes, github-copilot, qwen-portal, ...)",
-        default=os.getenv("LLM_PROVIDER", "openai"),
-        required=True,
-    )
-    provider = _normalize_provider_name(provider)
+    from apps.cli_prompts import autocomplete as _ac
+    from apps.cli_prompts import select_value
 
-    default_model = os.getenv("LLM_MODEL") or _DEFAULT_MODELS.get(provider, "gpt-4o")
-    model = _prompt(
-        "Model",
-        default=default_model,
-        required=True,
-    )
-    endpoint = _prompt(
-        "Endpoint (blank for provider default)",
-        default="" if provider in _OAUTH_PROVIDERS else os.getenv("OPENAI_BASE_URL", ""),
-    )
-    api_key_env = _prompt(
-        "API key env var name (e.g. OPENAI_API_KEY)",
-        default=_PROVIDER_ENV_VARS.get(provider, "") or ("OPENAI_API_KEY" if provider in {"openai", "openai_compatible"} else ""),
-    )
+    _PROVIDER_MENU = [
+        ("Claude Pro/Max — Anthropic OAuth subscription (no API key)", "anthropic-oauth"),
+        ("OpenAI Codex — ChatGPT Plus/Pro OAuth (no API key)", "openai-codex"),
+        ("OpenAI — API key", "openai"),
+        ("Anthropic — API key", "anthropic"),
+        ("Grok (xAI) — API key", "grok"),
+        ("Gemini — API key", "gemini"),
+        ("Ollama — local, no key", "ollama"),
+        ("GitHub Copilot — OAuth", "github-copilot"),
+        ("Qwen Portal — OAuth", "qwen-portal"),
+        ("MiniMax Portal — OAuth", "minimax-portal"),
+        ("Other / custom (type it)", "__custom__"),
+    ]
+    # Only honor LLM_PROVIDER if it's actually set — a brand-new user shouldn't
+    # be pre-pointed at a paid API-key path (Bar #5, #6). With nothing set,
+    # highlight the first (featured, zero-key) option instead.
+    _env_provider = os.getenv("LLM_PROVIDER")
+    env_default = _normalize_provider_name(_env_provider) if _env_provider else None
+    provider = await select_value("Provider:", _PROVIDER_MENU, default_value=env_default)
+    if provider == "__custom__":
+        provider = _normalize_provider_name(
+            _prompt("Provider id", default=env_default or "", required=True))
 
-    use_separate_sub = _prompt_yes_no("Use separate subconscious model?", default=False)
+    # Model — the list AND the default both come from the live catalog
+    # (models.dev / local Ollama), the way hermes-agent and openclaw do it. No
+    # stale hard-coded default; any free-typed name is still accepted.
+    from apps.tui import model_catalog
+    catalog: list[str] = []
+    try:
+        console.print("[muted]Fetching available models…[/muted]")
+        catalog = await model_catalog.fetch_models(provider)
+    except Exception:
+        catalog = []
+    default_model = os.getenv("LLM_MODEL") or model_catalog.recommended_default(provider, catalog)
+    if catalog:
+        model = (await _ac("Model (type to filter, or enter your own)", catalog,
+                           default=default_model) or default_model).strip()
+    else:
+        model = _prompt("Model", default=default_model, required=True)
+
+    # OAuth providers need no endpoint / API key. "anthropic-oauth" is a
+    # wizard-only alias: the LLM layer only knows "anthropic" (with no api_key it
+    # auto-resolves the OAuth token at runtime).
+    is_oauth = provider in _OAUTH_PROVIDERS or provider == "anthropic-oauth"
+    persist_provider = "anthropic" if provider == "anthropic-oauth" else provider
+
+    if is_oauth:
+        endpoint = ""
+        api_key_env = ""
+        console.print("[muted]OAuth provider — no endpoint or API key needed.[/muted]")
+        use_separate_sub = False
+    else:
+        endpoint = _prompt(
+            "Endpoint (blank for provider default)",
+            # Only OpenAI-shaped providers should inherit OPENAI_BASE_URL — don't
+            # bleed it into Grok/Gemini/Anthropic (Bar #5).
+            default=os.getenv("OPENAI_BASE_URL", "") if provider in {"openai", "openai_compatible"} else "",
+        )
+        api_key_env = _prompt(
+            "API key env var name (e.g. OPENAI_API_KEY)",
+            default=_PROVIDER_ENV_VARS.get(provider, "") or ("OPENAI_API_KEY" if provider in {"openai", "openai_compatible"} else ""),
+        )
+        use_separate_sub = _prompt_yes_no("Use separate subconscious model?", default=False)
+
     if use_separate_sub:
-        sub_provider = _prompt("Subconscious provider", default=provider, required=True)
+        sub_provider = _prompt("Subconscious provider", default=persist_provider, required=True)
         sub_model = _prompt("Subconscious model", default=model, required=True)
         sub_endpoint = _prompt("Subconscious endpoint", default=endpoint)
         sub_key_env = _prompt("Subconscious API key env var", default=api_key_env)
     else:
-        sub_provider = provider
+        sub_provider = persist_provider
         sub_model = model
         sub_endpoint = endpoint
         sub_key_env = api_key_env
 
     # Save LLM config to DB
     heartbeat_config = {
-        "provider": provider,
+        "provider": persist_provider,
         "model": model,
         "endpoint": endpoint,
         "api_key_env": api_key_env,
@@ -602,26 +666,53 @@ async def _configure_llm(conn: Any, *, dsn: str, wait_seconds: int) -> dict[str,
     await conn.execute("SELECT set_config('llm.chat', $1::jsonb)", json.dumps(heartbeat_config))
     await conn.execute("SELECT set_config('llm.subconscious', $1::jsonb)", json.dumps(subconscious_config))
 
-    console.print(f"\n[ok]\u2714[/ok] Models saved: [bold]{provider}/{model}[/bold]")
+    console.print(f"\n[ok]\u2714[/ok] Models saved: [bold]{persist_provider}/{model}[/bold]")
 
-    # Return resolved config for consent flow
-    return await _load_llm_config_for_consent(
+    # Anthropic OAuth (Claude Pro/Max): log in now so the token is in Hexis's
+    # own store before consent. Always runs (overwrites any existing token).
+    if provider == "anthropic-oauth":
+        console.print("\n[accent]Log in with your Claude Pro/Max subscription:[/accent]")
+        from apps.cli_auth import _anthropic_oauth_login
+        rc = await _anthropic_oauth_login(dsn, wait_seconds)
+        if rc != 0:
+            err_console.print(
+                "[warn]\u26a0[/warn] Login didn't complete. Run "
+                "`hexis auth anthropic login` in a terminal, then re-run `hexis init`."
+            )
+
+    # Resolve credentials for the consent flow (runs OAuth login for the
+    # loader-based OAuth providers; Anthropic is handled just above).
+    resolved = await _load_llm_config_for_consent(
         conn,
         dsn=dsn,
         wait_seconds=wait_seconds,
-        provider=provider,
+        provider=persist_provider,
         model=model,
     )
+
+    # Optional, advisory connectivity check (never blocks \u2014 a bad key surfaces
+    # here with a clear message instead of a confusing failure at consent).
+    if _prompt_yes_no("Test the connection now?", default=True):
+        from core.init_api import test_llm_connection
+        console.print("[muted]Testing\u2026[/muted]")
+        result = await test_llm_connection(resolved)
+        if result["ok"]:
+            console.print(f"[ok]\u2714[/ok] {result['message']}")
+        else:
+            err_console.print(f"[warn]\u26a0[/warn] {result['message']}")
+            console.print("[muted]You can continue anyway; fix it later with `hexis init`.[/muted]")
+
+    return resolved
 
 
 # ---------------------------------------------------------------------------
 # Tier selection
 # ---------------------------------------------------------------------------
 
-def _choose_tier() -> str:
+async def _choose_tier() -> str:
     """Let user pick Express, Character, or Custom."""
     console.print(f"\n{_step_bar(1)}\n")
-    choice = _prompt_choice(
+    choice = await _prompt_choice(
         "Choose your path:",
         [
             "[bold]Express[/bold]      [muted]\u2014 Use sensible defaults, start immediately[/muted]",
@@ -686,7 +777,7 @@ async def _run_character(conn: Any) -> str:
         table.add_row(str(i), summary["name"], voice_preview, summary["values"] or "\u2014")
     console.print(table)
 
-    choice_idx = _prompt_choice("Pick a character:", [get_card_summary(c)["name"] for c in cards], default=1)
+    choice_idx = await _prompt_choice("Pick a character:", [get_card_summary(c)["name"] for c in cards], default=1)
     chosen = cards[choice_idx - 1]
     summary = get_card_summary(chosen)
 
@@ -701,7 +792,7 @@ async def _run_character(conn: Any) -> str:
 
     tweak = _prompt_yes_no("Tweak anything?", default=False)
     if tweak:
-        tweak_choice = _prompt_choice(
+        tweak_choice = await _prompt_choice(
             "Tweak options:",
             [
                 "Name / voice / description",
@@ -780,12 +871,17 @@ async def _run_custom(
                 f"  {trait.capitalize()} (0.0-1.0)",
                 default=default_val,
                 min_value=0.0,
+                max_value=1.0,
             )
 
     personality_desc = pf.get("personality_description", "reflective and exploratory")
 
     if user_name is None:
         user_name = _prompt(f"\nWhat should {agent_name} call you?", default="User")
+
+    # Idempotent re-init: the custom path calls the init_* functions individually
+    # (not the wrapped entry functions), so clear any prior init persona first.
+    await conn.fetchval("SELECT reset_persona()")
 
     # Apply Phase 1
     await conn.fetchval("SELECT init_mode('persona')")
@@ -879,8 +975,13 @@ async def _run_custom(
 # Consent
 # ---------------------------------------------------------------------------
 
-async def _run_consent(conn: Any, llm_config: dict[str, Any]) -> bool:
-    """Run consent flow via LLM. Returns True if consented."""
+async def _run_consent(conn: Any, llm_config: dict[str, Any], *, interactive: bool = True) -> bool:
+    """Run the consent flow. Returns True if the agent should be activated.
+
+    Consent is a signal that Hexis takes the agent seriously — not a lock. If the
+    model doesn't consent, an interactive owner may proceed anyway (it's their AI);
+    non-interactive callers honor the model's answer without prompting.
+    """
     from rich.spinner import Spinner
     from rich.live import Live
     from core.init_api import run_consent_flow
@@ -933,16 +1034,46 @@ async def _run_consent(conn: Any, llm_config: dict[str, Any]) -> bool:
         console.print(make_panel("\n".join(lines), title="Agent Response"))
 
     if decision == "consent":
-        console.print(f"[ok]\u2714 Consent granted[/ok]")
+        console.print("[ok]\u2714 Consent granted[/ok]")
         return True
+
+    # Not consent (declined / abstained / no clear decision). It's the owner's
+    # agent \u2014 honor the "no" by default, but never trap the owner out (Bar #2).
+    if not result.get("decided"):
+        console.print("[warn]The model didn't return a clear consent decision.[/warn]")
+        model_state = "no clear decision"
     elif decision == "decline":
-        console.print(f"[fail]\u2718 Consent declined.[/fail] The agent chose not to initialize.")
-        console.print("[muted]You can re-run `hexis init` to try again.[/muted]")
-        return False
+        console.print("[warn]The model declined consent[/warn] (its reasoning is above).")
+        model_state = "decline"
     else:
-        console.print(f"[warn]\u26a0 Consent abstained.[/warn] No initialization will occur.")
-        console.print("[muted]You can re-run `hexis init` to try again.[/muted]")
+        console.print("[warn]The model abstained[/warn] (its reasoning is above).")
+        model_state = "abstain"
+
+    # Non-interactive (CI/scripts): honor the model's answer, don't prompt.
+    if not interactive:
+        console.print("[muted]Agent not activated. Re-run interactively to override, "
+                      "or try a more capable model.[/muted]")
         return False
+
+    choice = await _prompt_choice(
+        "It's your agent \u2014 how would you like to proceed?",
+        [
+            "Proceed anyway \u2014 activate it (records that you overrode the model)",
+            "Try again \u2014 re-ask the model",
+            "Cancel \u2014 leave the agent inactive for now",
+        ],
+        default=1,
+    )
+    if choice == 1:
+        from core.init_api import record_consent_override
+        await record_consent_override(conn, llm_config, model_decision=model_state)
+        console.print("[ok]\u2714 Activated.[/ok] [muted]The model's response is recorded; "
+                      "you chose to proceed \u2014 it's your AI.[/muted]")
+        return True
+    if choice == 2:
+        return await _run_consent(conn, llm_config)
+    console.print("[muted]Agent left inactive. Re-run `hexis init` any time to try again.[/muted]")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -965,7 +1096,7 @@ async def _run_init(dsn: str, *, wait_seconds: int) -> int:
         llm_config = await _configure_llm(conn, dsn=dsn, wait_seconds=wait_seconds)
 
         # Choose tier
-        tier = _choose_tier()
+        tier = await _choose_tier()
 
         # Run selected tier
         if tier == "express":
@@ -985,11 +1116,45 @@ async def _run_init(dsn: str, *, wait_seconds: int) -> int:
         profile = json.loads(raw) if isinstance(raw, str) else (raw or {})
         agent_name = profile.get("agent", {}).get("name", "Hexis")
 
-        console.print(f"\n[ok]\u2714[/ok] [bold]{agent_name}[/bold] is ready. Run [accent]hexis chat[/accent] to say hello.")
+        # Recap what's set up.
+        console.print(f"\n[ok]\u2714[/ok] [bold]{agent_name}[/bold] is ready.")
+        console.print(make_panel(
+            f"[key]Model:[/key]  {llm_config.get('provider', '?')} / {llm_config.get('model', '?')}\n"
+            f"[key]Path:[/key]   {tier}\n"
+            f"[key]User:[/key]   {user_name}",
+            title="What's set up",
+        ))
+        console.print("[muted]Change anything later with `hexis init` \u00b7 "
+                      "enable the autonomous heartbeat with `hexis start`.[/muted]")
+        console.print("[muted]Hexis runs on your machine and sends no telemetry.[/muted]")
         return 0
 
     finally:
         await conn.close()
+
+
+def _post_init_handoff() -> int:
+    """After a successful init, offer to jump straight into chat or the web UI.
+
+    Runs in the sync layer (the wizard's event loop has closed), so it starts a
+    fresh loop just for the prompt.
+    """
+    try:
+        choice = asyncio.run(_prompt_choice(
+            "What now?",
+            ["Open chat now", "Open the web dashboard", "Exit"],
+            default=1,
+        ))
+    except (KeyboardInterrupt, Exception):
+        console.print("[muted]Run `hexis chat` to say hello.[/muted]")
+        return 0
+    if choice == 1:
+        from apps import cli_chat
+        return cli_chat.main(["--greet"])
+    if choice == 2:
+        from apps.hexis_cli import main as cli_main
+        return cli_main(["ui"])
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1040,13 +1205,18 @@ def main(argv: list[str] | None = None) -> int:
         dsn = agent_api.db_dsn_from_env()
 
     try:
-        return asyncio.run(_run_init(dsn, wait_seconds=args.wait_seconds))
+        rc = asyncio.run(_run_init(dsn, wait_seconds=args.wait_seconds))
     except KeyboardInterrupt:
         err_console.print("\n[warn]Cancelled.[/warn]")
         return 130
     except Exception as e:
         err_console.print(f"[fail]init failed: {e}[/fail]")
         return 1
+    # Handoff runs in the sync layer (after the event loop closes) so the chat
+    # REPL can start its own loop without nesting asyncio.run.
+    if rc == 0:
+        return _post_init_handoff()
+    return rc
 
 
 if __name__ == "__main__":
