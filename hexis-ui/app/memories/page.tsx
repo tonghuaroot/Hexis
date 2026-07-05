@@ -37,6 +37,7 @@ export default function MemoriesPage() {
   const [health, setHealth] = useState<HealthEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
@@ -58,13 +59,14 @@ export default function MemoriesPage() {
       params.set("offset", String(offset));
 
       const res = await fetch(`/api/memories?${params}`, { cache: "no-store" });
-      if (!res.ok) throw new Error("Failed to fetch");
+      if (!res.ok) throw new Error(`Failed to load memories (${res.status})`);
       const data = await res.json();
       setMemories(data.memories || []);
       setHealth(data.health || []);
       setTotal(data.total || 0);
-    } catch {
-      setMemories([]);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load memories.");
     } finally {
       setLoading(false);
     }
@@ -168,6 +170,18 @@ export default function MemoriesPage() {
               <div className="flex justify-center py-12">
                 <Spinner label="Searching memories..." />
               </div>
+            ) : error ? (
+              <Card className="border-red-200 bg-red-50">
+                <div className="flex items-center justify-between gap-4">
+                  <p className="text-sm text-red-700">{error}</p>
+                  <button
+                    onClick={fetchMemories}
+                    className="rounded-full border border-red-300 px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </Card>
             ) : memories.length === 0 ? (
               <Card>
                 <p className="text-sm text-[var(--ink-soft)]">No memories found.</p>

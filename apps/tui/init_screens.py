@@ -7,14 +7,16 @@ import os
 from typing import Any
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button,
     DataTable,
     Input,
     Label,
     LoadingIndicator,
+    OptionList,
     RadioButton,
     RadioSet,
     RichLog,
@@ -22,14 +24,32 @@ from textual.widgets import (
     Static,
 )
 from textual.worker import Worker, WorkerState
+from rich.style import Style
+from rich.text import Text
 
-from apps.tui.init_widgets import BigFiveSliders, CharacterPreview, StepBar
+from apps.tui.design import COLORS
+from apps.tui.init_widgets import (
+    BigFiveSliders,
+    CharacterPreview,
+    ModelCombo,
+    ModelMenu,
+    StepBar,
+)
+
+
+def _teal(text: str) -> Text:
+    return Text(text, style=Style(color=COLORS["teal"], bold=True))
+
+
+def _plain(text: str, token: str = "text") -> Text:
+    return Text(text, style=Style(color=COLORS[token]))
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-20250514",
+    "anthropic-oauth": "claude-sonnet-5",
     "openai": "gpt-4o",
     "openai-codex": "gpt-5.2",
     "grok": "grok-3",
@@ -45,6 +65,7 @@ _DEFAULT_MODELS: dict[str, str] = {
 
 _PROVIDER_ENV_VARS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
+    "anthropic-oauth": "",
     "openai": "OPENAI_API_KEY",
     "openai-codex": "",
     "grok": "XAI_API_KEY",
@@ -61,7 +82,8 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
 _PROVIDER_OPTIONS: list[tuple[str, str]] = [
     ("OpenAI Codex (ChatGPT OAuth)", "openai-codex"),
     ("OpenAI Platform (API key)", "openai"),
-    ("Anthropic", "anthropic"),
+    ("Claude Pro/Max (Anthropic OAuth)", "anthropic-oauth"),
+    ("Anthropic (API key)", "anthropic"),
     ("Grok (xAI)", "grok"),
     ("Gemini", "gemini"),
     ("Ollama (local)", "ollama"),
@@ -75,6 +97,7 @@ _PROVIDER_OPTIONS: list[tuple[str, str]] = [
 
 _OAUTH_PROVIDERS: set[str] = {
     "openai-codex",
+    "anthropic-oauth",
     "chutes",
     "github-copilot",
     "qwen-portal",
@@ -84,10 +107,21 @@ _OAUTH_PROVIDERS: set[str] = {
 }
 
 
+def _persisted_provider(provider: str) -> str:
+    """Map a wizard-only provider alias to the id the LLM layer understands.
+
+    ``anthropic-oauth`` is a UI convenience; it persists as ``anthropic`` with
+    an empty api_key so ``load_llm_config`` auto-resolves the OAuth/Claude Code
+    token at runtime.
+    """
+    return "anthropic" if provider == "anthropic-oauth" else provider
+
+
 def _normalize_provider(raw: str) -> str:
     val = (raw or "").strip().lower()
     aliases = {
         "openai_codex": "openai-codex",
+        "anthropic_oauth": "anthropic-oauth",
         "github_copilot": "github-copilot",
         "qwen_portal": "qwen-portal",
         "minimax_portal": "minimax-portal",
@@ -105,6 +139,157 @@ def _state(screen: Screen) -> Any:
 def _conn(screen: Screen) -> Any:
     """Get the DB connection from the app."""
     return screen.app.conn  # type: ignore[attr-defined]
+
+
+# ── Already-configured: keep or reconfigure ──────────────────────────────────
+
+class ReconfigureScreen(Screen):
+    """Shown when `hexis init` runs on an already-configured agent.
+
+    Non-destructive: nothing changes unless the user chooses to reconfigure.
+    """
+
+    def __init__(self, summary: dict[str, Any]) -> None:
+        super().__init__()
+        self._summary = summary
+
+    def compose(self) -> ComposeResult:
+        s = self._summary
+        with VerticalScroll(classes="form-container"):
+            yield Static(Text(f"{s.get('name', 'Your agent')} is already set up",
+                              style=Style(color=COLORS["accent"], bold=True)))
+            yield Static("")
+            line = Text()
+            line.append("Model: ", style=Style(color=COLORS["teal"]))
+            line.append(f"{s.get('provider', '?')} / {s.get('model', '?')}",
+                        style=Style(color=COLORS["text"]))
+            yield Static(line)
+            yield Static("")
+            yield Static(_plain(
+                "Reconfiguring walks through setup again and overwrites the "
+                "current configuration. Keeping leaves everything as-is.", "dim"))
+        with Horizontal(classes="button-bar"):
+            yield Button("Keep — exit", id="keep", classes="muted")
+            yield Button("Reconfigure", id="reconfigure", classes="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "reconfigure":
+            self.app.switch_screen(LLMConfigScreen())
+        elif event.button.id == "keep":
+            self.app.exit(0)
+
+
+# ── Anthropic OAuth login (inline, in-wizard) ────────────────────────────────
+
+class AnthropicLoginScreen(ModalScreen[bool]):
+    """In-wizard Claude Pro/Max login (Anthropic OAuth PKCE).
+
+    Opens the browser to the authorize URL, the user pastes the code Anthropic
+    shows, and we exchange it for a token saved to Hexis's own store. Dismisses
+    True on success, False on cancel.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._verifier = ""
+        self._state = ""
+        self._auth_url = ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box", id="anthropic-login-box"):
+            yield Label("Claude Pro/Max Login", classes="dialog-title")
+            yield Static(
+                Text(
+                    "A browser window is opening. Authorize with your Claude "
+                    "Pro/Max subscription, copy the code Anthropic shows you, "
+                    "and paste it below. This replaces any existing Hexis "
+                    "Anthropic login.",
+                    style=Style(color=COLORS["text"]),
+                ),
+                classes="dialog-body",
+            )
+            yield Static("", id="anthropic-login-url", classes="hint")
+            yield Input(placeholder="Paste the authorization code (code#state)",
+                        id="anthropic-code")
+            yield Static("", id="anthropic-login-status", classes="hint")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Reopen Browser", id="reopen", classes="muted")
+                yield Button("Submit", id="submit", classes="primary")
+                yield Button("Cancel", id="cancel", classes="muted")
+
+    def on_mount(self) -> None:
+        from core.auth import create_state, generate_pkce
+        from core.auth.anthropic_oauth import build_authorize_url
+
+        self._verifier, challenge = generate_pkce()
+        self._state = create_state()
+        self._auth_url = build_authorize_url(challenge=challenge, state=self._state)
+        self._open_browser()
+        self.query_one("#anthropic-login-url", Static).update(
+            Text(f"If the browser didn't open, visit:\n{self._auth_url}",
+                 style=Style(color=COLORS["dim"]))
+        )
+        self.query_one("#anthropic-code", Input).focus()
+
+    def _open_browser(self) -> None:
+        import webbrowser
+        try:
+            webbrowser.open(self._auth_url)
+        except Exception:
+            pass
+
+    def _set_status(self, text: str, token: str) -> None:
+        self.query_one("#anthropic-login-status", Static).update(
+            Text(text, style=Style(color=COLORS[token]))
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(False)
+        elif event.button.id == "reopen":
+            self._open_browser()
+        elif event.button.id == "submit":
+            self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "anthropic-code":
+            self._submit()
+
+    def _submit(self) -> None:
+        pasted = self.query_one("#anthropic-code", Input).value.strip()
+        if not pasted:
+            self._set_status("Paste the authorization code first.", "warn")
+            return
+        self.query_one("#submit", Button).disabled = True
+        self._set_status("Exchanging code for a token…", "dim")
+        self.run_worker(self._exchange(pasted), name="anthropic-exchange",
+                        exclusive=True, exit_on_error=False)
+
+    async def _exchange(self, pasted: str) -> None:
+        from core.auth.anthropic_oauth import (
+            exchange_authorization_code,
+            parse_authorization_input,
+            save_credentials,
+        )
+
+        code, pasted_state = parse_authorization_input(pasted)
+        if pasted_state and pasted_state != self._state:
+            raise RuntimeError("State mismatch — reopen the browser and try again.")
+        if not code:
+            raise RuntimeError("Missing authorization code.")
+        creds = await exchange_authorization_code(
+            code=code, verifier=self._verifier, state=pasted_state or self._state,
+        )
+        save_credentials(creds)
+
+    async def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "anthropic-exchange":
+            return
+        if event.state == WorkerState.SUCCESS:
+            self.dismiss(True)
+        elif event.state == WorkerState.ERROR:
+            self.query_one("#submit", Button).disabled = False
+            self._set_status(f"Login failed: {event.worker.error}", "danger")
 
 
 # ── 1. LLM Config ───────────────────────────────────────────────────────────
@@ -141,11 +326,12 @@ class LLMConfigScreen(Screen):
             yield Static("", id="provider-help", classes="form-label")
 
             yield Label("Model", classes="form-label")
-            yield Input(
+            yield ModelCombo(
                 value=model_default,
-                placeholder="Model name",
+                placeholder="Type a model, or ↓ to pick from the list",
                 id="model",
             )
+            yield ModelMenu(id="model-menu")
 
             yield Label("Endpoint (blank for provider default)", classes="form-label")
             yield Input(
@@ -160,8 +346,15 @@ class LLMConfigScreen(Screen):
                 placeholder="e.g. OPENAI_API_KEY",
                 id="api-key-env",
             )
+            yield Static("", id="llm-status", classes="hint")
+            yield Static(
+                Text("Tip: you can change any of this later with `hexis init`.",
+                     style=Style(color=COLORS["dim"])),
+                classes="hint",
+            )
 
         with Horizontal(classes="button-bar"):
+            yield Button("Test connection", id="test-conn", classes="secondary")
             yield Button("Next", id="next", classes="primary")
 
     def _selected_provider(self) -> str:
@@ -196,6 +389,11 @@ class LLMConfigScreen(Screen):
             key_input.disabled = True
             if provider == "openai-codex":
                 help_text.update("Next opens browser OAuth for ChatGPT Plus/Pro.")
+            elif provider == "anthropic-oauth":
+                help_text.update(
+                    "Uses your Claude Pro/Max subscription via Hexis's own "
+                    "login. Run `hexis auth anthropic login` first if needed."
+                )
             else:
                 help_text.update("Next runs provider OAuth/device-code login.")
         else:
@@ -216,12 +414,82 @@ class LLMConfigScreen(Screen):
             preserve_model=bool(os.getenv("LLM_MODEL")),
             preserve_endpoint=True,
         )
+        self._load_models()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id != "provider":
             return
         provider = _normalize_provider(str(event.value)) if isinstance(event.value, str) else "openai"
         self._apply_provider_defaults(provider)
+        self.query_one("#model-menu", ModelMenu).hide()
+        self._load_models()
+
+    # ── model dropdown ───────────────────────────────────────────────────────
+    def _load_models(self) -> None:
+        provider = self._selected_provider()
+        try:
+            endpoint = self.query_one("#endpoint", Input).value.strip()
+        except Exception:
+            endpoint = ""
+        self.run_worker(self._fetch_models(provider, endpoint),
+                        name="model-fetch", group="model-fetch", exclusive=True,
+                        exit_on_error=False)
+
+    async def _fetch_models(self, provider: str, endpoint: str) -> None:
+        from apps.tui import model_catalog
+        models = await model_catalog.fetch_models(provider, endpoint=endpoint or None)
+        try:
+            self.query_one("#model-menu", ModelMenu).populate(models)
+        except Exception:
+            pass
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "model":
+            return
+        menu = self.query_one("#model-menu", ModelMenu)
+        if menu._suppress:
+            menu._suppress = False
+            menu.hide()
+            self._model_advisory(event.value)
+            return
+        menu.apply_filter(event.value)
+        self._model_advisory(event.value)
+
+    def _model_advisory(self, value: str) -> None:
+        """Soft, non-blocking hint: unknown model name or missing API key."""
+        import os as _os
+
+        status = self.query_one("#llm-status", Static)
+        provider = self._selected_provider()
+        menu = self.query_one("#model-menu", ModelMenu)
+        val = (value or "").strip()
+
+        if val and menu._all and val not in menu._all:
+            status.update(Text(
+                f"Heads up: “{val}” isn't in the known list for {provider} — "
+                "double-check the spelling (custom names are fine).",
+                style=Style(color=COLORS["warn"])))
+            return
+        if provider not in _OAUTH_PROVIDERS and provider != "ollama":
+            key_env = self.query_one("#api-key-env", Input).value.strip()
+            if key_env and not _os.getenv(key_env):
+                status.update(Text(
+                    f"Note: ${key_env} isn't set in this environment yet — "
+                    "the model won't respond until it is.",
+                    style=Style(color=COLORS["dim"])))
+                return
+        status.update("")
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "model-menu":
+            return
+        menu = self.query_one("#model-menu", ModelMenu)
+        combo = self.query_one("#model", ModelCombo)
+        menu._suppress = True
+        combo.value = event.option.id or ""
+        combo.cursor_position = len(combo.value)
+        menu.hide()
+        combo.focus()
 
     async def _ensure_openai_codex_login(self) -> None:
         import socket
@@ -272,11 +540,29 @@ class LLMConfigScreen(Screen):
         save_openai_codex_credentials(creds)
         await ensure_fresh_openai_codex_credentials(skew_seconds=0)
 
+    async def _login_anthropic_oauth(self) -> None:
+        """Always run the Claude Pro/Max login, overwriting any existing token.
+
+        `hexis init` should just log the user in fresh whether or not a
+        credential already exists — never silently reuse a stale one. The login
+        runs inline (browser + paste code) and saves to Hexis's OWN store
+        (``~/.hexis/auth/``), overwriting the previous token. Called from the
+        auth worker, so ``push_screen_wait`` is valid here.
+        """
+        from core.auth.anthropic_oauth import load_credentials
+
+        ok = await self.app.push_screen_wait(AnthropicLoginScreen())
+        if not ok or not load_credentials():
+            raise RuntimeError("Claude Pro/Max login was cancelled or did not complete.")
+
     async def _ensure_provider_auth(self, provider: str) -> None:
         if provider not in _OAUTH_PROVIDERS:
             return
         if provider == "openai-codex":
             await self._ensure_openai_codex_login()
+            return
+        if provider == "anthropic-oauth":
+            await self._login_anthropic_oauth()
             return
 
         from apps.hexis_init import _ensure_oauth_login
@@ -290,68 +576,127 @@ class LLMConfigScreen(Screen):
             allow_manual_fallback=False,
         )
 
+    def _test_connection(self) -> None:
+        """Advisory: make one real call to check the current form's config works."""
+        import os as _os
+
+        provider = self._selected_provider()
+        status = self.query_one("#llm-status", Static)
+        if provider in _OAUTH_PROVIDERS:
+            status.update(Text(
+                "OAuth providers are verified when you sign in on Next.",
+                style=Style(color=COLORS["dim"])))
+            return
+        key_env = self.query_one("#api-key-env", Input).value.strip()
+        cfg = {
+            "provider": provider,
+            "model": self.query_one("#model", Input).value.strip(),
+            "endpoint": self.query_one("#endpoint", Input).value.strip() or None,
+            "api_key": _os.getenv(key_env) if key_env else None,
+        }
+        status.update(Text("Testing connection…", style=Style(color=COLORS["dim"])))
+        self.query_one("#test-conn", Button).disabled = True
+        self.run_worker(self._do_test_connection(cfg), name="conn-test",
+                        group="conn-test", exclusive=True, exit_on_error=False)
+
+    async def _do_test_connection(self, cfg: dict[str, Any]) -> None:
+        from core.init_api import test_llm_connection
+
+        result = await test_llm_connection(cfg)
+        tok = "ok" if result["ok"] else (
+            "warn" if result["status"] in ("rate_limit", "network") else "danger")
+        try:
+            self.query_one("#llm-status", Static).update(
+                Text(result["message"], style=Style(color=COLORS[tok])))
+            self.query_one("#test-conn", Button).disabled = False
+        except Exception:
+            pass
+
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "next":
+        if event.button.id == "test-conn":
+            self._test_connection()
+            return
+        if event.button.id != "next":
+            return
+        state = _state(self)
+
+        state.provider = self._selected_provider()
+        state.model = self.query_one("#model", Input).value.strip()
+        state.endpoint = self.query_one("#endpoint", Input).value.strip()
+        state.api_key_env = self.query_one("#api-key-env", Input).value.strip()
+        if state.provider in _OAUTH_PROVIDERS:
+            # OAuth providers don't use API key env vars in llm config.
+            state.api_key_env = ""
+
+        # Subconscious defaults to same config
+        state.sub_provider = state.provider
+        state.sub_model = state.model
+        state.sub_endpoint = state.endpoint
+        state.sub_key_env = state.api_key_env
+
+        self._hb_config = {
+            "provider": _persisted_provider(state.provider),
+            "model": state.model,
+            "endpoint": state.endpoint,
+            "api_key_env": state.api_key_env,
+        }
+        self._sub_config = {
+            "provider": _persisted_provider(state.sub_provider),
+            "model": state.sub_model,
+            "endpoint": state.sub_endpoint,
+            "api_key_env": state.sub_key_env,
+        }
+
+        # Run auth + persistence off the UI thread so the form never freezes
+        # (OAuth can block on a browser round-trip).
+        self.query_one("#next", Button).disabled = True
+        status = self.query_one("#llm-status", Static)
+        if state.provider in _OAUTH_PROVIDERS:
+            status.update(Text("Authorizing… a browser window may open — finish login there.",
+                               style=Style(color=COLORS["accent"])))
+        else:
+            status.update(Text("Saving configuration…", style=Style(color=COLORS["dim"])))
+        self.run_worker(self._authorize_and_save(), name="llm-auth",
+                        group="llm-auth", exclusive=True, exit_on_error=False)
+
+    async def _authorize_and_save(self) -> None:
+        state = _state(self)
+        conn = _conn(self)
+        await self._ensure_provider_auth(state.provider)
+        await conn.fetchval(
+            "SELECT init_llm_config($1::jsonb, $2::jsonb)",
+            json.dumps(self._hb_config),
+            json.dumps(self._sub_config),
+        )
+        await conn.execute(
+            "SELECT set_config('llm.heartbeat', $1::jsonb)", json.dumps(self._hb_config)
+        )
+        await conn.execute(
+            "SELECT set_config('llm.chat', $1::jsonb)", json.dumps(self._hb_config)
+        )
+        await conn.execute(
+            "SELECT set_config('llm.subconscious', $1::jsonb)", json.dumps(self._sub_config)
+        )
+
+    async def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name != "llm-auth":
+            return
+        if event.state == WorkerState.SUCCESS:
             state = _state(self)
-            conn = _conn(self)
-
-            state.provider = self._selected_provider()
-            state.model = self.query_one("#model", Input).value.strip()
-            state.endpoint = self.query_one("#endpoint", Input).value.strip()
-            state.api_key_env = self.query_one("#api-key-env", Input).value.strip()
-            if state.provider in _OAUTH_PROVIDERS:
-                # OAuth providers don't use API key env vars in llm config.
-                state.api_key_env = ""
-
-            # Subconscious defaults to same config
-            state.sub_provider = state.provider
-            state.sub_model = state.model
-            state.sub_endpoint = state.endpoint
-            state.sub_key_env = state.api_key_env
-
-            # Save to DB
-            heartbeat_config = {
-                "provider": state.provider,
-                "model": state.model,
-                "endpoint": state.endpoint,
-                "api_key_env": state.api_key_env,
-            }
-            subconscious_config = {
-                "provider": state.sub_provider,
-                "model": state.sub_model,
-                "endpoint": state.sub_endpoint,
-                "api_key_env": state.sub_key_env,
-            }
-
-            try:
-                await self._ensure_provider_auth(state.provider)
-                await conn.fetchval(
-                    "SELECT init_llm_config($1::jsonb, $2::jsonb)",
-                    json.dumps(heartbeat_config),
-                    json.dumps(subconscious_config),
-                )
-                await conn.execute(
-                    "SELECT set_config('llm.heartbeat', $1::jsonb)",
-                    json.dumps(heartbeat_config),
-                )
-                await conn.execute(
-                    "SELECT set_config('llm.chat', $1::jsonb)",
-                    json.dumps(heartbeat_config),
-                )
-                await conn.execute(
-                    "SELECT set_config('llm.subconscious', $1::jsonb)",
-                    json.dumps(subconscious_config),
-                )
-            except RuntimeError as e:
-                from apps.tui.dialogs import ErrorDialog
-                await self.app.push_screen(ErrorDialog("Auth Error", str(e)))
-                return
-            except Exception as e:
-                from apps.tui.dialogs import ErrorDialog
-                await self.app.push_screen(ErrorDialog("DB Error", str(e)))
-                return
-
-            self.app.switch_screen(ChoosePathScreen())
+            if getattr(state, "retry_consent", False):
+                # Retrying after a refusal — identity is already saved, so go
+                # straight back to consent with the newly chosen model.
+                state.retry_consent = False
+                self.app.switch_screen(ConsentScreen())
+            else:
+                self.app.switch_screen(ChoosePathScreen())
+        elif event.state == WorkerState.ERROR:
+            err = event.worker.error
+            self.query_one("#next", Button).disabled = False
+            self.query_one("#llm-status", Static).update("")
+            from apps.tui.dialogs import ErrorDialog
+            title = "Auth Error" if isinstance(err, RuntimeError) else "DB Error"
+            await self.app.push_screen(ErrorDialog(title, str(err)))
 
 
 # ── 3. Choose Path ───────────────────────────────────────────────────────────
@@ -737,10 +1082,20 @@ class CustomGoalsScreen(Screen):
 class ConsentScreen(Screen):
     """Run consent flow via LLM and display the result."""
 
-    _countdown: int = 10
+    BINDINGS = [
+        Binding("pageup", "scroll_result('page_up')", "Scroll up", show=False),
+        Binding("pagedown", "scroll_result('page_down')", "Scroll down", show=False),
+    ]
+
+    def action_scroll_result(self, how: str) -> None:
+        try:
+            log = self.query_one("#consent-log", RichLog)
+        except Exception:
+            return
+        (log.scroll_page_up if how == "page_up" else log.scroll_page_down)()
 
     def compose(self) -> ComposeResult:
-        yield StepBar(current=2)
+        yield StepBar(current=3)
         with Vertical(classes="consent-container", id="consent-loading"):
             yield LoadingIndicator()
             yield Static(
@@ -748,12 +1103,23 @@ class ConsentScreen(Screen):
                 id="consent-status",
             )
         with VerticalScroll(classes="consent-result", id="consent-result"):
-            yield RichLog(id="consent-log", wrap=True, markup=True)
+            # markup=False → the agent's reasoning/signature (model output, may
+            # contain brackets) is written as Rich Text, never re-parsed.
+            yield RichLog(id="consent-log", wrap=True, markup=False)
         with Horizontal(classes="button-bar"):
-            yield Button("Exit Now", id="exit-now", classes="primary", disabled=True)
+            # Shown on consent granted:
+            yield Button("Open Chat (TUI)", id="open-chat", classes="primary")
+            yield Button("Open Web UI", id="open-ui", classes="secondary")
+            # Shown on refusal:
+            yield Button("Change Model & Retry", id="change-model", classes="primary")
+            # Always available once a result is in:
+            yield Button("Exit", id="exit-now", classes="muted", disabled=True)
 
     def on_mount(self) -> None:
         self.query_one("#consent-result").display = False
+        # All action buttons hidden until we have a decision.
+        for bid in ("#open-chat", "#open-ui", "#change-model"):
+            self.query_one(bid).display = False
         self._run_consent()
 
     @staticmethod
@@ -761,7 +1127,12 @@ class ConsentScreen(Screen):
         return "consent-worker"
 
     def _run_consent(self) -> None:
-        self.run_worker(self._do_consent(), name=self._worker_name(), exclusive=True)
+        # exit_on_error=False → a failure surfaces in on_worker_state_changed
+        # instead of crashing the whole wizard.
+        self.run_worker(
+            self._do_consent(), name=self._worker_name(),
+            exclusive=True, exit_on_error=False,
+        )
 
     async def _do_consent(self) -> dict[str, Any]:
         from apps.hexis_init import _load_llm_config_for_consent
@@ -792,7 +1163,14 @@ class ConsentScreen(Screen):
             log = self.query_one("#consent-log", RichLog)
             self.query_one("#consent-loading").display = False
             self.query_one("#consent-result").display = True
-            log.write(f"[red]Consent failed: {event.worker.error}[/red]")
+            log.write(Text(f"Consent failed: {event.worker.error}",
+                           style=Style(color=COLORS["danger"], bold=True)))
+            log.write("")
+            log.write(_plain("Change the model and try again, or exit.", "dim"))
+            change = self.query_one("#change-model", Button)
+            change.display = True
+            change.disabled = False
+            change.focus()
             self.query_one("#exit-now", Button).disabled = False
 
     async def _display_result(self, result: dict[str, Any]) -> None:
@@ -826,28 +1204,27 @@ class ConsentScreen(Screen):
         state.consent_memories = memories
 
         if reasoning:
-            log.write("[#3c6f64]Reasoning:[/#3c6f64]")
-            log.write(reasoning)
+            log.write(_teal("Reasoning:"))
+            log.write(_plain(str(reasoning)))
             log.write("")
 
         if signature:
-            log.write("[#3c6f64]Signature:[/#3c6f64]")
-            log.write(signature)
+            log.write(_teal("Signature:"))
+            log.write(_plain(str(signature)))
             log.write("")
 
         if memories:
-            log.write("[#3c6f64]Initial Memories:[/#3c6f64]")
+            log.write(_teal("Initial Memories:"))
             for m in memories:
                 mtype = m.get("type", "?")
                 mcontent = m.get("content", "")
                 mimp = m.get("importance", "")
                 imp_str = f" (importance: {mimp})" if mimp else ""
-                log.write(f"  [{mtype}] {mcontent}{imp_str}")
+                log.write(_plain(f"  [{mtype}] {mcontent}{imp_str}"))
             log.write("")
 
         if decision == "consent":
-            log.write("[green]Consent granted[/green]")
-            # Show agent name + next steps, then auto-exit
+            log.write(Text("Consent granted", style=Style(color=COLORS["ok"], bold=True)))
             agent_name = "Hexis"
             conn = _conn(self)
             try:
@@ -858,37 +1235,119 @@ class ConsentScreen(Screen):
                 pass
             state.final_agent_name = agent_name
             log.write("")
-            log.write(f"[bold #d8774f]{agent_name} is ready![/bold #d8774f]")
+            log.write(Text(f"{agent_name} is ready!", style=Style(color=COLORS["accent"], bold=True)))
             log.write("")
-            log.write("[#3c6f64]Next steps:[/#3c6f64]")
-            log.write("  [bold]hexis chat[/bold]    \u2014 Say hello")
-            log.write("  [bold]hexis status[/bold]  \u2014 Check agent status")
-            log.write("  [bold]hexis start[/bold]   \u2014 Enable heartbeat")
+            await self._write_recap(log, state, agent_name)
+            log.write(_teal("How would you like to begin?"))
+            log.write(_plain("  Open Chat (TUI)  \u2014 talk in the terminal"))
+            log.write(_plain("  Open Web UI      \u2014 the browser dashboard"))
+            log.write(_plain("  Exit             \u2014 back to the shell"))
             log.write("")
-            self._countdown = 10
-            log.write(f"Exiting in {self._countdown}s...")
-            self.query_one("#exit-now", Button).disabled = False
-            self.set_timer(1.0, self._tick_countdown)
-        elif decision == "decline":
-            log.write("[red]Consent declined.[/red] The agent chose not to initialize.")
-            self.query_one("#exit-now", Button).disabled = False
+            log.write(_plain("Change anything later with `hexis init`. "
+                             "Enable the autonomous heartbeat with `hexis start`.", "dim"))
+            log.write(_plain("Hexis runs on your machine and sends no telemetry.", "dim"))
+            # No timeout \u2014 the user chooses. Present the next-step buttons.
+            open_chat = self.query_one("#open-chat", Button)
+            open_chat.display = True
+            self.query_one("#open-ui", Button).display = True
+            exit_btn = self.query_one("#exit-now", Button)
+            exit_btn.label = "Exit"
+            exit_btn.disabled = False
+            open_chat.focus()
         else:
-            log.write("[yellow]Consent abstained.[/yellow]")
+            # Refusal (decline or abstain): show the FULL exchange so the user
+            # can see whether the prompt was worded poorly, and let them change
+            # the model and retry instead of exiting.
+            if decision == "decline":
+                log.write(Text("Consent declined \u2014 the agent chose not to initialize.",
+                               style=Style(color=COLORS["danger"], bold=True)))
+            else:
+                log.write(Text("Consent abstained.", style=Style(color=COLORS["warn"], bold=True)))
+            log.write("")
+            log.write(_plain(
+                "Full exchange below \u2014 refine services/prompts/consent.md or try "
+                "another model, then use \u201cChange Model & Retry\u201d.", "dim"))
+            log.write("")
+            self._dump_exchange(log, result)
+
+            change = self.query_one("#change-model", Button)
+            change.display = True
+            change.disabled = False
+            change.focus()
             self.query_one("#exit-now", Button).disabled = False
 
-    def _tick_countdown(self) -> None:
-        self._countdown -= 1
-        if self._countdown <= 0:
-            self.app.exit(0)
-            return
-        log = self.query_one("#consent-log", RichLog)
-        log.write(f"Exiting in {self._countdown}s...")
-        self.set_timer(1.0, self._tick_countdown)
+    async def _write_recap(self, log: RichLog, state: Any, agent_name: str) -> None:
+        """Recap what was configured + how many tools are available."""
+        log.write(_teal("What's set up:"))
+        provider = state.provider or "?"
+        log.write(_plain(f"  Identity   {agent_name}"))
+        log.write(_plain(f"  Model      {provider} / {state.model or '?'}"))
+        path_label = {"express": "Express (defaults)",
+                      "character": f"Character{' — ' + state.chosen_card.get('name') if state.chosen_card else ''}",
+                      "custom": "Custom"}.get(state.tier, state.tier or "—")
+        log.write(_plain(f"  Path       {path_label}"))
+        # Tool availability (best-effort; never block the recap on it).
+        try:
+            from core.tools import ToolContext, create_default_registry
+            import asyncpg
+            pool = await asyncpg.create_pool(state.dsn, min_size=1, max_size=2)
+            try:
+                registry = create_default_registry(pool)
+                specs = await registry.get_specs(ToolContext.CHAT)
+                log.write(_plain(f"  Tools      {len(specs)} available in chat"))
+            finally:
+                await pool.close()
+        except Exception:
+            pass
+        log.write("")
+
+    def _dump_exchange(self, log: RichLog, result: dict[str, Any]) -> None:
+        """Write the full prompt sent and the raw model response to the log."""
+        log.write(Text("\u2500\u2500 Prompt sent \u2500\u2500",
+                       style=Style(color=COLORS["accent"], bold=True)))
+        for msg in result.get("request_messages", []):
+            role = msg.get("role", "?")
+            content = msg.get("content", "")
+            log.write(Text(f"[{role}]", style=Style(color=COLORS["teal"], bold=True)))
+            log.write(_plain(str(content), "dim"))
+            log.write("")
+
+        log.write(Text("\u2500\u2500 Raw response \u2500\u2500",
+                       style=Style(color=COLORS["accent"], bold=True)))
+        raw_content = (result.get("raw_content") or "").strip()
+        if raw_content:
+            log.write(_plain(raw_content))
+            log.write("")
+        tool_calls = result.get("raw_tool_calls") or []
+        for tc in tool_calls:
+            name = tc.get("name", "?")
+            args = tc.get("arguments", {})
+            if not isinstance(args, str):
+                args = json.dumps(args, indent=2, ensure_ascii=False)
+            log.write(Text(f"tool call \u2192 {name}", style=Style(color=COLORS["teal"])))
+            log.write(_plain(args))
+            log.write("")
+        if not raw_content and not tool_calls:
+            log.write(_plain("(model returned no content and no tool call)", "dim"))
+            log.write("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "exit-now":
+        bid = event.button.id
+        if bid == "change-model":
+            # Return to model selection; identity stays persisted, so picking a
+            # new model routes straight back here (see InitState.retry_consent).
+            _state(self).retry_consent = True
+            self.app.switch_screen(LLMConfigScreen())
+            return
+        if bid == "open-chat":
+            # Hand off to the chat TUI after init exits (see the CLI init handler).
+            self.app.next_action = "chat"
+            self.app.exit(0)
+            return
+        if bid == "open-ui":
+            self.app.next_action = "ui"
+            self.app.exit(0)
+            return
+        if bid == "exit-now":
             state = _state(self)
-            if state.consent_decision == "consent":
-                self.app.exit(0)
-            else:
-                self.app.exit(1)
+            self.app.exit(0 if state.consent_decision == "consent" else 1)

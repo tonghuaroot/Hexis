@@ -320,61 +320,39 @@ async def _refresh_claude_code_token(creds: dict[str, Any]) -> str | None:
 # ---------------------------------------------------------------------------
 
 async def resolve_anthropic_token() -> tuple[str | None, str]:
-    """Resolve an Anthropic token from all available sources.
+    """Resolve an Anthropic OAuth/subscription token from Hexis's OWN store only.
 
-    Returns (token, auth_mode) where auth_mode is one of:
-    - "oauth" for OAuth tokens (setup-token or PKCE)
-    - "setup-token" for setup tokens
-    - "api-key" for regular API keys
-    - "" if nothing found
+    Hexis manages its own Anthropic login and deliberately does **not** read
+    Claude Code's credentials (``~/.claude/.credentials.json`` / the macOS
+    Keychain) or environment tokens. Populate the store with one of:
+        hexis auth anthropic login          # OAuth PKCE (Claude Pro/Max)
+        hexis auth anthropic setup-token     # paste a setup token
 
-    Priority:
-    1. Hexis-native PKCE OAuth (~/.hexis/auth/)
-    2. Claude Code credentials (~/.claude/.credentials.json or macOS Keychain)
-    3. CLAUDE_CODE_OAUTH_TOKEN env var
-    4. Anthropic setup token (~/.hexis/auth/)
-    5. ANTHROPIC_API_KEY env var
+    Returns (token, auth_mode): auth_mode is "setup-token" for a stored
+    OAuth/subscription token, or "" if nothing is stored.
+
+    Note: plain API-key auth for ``provider=anthropic`` is handled separately by
+    ``normalize_llm_config`` (via ``api_key_env`` / the ``ANTHROPIC_API_KEY``
+    env var) and does not go through this function.
     """
-    # 1. Hexis-native PKCE OAuth
+    # 1. Hexis-native PKCE OAuth (~/.hexis/auth/oauth.anthropic.json)
     hexis_creds = load_credentials()
     if hexis_creds:
         if not needs_refresh(hexis_creds.expires_ms, 120):
             return hexis_creds.access, "setup-token"
-        # Try to refresh
+        # Token is near expiry — refresh it in place.
         try:
             refreshed = await refresh_anthropic_token(hexis_creds.refresh)
             save_credentials(refreshed)
             return refreshed.access, "setup-token"
         except Exception as exc:
-            logger.debug("Hexis Anthropic token expired and refresh failed: %s", exc)
+            logger.debug("Hexis Anthropic OAuth token expired and refresh failed: %s", exc)
 
-    # 2. Claude Code credentials
-    cc_creds = read_claude_code_credentials()
-    if cc_creds:
-        access = cc_creds.get("accessToken", "")
-        if _is_claude_code_token_valid(cc_creds):
-            return access, "setup-token"
-        refreshed_token = await _refresh_claude_code_token(cc_creds)
-        if refreshed_token:
-            return refreshed_token, "setup-token"
-
-    # 3. CLAUDE_CODE_OAUTH_TOKEN env var
-    cc_env = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
-    if cc_env:
-        return cc_env, "setup-token"
-
-    # 4. Anthropic setup token
+    # 2. Hexis-stored setup token (~/.hexis/auth/token.anthropic_setup_token.json)
     from core.auth.anthropic_setup_token import load_credentials as load_setup_token
     setup_creds = load_setup_token()
     if setup_creds:
         return setup_creds.token, "setup-token"
-
-    # 5. ANTHROPIC_API_KEY env var
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    if api_key:
-        if is_oauth_token(api_key):
-            return api_key, "setup-token"
-        return api_key, "api-key"
 
     return None, ""
 

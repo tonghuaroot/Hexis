@@ -512,9 +512,14 @@ async def stream_agent(
     has_backlog_tasks: bool = False,
     timeout_seconds: float | None = None,
     max_tokens: int | None = None,
+    on_approval: "Callable[[str, dict[str, Any]], Awaitable[bool]] | None" = None,
 ) -> AsyncIterator[AgentEventData]:
     """
     Streaming variant of run_agent(). Yields AgentEventData as they happen.
+
+    ``on_approval(tool_name, arguments) -> bool`` is called before any tool that
+    ``requires_approval`` runs; return False to deny. In interactive chat this is
+    the human's [y/N] gate for side-effecting tools (email, DMs, shell, …).
 
     Used by the SSE chat endpoint to stream tokens to the frontend.
     """
@@ -606,9 +611,17 @@ async def stream_agent(
     enriched_parts.append(f"[USER MESSAGE]\n{user_message}")
     enriched_user_message = "\n\n".join(enriched_parts)
 
-    # Configure loop
-    effective_timeout = timeout_seconds or 120.0
-    effective_max_tokens = max_tokens or 4096
+    # Configure loop. Limits derive from config (Bar #1) with sane fallbacks;
+    # an explicit caller arg still wins.
+    def _cfg_num(key: str, fallback: float) -> float:
+        val = llm_config.get(key) if isinstance(llm_config, dict) else None
+        try:
+            return float(val) if val else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    effective_timeout = timeout_seconds or _cfg_num("timeout_seconds", 120.0)
+    effective_max_tokens = int(max_tokens or _cfg_num("max_tokens", 4096))
     loop_config = AgentLoopConfig(
         tool_context=tool_context,
         system_prompt=system_prompt,
@@ -621,6 +634,7 @@ async def stream_agent(
         temperature=0.7,
         max_tokens=effective_max_tokens,
         session_id=session_id,
+        on_approval=on_approval,
     )
 
     agent = AgentLoop(loop_config)

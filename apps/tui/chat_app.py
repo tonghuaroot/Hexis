@@ -1,369 +1,404 @@
-"""Hexis Chat TUI — Textual app for streaming conversations."""
+"""Hexis Chat TUI — Textual app for streaming conversations.
+
+Streams through ``services.agent.stream_agent`` (unchanged backend contract),
+rendering grouped turns with markup-safe text, batched updates, a collapsible
+reasoning block, an inline tool tree, and a progressive-disclosure status bar.
+"""
 from __future__ import annotations
 
-import time
 import uuid
 from typing import Any
 
 from dotenv import load_dotenv
+from rich.style import Style
+from rich.text import Text
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Input, Static
 from textual.worker import Worker, WorkerState
 
-from apps.tui.chat_widgets import (
-    ChatInput,
-    ChatLog,
-    ContextSidebar,
-    StreamingMessage,
-)
+from apps.tui.chat_widgets import COMMANDS, Composer, SlashMenu, Transcript
+from apps.tui.design import COLORS, GLYPHS
+from apps.tui.status_bar import StatusBar
 from apps.tui.theme import hexis_theme
+from apps.tui.tips import mark_seen, random_tip, seen
 
 
 class ChatScreen(Screen):
-    """Main chat screen with log, input, and optional sidebar."""
+    """Main chat screen: header · transcript · status bar · composer."""
 
     BINDINGS = [
-        ("ctrl+c", "quit_app", "Quit"),
-        ("ctrl+l", "clear_chat", "Clear"),
+        Binding("ctrl+c", "interrupt_or_quit", "Interrupt / Quit", priority=True),
+        Binding("ctrl+l", "clear_chat", "Clear"),
+        Binding("ctrl+t", "toggle_thinking", "Thinking"),
+        # Keyboard scrolling (mouse wheel is off so the terminal owns the mouse
+        # for text selection / copy).
+        Binding("pageup", "scroll_transcript('page_up')", "Scroll up", show=False),
+        Binding("pagedown", "scroll_transcript('page_down')", "Scroll down", show=False),
+        Binding("ctrl+home", "scroll_transcript('home')", "Top", show=False),
+        Binding("ctrl+end", "scroll_transcript('end')", "Bottom", show=False),
     ]
+
+    def action_scroll_transcript(self, how: str) -> None:
+        tr = self.query_one(Transcript)
+        {
+            "page_up": tr.scroll_page_up,
+            "page_down": tr.scroll_page_down,
+            "home": tr.scroll_home,
+            "end": tr.scroll_end,
+        }.get(how, lambda: None)()
 
     def __init__(self) -> None:
         super().__init__()
         self._history: list[dict[str, Any]] = []
         self._verbose = False
         self._debug = False
+        self._show_reasoning = True
         self._agent_name = "Hexis"
+        self._mood = ""
         self._streaming = False
-        self._streaming_msg: StreamingMessage | None = None
-        self._status_text = "streaming chat"
-        self._status_started_at: float | None = None
-        self._status_timer: Any = None
-
-    def _format_elapsed(self) -> str:
-        if self._status_started_at is None:
-            return "0s"
-        total = max(0, int(time.monotonic() - self._status_started_at))
-        if total < 60:
-            return f"{total}s"
-        minutes, seconds = divmod(total, 60)
-        return f"{minutes}m {seconds}s"
-
-    def _render_header(self) -> None:
-        status = self._status_text
-        if self._status_started_at is not None:
-            status = f"{status} · {self._format_elapsed()}"
-        header = self.query_one("#chat-header", Static)
-        header.update(
-            f"[bold #d8774f]{self._agent_name}[/bold #d8774f]"
-            f" [#4e463d]\u2014 {status}[/#4e463d]"
-        )
-
-    def _tick_status(self) -> None:
-        if self._status_started_at is not None:
-            self._render_header()
-
-    def _set_header_status(self, status_text: str, *, busy: bool = False) -> None:
-        if busy:
-            if self._status_text != status_text or self._status_started_at is None:
-                self._status_started_at = time.monotonic()
-            if self._status_timer is None:
-                self._status_timer = self.set_interval(1.0, self._tick_status)
-        else:
-            self._status_started_at = None
-            if self._status_timer is not None:
-                self._status_timer.stop()
-                self._status_timer = None
-        self._status_text = status_text
-        self._render_header()
+        self._current_turn: Any = None
+        self._pending_user = ""
+        self._queued: list[str] = []
+        self._tool_count = 0
+        self._flush_timer: Any = None
+        self._greet = False
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="chat-header", classes="chat-header")
-        with Horizontal():
-            with Vertical(id="chat-column"):
-                yield ChatLog(id="chat-log")
-                yield ChatInput(id="chat-input")
-            yield ContextSidebar(id="context-sidebar")
-        yield Static(
-            " /quit  /clear  /recall <q>  /status  /verbose  /tools  /history ",
-            classes="chat-footer",
-        )
+        yield Static("", id="chat-header")
+        yield Transcript(id="transcript")
+        yield StatusBar(id="status-bar")
+        yield Composer()
+        yield SlashMenu(id="slash-menu")
 
     async def on_mount(self) -> None:
         app: HexisChatApp = self.app  # type: ignore[assignment]
         self._agent_name = app.agent_name
-        self._set_header_status("streaming chat")
+        self._mood = app.mood
+        self._render_header()
+        self.query_one(SlashMenu).display = False
+        status = self.query_one(StatusBar)
+        status.update_state(model=app.model_name, mood=self._mood)
+        self.query_one(Transcript).write_info(
+            "Keyboard-only — type to chat, / for commands, PageUp/PageDown to "
+            "scroll. Drag with the mouse to select & copy text."
+        )
+        # First-ever open: a one-time contextual hint (show-once).
+        if not seen("chat.opened"):
+            mark_seen("chat.opened")
+            self.query_one(Transcript).write_info(
+                "First time here — Ctrl+C interrupts a reply, Ctrl+T toggles the "
+                "agent's thinking, /help lists everything."
+            )
+        self.query_one(Transcript).write_info(random_tip())
+        await self._refresh_energy()
+        # First-run: seed a wake-up turn so the agent greets and (with consent,
+        # no external lookups) offers to learn who you are.
+        if self._greet:
+            self.run_worker(self._seed_greet(), name="greet", exit_on_error=False)
 
-        self.query_one("#chat-input", ChatInput).focus()
+    async def _seed_greet(self) -> None:
+        await self._send_message(
+            "Hi — this is the first time we're talking. Please introduce yourself "
+            "briefly, and if you'd like, feel free to ask a little about me — only "
+            "what I choose to share, and without looking anything up unless I say "
+            "it's okay."
+        )
+        self.query_one(Composer).focus()
 
-    def on_unmount(self) -> None:
-        if self._status_timer is not None:
-            self._status_timer.stop()
-            self._status_timer = None
+    def _render_header(self) -> None:
+        header = self.query_one("#chat-header", Static)
+        t = Text()
+        t.append(f"{GLYPHS['logo']} ", style=Style(color=COLORS["accent"]))
+        t.append(self._agent_name, style=Style(color=COLORS["accent"], bold=True))
+        if self._mood:
+            t.append(f"  {self._mood}", style=Style(color=COLORS["dim"]))
+        header.update(t)
+
+    async def _refresh_energy(self) -> None:
+        """Populate the status bar's energy meter from heartbeat_state."""
+        app: HexisChatApp = self.app  # type: ignore[assignment]
+        try:
+            async with app.pool.acquire() as conn:
+                energy = await conn.fetchval(
+                    "SELECT current_energy FROM heartbeat_state WHERE id = 1"
+                )
+                max_energy = await conn.fetchval(
+                    "SELECT get_config_int('heartbeat.max_energy')"
+                )
+            if energy is not None:
+                self.query_one(StatusBar).update_state(
+                    energy=int(energy), max_energy=int(max_energy or 20)
+                )
+        except Exception:
+            pass  # energy meter is ambient; never block chat on it
+
+    # ── input ────────────────────────────────────────────────────────────────
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "composer":
+            return
+        menu = self.query_one(SlashMenu)
+        value = event.value
+        if value.startswith("/") and " " not in value:
+            menu.show(value)
+        else:
+            menu.hide()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "chat-input":
+        if event.input.id != "composer":
             return
-
         text = event.value.strip()
+        composer = self.query_one(Composer)
+        self.query_one(SlashMenu).hide()
         if not text:
             return
 
-        chat_input = self.query_one("#chat-input", ChatInput)
-
         if text.startswith("/"):
-            chat_input.push_history(text)
-            chat_input.value = ""
+            composer.push_history(text)
+            composer.value = ""
             await self._handle_slash(text)
             return
 
+        composer.push_history(text)
+        composer.value = ""
         if self._streaming:
-            # Keep input intact so the user can resubmit after streaming completes.
+            self._queued.append(text)
+            self.query_one(Transcript).write_info(f"queued ({len(self._queued)})")
             return
-
-        chat_input.push_history(text)
-        chat_input.value = ""
         await self._send_message(text)
 
+    # ── slash commands ───────────────────────────────────────────────────────
     async def _handle_slash(self, text: str) -> None:
-        log = self.query_one("#chat-log", ChatLog)
+        tr = self.query_one(Transcript)
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
+        arg = parts[1] if len(parts) > 1 else ""
+        app: HexisChatApp = self.app  # type: ignore[assignment]
 
         if cmd in ("/quit", "/exit"):
             self.app.exit(0)
-            return
-
-        if cmd == "/clear":
+        elif cmd == "/clear":
             self._history.clear()
-            # Remove all children from the ChatLog
-            await log.remove_children()
-            log.write_info("Conversation cleared.")
-            return
-
-        if cmd == "/help":
-            log.write_info("Commands:")
-            log.write_info("  /quit, /exit   — Exit chat")
-            log.write_info("  /clear         — Clear conversation")
-            log.write_info("  /recall <q>    — Search memories")
-            log.write_info("  /status        — Show agent status")
-            log.write_info("  /verbose       — Toggle verbose mode")
-            log.write_info("  /debug         — Toggle debug mode")
-            log.write_info("  /tools         — List available tools")
-            log.write_info("  /history       — Show conversation history")
-            return
-
-        if cmd == "/recall":
-            query = parts[1] if len(parts) > 1 else ""
-            if not query:
-                log.write_error("Usage: /recall <query>")
+            await tr.remove_children()
+            tr.write_info("Conversation cleared.")
+        elif cmd == "/help":
+            tr.write_info("Commands:")
+            for c, desc in COMMANDS:
+                tr.write_info(f"  {c:<11} {desc}")
+            tr.write_info("Keys: ctrl+c interrupt · ctrl+l clear · ctrl+t thinking · tab complete")
+        elif cmd == "/thinking":
+            self._show_reasoning = not self._show_reasoning
+            tr.write_info(f"Reasoning display: {'on' if self._show_reasoning else 'off'}")
+        elif cmd == "/debug":
+            self._debug = not self._debug
+            self._verbose = self._debug
+            tr.write_info(f"Debug: {'on' if self._debug else 'off'}")
+        elif cmd == "/recall":
+            if not arg:
+                tr.write_error("Usage: /recall <query>")
                 return
-            app: HexisChatApp = self.app  # type: ignore[assignment]
             try:
                 from core.cognitive_memory_api import CognitiveMemory
                 async with CognitiveMemory.connect(app.dsn) as mem:
-                    result = await mem.recall(query, limit=5)
+                    result = await mem.recall(arg, limit=5)
                 if not result.memories:
-                    log.write_info("No memories found.")
+                    tr.write_info("No memories found.")
                 else:
-                    log.write_recall(result.memories)
+                    tr.write_recall(result.memories)
             except Exception as e:
-                log.write_error(str(e))
-            return
-
-        if cmd == "/status":
-            app: HexisChatApp = self.app  # type: ignore[assignment]
+                tr.write_error(str(e))
+        elif cmd == "/status":
             try:
                 from core.cli_api import status_payload_rich
                 payload = await status_payload_rich(app.dsn)
-                agent = payload.get("agent", {})
-                log.write_info(f"Agent: {agent.get('name', '?')}")
-                log.write_info(f"Mood: {agent.get('mood', '?')}")
-                energy = payload.get("energy", {})
-                log.write_info(f"Energy: {energy.get('current', '?')}/{energy.get('max', '?')}")
+                agent = payload.get("agent", {}) if isinstance(payload.get("agent"), dict) else {}
+                tr.write_info(f"Agent: {agent.get('name', self._agent_name)}")
+                if payload.get("mood"):
+                    tr.write_info(f"Mood: {payload.get('mood')}")
+                energy = payload.get("energy")
+                max_e = payload.get("max_energy")
+                if energy is not None:
+                    tr.write_info(f"Energy: {energy}/{max_e}")
                 consent = payload.get("consent", {})
-                log.write_info(f"Consent: {consent.get('status', '?')}")
+                if isinstance(consent, dict) and consent.get("status"):
+                    tr.write_info(f"Consent: {consent.get('status')}")
             except Exception as e:
-                log.write_error(str(e))
-            return
-
-        if cmd == "/verbose":
-            self._verbose = not self._verbose
-            sidebar = self.query_one("#context-sidebar", ContextSidebar)
-            if self._verbose:
-                sidebar.add_class("visible")
-            else:
-                sidebar.remove_class("visible")
-            log.write_info(f"Verbose mode: {'on' if self._verbose else 'off'}")
-            return
-
-        if cmd == "/debug":
-            self._debug = not self._debug
-            self._verbose = self._verbose or self._debug
-            log.write_info(f"Debug mode: {'on' if self._debug else 'off'} (verbose: {'on' if self._verbose else 'off'})")
-            return
-
-        if cmd == "/tools":
-            app: HexisChatApp = self.app  # type: ignore[assignment]
+                tr.write_error(str(e))
+        elif cmd == "/tools":
             try:
                 from core.tools import ToolContext
                 specs = await app.registry.get_specs(ToolContext.CHAT)
-                log.write_info("Available Tools:")
+                tr.write_info(f"Available tools ({len(specs)}):")
                 for spec in specs:
                     func = spec.get("function", {})
-                    name = func.get("name", "?")
-                    desc = func.get("description", "")[:60]
-                    log.write_info(f"  [#3c6f64]{name}[/#3c6f64] — {desc}")
+                    tr.write_info(f"  {func.get('name', '?')} — "
+                                  f"{(func.get('description') or '')[:60]}")
             except Exception as e:
-                log.write_error(str(e))
-            return
-
-        if cmd == "/history":
+                tr.write_error(str(e))
+        elif cmd == "/history":
             if not self._history:
-                log.write_info("No conversation history yet.")
+                tr.write_info("No conversation history yet.")
             else:
                 for i, msg in enumerate(self._history):
-                    role = msg["role"]
-                    content = msg["content"][:100]
-                    log.write_info(f"  {i} [{role}]: {content}")
-            return
+                    tr.write_info(f"  {i} [{msg['role']}]: {msg['content'][:100]}")
+        else:
+            tr.write_error(f"Unknown command: {cmd}")
+            tr.write_info("Type /help for available commands.")
 
-        log.write_error(f"Unknown command: {cmd}")
-        log.write_info("Type /help for available commands.")
-
+    # ── streaming ──────────────────────────────────────────────────────────────
     async def _send_message(self, text: str) -> None:
-        log = self.query_one("#chat-log", ChatLog)
-        log.write_user(text)
-
+        tr = self.query_one(Transcript)
+        await tr.add_user(text)
+        self._pending_user = text
+        self._tool_count = 0
         self._streaming = True
-        self._set_header_status("waiting", busy=True)
-        self._streaming_msg = log.start_assistant(self._agent_name)
-        self.run_worker(
-            self._stream_response(text),
-            name="chat-stream",
-            exclusive=True,
-        )
+        self._current_turn = await tr.add_assistant(self._agent_name)
+        self._current_turn.show_reasoning(self._show_reasoning)
+        self.query_one(StatusBar).set_busy("thinking")
+        self._flush_timer = self.set_interval(0.1, self._flush)
+        # exit_on_error=False → an LLM/stream failure shows as an error line
+        # instead of crashing the chat app (on_worker_state_changed handles it).
+        self.run_worker(self._stream_response(text), name="chat-stream",
+                        exclusive=True, exit_on_error=False)
 
-    async def _stream_response(self, user_input: str) -> str:
+    async def _flush(self) -> None:
+        if self._current_turn is not None:
+            await self._current_turn.flush()
+            self.query_one(Transcript).scroll_end(animate=False)
+
+    async def _stream_response(self, user_input: str) -> None:
         from core.agent_loop import AgentEvent
-        from core.cognitive_memory_api import CognitiveMemory
         from services.agent import stream_agent
-        from services.chat import _remember_conversation
 
         app: HexisChatApp = self.app  # type: ignore[assignment]
-        log = self.query_one("#chat-log", ChatLog)
-        streaming_msg = self._streaming_msg
-
+        tr = self.query_one(Transcript)
+        status = self.query_one(StatusBar)
+        turn = self._current_turn
         session_id = str(uuid.uuid4())
-        full_text = ""
-        saw_first_token = False
+        saw_token = False
 
-        # Use the unified agent runner (subconscious → memory hydration → conscious loop)
         async for event in stream_agent(
-            app.pool,
-            app.registry,
-            user_message=user_input,
-            mode="chat",
-            history=self._history,
-            session_id=session_id,
-            dsn=app.dsn,
+            app.pool, app.registry,
+            user_message=user_input, mode="chat",
+            history=self._history, session_id=session_id, dsn=app.dsn,
         ):
-            if event.event == AgentEvent.PHASE_CHANGE:
-                phase = event.data.get("phase", "")
-                status = event.data.get("status", "")
+            ev = event.event
+            data = event.data
+            if ev == AgentEvent.PHASE_CHANGE:
+                phase = data.get("phase", "")
+                st = data.get("status", "")
                 if phase == "memory_recall":
-                    if status == "start":
-                        self._set_header_status("recalling memories", busy=True)
-                        log.write_info("Recalling memories...")
-                    else:
-                        self._set_header_status("thinking...", busy=True)
-                        count = event.data.get("count", 0)
-                        log.write_info(f"Recalled {count} memories")
+                    status.set_busy("recalling memories" if st == "start" else "thinking")
+                    if st == "end" and self._verbose:
+                        tr.write_info(f"recalled {data.get('count', 0)} memories")
                 elif phase == "subconscious":
-                    if self._verbose:
-                        if status == "start":
-                            log.write_info("Subconscious appraisal...")
-                        elif status == "end":
-                            log.write_info("Subconscious appraisal complete")
-                    if status == "start":
-                        self._set_header_status("reasoning", busy=True)
-                    elif status == "end":
-                        self._set_header_status("thinking...", busy=True)
-
-            elif event.event == AgentEvent.TEXT_DELTA:
-                text = event.data.get("text", "")
-                if text and streaming_msg:
-                    if not saw_first_token:
-                        saw_first_token = True
-                        self._set_header_status("streaming", busy=True)
-                    full_text += text
-                    streaming_msg.append_text(text)
-
-            elif event.event == AgentEvent.TOOL_START:
-                tool_name = event.data.get("tool_name", "tool")
-                log.write_tool_start(tool_name)
-
-            elif event.event == AgentEvent.TOOL_RESULT:
-                tool_name = event.data.get("tool_name", "tool")
-                success = event.data.get("success", False)
-                duration = event.data.get("duration")
-                error = event.data.get("error", "")
-                log.write_tool_result(tool_name, success, duration, error)
-
-            elif event.event == AgentEvent.ERROR:
-                error_msg = event.data.get("error", "Unknown error")
-                log.write_error(error_msg)
-                self._set_header_status("error")
-
-        # Finalize streaming message
-        if streaming_msg:
-            log.finish_assistant(streaming_msg, full_text)
-
-        # Update history
-        self._history.append({"role": "user", "content": user_input})
-        self._history.append({"role": "assistant", "content": full_text})
-
-        # Memory formation
-        if full_text:
-            try:
-                async with CognitiveMemory.connect(app.dsn) as mem_client:
-                    await _remember_conversation(
-                        mem_client,
-                        user_message=user_input,
-                        assistant_message=full_text,
+                    status.set_busy("reflecting" if st == "start" else "thinking")
+                elif phase in ("plan", "execute", "verify"):
+                    status.set_busy(phase + "ing" if phase != "plan" else "planning")
+            elif ev == AgentEvent.TEXT_DELTA:
+                text = data.get("text", "")
+                if text and turn is not None:
+                    if not saw_token:
+                        saw_token = True
+                        status.set_busy("")  # switch to rotating think-verbs
+                    turn.append_delta(text)
+            elif ev == AgentEvent.TOOL_START:
+                name = data.get("tool_name", "tool")
+                self._tool_count += 1
+                status.update_state(tools=self._tool_count)
+                status.set_busy(f"running {name}")
+                if turn is not None:
+                    await turn.tool_start(name)
+            elif ev == AgentEvent.TOOL_RESULT:
+                if turn is not None:
+                    await turn.tool_result(
+                        data.get("tool_name", "tool"), data.get("success", False),
+                        data.get("duration"), data.get("error", "") or "",
                     )
-            except Exception:
-                pass
+                status.set_busy("")
+            elif ev == AgentEvent.CONTINUATION:
+                tr.write_info("continuing…")
+            elif ev == AgentEvent.ENERGY_EXHAUSTED:
+                tr.write_info("energy exhausted")
+            elif ev == AgentEvent.ERROR:
+                tr.write_error(data.get("error", "Unknown error"))
 
-        self._set_header_status("streaming chat")
-        return full_text
-
-    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+    async def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if event.worker.name != "chat-stream":
             return
+        if event.state not in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
+            return
 
-        if event.state in (WorkerState.SUCCESS, WorkerState.ERROR, WorkerState.CANCELLED):
-            self._streaming = False
-            self._streaming_msg = None
-            if event.state == WorkerState.ERROR:
-                self._set_header_status("error")
-            else:
-                self._set_header_status("streaming chat")
-            self.query_one("#chat-input", ChatInput).focus()
+        if self._flush_timer is not None:
+            self._flush_timer.stop()
+            self._flush_timer = None
 
-            if event.state == WorkerState.ERROR:
-                log = self.query_one("#chat-log", ChatLog)
-                log.write_error(str(event.worker.error))
+        turn = self._current_turn
+        if turn is not None:
+            await turn.finalize()
+        self._streaming = False
+        self._current_turn = None
+        status = self.query_one(StatusBar)
+        status.set_idle()
 
-    def action_quit_app(self) -> None:
-        self.app.exit(0)
+        tr = self.query_one(Transcript)
+        if event.state == WorkerState.ERROR:
+            tr.write_error(str(event.worker.error))
+        elif event.state == WorkerState.CANCELLED:
+            tr.write_info("interrupted")
+
+        if event.state == WorkerState.SUCCESS and turn is not None:
+            final_text = getattr(turn, "_visible", "") or ""
+            self._history.append({"role": "user", "content": self._pending_user})
+            self._history.append({"role": "assistant", "content": final_text})
+            if final_text:
+                self.run_worker(
+                    self._remember(self._pending_user, final_text),
+                    name="chat-remember", exit_on_error=False,
+                )
+
+        await self._refresh_energy()
+        self.query_one(Composer).focus()
+
+        # Drain one queued message.
+        if self._queued and not self._streaming:
+            await self._send_message(self._queued.pop(0))
+
+    async def _remember(self, user_input: str, assistant_text: str) -> None:
+        app: HexisChatApp = self.app  # type: ignore[assignment]
+        try:
+            from core.cognitive_memory_api import CognitiveMemory
+            from services.chat import _remember_conversation
+            async with CognitiveMemory.connect(app.dsn) as mem_client:
+                await _remember_conversation(
+                    mem_client, user_message=user_input, assistant_message=assistant_text
+                )
+        except Exception as e:
+            if self._debug:
+                self.query_one(Transcript).write_info(f"[memory] not stored: {e}")
+
+    # ── actions ────────────────────────────────────────────────────────────────
+    def action_interrupt_or_quit(self) -> None:
+        if self._streaming:
+            for worker in list(self.workers):
+                if worker.name == "chat-stream":
+                    worker.cancel()
+        else:
+            self.app.exit(0)
 
     async def action_clear_chat(self) -> None:
         self._history.clear()
-        log = self.query_one("#chat-log", ChatLog)
-        await log.remove_children()
-        log.write_info("Conversation cleared.")
+        await self.query_one(Transcript).remove_children()
+        self.query_one(Transcript).write_info("Conversation cleared.")
+
+    def action_toggle_thinking(self) -> None:
+        self._show_reasoning = not self._show_reasoning
+        if self._current_turn is not None:
+            self._current_turn.show_reasoning(self._show_reasoning)
+        self.query_one(Transcript).write_info(
+            f"Reasoning display: {'on' if self._show_reasoning else 'off'}"
+        )
 
 
 class HexisChatApp(App):
@@ -379,63 +414,101 @@ class HexisChatApp(App):
         self._argv = argv or []
         self.pool: Any = None
         self.registry: Any = None
-        self.system_prompt: str = ""
-        self.llm_config: dict[str, Any] = {}
         self.agent_name: str = "Hexis"
+        self.model_name: str = ""
+        self.mood: str = ""
         self.dsn: str = ""
+        self._verbose = False
+        self._debug = False
+        self._greet = False  # --greet: seed a first "wake up" turn on first run
+        # Set to "init" when a first-run chat should hand off to setup.
+        self.next_action: str | None = None
+
+    def get_css_variables(self) -> dict[str, str]:
+        from apps.tui.design import CSS_VARS
+        variables = super().get_css_variables()
+        variables.update(CSS_VARS)
+        return variables
+
+    def run(self, **kwargs):
+        # Keyboard-only by default: don't capture the mouse, so the terminal's
+        # native click-drag text selection / copy keeps working. Set
+        # HEXIS_TUI_MOUSE=1 to re-enable mouse interaction.
+        import os
+        kwargs.setdefault("mouse", os.getenv("HEXIS_TUI_MOUSE", "") == "1")
+        return super().run(**kwargs)
 
     async def on_mount(self) -> None:
         load_dotenv()
         import asyncpg
         from core.agent_api import db_dsn_from_env, get_agent_profile_context
         from core.llm_config import load_llm_config
-        from core.tools import ToolContext, create_default_registry
-        from services.chat import _build_system_prompt
+        from core.tools import create_default_registry
 
-        # Parse args
         dsn = None
-        verbose = False
-        debug = False
         i = 0
         while i < len(self._argv):
-            if self._argv[i] == "--dsn" and i + 1 < len(self._argv):
+            a = self._argv[i]
+            if a == "--dsn" and i + 1 < len(self._argv):
                 dsn = self._argv[i + 1]
                 i += 2
-            elif self._argv[i] in ("-v", "--verbose"):
-                verbose = True
+            elif a in ("-v", "--verbose"):
+                self._verbose = True
                 i += 1
-            elif self._argv[i] in ("-d", "--debug"):
-                debug = True
-                verbose = True
+            elif a in ("-d", "--debug"):
+                self._debug = True
+                self._verbose = True
+                i += 1
+            elif a == "--greet":
+                self._greet = True
                 i += 1
             else:
                 i += 1
 
         self.dsn = dsn or db_dsn_from_env()
-
+        configured = True
         try:
             self.pool = await asyncpg.create_pool(self.dsn, min_size=2, max_size=5)
-
             async with self.pool.acquire() as conn:
-                self.llm_config = await load_llm_config(conn, "llm.chat", fallback_key="llm")
-
+                try:
+                    configured = bool(await conn.fetchval("SELECT is_agent_configured()"))
+                except Exception:
+                    configured = True  # never block chat on this probe
+                llm_config = await load_llm_config(conn, "llm.chat", fallback_key="llm")
+            self.model_name = llm_config.get("model", "") if isinstance(llm_config, dict) else ""
             self.registry = create_default_registry(self.pool)
             agent_profile = await get_agent_profile_context(self.dsn)
-            self.system_prompt = await _build_system_prompt(agent_profile, self.registry)
-
             if isinstance(agent_profile, dict):
                 self.agent_name = agent_profile.get("name", "Hexis")
-
+                self.mood = agent_profile.get("mood", "") or ""
         except Exception as e:
             from apps.tui.dialogs import ErrorDialog
             await self.push_screen(ErrorDialog("Connection Error", str(e)))
             return
 
+        # First-run detection: an empty chat on an unconfigured agent just fails
+        # at the first message. Offer setup instead.
+        if not configured:
+            from apps.tui.dialogs import ConfirmDialog
+
+            def _decide(run_init: bool | None) -> None:
+                if run_init:
+                    self.next_action = "init"
+                self.exit(0)
+
+            await self.push_screen(
+                ConfirmDialog(
+                    "Not set up yet",
+                    "No agent is configured. Run setup (hexis init) now?",
+                ),
+                _decide,
+            )
+            return
+
         screen = ChatScreen()
-        if verbose:
-            screen._verbose = True
-        if debug:
-            screen._debug = True
+        screen._verbose = self._verbose
+        screen._debug = self._debug
+        screen._greet = self._greet
         await self.push_screen(screen)
 
     async def on_unmount(self) -> None:

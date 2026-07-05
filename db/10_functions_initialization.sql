@@ -858,6 +858,15 @@ BEGIN
         );
     END LOOP;
 
+    -- Tag init-created goals so reset_persona() can clear them on a re-init
+    -- (goals otherwise carry only a goal_source enum, indistinguishable from
+    -- goals the agent sets for itself later).
+    IF array_length(created_ids, 1) IS NOT NULL THEN
+        UPDATE memories
+        SET metadata = metadata || jsonb_build_object('origin', 'initialization')
+        WHERE id = ANY(created_ids);
+    END IF;
+
     IF purpose_text IS NOT NULL THEN
         mem_id := create_worldview_memory(
             format('My purpose is %s.', purpose_text),
@@ -1097,6 +1106,7 @@ DECLARE
     hb_tools JSONB;
     embed_texts TEXT[] := ARRAY[]::text[];
 BEGIN
+    PERFORM reset_persona();  -- idempotent re-init: clear any prior init persona
     embed_texts := embed_texts || ARRAY[
         'My name is Hexis.',
         'I use they/them pronouns.',
@@ -1224,6 +1234,7 @@ DECLARE
     hb_action_costs JSONB;
     hb_tools JSONB;
 BEGIN
+    PERFORM reset_persona();  -- idempotent re-init: clear any prior init persona
     IF payload ? 'mode' THEN
         results := results || jsonb_build_object('mode', init_mode(payload->>'mode'));
     END IF;
@@ -1310,6 +1321,32 @@ BEGIN
     RETURN jsonb_build_object('results', results, 'status', get_init_status());
 END;
 $$ LANGUAGE plpgsql;
+CREATE OR REPLACE FUNCTION reset_persona()
+RETURNS INTEGER AS $$
+DECLARE
+    n INTEGER;
+BEGIN
+    -- Make re-initialization idempotent: soft-archive persona rows created by a
+    -- PRIOR init so a re-run REPLACES the persona instead of layering a second,
+    -- possibly-contradictory one on top (e.g. two "My name is ..." beliefs).
+    --
+    -- Only rows unambiguously created BY init are touched (origin/type/source =
+    -- 'initialization'). The agent's own lived memories (episodic/semantic/etc.)
+    -- and its later deliberate self-changes (origin 'user_initialized') are kept.
+    -- Soft-archive (status='archived', not DELETE) keeps it reversible and FK-safe.
+    UPDATE memories
+    SET status = 'archived', updated_at = CURRENT_TIMESTAMP
+    WHERE status = 'active'
+      AND (
+            metadata->>'origin' = 'initialization'
+         OR metadata->>'type'   = 'initialization'
+         OR source_attribution->>'source' = 'initialization'
+      );
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RETURN n;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION reset_initialization()
 RETURNS JSONB AS $$
 BEGIN
@@ -1377,6 +1414,7 @@ DECLARE
     hb_tools JSONB;
     mem_id UUID;
 BEGIN
+    PERFORM reset_persona();  -- idempotent re-init: clear any prior init persona
     card := COALESCE(p_card, '{}'::jsonb);
 
     -- Extract fields with defaults

@@ -35,14 +35,18 @@ function formatValue(value: any, key: string): string {
 export default function SettingsPage() {
   const [data, setData] = useState<SettingsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [toolError, setToolError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("models");
 
   const fetchSettings = useCallback(async () => {
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
-      if (res.ok) setData(await res.json());
-    } catch {
-      // ignore
+      if (!res.ok) throw new Error(`Failed to load settings (${res.status})`);
+      setData(await res.json());
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load settings.");
     } finally {
       setLoading(false);
     }
@@ -55,12 +59,21 @@ export default function SettingsPage() {
   const toggleTool = async (toolKey: string, currentValue: any) => {
     const toolName = toolKey.replace("tools.", "").replace(".enabled", "");
     const enabled = currentValue !== true;
-    await fetch("/api/settings/tools", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tool_name: toolName, enabled }),
-    });
-    fetchSettings();
+    setToolError(null);
+    try {
+      const res = await fetch("/api/settings/tools", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool_name: toolName, enabled }),
+      });
+      if (!res.ok) {
+        const payload = await res.json().catch(() => ({}));
+        throw new Error(payload?.error || `Failed to update ${toolName} (${res.status})`);
+      }
+      fetchSettings();
+    } catch (err) {
+      setToolError(err instanceof Error ? err.message : "Failed to update tool.");
+    }
   };
 
   if (loading) {
@@ -75,7 +88,16 @@ export default function SettingsPage() {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <Card className="max-w-md text-center">
-          <p className="text-sm text-[var(--ink-soft)]">Unable to load settings.</p>
+          <p className="text-sm text-red-600">{error || "Unable to load settings."}</p>
+          <button
+            onClick={() => {
+              setLoading(true);
+              fetchSettings();
+            }}
+            className="mt-4 rounded-full bg-[var(--foreground)] px-5 py-2.5 text-sm font-medium text-white transition hover:bg-[var(--accent-strong)]"
+          >
+            Retry
+          </button>
         </Card>
       </div>
     );
@@ -191,6 +213,11 @@ export default function SettingsPage() {
               <p className="mt-1 text-xs text-[var(--ink-soft)]">
                 Enable or disable tools available to the agent.
               </p>
+              {toolError && (
+                <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {toolError}
+                </p>
+              )}
               <div className="mt-4 space-y-2">
                 {Object.entries(data.tools).length === 0 ? (
                   <p className="text-sm text-[var(--ink-soft)]">

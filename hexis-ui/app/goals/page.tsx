@@ -24,6 +24,7 @@ const SOURCES = ["user_request", "curiosity", "identity", "derived", "external"]
 export default function GoalsPage() {
   const [goals, setGoals] = useState<Goal[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newDesc, setNewDesc] = useState("");
@@ -36,11 +37,12 @@ export default function GoalsPage() {
   const fetchGoals = useCallback(async () => {
     try {
       const res = await fetch("/api/goals", { cache: "no-store" });
-      if (!res.ok) throw new Error("Failed");
+      if (!res.ok) throw new Error(`Failed to load goals (${res.status})`);
       const data = await res.json();
       setGoals(data.goals || []);
-    } catch {
-      setGoals([]);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load goals.");
     } finally {
       setLoading(false);
     }
@@ -176,6 +178,21 @@ export default function GoalsPage() {
                   {creating ? "Creating..." : "Create"}
                 </button>
               </div>
+            </div>
+          </Card>
+        )}
+
+        {/* Backend outage banner (distinct from "no goals") */}
+        {error && (
+          <Card className="mt-6 border-red-200 bg-red-50 fade-up">
+            <div className="flex items-center justify-between gap-4">
+              <p className="text-sm text-red-700">{error}</p>
+              <button
+                onClick={fetchGoals}
+                className="rounded-full border border-red-300 px-4 py-2 text-sm font-medium text-red-700 transition hover:bg-red-100"
+              >
+                Retry
+              </button>
             </div>
           </Card>
         )}

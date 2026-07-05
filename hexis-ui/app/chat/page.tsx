@@ -49,6 +49,15 @@ function saveSession(messages: ChatMessage[]) {
   }
 }
 
+// Escape HTML so model output is shown as text, never parsed/executed.
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 // Simple markdown-ish rendering: bold, italic, code, line breaks
 function renderMarkdown(text: string) {
   if (!text) return null;
@@ -80,8 +89,8 @@ function renderMarkdown(text: string) {
       continue;
     }
 
-    // Inline formatting
-    const formatted = line
+    // Inline formatting — escape HTML first so raw markup can never be parsed.
+    const formatted = escapeHtml(line)
       .replace(/`([^`]+)`/g, '<code class="rounded bg-[var(--surface-strong)] px-1.5 py-0.5 text-xs">$1</code>')
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/\*([^*]+)\*/g, "<em>$1</em>");
@@ -558,6 +567,7 @@ export default function ChatPage() {
               <div className="flex gap-3">
                 <textarea
                   ref={textareaRef}
+                  aria-label="Message Hexis"
                   className="min-h-[48px] max-h-[120px] flex-1 resize-none rounded-2xl border border-[var(--outline)] bg-white px-4 py-3 text-sm focus:border-[var(--accent)] focus:outline-none"
                   placeholder="Talk with Hexis... (Enter to send, Shift+Enter for newline)"
                   value={input}

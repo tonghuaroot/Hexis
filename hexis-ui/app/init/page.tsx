@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type InitStage =
@@ -48,12 +48,19 @@ const stagePrompt: Record<InitStage, string> = {
 };
 
 type LlmProvider =
-  | "openai"
   | "openai-codex"
+  | "anthropic-oauth"
+  | "openai"
   | "anthropic"
   | "grok"
   | "gemini"
   | "ollama"
+  | "chutes"
+  | "github-copilot"
+  | "qwen-portal"
+  | "minimax-portal"
+  | "google-gemini-cli"
+  | "google-antigravity"
   | "openai_compatible";
 type LlmRole = "conscious" | "subconscious";
 type LlmConfig = {
@@ -80,98 +87,130 @@ type CharacterEntry = {
   image: string | null;
 };
 
-const providerOptions: { value: LlmProvider; label: string }[] = [
-  { value: "openai", label: "OpenAI" },
-  { value: "openai-codex", label: "ChatGPT Plus/Pro (Codex OAuth)" },
-  { value: "anthropic", label: "Anthropic" },
-  { value: "grok", label: "Grok (xAI)" },
-  { value: "gemini", label: "Gemini" },
-  { value: "ollama", label: "Ollama (local)" },
-  {
-    value: "openai_compatible",
-    label: "Local (OpenAI-compatible: vLLM, llama.cpp, LM Studio)",
-  },
-];
+// Provider metadata. Model lists + default models are NOT hardcoded here — they
+// are derived live from /api/init/models (models.dev / Ollama). This only holds
+// labels, endpoint defaults, and how the api-key/OAuth field should render.
+type ProviderMeta = {
+  label: string;
+  endpoint: string;
+  apiKeyLabel: string;
+  apiKeyRequired: boolean;
+  oauth: boolean;
+};
 
-const providerDefaults: Record<
-  LlmProvider,
-  { model: string; endpoint: string; apiKeyLabel: string; apiKeyRequired: boolean }
-> = {
-  openai: {
-    model: "gpt-5.2",
-    endpoint: "https://api.openai.com/v1",
-    apiKeyLabel: "OpenAI API Key",
-    apiKeyRequired: true,
-  },
+// Ordered so the dropdown mirrors the CLI's full provider set.
+const providerMeta: Record<LlmProvider, ProviderMeta> = {
   "openai-codex": {
-    model: "gpt-5.2",
+    label: "ChatGPT Plus/Pro (Codex OAuth)",
     endpoint: "",
     apiKeyLabel: "OAuth",
     apiKeyRequired: false,
+    oauth: true,
+  },
+  "anthropic-oauth": {
+    label: "Claude Pro/Max (Anthropic OAuth)",
+    endpoint: "",
+    apiKeyLabel: "OAuth",
+    apiKeyRequired: false,
+    oauth: true,
+  },
+  openai: {
+    label: "OpenAI",
+    endpoint: "https://api.openai.com/v1",
+    apiKeyLabel: "OpenAI API Key",
+    apiKeyRequired: true,
+    oauth: false,
   },
   anthropic: {
-    model: "claude-opus-4-5",
+    label: "Anthropic",
     endpoint: "",
     apiKeyLabel: "Anthropic API Key",
     apiKeyRequired: true,
+    oauth: false,
   },
   grok: {
-    model: "grok-4-1-fast-reasoning",
+    label: "Grok (xAI)",
     endpoint: "",
     apiKeyLabel: "Grok API Key",
     apiKeyRequired: true,
+    oauth: false,
   },
   gemini: {
-    model: "gemini-3-pro-preview",
+    label: "Gemini",
     endpoint: "",
     apiKeyLabel: "Gemini API Key",
     apiKeyRequired: true,
+    oauth: false,
   },
   ollama: {
-    model: "",
+    label: "Ollama (local)",
     endpoint: "http://localhost:11434/v1",
     apiKeyLabel: "API Key (optional)",
     apiKeyRequired: false,
+    oauth: false,
+  },
+  chutes: {
+    label: "Chutes (OAuth)",
+    endpoint: "",
+    apiKeyLabel: "OAuth",
+    apiKeyRequired: false,
+    oauth: true,
+  },
+  "github-copilot": {
+    label: "GitHub Copilot (OAuth)",
+    endpoint: "",
+    apiKeyLabel: "OAuth",
+    apiKeyRequired: false,
+    oauth: true,
+  },
+  "qwen-portal": {
+    label: "Qwen Portal (OAuth)",
+    endpoint: "",
+    apiKeyLabel: "OAuth",
+    apiKeyRequired: false,
+    oauth: true,
+  },
+  "minimax-portal": {
+    label: "MiniMax Portal (OAuth)",
+    endpoint: "",
+    apiKeyLabel: "OAuth",
+    apiKeyRequired: false,
+    oauth: true,
+  },
+  "google-gemini-cli": {
+    label: "Google Gemini CLI (OAuth)",
+    endpoint: "",
+    apiKeyLabel: "OAuth",
+    apiKeyRequired: false,
+    oauth: true,
+  },
+  "google-antigravity": {
+    label: "Google Antigravity (OAuth)",
+    endpoint: "",
+    apiKeyLabel: "OAuth",
+    apiKeyRequired: false,
+    oauth: true,
   },
   openai_compatible: {
-    model: "",
+    label: "Local (OpenAI-compatible: vLLM, llama.cpp, LM Studio)",
     endpoint: "http://localhost:8000/v1",
     apiKeyLabel: "API Key (optional)",
     apiKeyRequired: false,
+    oauth: false,
   },
 };
 
-const providerModels: Record<LlmProvider, string[]> = {
-  openai: [
-    "gpt-5.2",
-    "gpt-5.2-chat-latest",
-    "gpt-5.2-codex",
-    "gpt-5.1",
-    "gpt-5.1-codex-max",
-    "gpt-5-mini",
-    "gpt-5-nano",
-  ],
-  "openai-codex": [
-    "gpt-5.2",
-    "gpt-5.2-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex-mini",
-  ],
-  anthropic: [
-    "claude-opus-4-5",
-    "claude-sonnet-4-5",
-    "claude-haiku-4-5",
-  ],
-  grok: ["grok-4-1-fast-reasoning", "grok-4-1-fast-non-reasoning"],
-  gemini: ["gemini-3-pro-preview", "gemini-3-flash-preview"],
-  ollama: [],
-  openai_compatible: [],
-};
+const providerOrder = Object.keys(providerMeta) as LlmProvider[];
+
+// ``anthropic-oauth`` is a wizard-only alias; it persists as ``anthropic`` with
+// an empty key so the LLM layer auto-resolves the OAuth token at runtime.
+const persistedProvider = (provider: LlmProvider): string =>
+  provider === "anthropic-oauth" ? "anthropic" : provider;
 
 const defaultLlmConfig = (provider: LlmProvider): LlmConfig => ({
   provider,
-  model: providerDefaults[provider].model,
-  endpoint: providerDefaults[provider].endpoint,
+  model: "",
+  endpoint: providerMeta[provider].endpoint,
   apiKey: "",
 });
 
@@ -247,12 +286,12 @@ export default function Home() {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  const [ollamaStatus, setOllamaStatus] = useState<"idle" | "loading" | "ready" | "error">(
-    "idle"
-  );
-  const [ollamaError, setOllamaError] = useState<string | null>(null);
-  const ollamaActiveRef = useRef(false);
+  // Live model catalog per role (derived from /api/init/models, never hardcoded).
+  type ModelCatalog = { models: string[]; loading: boolean; error: string | null };
+  const [modelCatalog, setModelCatalog] = useState<Record<LlmRole, ModelCatalog>>({
+    conscious: { models: [], loading: false, error: null },
+    subconscious: { models: [], loading: false, error: null },
+  });
 
   const [llmConscious, setLlmConscious] = useState<LlmConfig>(defaultLlmConfig("openai"));
   const [llmSubconscious, setLlmSubconscious] = useState<LlmConfig>(
@@ -400,42 +439,73 @@ export default function Home() {
     }
   }, [stage, characters.length]);
 
-  const loadOllamaModels = async () => {
-    if (ollamaStatus === "loading") return;
-    setOllamaStatus("loading");
-    setOllamaError(null);
+  // Fetch the live model catalog for a role's provider. Populates the free-text
+  // model field with the recommended default only when it is currently empty.
+  const loadModels = useCallback(async (role: LlmRole, config: LlmConfig) => {
+    const setConfig = role === "conscious" ? setLlmConscious : setLlmSubconscious;
+    setModelCatalog((prev) => ({
+      ...prev,
+      [role]: { ...prev[role], loading: true, error: null },
+    }));
     try {
-      const res = await fetch("/api/init/ollama/models");
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        throw new Error(typeof payload?.error === "string" ? payload.error : "Unable to reach Ollama.");
+      const params = new URLSearchParams({ provider: config.provider });
+      if (config.provider === "ollama" && config.endpoint) {
+        params.set("endpoint", config.endpoint);
       }
-      const payload = await res.json();
+      const res = await fetch(`/api/init/models?${params.toString()}`);
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(
+          typeof payload?.error === "string" ? payload.error : "Unable to load models."
+        );
+      }
       const models = Array.isArray(payload?.models)
         ? payload.models.filter((item: unknown) => typeof item === "string")
         : [];
-      setOllamaModels(models);
-      setOllamaStatus("ready");
+      const recommended = typeof payload?.default === "string" ? payload.default : "";
+      setModelCatalog((prev) => ({
+        ...prev,
+        [role]: { models, loading: false, error: null },
+      }));
+      if (recommended) {
+        setConfig((prev) => (prev.model.trim() ? prev : { ...prev, model: recommended }));
+      }
     } catch (err: any) {
-      setOllamaModels([]);
-      setOllamaStatus("error");
-      setOllamaError(err?.message || "Unable to reach Ollama.");
+      setModelCatalog((prev) => ({
+        ...prev,
+        [role]: { models: [], loading: false, error: err?.message || "Unable to load models." },
+      }));
     }
-  };
+  }, []);
 
-  const needsOllama =
-    llmConscious.provider === "ollama" || llmSubconscious.provider === "ollama";
+  // Refetch models when the provider changes. For Ollama, also refetch (debounced)
+  // when the typed endpoint changes so the local daemon at that host is queried.
+  const consciousEndpointDep =
+    llmConscious.provider === "ollama" ? llmConscious.endpoint : null;
+  const subconsciousEndpointDep =
+    llmSubconscious.provider === "ollama" ? llmSubconscious.endpoint : null;
 
   useEffect(() => {
-    if (needsOllama && !ollamaActiveRef.current) {
-      loadOllamaModels().catch(() => undefined);
+    if (llmConscious.provider === "ollama") {
+      const timer = setTimeout(() => loadModels("conscious", llmConscious), 400);
+      return () => clearTimeout(timer);
     }
-    ollamaActiveRef.current = needsOllama;
-  }, [needsOllama]);
+    loadModels("conscious", llmConscious);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [llmConscious.provider, consciousEndpointDep, loadModels]);
+
+  useEffect(() => {
+    if (llmSubconscious.provider === "ollama") {
+      const timer = setTimeout(() => loadModels("subconscious", llmSubconscious), 400);
+      return () => clearTimeout(timer);
+    }
+    loadModels("subconscious", llmSubconscious);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [llmSubconscious.provider, subconsciousEndpointDep, loadModels]);
 
   const updateLlmProvider = (role: LlmRole, provider: LlmProvider) => {
-    const defaults = providerDefaults[provider];
-    const patch = { provider, model: defaults.model, endpoint: defaults.endpoint, apiKey: "" };
+    // Clear the model so the catalog fetch can supply the provider's default.
+    const patch = { provider, model: "", endpoint: providerMeta[provider].endpoint, apiKey: "" };
     setConsentRecords((prev) => ({ ...prev, [role]: null }));
     if (role === "conscious") {
       setLlmConscious((prev) => ({ ...prev, ...patch }));
@@ -456,21 +526,21 @@ export default function Home() {
         if (!config.model.trim()) missing.push(`${label} model`);
         if (config.provider === "openai_compatible" && !config.endpoint.trim())
           missing.push(`${label} endpoint`);
-        const defaults = providerDefaults[config.provider];
-        if (defaults?.apiKeyRequired && !config.apiKey.trim()) missing.push(`${label} API key`);
+        const meta = providerMeta[config.provider];
+        if (meta?.apiKeyRequired && !config.apiKey.trim()) missing.push(`${label} API key`);
       };
       validateConfig("conscious", llmConscious);
       validateConfig("subconscious", llmSubconscious);
       if (missing.length > 0) throw new Error(`Missing ${missing.join(" and ")}`);
       await postJson("/api/init/llm", {
         conscious: {
-          provider: llmConscious.provider,
+          provider: persistedProvider(llmConscious.provider),
           model: llmConscious.model,
           endpoint: llmConscious.endpoint,
           api_key: llmConscious.apiKey,
         },
         subconscious: {
-          provider: llmSubconscious.provider,
+          provider: persistedProvider(llmSubconscious.provider),
           model: llmSubconscious.model,
           endpoint: llmSubconscious.endpoint,
           api_key: llmSubconscious.apiKey,
@@ -603,7 +673,7 @@ export default function Home() {
     const res = await postJson<any>("/api/init/consent/request", {
       role,
       llm: {
-        provider: config.provider,
+        provider: persistedProvider(config.provider),
         model: config.model,
         endpoint: config.endpoint,
         api_key: config.apiKey,
@@ -618,11 +688,37 @@ export default function Home() {
     setBusy(true);
     setError(null);
     try {
-      if (!consentRecords.subconscious) await requestConsent("subconscious");
-      if (!consentRecords.conscious) await requestConsent("conscious");
+      // Always re-issue a fresh request (declines are recoverable): clear any
+      // prior record so a second click is never a silent no-op.
+      setConsentRecords({ conscious: null, subconscious: null });
+      await requestConsent("subconscious");
+      await requestConsent("conscious");
       await loadStatus();
     } catch (err: any) {
       setError(err.message || "Failed to request consent");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Owner override: activate even though the model didn't consent. It's the
+  // owner's AI — consent is a signal, not a lock.
+  const handleProceedAnyway = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await postJson<any>("/api/init/consent/override", {
+        role: "conscious",
+        llm: {
+          provider: persistedProvider(llmConscious.provider),
+          model: llmConscious.model,
+          endpoint: llmConscious.endpoint,
+        },
+        model_decision: consentRecords.conscious?.decision || "decline",
+      });
+      await loadStatus();
+    } catch (err: any) {
+      setError(err.message || "Failed to activate");
     } finally {
       setBusy(false);
     }
@@ -837,11 +933,12 @@ export default function Home() {
                 </p>
                 <div className="space-y-6">
                   {llmEntries.map((entry) => {
-                    const defaults = providerDefaults[entry.config.provider];
-                    const modelOptions =
-                      entry.config.provider === "ollama"
-                        ? ollamaModels
-                        : providerModels[entry.config.provider];
+                    const meta = providerMeta[entry.config.provider];
+                    const catalog = modelCatalog[entry.role];
+                    const modelOptions = catalog.models;
+                    const showEndpoint =
+                      entry.config.provider === "ollama" ||
+                      entry.config.provider === "openai_compatible";
                     return (
                       <fieldset
                         key={entry.role}
@@ -852,28 +949,36 @@ export default function Home() {
                         </legend>
                         <div className="mt-3 grid gap-4">
                           <div>
-                            <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                            <label
+                              htmlFor={`provider-${entry.role}`}
+                              className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                            >
                               Provider
                             </label>
                             <select
+                              id={`provider-${entry.role}`}
                               className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                               value={entry.config.provider}
                               onChange={(e) =>
                                 updateLlmProvider(entry.role, e.target.value as LlmProvider)
                               }
                             >
-                              {providerOptions.map((opt) => (
-                                <option key={opt.value} value={opt.value}>
-                                  {opt.label}
+                              {providerOrder.map((value) => (
+                                <option key={value} value={value}>
+                                  {providerMeta[value].label}
                                 </option>
                               ))}
                             </select>
                           </div>
                           <div>
-                            <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                            <label
+                              htmlFor={`model-${entry.role}`}
+                              className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                            >
                               Model
                             </label>
                             <input
+                              id={`model-${entry.role}`}
                               className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                               list={`model-options-${entry.role}`}
                               value={entry.config.model}
@@ -883,6 +988,9 @@ export default function Home() {
                                   return { ...prev, model: e.target.value };
                                 })
                               }
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && !busy) handleLlmSave();
+                              }}
                               placeholder="Model name"
                             />
                             {modelOptions.length > 0 ? (
@@ -892,33 +1000,35 @@ export default function Home() {
                                 ))}
                               </datalist>
                             ) : null}
-                            {entry.config.provider === "ollama" ? (
-                              <p className="mt-2 text-xs text-[var(--ink-soft)]">
-                                {ollamaStatus === "loading"
-                                  ? "Loading Ollama models..."
-                                  : ollamaStatus === "error"
-                                    ? ollamaError || "Ollama not reachable."
-                                    : ollamaModels.length > 0
-                                      ? `${ollamaModels.length} Ollama models detected.`
-                                      : "No local Ollama models found."}
-                                {ollamaStatus === "error" ? (
-                                  <button
-                                    type="button"
-                                    className="ml-2 text-[var(--accent-strong)] underline"
-                                    onClick={() => loadOllamaModels().catch(() => undefined)}
-                                  >
-                                    Retry
-                                  </button>
-                                ) : null}
-                              </p>
-                            ) : null}
+                            <p className="mt-2 text-xs text-[var(--ink-soft)]">
+                              {catalog.loading
+                                ? "Loading available models..."
+                                : catalog.error
+                                  ? catalog.error
+                                  : modelOptions.length > 0
+                                    ? `${modelOptions.length} models available — or type any model id.`
+                                    : "No models listed — type a model id."}
+                              {catalog.error ? (
+                                <button
+                                  type="button"
+                                  className="ml-2 text-[var(--accent-strong)] underline"
+                                  onClick={() => loadModels(entry.role, entry.config)}
+                                >
+                                  Retry
+                                </button>
+                              ) : null}
+                            </p>
                           </div>
-                          {entry.config.provider === "openai_compatible" ? (
+                          {showEndpoint ? (
                             <div>
-                              <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                              <label
+                                htmlFor={`endpoint-${entry.role}`}
+                                className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                              >
                                 Endpoint
                               </label>
                               <input
+                                id={`endpoint-${entry.role}`}
                                 className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                                 value={entry.config.endpoint}
                                 onChange={(e) =>
@@ -931,27 +1041,37 @@ export default function Home() {
                               />
                             </div>
                           ) : null}
-                          {entry.config.provider === "openai-codex" ? (
+                          {meta.oauth ? (
                             <div className="rounded-xl border border-[var(--outline)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--ink)]">
                               <p className="font-semibold">OAuth required</p>
                               <p className="mt-1 text-[var(--ink-soft)]">
-                                Run <span className="font-mono">hexis auth openai-codex login</span> to store your ChatGPT
-                                subscription token. No API key is needed here.
+                                Run{" "}
+                                <span className="font-mono">
+                                  hexis auth {persistedProvider(entry.config.provider)} login
+                                </span>{" "}
+                                to authorize. No API key is needed here.
                               </p>
                             </div>
                           ) : (
                             <div>
-                              <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
-                                {defaults.apiKeyLabel}
+                              <label
+                                htmlFor={`apikey-${entry.role}`}
+                                className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                              >
+                                {meta.apiKeyLabel}
                               </label>
                               <input
+                                id={`apikey-${entry.role}`}
                                 className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                                 type="password"
                                 value={entry.config.apiKey}
                                 onChange={(e) =>
                                   entry.setConfig((prev) => ({ ...prev, apiKey: e.target.value }))
                                 }
-                                placeholder={defaults.apiKeyRequired ? "Required" : "Optional"}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && !busy) handleLlmSave();
+                                }}
+                                placeholder={meta.apiKeyRequired ? "Required" : "Optional"}
                               />
                             </div>
                           )}
@@ -1014,13 +1134,20 @@ export default function Home() {
                   Start with sensible defaults. You can customize later.
                 </p>
                 <div>
-                  <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                  <label
+                    htmlFor="express-user-name"
+                    className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                  >
                     What should Hexis call you?
                   </label>
                   <input
+                    id="express-user-name"
                     className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                     value={userName}
                     onChange={(e) => setUserName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !busy) handleExpress();
+                    }}
                     placeholder="User"
                   />
                 </div>
@@ -1053,13 +1180,20 @@ export default function Home() {
             {stage === "character" && (
               <div className="space-y-6">
                 <div>
-                  <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                  <label
+                    htmlFor="character-user-name"
+                    className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                  >
                     Your name
                   </label>
                   <input
+                    id="character-user-name"
                     className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                     value={userName}
                     onChange={(e) => setUserName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !busy && selectedCharacter) handleCharacterApply();
+                    }}
                     placeholder="User"
                   />
                 </div>
@@ -1219,10 +1353,14 @@ export default function Home() {
                         { label: "Creator Name", key: "creator_name", placeholder: userName || "Your name" },
                       ].map((field) => (
                         <div key={field.key}>
-                          <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                          <label
+                            htmlFor={`identity-${field.key}`}
+                            className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                          >
                             {field.label}
                           </label>
                           <input
+                            id={`identity-${field.key}`}
                             className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                             value={(identity as any)[field.key]}
                             onChange={(e) =>
@@ -1234,10 +1372,14 @@ export default function Home() {
                       ))}
                     </div>
                     <div>
-                      <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                      <label
+                        htmlFor="identity-description"
+                        className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                      >
                         Description
                       </label>
                       <textarea
+                        id="identity-description"
                         className="mt-2 h-20 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                         value={identity.description}
                         onChange={(e) =>
@@ -1247,10 +1389,14 @@ export default function Home() {
                       />
                     </div>
                     <div>
-                      <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                      <label
+                        htmlFor="identity-purpose"
+                        className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                      >
                         Purpose
                       </label>
                       <textarea
+                        id="identity-purpose"
                         className="mt-2 h-16 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                         value={identity.purpose}
                         onChange={(e) =>
@@ -1260,10 +1406,14 @@ export default function Home() {
                       />
                     </div>
                     <div>
-                      <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                      <label
+                        htmlFor="personality-summary"
+                        className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                      >
                         Personality Summary
                       </label>
                       <textarea
+                        id="personality-summary"
                         className="mt-2 h-16 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                         value={personalityDesc}
                         onChange={(e) => setPersonalityDesc(e.target.value)}
@@ -1284,6 +1434,8 @@ export default function Home() {
                             type="range"
                             min={0}
                             max={100}
+                            aria-label={`${trait} (0 to 100)`}
+                            aria-valuetext={`${personalityTraits[trait]}%`}
                             value={personalityTraits[trait]}
                             onChange={(e) =>
                               setPersonalityTraits((prev) => ({
@@ -1303,10 +1455,14 @@ export default function Home() {
                 {customSection === "values" && (
                   <div className="space-y-5">
                     <div>
-                      <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                      <label
+                        htmlFor="values-text"
+                        className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                      >
                         Values (One Per Line)
                       </label>
                       <textarea
+                        id="values-text"
                         className="mt-2 h-28 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                         value={valuesText}
                         onChange={(e) => setValuesText(e.target.value)}
@@ -1321,10 +1477,14 @@ export default function Home() {
                         { key: "ethics", label: "Ethics" },
                       ].map((field) => (
                         <div key={field.key}>
-                          <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                          <label
+                            htmlFor={`worldview-${field.key}`}
+                            className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                          >
                             {field.label}
                           </label>
                           <textarea
+                            id={`worldview-${field.key}`}
                             className="mt-2 h-16 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                             value={(worldview as any)[field.key]}
                             onChange={(e) =>
@@ -1346,6 +1506,7 @@ export default function Home() {
                         {boundaries.map((b, idx) => (
                           <div key={idx} className="flex gap-2">
                             <input
+                              aria-label={`Boundary ${idx + 1}`}
                               className="flex-1 rounded-xl border border-[var(--outline)] bg-white px-3 py-2 text-sm"
                               value={b.content}
                               onChange={(e) => updateBoundary(idx, "content", e.target.value)}
@@ -1377,10 +1538,14 @@ export default function Home() {
                 {customSection === "goals" && (
                   <div className="space-y-5">
                     <div>
-                      <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                      <label
+                        htmlFor="interests-text"
+                        className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                      >
                         Interests (One Per Line)
                       </label>
                       <textarea
+                        id="interests-text"
                         className="mt-2 h-20 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                         value={interestsText}
                         onChange={(e) => setInterestsText(e.target.value)}
@@ -1388,10 +1553,14 @@ export default function Home() {
                       />
                     </div>
                     <div>
-                      <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                      <label
+                        htmlFor="goals-purpose"
+                        className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                      >
                         Purpose
                       </label>
                       <textarea
+                        id="goals-purpose"
                         className="mt-2 h-16 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                         value={purposeText}
                         onChange={(e) => setPurposeText(e.target.value)}
@@ -1406,6 +1575,7 @@ export default function Home() {
                         {goals.map((g, idx) => (
                           <div key={idx} className="flex gap-2">
                             <input
+                              aria-label={`Goal ${idx + 1} title`}
                               className="flex-1 rounded-xl border border-[var(--outline)] bg-white px-3 py-2 text-sm"
                               value={g.title}
                               onChange={(e) => updateGoal(idx, "title", e.target.value)}
@@ -1432,10 +1602,14 @@ export default function Home() {
                     </div>
                     <div className="grid gap-4 sm:grid-cols-3">
                       <div>
-                        <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                        <label
+                          htmlFor="relationship-user-name"
+                          className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                        >
                           Your Name
                         </label>
                         <input
+                          id="relationship-user-name"
                           className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                           value={relationship.user_name || userName}
                           onChange={(e) =>
@@ -1445,10 +1619,14 @@ export default function Home() {
                         />
                       </div>
                       <div>
-                        <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                        <label
+                          htmlFor="relationship-type"
+                          className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                        >
                           Relationship Type
                         </label>
                         <input
+                          id="relationship-type"
                           className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                           value={relationship.type}
                           onChange={(e) =>
@@ -1458,10 +1636,14 @@ export default function Home() {
                         />
                       </div>
                       <div>
-                        <label className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                        <label
+                          htmlFor="relationship-purpose"
+                          className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]"
+                        >
                           Purpose
                         </label>
                         <input
+                          id="relationship-purpose"
                           className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
                           value={relationship.purpose}
                           onChange={(e) =>
@@ -1550,6 +1732,12 @@ export default function Home() {
                     );
                   })}
                 </div>
+                {consentDeclined ? (
+                  <p className="text-sm text-[var(--ink-soft)]">
+                    The model didn&apos;t consent. It&apos;s your agent — change the model,
+                    try again, or proceed anyway. Either way, the model&apos;s response is recorded.
+                  </p>
+                ) : null}
                 <div className="flex flex-col gap-3 sm:flex-row">
                   <button
                     className="rounded-full bg-[var(--foreground)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)]"
@@ -1565,6 +1753,23 @@ export default function Home() {
                   >
                     Refresh
                   </button>
+                  <button
+                    className="rounded-full border border-[var(--outline)] px-6 py-3 text-sm font-semibold text-[var(--foreground)]"
+                    onClick={() => setStage("llm")}
+                    disabled={busy}
+                  >
+                    Change model
+                  </button>
+                  {consentDeclined ? (
+                    <button
+                      className="rounded-full bg-[var(--accent-strong)] px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                      onClick={handleProceedAnyway}
+                      disabled={busy}
+                      title="It's your agent — activate it even though the model didn't consent"
+                    >
+                      Proceed anyway
+                    </button>
+                  ) : null}
                   {statusStage === "complete" ? (
                     <button
                       className="rounded-full border border-[var(--outline)] px-6 py-3 text-sm font-semibold text-[var(--foreground)]"
