@@ -711,3 +711,35 @@ BEGIN
         || 'What do you want to do this heartbeat? Respond with STRICT JSON.';
 END;
 $$;
+
+-- Compose the personhood addendum for a context kind by concatenating the
+-- seeded personhood.<slug> modules — mirrors
+-- services.prompt_resources.compose_personhood_prompt (kind -> slug list).
+CREATE OR REPLACE FUNCTION compose_personhood(p_kind TEXT)
+RETURNS TEXT LANGUAGE plpgsql STABLE AS $$
+DECLARE
+    slugs TEXT[];
+    parts TEXT[] := ARRAY[]::TEXT[];
+    s TEXT;
+    body TEXT;
+BEGIN
+    slugs := CASE p_kind
+        WHEN 'heartbeat' THEN ARRAY['core_identity', 'affective_system', 'reflection_protocols']
+        WHEN 'reflect' THEN ARRAY['core_identity', 'self_model_maintenance', 'value_system', 'narrative_identity', 'relational_system']
+        WHEN 'conversation' THEN ARRAY['core_identity', 'relational_system', 'affective_system', 'conversational_presence']
+        WHEN 'ingest' THEN ARRAY['core_identity', 'affective_system', 'value_system']
+        WHEN 'group' THEN ARRAY['core_identity', 'conversational_presence']
+        ELSE NULL
+    END;
+    IF slugs IS NULL THEN
+        RAISE EXCEPTION 'Unknown personhood kind: %', p_kind;
+    END IF;
+    FOREACH s IN ARRAY slugs LOOP
+        SELECT content INTO body FROM prompt_modules WHERE key = 'personhood.' || s;
+        IF body IS NOT NULL AND btrim(body) <> '' THEN
+            parts := parts || btrim(body);
+        END IF;
+    END LOOP;
+    RETURN btrim(array_to_string(parts, E'\n\n---\n\n'));
+END;
+$$;

@@ -20,6 +20,7 @@ from core.cognitive_memory_api import (
 )
 from services.agent import SubconsciousOutput, format_subconscious_signals
 from services.heartbeat_prompt import build_heartbeat_decision_prompt
+from services.prompt_resources import compose_personhood_prompt
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
 
@@ -189,3 +190,18 @@ async def test_subconscious_signals_parity(db_pool, name):
     async with db_pool.acquire() as conn:
         sql = await conn.fetchval("SELECT render_subconscious_signals($1::jsonb)", json.dumps(j))
     assert sql == format_subconscious_signals(_mk_sub(j)), name
+
+
+# ---------------------------------------------------------------------------
+# Personhood composition: compose_personhood vs compose_personhood_prompt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["heartbeat", "reflect", "conversation", "ingest", "group"])
+async def test_compose_personhood_parity(db_pool, kind):
+    """The DB composer selects + joins the same personhood sub-modules per kind
+    as services.prompt_resources.compose_personhood_prompt (seeded from
+    personhood.md by scripts/gen_prompt_seed.py)."""
+    async with db_pool.acquire() as conn:
+        sql = await conn.fetchval("SELECT compose_personhood($1)", kind)
+    assert sql == compose_personhood_prompt(kind), kind
