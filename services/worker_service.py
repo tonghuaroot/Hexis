@@ -30,6 +30,7 @@ from services.recmem import (
     run_recmem_route_step,
     run_recmem_sweep_step,
 )
+from services.summarization import run_memory_summarization_step
 from services.reconsolidation import run_reconsolidation_step
 from services.subconscious import run_subconscious_decider
 
@@ -469,6 +470,19 @@ class MaintenanceWorker:
                 if result.get("skipped"):
                     break
 
+    async def _run_memory_rest_if_enabled(self) -> None:
+        """Drain the memory-consolidation summarization queue (LLM compaction +
+        distill-upward). Consolidation/pruning themselves run in the DB maintenance
+        pass; this only does the LLM step. No-op unless retention.enabled."""
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            if not bool(await conn.fetchval("SELECT COALESCE(get_config_bool('retention.enabled'), false)")):
+                return
+            result = await run_memory_summarization_step(conn)
+            if not result.get("skipped"):
+                logger.info("Memory summarization: %s", result)
+
     async def run(self) -> None:
         self.running = True
         logger.info("Maintenance worker starting...")
@@ -490,6 +504,7 @@ class MaintenanceWorker:
                     await self._run_subconscious_if_due()
                     await self._run_reconsolidation_if_pending()
                     await self._run_recmem_if_enabled()
+                    await self._run_memory_rest_if_enabled()
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")
                 await asyncio.sleep(POLL_INTERVAL)

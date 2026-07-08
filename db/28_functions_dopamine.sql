@@ -620,6 +620,16 @@ BEGIN
     ready_transformations := check_transformation_readiness();
     dopamine_drift := drift_dopamine_tonic();        -- new: homeostatic drift
 
+    -- Memory retention (compression-native fade ladder): consolidate aged episodes
+    -- into gists, then prune past-grace originals. No-op unless retention.enabled.
+    -- Guarded so a failure never breaks the maintenance tick.
+    BEGIN
+        PERFORM run_memory_rest();
+        PERFORM run_retention_gc();
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'memory retention pass failed: %', SQLERRM;
+    END;
+
     UPDATE maintenance_state
     SET last_maintenance_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP

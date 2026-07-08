@@ -24,6 +24,7 @@ RLM_RECONSOLIDATION_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / 
 RECMEM_EPISODE_MERGE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_episode_merge.md"
 RECMEM_EPISODE_CREATE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_episode_create.md"
 RECMEM_SEMANTIC_REFINE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_semantic_refine.md"
+MEMORY_SUMMARIZATION_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "memory_summarization.md"
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,16 @@ def load_recmem_semantic_refine_prompt() -> str:
     if RECMEM_SEMANTIC_REFINE_PROMPT_PATH.exists():
         return RECMEM_SEMANTIC_REFINE_PROMPT_PATH.read_text(encoding="utf-8")
     return "Extract grounded, atomic semantic facts from an episodic memory and source turns. Respond with JSON."
+
+
+def load_memory_summarization_prompt() -> str:
+    if MEMORY_SUMMARIZATION_PROMPT_PATH.exists():
+        return MEMORY_SUMMARIZATION_PROMPT_PATH.read_text(encoding="utf-8")
+    return (
+        "Compact these consolidated memories into one concise first-person recollection, and list the "
+        "durable lessons worth keeping. Respond with JSON {\"summary\": str, \"lessons\": [{\"content\": str, "
+        "\"kind\": \"semantic\"|\"strategic\"}]}."
+    )
 
 
 def load_heartbeat_task_mode_prompt() -> str:

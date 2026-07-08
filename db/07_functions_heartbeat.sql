@@ -908,6 +908,16 @@ BEGIN
     PERFORM update_mood();
     ready_transformations := check_transformation_readiness();
 
+    -- Memory retention (compression-native fade ladder): consolidate aged episodes
+    -- into gists, then prune past-grace originals. No-op unless retention.enabled.
+    -- (Kept in sync with the db/28 dopamine override, which is the live version.)
+    BEGIN
+        PERFORM run_memory_rest();
+        PERFORM run_retention_gc();
+    EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'memory retention pass failed: %', SQLERRM;
+    END;
+
     UPDATE maintenance_state
     SET last_maintenance_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP

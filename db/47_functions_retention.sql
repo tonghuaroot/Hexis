@@ -1,0 +1,435 @@
+-- Memory retention: the compression-native fade ladder
+-- (docs/memory_retention_design.md §5, §6, §8, §9). During subconscious REST,
+-- aged/low-strength/unprotected episodic memories are grouped, merged into one
+-- summarized GIST (their lesson distilled upward first), the originals archived,
+-- and — after a grace window — TRULY deleted, reclaiming representational mass
+-- against a capacity dial.
+--
+-- Ships DARK: everything here is a no-op until config retention.enabled = true.
+-- Reuses phase-1 strength (calculate_strength) and the memory_edges helpers.
+SET search_path = public, ag_catalog, "$user";
+SET check_function_bodies = off;
+
+-- ============================================================================
+-- Part A: protection — what must never fade
+-- ============================================================================
+-- A memory is protected (exempt from consolidation AND pruning) if it is an
+-- identity/goal type, highly important, emotionally charged (intensity or
+-- valence), or explicitly pinned. Conservative by design: far worse to erase a
+-- first kiss than to keep a mundane memory a cycle too long.
+CREATE OR REPLACE FUNCTION is_memory_protected(p_memory_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM memories m
+        WHERE m.id = p_memory_id
+          AND (
+                m.type::text IN ('worldview', 'goal')
+             OR COALESCE(m.importance, 0) >= COALESCE(get_config_float('retention.protect_importance'), 0.85)
+             OR COALESCE((m.metadata->'emotional_context'->>'intensity')::float, 0)
+                    >= COALESCE(get_config_float('retention.protect_intensity'), 0.75)
+             OR abs(COALESCE((m.metadata->>'emotional_valence')::float, 0))
+                    >= COALESCE(get_config_float('retention.protect_valence_abs'), 0.7)
+             OR COALESCE((m.metadata->>'protected')::boolean, false)
+          )
+    );
+$$;
+
+-- ============================================================================
+-- Summarization queue (filled by consolidate_memory_group, drained by the worker)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS memory_summarization_queue (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    memory_id       UUID NOT NULL UNIQUE REFERENCES memories(id) ON DELETE CASCADE,
+    status          TEXT NOT NULL DEFAULT 'pending',   -- pending|in_progress|done|failed
+    attempts        INT  NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    enqueued_at     TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at    TIMESTAMPTZ,
+    last_error      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memory_summarization_queue_claim
+    ON memory_summarization_queue (status, next_attempt_at);
+
+-- ============================================================================
+-- Part B: candidate selection + merge into a gist (reversible)
+-- ============================================================================
+
+-- Intelligent edge merge (§5d): carry the group's EXTERNAL relationships onto the
+-- gist -- collapse duplicates by (direction, neighbor, rel_type), reinforce weight
+-- by corroboration (w = 1 - Π(1-wᵢ)), drop intra-group edges. The originals' own
+-- edges vanish when the originals are hard-deleted (GC); until then the phase-1
+-- live-memory filter already hides edges to archived endpoints.
+CREATE OR REPLACE FUNCTION merge_memory_edges(p_gist_id UUID, p_source_ids UUID[])
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    src TEXT[] := ARRAY(SELECT unnest(p_source_ids)::text);
+    rec RECORD;
+BEGIN
+    -- outgoing: source -> external neighbor
+    FOR rec IN
+        SELECT e.rel_type, e.dst_type, e.dst_id,
+               (1 - exp(sum(ln(GREATEST(1e-9, 1 - LEAST(1.0, COALESCE(e.weight, 1.0))))))) AS w
+        FROM memory_edges e
+        WHERE e.src_type = 'memory' AND e.src_id = ANY(src)
+          AND NOT (e.dst_type = 'memory' AND e.dst_id = ANY(src))
+        GROUP BY e.rel_type, e.dst_type, e.dst_id
+    LOOP
+        PERFORM upsert_memory_edge('memory', p_gist_id::text, rec.rel_type, rec.dst_type, rec.dst_id,
+                                   LEAST(1.0, rec.w), NULL, 'consolidation',
+                                   jsonb_build_object('merged_from', to_jsonb(p_source_ids)));
+    END LOOP;
+    -- incoming: external neighbor -> source
+    FOR rec IN
+        SELECT e.rel_type, e.src_type, e.src_id,
+               (1 - exp(sum(ln(GREATEST(1e-9, 1 - LEAST(1.0, COALESCE(e.weight, 1.0))))))) AS w
+        FROM memory_edges e
+        WHERE e.dst_type = 'memory' AND e.dst_id = ANY(src)
+          AND NOT (e.src_type = 'memory' AND e.src_id = ANY(src))
+        GROUP BY e.rel_type, e.src_type, e.src_id
+    LOOP
+        PERFORM upsert_memory_edge(rec.src_type, rec.src_id, rec.rel_type, 'memory', p_gist_id::text,
+                                   LEAST(1.0, rec.w), NULL, 'consolidation',
+                                   jsonb_build_object('merged_from', to_jsonb(p_source_ids)));
+    END LOOP;
+END;
+$$;
+
+-- Episode-grouped candidate groups: aged, idle, low-strength, unprotected active
+-- episodic memories -- only groups with >= retention.min_group_size members.
+CREATE OR REPLACE FUNCTION find_consolidation_candidates()
+RETURNS TABLE (episode_id TEXT, memory_ids UUID[])
+LANGUAGE sql STABLE
+AS $$
+    SELECT e.dst_id AS episode_id, array_agg(m.id ORDER BY m.created_at)
+    FROM memory_edges e
+    JOIN memories m ON m.id = _safe_uuid(e.src_id)
+    WHERE e.rel_type = 'IN_EPISODE' AND e.dst_type = 'episode' AND e.src_type = 'memory'
+      AND m.type = 'episodic'
+      AND m.status = 'active'
+      AND age_in_days(m.created_at) >= COALESCE(get_config_float('retention.min_age_days'), 30)
+      AND (m.last_reinforced IS NULL OR age_in_days(m.last_reinforced) >= COALESCE(get_config_float('retention.min_idle_days'), 21))
+      AND calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)
+            < COALESCE(get_config_float('retention.consolidate_max_strength'), 0.4)
+      AND NOT is_memory_protected(m.id)
+    GROUP BY e.dst_id
+    HAVING count(*) >= COALESCE(get_config_int('retention.min_group_size'), 3);
+$$;
+
+-- Merge a group of episodic memories into one GIST holding their full concatenated
+-- content, migrate the graph onto it, archive the originals (reversible until GC),
+-- and enqueue the gist for summarization+distillation. Returns the gist id (or
+-- NULL if nothing eligible). Idempotent-ish: only touches active, unprotected rows.
+CREATE OR REPLACE FUNCTION consolidate_memory_group(p_ids UUID[])
+RETURNS UUID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_ids UUID[];
+    v_gist_id UUID;
+    v_full_content TEXT;
+    v_importance FLOAT;
+    v_valence FLOAT;
+    v_orig UUID;
+BEGIN
+    SELECT array_agg(id ORDER BY created_at),
+           string_agg(content, E'\n\n---\n\n' ORDER BY created_at),
+           max(importance),
+           avg((metadata->>'emotional_valence')::float)
+      INTO v_ids, v_full_content, v_importance, v_valence
+      FROM memories
+      WHERE id = ANY(p_ids) AND status = 'active' AND type = 'episodic'
+        AND NOT is_memory_protected(id);
+
+    IF v_ids IS NULL OR array_length(v_ids, 1) < 2 THEN
+        RETURN NULL;
+    END IF;
+
+    v_gist_id := create_memory_with_embedding(
+        'episodic', v_full_content,
+        (get_embedding(ARRAY[left(v_full_content, 8000)]))[1],
+        LEAST(1.0, COALESCE(v_importance, 0.5)),
+        jsonb_build_object('kind', 'consolidation', 'source', 'rest'),
+        NULL,
+        jsonb_build_object('consolidation', jsonb_build_object(
+            'role', 'merged', 'source_ids', to_jsonb(v_ids), 'summarized', false))
+    );
+    IF v_valence IS NOT NULL THEN
+        UPDATE memories SET metadata = metadata || jsonb_build_object('emotional_valence', v_valence)
+        WHERE id = v_gist_id;
+    END IF;
+
+    PERFORM merge_memory_edges(v_gist_id, v_ids);
+
+    FOREACH v_orig IN ARRAY v_ids LOOP
+        BEGIN
+            PERFORM create_memory_relationship(v_gist_id, v_orig, 'DERIVED_FROM', '{}'::jsonb);
+        EXCEPTION WHEN OTHERS THEN NULL;  -- provenance edge is best-effort (source_ids in metadata is canonical)
+        END;
+    END LOOP;
+
+    UPDATE memories SET
+        status = 'archived',
+        superseded_by = v_gist_id,
+        metadata = jsonb_set(metadata, '{consolidation}',
+                     COALESCE(metadata->'consolidation', '{}'::jsonb)
+                       || jsonb_build_object('superseded_by', v_gist_id, 'archived_at', clock_timestamp()::text))
+    WHERE id = ANY(v_ids);
+
+    INSERT INTO memory_summarization_queue (memory_id) VALUES (v_gist_id)
+    ON CONFLICT (memory_id) DO NOTHING;
+
+    RETURN v_gist_id;
+END;
+$$;
+
+-- ============================================================================
+-- Part C: summarization queue worker interface (LLM compaction + distill-upward)
+-- ============================================================================
+
+-- Claim a batch of gists to summarize (concurrency-safe). Returns (memory_id, content).
+CREATE OR REPLACE FUNCTION claim_memory_summarization_batch(p_limit INT DEFAULT 8)
+RETURNS TABLE (memory_id UUID, content TEXT)
+LANGUAGE sql
+AS $$
+    WITH claimed AS (
+        SELECT id
+        FROM memory_summarization_queue
+        WHERE status = 'pending' AND next_attempt_at <= CURRENT_TIMESTAMP
+        ORDER BY enqueued_at
+        FOR UPDATE SKIP LOCKED
+        LIMIT GREATEST(COALESCE(p_limit, 8), 1)
+    ),
+    upd AS (
+        UPDATE memory_summarization_queue q
+           SET status = 'in_progress', attempts = attempts + 1
+        WHERE q.id IN (SELECT id FROM claimed)
+        RETURNING q.memory_id
+    )
+    SELECT u.memory_id, m.content
+    FROM upd u JOIN memories m ON m.id = u.memory_id;
+$$;
+
+-- Apply the worker's result: compact the gist to the summary (drop fidelity, keep
+-- the pre-summary text), and distill each durable lesson UPWARD into the schema
+-- (semantic/strategic, deduped vs existing schema, DERIVED_FROM the gist).
+CREATE OR REPLACE FUNCTION apply_memory_summary(
+    p_id UUID,
+    p_summary TEXT,
+    p_lessons JSONB DEFAULT '[]'::jsonb
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_drop FLOAT := COALESCE(get_config_float('retention.fidelity_drop'), 0.7);
+    lesson JSONB;
+    v_lesson_id UUID;
+    v_lesson_emb vector;
+    v_dup UUID;
+    v_created INT := 0;
+BEGIN
+    IF COALESCE(btrim(p_summary), '') = '' THEN
+        RAISE EXCEPTION 'summary must not be empty';
+    END IF;
+
+    UPDATE memories m SET
+        content = p_summary,
+        embedding = (get_embedding(ARRAY[p_summary]))[1],
+        fidelity = GREATEST(0.0, LEAST(1.0, m.fidelity * v_drop)),
+        metadata = jsonb_set(
+                     jsonb_set(m.metadata,
+                               '{consolidation,full_content}',
+                               to_jsonb(COALESCE(m.metadata->'consolidation'->>'full_content', m.content)), true),
+                     '{consolidation,summarized}', 'true'::jsonb, true),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE m.id = p_id;
+
+    FOR lesson IN SELECT * FROM jsonb_array_elements(COALESCE(p_lessons, '[]'::jsonb))
+    LOOP
+        CONTINUE WHEN COALESCE(btrim(lesson->>'content'), '') = '';
+        v_lesson_emb := (get_embedding(ARRAY[lesson->>'content']))[1];
+        -- schema dedup: skip lessons already known (>= 0.92 cosine to an active fact/pattern)
+        SELECT id INTO v_dup FROM memories
+        WHERE status = 'active' AND type IN ('semantic', 'strategic')
+          AND (1 - (embedding <=> v_lesson_emb)) >= 0.92
+        ORDER BY embedding <=> v_lesson_emb
+        LIMIT 1;
+        IF v_dup IS NOT NULL THEN CONTINUE; END IF;
+
+        IF COALESCE(lesson->>'kind', 'semantic') = 'strategic' THEN
+            v_lesson_id := create_strategic_memory(
+                p_content := lesson->>'content',
+                p_pattern_description := COALESCE(lesson->>'pattern', 'consolidated lesson'),
+                p_confidence_score := 0.7,
+                p_importance := 0.6,
+                p_source_attribution := jsonb_build_object('kind', 'distillation', 'from', p_id::text));
+        ELSE
+            v_lesson_id := create_semantic_memory(
+                p_content := lesson->>'content',
+                p_confidence := 0.7,
+                p_importance := 0.55,
+                p_source_attribution := jsonb_build_object('kind', 'distillation', 'from', p_id::text));
+        END IF;
+
+        BEGIN
+            PERFORM create_memory_relationship(v_lesson_id, p_id, 'DERIVED_FROM', '{}'::jsonb);
+        EXCEPTION WHEN OTHERS THEN NULL;
+        END;
+        v_created := v_created + 1;
+    END LOOP;
+
+    UPDATE memory_summarization_queue
+       SET status = 'done', completed_at = CURRENT_TIMESTAMP
+     WHERE memory_id = p_id;
+
+    RETURN jsonb_build_object('memory_id', p_id, 'lessons_created', v_created);
+END;
+$$;
+
+-- Retry/backoff on worker failure (mirrors fail_recmem_consolidation_task).
+CREATE OR REPLACE FUNCTION fail_memory_summarization(p_id UUID, p_error TEXT)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_attempts INT;
+    v_max INT := COALESCE(get_config_int('memory.recmem_task_max_attempts'), 3);
+    v_base INT := COALESCE(get_config_int('memory.recmem_task_backoff_base_s'), 30);
+BEGIN
+    SELECT attempts INTO v_attempts FROM memory_summarization_queue WHERE memory_id = p_id;
+    UPDATE memory_summarization_queue SET
+        status = CASE WHEN COALESCE(v_attempts, 1) >= v_max THEN 'failed' ELSE 'pending' END,
+        next_attempt_at = CURRENT_TIMESTAMP + ((v_base * power(2, COALESCE(v_attempts, 1)))::text || ' seconds')::interval,
+        last_error = left(COALESCE(p_error, ''), 1000)
+    WHERE memory_id = p_id;
+END;
+$$;
+
+-- ============================================================================
+-- Part D: true deletion (cross-store) + the GC
+-- ============================================================================
+
+-- Per-node AGE cleanup (only a full-graph wipe existed before). Best-effort.
+CREATE OR REPLACE FUNCTION remove_memory_node(p_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE format(
+        'SELECT * FROM ag_catalog.cypher(''memory_graph'', $q$
+            MATCH (m:MemoryNode {memory_id: %L}) DETACH DELETE m
+        $q$) as (result ag_catalog.agtype)', p_id);
+EXCEPTION WHEN OTHERS THEN
+    NULL;  -- graph cleanup is best-effort; memory_edges is the primary substrate
+END;
+$$;
+
+-- Hard delete a memory and everything that references it, across all stores.
+-- Ordered so the NO-ACTION FKs (reconsolidation_tasks) can't block the delete.
+CREATE OR REPLACE FUNCTION delete_memory_fully(p_id UUID)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- 1. NO-ACTION FKs that would otherwise raise on the final delete
+    DELETE FROM reconsolidation_tasks WHERE belief_id = p_id OR summary_memory_id = p_id;
+    -- 2. relational edge substrate (TEXT ids, no FK) -- both directions
+    DELETE FROM memory_edges
+     WHERE (src_type = 'memory' AND src_id = p_id::text)
+        OR (dst_type = 'memory' AND dst_id = p_id::text);
+    -- 3. activation cache (no FK)
+    DELETE FROM activation_cache WHERE memory_id = p_id;
+    -- 4. AGE graph node
+    PERFORM remove_memory_node(p_id);
+    -- 5. the row (CASCADE cleans memory_source_units + memory_neighborhoods; SET-NULL FKs auto-null)
+    DELETE FROM memories WHERE id = p_id;
+    RETURN TRUE;
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'delete_memory_fully(%) failed: %', p_id, SQLERRM;
+    RETURN FALSE;
+END;
+$$;
+
+-- Reclaim: hard-delete archived originals past the grace/undo window, then (if a
+-- capacity dial is set and episodic mass is still over it) prune the weakest live
+-- episodic memories until under target. Protected memories are never touched.
+CREATE OR REPLACE FUNCTION run_retention_gc()
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_grace    FLOAT := COALESCE(get_config_float('retention.prune_grace_days'), 14);
+    v_capacity FLOAT := COALESCE(get_config_float('retention.capacity'), 0);
+    v_pruned INT := 0;
+    v_mass FLOAT;
+    v_target UUID;
+    rec RECORD;
+BEGIN
+    IF NOT COALESCE(get_config_bool('retention.enabled'), false) THEN
+        RETURN jsonb_build_object('skipped', true);
+    END IF;
+
+    -- (a) archived originals past grace (the undo window) -> truly delete
+    FOR rec IN
+        SELECT id FROM memories
+        WHERE status = 'archived' AND superseded_by IS NOT NULL
+          AND age_in_days(COALESCE((metadata->'consolidation'->>'archived_at')::timestamptz, updated_at)) >= v_grace
+          AND NOT is_memory_protected(id)
+    LOOP
+        IF delete_memory_fully(rec.id) THEN v_pruned := v_pruned + 1; END IF;
+    END LOOP;
+
+    -- (b) capacity pressure -> prune the weakest live episodic memories (last resort)
+    IF v_capacity > 0 THEN
+        LOOP
+            SELECT COALESCE(sum(calculate_strength(importance, decay_rate, created_at, last_reinforced)), 0)
+              INTO v_mass FROM memories WHERE status = 'active' AND type = 'episodic';
+            EXIT WHEN v_mass <= v_capacity;
+            SELECT id INTO v_target FROM memories
+            WHERE status = 'active' AND type = 'episodic' AND NOT is_memory_protected(id)
+            ORDER BY calculate_strength(importance, decay_rate, created_at, last_reinforced) ASC, created_at ASC
+            LIMIT 1;
+            EXIT WHEN v_target IS NULL;
+            EXIT WHEN NOT delete_memory_fully(v_target);
+            v_pruned := v_pruned + 1;
+        END LOOP;
+    END IF;
+
+    RETURN jsonb_build_object('pruned', v_pruned);
+END;
+$$;
+
+-- ============================================================================
+-- Part E: the rest orchestrator (DB half; the LLM summarization runs in the worker)
+-- ============================================================================
+-- Group aged/low-strength/unprotected episodic memories and merge each group into
+-- a gist (archiving the originals, enqueuing summarization). No LLM here -- the
+-- summarization worker drains the queue. No-op unless retention.enabled.
+CREATE OR REPLACE FUNCTION run_memory_rest()
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_batch INT := COALESCE(get_config_int('retention.rest_batch_size'), 8);
+    v_consolidated INT := 0;
+    v_gist UUID;
+    rec RECORD;
+BEGIN
+    IF NOT COALESCE(get_config_bool('retention.enabled'), false) THEN
+        RETURN jsonb_build_object('skipped', true);
+    END IF;
+    FOR rec IN SELECT memory_ids FROM find_consolidation_candidates() LIMIT GREATEST(v_batch, 1)
+    LOOP
+        BEGIN
+            v_gist := consolidate_memory_group(rec.memory_ids);
+            IF v_gist IS NOT NULL THEN v_consolidated := v_consolidated + 1; END IF;
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'consolidate_memory_group failed: %', SQLERRM;
+        END;
+    END LOOP;
+    RETURN jsonb_build_object('consolidated', v_consolidated);
+END;
+$$;

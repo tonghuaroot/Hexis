@@ -689,7 +689,26 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.recmem_sweep_min_rerouting_age_days', '7'::jsonb, 'Skip units routed within this window')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
-    ('llm.recmem', 'null'::jsonb, 'Optional LLM override for RecMem consolidation prompts')
+    ('llm.recmem', 'null'::jsonb, 'Optional LLM override for RecMem consolidation prompts'),
+    ('llm.summarization', 'null'::jsonb, 'Optional LLM override for memory-consolidation summarization/distillation')
+ON CONFLICT (key) DO NOTHING;
+-- Memory retention / compression-native consolidation (docs/memory_retention_design.md).
+-- Ships DARK: the whole fade ladder (consolidate -> summarize -> archive -> prune)
+-- is a no-op until retention.enabled is set true.
+INSERT INTO config (key, value, description) VALUES
+    ('retention.enabled', 'false'::jsonb, 'Master switch for rest-cycle memory consolidation + pruning (ships off)'),
+    ('retention.min_age_days', '30'::jsonb, 'Episodic memories younger than this are never consolidated'),
+    ('retention.min_idle_days', '21'::jsonb, 'Skip memories reinforced within this window'),
+    ('retention.consolidate_max_strength', '0.4'::jsonb, 'Only consolidate memories whose computed strength has fallen below this'),
+    ('retention.min_group_size', '3'::jsonb, 'Never consolidate a group smaller than this'),
+    ('retention.protect_importance', '0.85'::jsonb, 'Importance at/above this exempts a memory from all fading'),
+    ('retention.protect_intensity', '0.75'::jsonb, 'Emotional intensity at/above this exempts a memory'),
+    ('retention.protect_valence_abs', '0.7'::jsonb, 'Absolute emotional valence at/above this exempts a memory'),
+    ('retention.capacity', '0'::jsonb, 'Soft ceiling on episodic representational mass (sum of strength); 0 = unlimited'),
+    ('retention.prune_grace_days', '14'::jsonb, 'Archived originals become hard-deletable only after this grace/undo window'),
+    ('retention.fidelity_drop', '0.7'::jsonb, 'Fidelity multiplier applied each time a memory is summarized (lossiness)'),
+    ('retention.rest_batch_size', '8'::jsonb, 'Max candidate groups consolidated per rest pass'),
+    ('retention.summarize_batch_size', '8'::jsonb, 'Summarization tasks per worker tick')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('heartbeat.use_rlm', 'true'::jsonb, 'Enable RLM loop for heartbeat decisions'),
