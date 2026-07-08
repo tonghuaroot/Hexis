@@ -196,88 +196,28 @@ async def finalize_heartbeat(
     if has_tasks:
         summary += " [backlog active]"
 
-    # Record heartbeat as episodic memory
+    # Persist finalization in the DB (db/43 finalize_agentic_heartbeat):
+    # episodic memory + heartbeat_state bump + auto-checkpoint of interrupted
+    # in-progress backlog items — previously three inline SQL blocks here.
+    memory_id = None
     try:
-        memory_id = await conn.fetchval(
-            """
-            SELECT create_episodic_memory(
-                p_content := $1,
-                p_action := 'heartbeat',
-                p_context := $2::jsonb,
-                p_result := $3,
-                p_importance := 0.5,
-                p_trust_level := 1.0
-            )
-            """,
-            summary[:2000],
-            json.dumps({
-                "heartbeat_id": heartbeat_id,
-                "energy_spent": energy_spent,
-                "tool_calls": len(tool_calls),
-                "stopped_reason": stopped_reason,
-                "has_backlog_tasks": has_tasks,
-            }),
-            "completed" if stopped_reason == "completed" else stopped_reason,
+        raw = await conn.fetchval(
+            "SELECT finalize_agentic_heartbeat($1::text, $2::text, $3::int, $4::int, $5::text, $6::boolean)",
+            heartbeat_id,
+            summary,
+            int(energy_spent or 0),
+            len(tool_calls),
+            stopped_reason,
+            has_tasks,
         )
+        payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        memory_id = payload.get("memory_id")
     except Exception:
-        memory_id = None
-        logger.debug("Failed to record heartbeat memory", exc_info=True)
-
-    # Update heartbeat state (mark completion, deduct energy)
-    try:
-        await conn.execute(
-            """
-            UPDATE heartbeat_state
-            SET last_heartbeat_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = 1
-            """
-        )
-    except Exception:
-        logger.debug("Failed to update heartbeat state", exc_info=True)
-
-    # Auto-checkpoint: if backlog had tasks and heartbeat was interrupted,
-    # checkpoint any still-in-progress items so next heartbeat can resume
-    if has_tasks and stopped_reason in ("timeout", "energy_exhausted"):
-        try:
-            in_progress_items = await conn.fetch(
-                """
-                SELECT id, title, checkpoint
-                FROM public.backlog
-                WHERE status = 'in_progress'
-                ORDER BY updated_at DESC
-                LIMIT 5
-                """
-            )
-            for item in in_progress_items:
-                existing_cp = item["checkpoint"]
-                if existing_cp is None:
-                    # Auto-create a minimal checkpoint
-                    auto_checkpoint = json.dumps({
-                        "step": "interrupted",
-                        "progress": f"Heartbeat ended ({stopped_reason}). {len(tool_calls)} tool calls made.",
-                        "next_action": "Continue from where left off",
-                    })
-                    await conn.execute(
-                        """
-                        UPDATE public.backlog
-                        SET checkpoint = $1::jsonb, updated_at = CURRENT_TIMESTAMP
-                        WHERE id = $2
-                        """,
-                        auto_checkpoint,
-                        item["id"],
-                    )
-                    logger.info(
-                        "Auto-checkpointed in-progress item %s: %s",
-                        item["id"],
-                        item["title"],
-                    )
-        except Exception:
-            logger.debug("Failed to auto-checkpoint backlog items", exc_info=True)
+        logger.debug("Failed to finalize heartbeat", exc_info=True)
 
     return {
         "completed": True,
-        "memory_id": str(memory_id) if memory_id else None,
+        "memory_id": memory_id,
         "energy_spent": energy_spent,
         "outbox_messages": [],
         "has_backlog_tasks": has_tasks,
