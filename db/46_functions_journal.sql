@@ -113,6 +113,7 @@ AS $$
 DECLARE
     v_id UUID;
     v_rows JSONB;
+    v_read_id UUID;
 BEGIN
     IF p_tool_name = 'write_journal' THEN
         IF COALESCE(btrim(p_args->>'content'), '') = '' THEN
@@ -128,8 +129,25 @@ BEGIN
                             'Wrote a journal entry: ' || left(p_args->>'content', 60));
 
     ELSIF p_tool_name = 'read_journal' THEN
+        v_read_id := NULLIF(p_args->>'id', '')::uuid;
         SELECT COALESCE(jsonb_agg(to_jsonb(r)), '[]'::jsonb) INTO v_rows
-        FROM read_journal_entries(NULLIF(p_args->>'id', '')::uuid, COALESCE((p_args->>'limit')::int, 5)) r;
+        FROM read_journal_entries(v_read_id, COALESCE((p_args->>'limit')::int, 5)) r;
+        -- Re-reading a SPECIFIC entry is a fresh experience: it forms a NEW episodic
+        -- memory (which then fades like any other), even if the memory of writing it
+        -- has long since faded -- the entry itself is permanent, the reading is not.
+        -- (Browsing the recent list is not a revisiting, so it forms no memory.)
+        IF v_read_id IS NOT NULL AND jsonb_array_length(v_rows) = 1 THEN
+            BEGIN
+                PERFORM create_episodic_memory(
+                    p_content := 'I revisited my journal entry'
+                        || COALESCE(' "' || NULLIF(v_rows->0->>'title', '') || '"', '')
+                        || '. ' || left(COALESCE(v_rows->0->>'content', ''), 400),
+                    p_context := jsonb_build_object('activity', 'rereading_journal', 'journal_entry_id', v_read_id),
+                    p_importance := 0.4);
+            EXCEPTION WHEN OTHERS THEN
+                NULL;  -- the read still succeeds even if forming the memory hiccups
+            END;
+        END IF;
         RETURN tool_success(jsonb_build_object('entries', v_rows),
                             'Read ' || jsonb_array_length(v_rows) || ' journal entry(ies)');
 

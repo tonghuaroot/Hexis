@@ -59,6 +59,39 @@ async def test_execute_journal_tool_roundtrip(db_pool):
             await tr.rollback()
 
 
+async def test_rereading_specific_entry_forms_a_memory(db_pool):
+    """Re-reading a SPECIFIC entry is a fresh experience -> it forms a new episodic
+    memory (even though the entry itself is permanent). Browsing the list does not."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            eid = await conn.fetchval(
+                "SELECT write_journal_entry($1, $2)",
+                "The night the storm knocked the power out and we talked by candlelight.", "the storm")
+            q = "SELECT count(*) FROM memories WHERE metadata->'context'->>'activity'='rereading_journal'"
+            before = await conn.fetchval(q)
+
+            # browsing the recent LIST forms no memory (not a revisiting)
+            await conn.fetchval("SELECT execute_journal_tool('read_journal', $1::jsonb)", json.dumps({"limit": 5}))
+            assert await conn.fetchval(q) == before
+
+            # re-reading the SPECIFIC entry forms a fresh memory of the revisiting
+            await conn.fetchval("SELECT execute_journal_tool('read_journal', $1::jsonb)", json.dumps({"id": str(eid)}))
+            assert await conn.fetchval(q) == before + 1
+
+            m = await conn.fetchrow(
+                "SELECT id, type::text AS t, content, source_attribution FROM memories "
+                "WHERE (metadata->'context'->>'journal_entry_id')::uuid = $1", eid)
+            assert m["t"] == "episodic"
+            assert "revisited my journal" in m["content"]
+            # a normal experiential memory that fades -- NOT an ingested/protected one
+            assert (_j(m["source_attribution"]) or {}).get("content_hash") is None
+            assert await conn.fetchval("SELECT is_memory_protected($1)", m["id"]) is False
+        finally:
+            await tr.rollback()
+
+
 async def test_journal_absent_from_passive_recall(db_pool):
     """The journal must never surface through gather_turn_context or
     recmem_recall_context -- it is not memory."""
