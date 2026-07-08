@@ -93,6 +93,72 @@ async def test_agent_next_step_stops_on_db_owned_energy_budget(db_pool):
             await tr.rollback()
 
 
+async def test_next_step_returns_db_owned_message_log(db_pool):
+    """next_agent_step hands back the authoritative agent_turns.messages log,
+    and apply_* / append_agent_message accumulate it in replayable format."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            started = _coerce_json(
+                await conn.fetchval(
+                    "SELECT start_agent_turn($1::text, $2::text, NULL, $3::jsonb)",
+                    "chat",
+                    "hi",
+                    json.dumps({
+                        "messages": [
+                            {"role": "system", "content": "S"},
+                            {"role": "user", "content": "hi"},
+                        ],
+                        "energy_budget": 10,
+                        "max_iterations": 5,
+                    }),
+                )
+            )
+            turn_id = started["turn_id"]
+
+            # The step hands back the current message log for the LLM call.
+            step = _coerce_json(await conn.fetchval("SELECT next_agent_step($1::uuid)", turn_id))
+            assert step["action"] == "llm"
+            assert isinstance(step["messages"], list)
+            assert step["messages"][-1] == {"role": "user", "content": "hi"}
+
+            # Assistant message with an OpenAI-format tool call, then its result.
+            await conn.fetchval(
+                "SELECT apply_agent_llm_result($1::uuid, $2::jsonb)",
+                turn_id,
+                json.dumps({
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "type": "function",
+                         "function": {"name": "recall", "arguments": "{}"}}
+                    ],
+                }),
+            )
+            await conn.fetchval(
+                "SELECT apply_agent_tool_result($1::uuid, 'c1', $2::jsonb)",
+                turn_id,
+                json.dumps({"tool_name": "recall", "success": True,
+                            "energy_spent": 1, "model_output": "result-text"}),
+            )
+
+            step2 = _coerce_json(await conn.fetchval("SELECT next_agent_step($1::uuid)", turn_id))
+            roles = [m["role"] for m in step2["messages"]]
+            assert roles == ["system", "user", "assistant", "tool"]
+            assert step2["messages"][2]["tool_calls"][0]["id"] == "c1"
+            assert step2["messages"][3]["content"] == "result-text"
+
+            # append_agent_message adds a user turn (continuation / plan / verify).
+            appended = _coerce_json(
+                await conn.fetchval(
+                    "SELECT append_agent_message($1::uuid, 'user', 'continue')", turn_id
+                )
+            )
+            assert appended["messages"][-1] == {"role": "user", "content": "continue"}
+        finally:
+            await tr.rollback()
+
+
 async def test_external_call_kind_resolution_is_db_owned(db_pool):
     async with db_pool.acquire() as conn:
         tool_call = _coerce_json(

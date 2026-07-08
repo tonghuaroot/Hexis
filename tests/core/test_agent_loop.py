@@ -40,6 +40,27 @@ pytestmark = [pytest.mark.asyncio(loop_scope="session")]
 
 
 # ============================================================================
+# DB wiring
+# ============================================================================
+#
+# The loop is now DB-authoritative: agent_turns owns the message log, energy
+# accounting and stop decisions. These tests therefore run against the real
+# temp test DB (mocking only the LLM + registry), rather than mocking the
+# turn-state away. The autouse fixture publishes the pool so the helper
+# factories below can hand it to every AgentLoop under test.
+
+_DB_POOL: Any = None
+
+
+@pytest.fixture(autouse=True)
+def _wire_db_pool(db_pool):
+    global _DB_POOL
+    _DB_POOL = db_pool
+    yield
+    _DB_POOL = None
+
+
+# ============================================================================
 # Helpers
 # ============================================================================
 
@@ -81,9 +102,9 @@ def _mock_registry(
     spec_map: dict[str, ToolSpec] | None = None,
     config: ToolsConfig | None = None,
 ) -> MagicMock:
-    """Create a mock ToolRegistry."""
+    """Create a mock ToolRegistry (real DB pool for authoritative turn-state)."""
     registry = MagicMock()
-    registry.pool = MagicMock()
+    registry.pool = _DB_POOL
 
     # get_specs returns OpenAI function specs
     registry.get_specs = AsyncMock(return_value=tool_specs or [])
