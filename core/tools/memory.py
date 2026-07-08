@@ -504,6 +504,109 @@ class ExploreConceptHandler(ToolHandler):
             return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
 
 
+class ExploreSubgraphHandler(ToolHandler):
+    """Assemble a dynamic sub-knowledge-graph around seed memories."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="explore_subgraph",
+            description=(
+                "Assemble a focused sub-knowledge-graph around memories: expand over typed "
+                "relationships (causes, supports, contradicts, derived_from, instance_of, ...) "
+                "to see how they connect -- the belief/causal structure, not a flat list. "
+                "Seed with a query (recalls memories) or explicit memory ids. Use this when a "
+                "question is about how things relate, contradict, or lead to one another."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Recall seed memories matching this text (used if 'seeds' omitted).",
+                    },
+                    "seeds": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Explicit seed memory ids (uuid). Use if you already have them.",
+                    },
+                    "rel_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict expansion to these edge types (e.g. ['CAUSES','SUPPORTS']). Omit for all.",
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Max hops from a seed.",
+                        "default": 2,
+                        "minimum": 1,
+                        "maximum": 4,
+                    },
+                    "budget": {
+                        "type": "integer",
+                        "description": "Max nodes in the result.",
+                        "default": 30,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                },
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=1,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        seeds = arguments.get("seeds")
+        query = arguments.get("query")
+        rel_types = arguments.get("rel_types")
+        depth = arguments.get("depth", 2)
+        budget = arguments.get("budget", 30)
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                if seeds:
+                    seed_ids = [str(s) for s in seeds]
+                elif query:
+                    rows = await conn.fetch("SELECT memory_id FROM fast_recall($1, 10)", query)
+                    seed_ids = [str(r["memory_id"]) for r in rows]
+                else:
+                    return ToolResult.error_result(
+                        "Provide 'query' or 'seeds'.", ToolErrorType.INVALID_PARAMS
+                    )
+
+                if not seed_ids:
+                    return ToolResult.success_result(
+                        output={"nodes": [], "edges": [], "rendered": None},
+                        display_output="No seed memories found.",
+                    )
+
+                sg = await conn.fetchval(
+                    "SELECT build_context_subgraph($1::uuid[], $2, $3::text[], $4)",
+                    seed_ids, depth, rel_types, budget,
+                )
+                rendered = await conn.fetchval("SELECT render_subgraph($1::jsonb)", sg)
+
+            sg_obj = json.loads(sg) if isinstance(sg, str) else (sg or {})
+            nodes = sg_obj.get("nodes", [])
+            edges = sg_obj.get("edges", [])
+            return ToolResult.success_result(
+                output={"nodes": nodes, "edges": edges, "rendered": rendered},
+                display_output=(
+                    rendered
+                    if rendered
+                    else f"No typed connections among {len(seed_ids)} seed memory(ies)."
+                ),
+            )
+
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+
 class GetProceduresHandler(ToolHandler):
     """Retrieve procedural memories for a task."""
 
@@ -1052,6 +1155,7 @@ def create_memory_tools() -> list[ToolHandler]:
         RememberHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
+        ExploreSubgraphHandler(),
         GetProceduresHandler(),
         GetStrategiesHandler(),
         QueueUserMessageHandler(),
