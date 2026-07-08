@@ -247,6 +247,7 @@ BEGIN
                         $q$) AS (result ag_catalog.agtype)',
                         v_memory_id, task.belief_id
                     );
+                    PERFORM delete_memory_edge('memory', v_memory_id::text, 'CONTESTED_BECAUSE', 'memory', task.belief_id::text);
                 EXCEPTION WHEN OTHERS THEN NULL;
                 END;
 
@@ -273,6 +274,9 @@ BEGIN
                         v_memory_id, task.belief_id,
                         clock_timestamp()::text, v_strength
                     );
+                    PERFORM upsert_memory_edge(v_memory_id, task.belief_id, 'CONTESTED_BECAUSE',
+                                               jsonb_build_object('strength', v_strength, 'source', 'reconsolidation',
+                                                                  'reconsolidated_at', clock_timestamp()::text));
                 EXCEPTION WHEN OTHERS THEN NULL;
                 END;
                 still_contested := still_contested + 1;
@@ -294,6 +298,7 @@ BEGIN
                         $q$) AS (result ag_catalog.agtype)',
                         v_memory_id, task.belief_id
                     );
+                    PERFORM delete_memory_edge('memory', v_memory_id::text, 'SUPPORTS', 'memory', task.belief_id::text);
                 EXCEPTION WHEN OTHERS THEN NULL;
                 END;
 
@@ -316,6 +321,9 @@ BEGIN
                         v_memory_id, task.belief_id,
                         clock_timestamp()::text, v_strength
                     );
+                    PERFORM upsert_memory_edge(v_memory_id, task.belief_id, 'SUPPORTS',
+                                               jsonb_build_object('strength', v_strength, 'source', 'reconsolidation',
+                                                                  'reconsolidated_at', clock_timestamp()::text));
                 EXCEPTION WHEN OTHERS THEN NULL;
                 END;
                 kept := kept + 1;

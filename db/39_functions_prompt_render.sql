@@ -30,6 +30,30 @@ RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
     SELECT CASE WHEN v IS NOT NULL AND jsonb_typeof(v) = 'array' THEN v ELSE '[]'::jsonb END;
 $$;
 
+-- Render a dynamic sub-knowledge-graph (build_context_subgraph output:
+-- {nodes, edges}) as compact markdown: each typed edge as "A  —rel→  B" using
+-- node labels, grouped by relation. Returns NULL when there is no structure to
+-- show, so callers can omit the section entirely.
+CREATE OR REPLACE FUNCTION render_subgraph(p jsonb)
+RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    WITH nodes AS (
+        SELECT (n->>'type') AS ntype, (n->>'id') AS nid,
+               left(COALESCE(NULLIF(btrim(n->>'label'), ''), n->>'id'), 80) AS label
+        FROM jsonb_array_elements(_pr_arr(p->'nodes')) n
+    ),
+    edges AS (
+        SELECT (e->>'src_type') AS st, (e->>'src_id') AS si, (e->>'rel') AS rel,
+               (e->>'dst_type') AS dt, (e->>'dst_id') AS di
+        FROM jsonb_array_elements(_pr_arr(p->'edges')) e
+    )
+    SELECT string_agg(
+        '  - ' || COALESCE(ns.label, e.si) || '  —' || lower(e.rel) || '→  ' || COALESCE(nd.label, e.di),
+        E'\n' ORDER BY e.rel, ns.label, nd.label)
+    FROM edges e
+    LEFT JOIN nodes ns ON ns.ntype = e.st AND ns.nid = e.si
+    LEFT JOIN nodes nd ON nd.ntype = e.dt AND nd.nid = e.di;
+$$;
+
 -- --- list formatters --------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION render_goals(p_goals jsonb)

@@ -133,6 +133,8 @@ BEGIN
             CREATE (root)-[:CONTAINS {priority: %L}]->(g)
             RETURN g
         $q$) as (result ag_catalog.agtype)', new_goal_id, p_priority::text);
+        PERFORM upsert_memory_edge('goals_root', 'goals', 'CONTAINS', 'goal', new_goal_id::text,
+                                   1.0, NULL, NULL, jsonb_build_object('priority', p_priority::text));
         IF p_parent_id IS NOT NULL THEN
             PERFORM link_goal_subgoal(p_parent_id, new_goal_id);
         END IF;
@@ -167,6 +169,7 @@ BEGIN
         MERGE (child)-[:SUBGOAL_OF]->(parent)
         RETURN child
     $q$) as (result ag_catalog.agtype)', p_parent_id, p_child_id);
+    PERFORM upsert_memory_edge('goal', p_child_id::text, 'SUBGOAL_OF', 'goal', p_parent_id::text, 1.0);
     RETURN TRUE;
 EXCEPTION WHEN OTHERS THEN
     RETURN FALSE;
@@ -209,6 +212,14 @@ BEGIN
             CREATE (m)-[:EVIDENCE_FOR]->(g)
             RETURN m
         $q$) as (result ag_catalog.agtype)', p_memory_id, p_goal_id);
+    END IF;
+
+    IF edge_type = 'ORIGINATED_FROM' THEN
+        PERFORM upsert_memory_edge('goal', p_goal_id::text, 'ORIGINATED_FROM', 'memory', p_memory_id::text, 1.0);
+    ELSIF edge_type = 'BLOCKS' THEN
+        PERFORM upsert_memory_edge('memory', p_memory_id::text, 'BLOCKS', 'goal', p_goal_id::text, 1.0);
+    ELSE
+        PERFORM upsert_memory_edge('memory', p_memory_id::text, 'EVIDENCE_FOR', 'goal', p_goal_id::text, 1.0);
     END IF;
 
     RETURN TRUE;
@@ -309,6 +320,9 @@ BEGIN
         RETURN from
     $q$) as (result ag_catalog.agtype)', p_from_cluster_id, p_to_cluster_id, edge_type, p_strength);
 
+    PERFORM upsert_memory_edge('cluster', p_from_cluster_id::text, edge_type,
+                               'cluster', p_to_cluster_id::text, p_strength, NULL, NULL,
+                               jsonb_build_object('strength', p_strength));
     RETURN TRUE;
 EXCEPTION WHEN OTHERS THEN
     RETURN FALSE;
@@ -359,6 +373,8 @@ BEGIN
         RETURN m
     $q$) as (result ag_catalog.agtype)', p_memory_id, p_cluster_id, p_strength, CURRENT_TIMESTAMP::text);
 
+    PERFORM upsert_memory_edge('memory', p_memory_id::text, 'MEMBER_OF', 'cluster', p_cluster_id::text,
+                               p_strength, NULL, NULL, jsonb_build_object('strength', p_strength));
     RETURN TRUE;
 EXCEPTION WHEN OTHERS THEN
     RETURN FALSE;

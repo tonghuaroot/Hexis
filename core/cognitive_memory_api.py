@@ -95,6 +95,17 @@ class RecallResult:
     query: str
 
 
+# Default edge types for the chat reasoning subgraph: the *semantic* relations
+# that carry reasoning structure. Excludes hub-forming structural/temporal edges
+# (IN_EPISODE, MEMBER_OF, CLUSTER_*, goal-tree edges) that would over-connect the
+# view — every co-occurring memory linking through one episode/cluster node. The
+# substrate still stores those; the explore_subgraph tool can request any type.
+REASONING_EDGE_TYPES = [
+    "CAUSES", "SUPPORTS", "CONTRADICTS", "DERIVED_FROM",
+    "CONTESTED_BECAUSE", "INSTANCE_OF", "ASSOCIATED", "TEMPORAL_NEXT",
+]
+
+
 @dataclass(frozen=True)
 class HydratedContext:
     memories: list[Memory]
@@ -104,6 +115,10 @@ class HydratedContext:
     emotional_state: dict[str, Any] | None
     goals: dict[str, Any] | None
     urgent_drives: list[dict[str, Any]]
+    # Dynamic sub-knowledge-graph seeded from the recalled memories: the typed
+    # {nodes, edges} structure (supports/contradicts/causes/...) among + around
+    # them. None when disabled or nothing was recalled.
+    subgraph: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +233,10 @@ class CognitiveMemory:
         include_emotional_state: bool = True,
         include_goals: bool = False,
         include_drives: bool = True,
+        include_subgraph: bool = True,
+        subgraph_depth: int = 2,
+        subgraph_budget: int = 40,
+        subgraph_rel_types: list[str] | None = None,
         session_id: UUID | str | None = None,
     ) -> HydratedContext:
         """
@@ -256,6 +275,24 @@ class CognitiveMemory:
         goals = ctx.get("goals") if include_goals else None
         urgent_drives = ctx.get("urgent_drives", []) if include_drives else []
 
+        # Seed the dynamic sub-knowledge-graph from the recalled memories. Runs
+        # after recall (it depends on the recalled ids), as one small round-trip.
+        subgraph = None
+        if include_subgraph and memories:
+            seed_ids = [m.id for m in memories]
+            # Default to the semantic reasoning edges (curated); callers can pass
+            # an explicit list (incl. structural types) to override.
+            rel_types = subgraph_rel_types if subgraph_rel_types is not None else REASONING_EDGE_TYPES
+            try:
+                async with self._pool.acquire() as conn:
+                    sg_row = await conn.fetchval(
+                        "SELECT build_context_subgraph($1::uuid[], $2, $3::text[], $4)",
+                        seed_ids, subgraph_depth, rel_types, subgraph_budget,
+                    )
+                subgraph = _coerce_json(sg_row)
+            except Exception:
+                subgraph = None  # advisory: never fail hydration on subgraph assembly
+
         return HydratedContext(
             memories=memories,
             partial_activations=partial,
@@ -264,6 +301,7 @@ class CognitiveMemory:
             emotional_state=dict(emotional_state) if isinstance(emotional_state, dict) else None,
             goals=dict(goals) if isinstance(goals, dict) else None,
             urgent_drives=list(urgent_drives) if isinstance(urgent_drives, list) else [],
+            subgraph=subgraph if isinstance(subgraph, dict) else None,
         )
 
     async def hydrate_batch(
@@ -1447,6 +1485,32 @@ class CognitiveMemorySync:
         return self._loop.run_until_complete(self._async.record_ingestion_receipts(items))
 
 
+def _format_subgraph(subgraph: dict[str, Any] | None, *, max_edges: int = 20) -> str | None:
+    """Render a build_context_subgraph result ({nodes, edges}) as compact markdown:
+    one 'A  —rel→  B' line per typed edge, using node labels. None if no structure."""
+    if not isinstance(subgraph, dict):
+        return None
+    nodes = subgraph.get("nodes") or []
+    edges = subgraph.get("edges") or []
+    if not edges:
+        return None
+    label: dict[tuple[Any, Any], str] = {}
+    for n in nodes:
+        if isinstance(n, dict):
+            lbl = str(n.get("label") or n.get("id") or "").strip()
+            label[(n.get("type"), n.get("id"))] = lbl[:80]
+    lines: list[str] = []
+    for e in sorted(
+        (e for e in edges if isinstance(e, dict)),
+        key=lambda e: (str(e.get("rel", "")), str(e.get("src_id", ""))),
+    )[:max_edges]:
+        s = label.get((e.get("src_type"), e.get("src_id")), e.get("src_id"))
+        d = label.get((e.get("dst_type"), e.get("dst_id")), e.get("dst_id"))
+        rel = str(e.get("rel") or "related").lower()
+        lines.append(f"- {s}  —{rel}→  {d}")
+    return "\n".join(lines) if lines else None
+
+
 def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5, max_partials: int = 3) -> str:
     parts: list[str] = []
 
@@ -1484,6 +1548,12 @@ def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5
                     elif kind:
                         src_kind = f", source: {kind}"
                 parts.append(f"- {m.content}{score}{trust}{src_kind}")
+
+    subgraph_md = _format_subgraph(context.subgraph)
+    if subgraph_md:
+        parts.append("\n## Knowledge Subgraph")
+        parts.append("How the recalled memories connect (typed links among + around them):")
+        parts.append(subgraph_md)
 
     if context.partial_activations:
         parts.append("\n## Vague Recollections (tip-of-tongue)")

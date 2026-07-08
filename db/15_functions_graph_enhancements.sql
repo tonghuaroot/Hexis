@@ -51,6 +51,9 @@ BEGIN
         p_worldview_id,
         COALESCE(p_strength, 0.8)
     );
+    PERFORM upsert_memory_edge('memory', p_memory_id::text, 'SUPPORTS', 'memory', p_worldview_id::text,
+                               COALESCE(p_strength, 0.8), NULL, NULL,
+                               jsonb_build_object('strength', COALESCE(p_strength, 0.8)));
 END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION find_contradictions(p_memory_id UUID DEFAULT NULL)
