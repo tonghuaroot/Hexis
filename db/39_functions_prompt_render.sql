@@ -681,6 +681,29 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION render_memories_at_threshold(p_slice jsonb)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+    slice jsonb := COALESCE(p_slice, '{}'::jsonb);
+    reviews jsonb := CASE WHEN jsonb_typeof(slice->'reviews') = 'array' THEN slice->'reviews' ELSE '[]'::jsonb END;
+    lines text[] := ARRAY[]::text[];
+    item jsonb;
+    n int := 0;
+BEGIN
+    IF jsonb_array_length(reviews) = 0 THEN
+        RETURN '  (none fading)';
+    END IF;
+    lines := lines || ('  KEEP points remaining this chapter: ' || COALESCE(slice->>'budget_remaining', '0'));
+    FOR item IN SELECT * FROM jsonb_array_elements(reviews) LOOP
+        n := n + 1;
+        IF n > 5 THEN EXIT; END IF;
+        lines := lines || ('    - [' || COALESCE(item->>'review_id', '?') || '] '
+                           || COALESCE(item->>'preview', '(no preview)'));
+    END LOOP;
+    RETURN array_to_string(lines, E'\n');
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION render_heartbeat_decision_prompt(p_context jsonb)
 RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
 DECLARE
@@ -734,6 +757,10 @@ BEGIN
         || 'Available: ' || COALESCE(energy->>'current', '0') || E'\n'
         || 'Max: ' || COALESCE(energy->>'max', '20') || E'\n\n'
         || '## Backlog' || E'\n' || render_backlog(CASE WHEN ctx ? 'backlog' THEN ctx->'backlog' ELSE '{}'::jsonb END) || E'\n\n'
+        || CASE WHEN ctx ? 'memories_at_threshold'
+                THEN '## Memories at the Threshold' || E'\n'
+                     || render_memories_at_threshold(ctx->'memories_at_threshold') || E'\n\n'
+                ELSE '' END
         || '## Allowed Actions' || E'\n' || render_allowed_actions(CASE WHEN ctx ? 'allowed_actions' THEN ctx->'allowed_actions' ELSE '[]'::jsonb END) || E'\n\n'
         || '## Action Costs' || E'\n' || render_costs(ctx->'action_costs') || E'\n\n'
         || '---' || E'\n\n'

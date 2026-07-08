@@ -54,7 +54,10 @@ BEGIN
             'reach_out_public',
             'pause_heartbeat',
             'terminate',
-            'rest'
+            'rest',
+            'keep_memory',
+            'release_memory',
+            'journal_memory'
         );
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;

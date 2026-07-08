@@ -364,6 +364,7 @@ DECLARE
     v_grace    FLOAT := COALESCE(get_config_float('retention.prune_grace_days'), 14);
     v_capacity FLOAT := COALESCE(get_config_float('retention.capacity'), 0);
     v_pruned INT := 0;
+    v_expired INT := 0;
     v_mass FLOAT;
     v_target UUID;
     rec RECORD;
@@ -371,6 +372,20 @@ BEGIN
     IF NOT COALESCE(get_config_bool('retention.enabled'), false) THEN
         RETURN jsonb_build_object('skipped', true);
     END IF;
+
+    -- (0) conscious review left undecided past its window -> default LET GO (consolidate)
+    FOR rec IN
+        SELECT id, memory_ids FROM memory_review_queue
+        WHERE status = 'pending' AND expires_at <= CURRENT_TIMESTAMP
+    LOOP
+        BEGIN
+            PERFORM consolidate_memory_group(rec.memory_ids);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'review expiry consolidate failed: %', SQLERRM;
+        END;
+        UPDATE memory_review_queue SET status = 'expired', decided_at = CURRENT_TIMESTAMP WHERE id = rec.id;
+        v_expired := v_expired + 1;
+    END LOOP;
 
     -- (a) archived originals past grace (the undo window) -> truly delete
     FOR rec IN
@@ -398,7 +413,7 @@ BEGIN
         END LOOP;
     END IF;
 
-    RETURN jsonb_build_object('pruned', v_pruned);
+    RETURN jsonb_build_object('pruned', v_pruned, 'reviews_expired', v_expired);
 END;
 $$;
 
@@ -414,22 +429,175 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     v_batch INT := COALESCE(get_config_int('retention.rest_batch_size'), 8);
+    v_escalate_max INT := GREATEST(0, COALESCE(get_config_int('retention.escalate_batch'), 3));
+    v_expiry_days INT := GREATEST(1, COALESCE(get_config_int('retention.review_expiry_days'), 7));
     v_consolidated INT := 0;
+    v_escalated INT := 0;
     v_gist UUID;
+    v_preview TEXT;
     rec RECORD;
 BEGIN
     IF NOT COALESCE(get_config_bool('retention.enabled'), false) THEN
         RETURN jsonb_build_object('skipped', true);
     END IF;
-    FOR rec IN SELECT memory_ids FROM find_consolidation_candidates() LIMIT GREATEST(v_batch, 1)
+
+    -- Refill the KEEP budget if we've entered a new life chapter.
+    PERFORM reset_retention_budget_if_new_chapter();
+
+    FOR rec IN SELECT episode_id, memory_ids FROM find_consolidation_candidates() LIMIT GREATEST(v_batch, 1)
     LOOP
         BEGIN
-            v_gist := consolidate_memory_group(rec.memory_ids);
-            IF v_gist IS NOT NULL THEN v_consolidated := v_consolidated + 1; END IF;
+            -- A group already awaiting a conscious decision is left alone (neither
+            -- re-escalated nor consolidated behind the conscious mind's back).
+            IF EXISTS (SELECT 1 FROM memory_review_queue q
+                       WHERE q.status = 'pending' AND q.memory_ids && rec.memory_ids) THEN
+                CONTINUE;
+            END IF;
+            -- Borderline groups escalate to the conscious mind -- but only up to
+            -- escalate_batch per pass, and only when there's budget to actually act
+            -- (out of points => the subconscious just proceeds). Everything else
+            -- consolidates silently, exactly as before.
+            IF is_consolidation_borderline(rec.memory_ids)
+               AND v_escalated < v_escalate_max
+               AND retention_budget_remaining() > 0
+            THEN
+                SELECT string_agg(left(content, 120), ' / ' ORDER BY created_at)
+                  INTO v_preview FROM memories WHERE id = ANY(rec.memory_ids) AND status = 'active';
+                INSERT INTO memory_review_queue (episode_id, memory_ids, reason, preview, expires_at)
+                VALUES (rec.episode_id, rec.memory_ids, 'near_protection_threshold', v_preview,
+                        CURRENT_TIMESTAMP + (v_expiry_days || ' days')::interval);
+                v_escalated := v_escalated + 1;
+            ELSE
+                v_gist := consolidate_memory_group(rec.memory_ids);
+                IF v_gist IS NOT NULL THEN v_consolidated := v_consolidated + 1; END IF;
+            END IF;
         EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING 'consolidate_memory_group failed: %', SQLERRM;
+            RAISE WARNING 'memory rest group failed: %', SQLERRM;
         END;
     END LOOP;
-    RETURN jsonb_build_object('consolidated', v_consolidated);
+    RETURN jsonb_build_object('consolidated', v_consolidated, 'escalated', v_escalated);
 END;
+$$;
+
+-- ============================================================================
+-- Part F: subconscious triage -> conscious veto (docs/memory_retention_design.md §5)
+-- Most forgetting stays pre-conscious; BORDERLINE consolidations escalate to the
+-- conscious heartbeat, which may spend a point from a finite, per-life-chapter
+-- budget to KEEP a memory, JOURNAL it, or LET IT GO (the default).
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS memory_review_queue (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    episode_id  TEXT,
+    memory_ids  UUID[] NOT NULL,
+    reason      TEXT,                                  -- why the subconscious was unsure
+    preview     TEXT,                                  -- short content for the conscious mind
+    status      TEXT NOT NULL DEFAULT 'pending',       -- pending|kept|released|expired
+    decision    TEXT CHECK (decision IN ('keep', 'release', 'journal')),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP + INTERVAL '7 days',
+    decided_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_memory_review_queue_pending
+    ON memory_review_queue (status, expires_at);
+
+-- Current life chapter, read RELATIONALLY (no AGE dependency in the rest cycle).
+CREATE OR REPLACE FUNCTION current_chapter_relational()
+RETURNS TEXT
+LANGUAGE sql STABLE
+AS $$
+    SELECT COALESCE(
+        (SELECT properties->>'name' FROM memory_edges
+          WHERE src_type = 'self' AND dst_type = 'life_chapter' AND dst_id = 'current' LIMIT 1),
+        'unknown');
+$$;
+
+-- Finite KEEP budget in the state KV as {chapter, remaining, total}. Refills when
+-- the life chapter changes -- a fresh chapter is a fresh allowance to hold onto.
+CREATE OR REPLACE FUNCTION reset_retention_budget_if_new_chapter()
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_total   INT  := GREATEST(0, COALESCE(get_config_int('retention.veto_budget_per_chapter'), 5));
+    v_chapter TEXT := current_chapter_relational();
+    v_state   JSONB := get_state('retention_veto_budget');
+BEGIN
+    IF v_state IS NULL OR COALESCE(v_state->>'chapter', '') IS DISTINCT FROM v_chapter THEN
+        PERFORM set_state('retention_veto_budget', jsonb_build_object(
+            'chapter', v_chapter, 'remaining', v_total, 'total', v_total));
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION retention_budget_remaining()
+RETURNS INT
+LANGUAGE sql STABLE
+AS $$
+    SELECT COALESCE((get_state('retention_veto_budget')->>'remaining')::int, 0);
+$$;
+
+-- Spend one point if any remain; returns true on success.
+CREATE OR REPLACE FUNCTION spend_retention_budget()
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_state JSONB := get_state('retention_veto_budget');
+    v_remaining INT := COALESCE((v_state->>'remaining')::int, 0);
+BEGIN
+    IF v_remaining <= 0 THEN
+        RETURN false;
+    END IF;
+    PERFORM set_state('retention_veto_budget',
+        COALESCE(v_state, '{}'::jsonb) || jsonb_build_object('remaining', v_remaining - 1));
+    RETURN true;
+END;
+$$;
+
+-- A candidate group is BORDERLINE (worth the conscious mind's attention) when any
+-- member sits just below a protection threshold -- close enough that the cheap
+-- subconscious shouldn't decide alone. Not-yet-protected, but nearly precious.
+CREATE OR REPLACE FUNCTION is_consolidation_borderline(p_ids UUID[])
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM memories m
+        WHERE m.id = ANY(p_ids) AND m.status = 'active'
+          AND NOT is_memory_protected(m.id)
+          AND (
+                m.importance >= COALESCE(get_config_float('retention.protect_importance'), 0.85)
+                                - COALESCE(get_config_float('retention.borderline_margin'), 0.15)
+             OR current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
+                    (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
+                    >= COALESCE(get_config_float('retention.protect_intensity'), 0.75)
+                       - COALESCE(get_config_float('retention.borderline_margin'), 0.15)
+             OR abs(COALESCE((m.metadata->>'emotional_valence')::float, 0))
+                    >= COALESCE(get_config_float('retention.protect_valence_abs'), 0.7)
+                       - COALESCE(get_config_float('retention.borderline_margin'), 0.15)
+          )
+    );
+$$;
+
+-- The conscious-review slice for the heartbeat context: memories at the threshold of
+-- fading + how many KEEP points remain. Empty reviews => the section renders nothing.
+CREATE OR REPLACE FUNCTION get_memories_at_threshold_context(p_limit INT DEFAULT 5)
+RETURNS JSONB
+LANGUAGE sql STABLE
+AS $$
+    SELECT jsonb_build_object(
+        'budget_remaining', retention_budget_remaining(),
+        'reviews', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'review_id', q.id,
+                'preview', q.preview,
+                'reason', q.reason,
+                'memory_ids', to_jsonb(q.memory_ids),
+                'expires_at', q.expires_at
+            ) ORDER BY q.created_at)
+            FROM (SELECT * FROM memory_review_queue
+                  WHERE status = 'pending' ORDER BY created_at LIMIT GREATEST(p_limit, 1)) q
+        ), '[]'::jsonb)
+    );
 $$;

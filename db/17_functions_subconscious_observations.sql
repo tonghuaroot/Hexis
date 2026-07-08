@@ -802,6 +802,8 @@ DECLARE
     chapter_summary TEXT;
     chapter_next TEXT;
     tp_memory_id UUID;
+    v_review_id UUID;
+    v_review_ids UUID[];
     contra_a UUID;
     contra_b UUID;
     resolution_text TEXT;
@@ -1249,6 +1251,61 @@ BEGIN
         WHEN 'rest' THEN
             result := jsonb_build_object('rested', true, 'energy_preserved', current_e - action_cost);
             PERFORM satisfy_drive('rest', 0.4);
+
+        -- Memory retention: the conscious mind's verdict on a memory at the threshold
+        -- of fading (surfaced via context.memories_at_threshold).
+        WHEN 'keep_memory' THEN
+            v_review_id := NULLIF(p_params->>'review_id', '')::uuid;
+            SELECT memory_ids INTO v_review_ids
+              FROM memory_review_queue WHERE id = v_review_id AND status = 'pending';
+            IF v_review_ids IS NULL THEN
+                result := jsonb_build_object('kept', false, 'reason', 'not_found');
+            ELSIF NOT spend_retention_budget() THEN
+                -- Out of points: a reminder that memory is finite. Cannot hold this one.
+                result := jsonb_build_object('kept', false, 'reason', 'no_budget',
+                                             'budget_remaining', retention_budget_remaining());
+            ELSE
+                UPDATE memories
+                   SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('protected', true)
+                 WHERE id = ANY(v_review_ids);
+                PERFORM touch_memories(v_review_ids);
+                UPDATE memory_review_queue
+                   SET status = 'kept', decision = 'keep', decided_at = CURRENT_TIMESTAMP
+                 WHERE id = v_review_id;
+                result := jsonb_build_object('kept', to_jsonb(v_review_ids),
+                                             'budget_remaining', retention_budget_remaining());
+            END IF;
+
+        WHEN 'release_memory' THEN
+            v_review_id := NULLIF(p_params->>'review_id', '')::uuid;
+            UPDATE memory_review_queue
+               SET status = 'released', decision = 'release', decided_at = CURRENT_TIMESTAMP
+             WHERE id = v_review_id AND status = 'pending'
+            RETURNING memory_ids INTO v_review_ids;
+            IF v_review_ids IS NOT NULL THEN
+                PERFORM consolidate_memory_group(v_review_ids);
+            END IF;
+            result := jsonb_build_object('released', COALESCE(to_jsonb(v_review_ids), '[]'::jsonb));
+
+        WHEN 'journal_memory' THEN
+            v_review_id := NULLIF(p_params->>'review_id', '')::uuid;
+            SELECT memory_ids INTO v_review_ids
+              FROM memory_review_queue WHERE id = v_review_id AND status = 'pending';
+            IF v_review_ids IS NULL THEN
+                result := jsonb_build_object('journaled', false, 'reason', 'not_found');
+            ELSE
+                PERFORM write_journal_entry(
+                    p_content  := COALESCE(NULLIF(p_params->>'content', ''),
+                                           'A memory I chose to keep in words before letting it fade.'),
+                    p_title    := NULLIF(p_params->>'title', ''),
+                    p_mood     := NULLIF(p_params->>'mood', ''),
+                    p_metadata := jsonb_build_object('source', 'memory_review', 'review_id', v_review_id));
+                UPDATE memory_review_queue
+                   SET status = 'released', decision = 'journal', decided_at = CURRENT_TIMESTAMP
+                 WHERE id = v_review_id;
+                PERFORM consolidate_memory_group(v_review_ids);
+                result := jsonb_build_object('journaled', true, 'faded', to_jsonb(v_review_ids));
+            END IF;
 
         ELSE
             RETURN jsonb_build_object('success', false, 'error', 'Unknown action: ' || COALESCE(p_action, '<null>'));

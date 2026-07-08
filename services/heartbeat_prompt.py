@@ -38,6 +38,13 @@ def build_heartbeat_decision_prompt(context: dict[str, Any]) -> str:
     action_costs = context.get("action_costs", {})
     backlog = context.get("backlog", {})
     hb_number = context.get("heartbeat_number", 0)
+    # Conditional section (mirrors the DB `CASE WHEN ctx ? 'memories_at_threshold'`):
+    # absent key -> no section at all, so parity holds for contexts without it.
+    mat_section = (
+        f"## Memories at the Threshold\n{_format_memories_at_threshold(context['memories_at_threshold'])}\n\n"
+        if "memories_at_threshold" in context
+        else ""
+    )
 
     prompt = f"""## Heartbeat #{hb_number}
 
@@ -115,7 +122,7 @@ Max: {energy.get('max', 20)}
 ## Backlog
 {_format_backlog(backlog)}
 
-## Allowed Actions
+{mat_section}## Allowed Actions
 {_format_allowed_actions(allowed_actions)}
 
 ## Action Costs
@@ -393,6 +400,21 @@ def _format_backlog(backlog: Any) -> str:
     else:
         lines.append("  (no actionable tasks)")
 
+    return "\n".join(lines)
+
+
+def _format_memories_at_threshold(slice_: Any) -> str:
+    # Mirrors render_memories_at_threshold (db/39). Keep byte-identical.
+    if not isinstance(slice_, dict):
+        slice_ = {}
+    reviews = slice_.get("reviews")
+    if not isinstance(reviews, list) or not reviews:
+        return "  (none fading)"
+    lines = [f"  KEEP points remaining this chapter: {slice_.get('budget_remaining', 0)}"]
+    for item in reviews[:5]:
+        review_id = item.get("review_id", "?")
+        preview = item.get("preview", "(no preview)")
+        lines.append(f"    - [{review_id}] {preview}")
     return "\n".join(lines)
 
 

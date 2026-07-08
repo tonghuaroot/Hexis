@@ -604,7 +604,7 @@ INSERT INTO config (key, value, description) VALUES
     ('heartbeat.max_energy', '20'::jsonb, 'Maximum energy cap'),
     ('heartbeat.heartbeat_interval_minutes', '60'::jsonb, 'Minutes between heartbeats'),
     ('heartbeat.max_decision_tokens', '2048'::jsonb, 'Max tokens for heartbeat decision'),
-    ('heartbeat.allowed_actions', '["observe","review_goals","remember","recall","connect","reprioritize","reflect","contemplate","meditate","study","debate_internally","maintain","mark_turning_point","begin_chapter","close_chapter","acknowledge_relationship","update_trust","reflect_on_relationship","resolve_contradiction","accept_tension","brainstorm_goals","inquire_shallow","synthesize","reach_out_user","inquire_deep","reach_out_public","fast_ingest","slow_ingest","hybrid_ingest","pause_heartbeat","terminate","rest"]'::jsonb, 'Allowed heartbeat actions'),
+    ('heartbeat.allowed_actions', '["observe","review_goals","remember","recall","connect","reprioritize","reflect","contemplate","meditate","study","debate_internally","maintain","mark_turning_point","begin_chapter","close_chapter","acknowledge_relationship","update_trust","reflect_on_relationship","resolve_contradiction","accept_tension","brainstorm_goals","inquire_shallow","synthesize","reach_out_user","inquire_deep","reach_out_public","fast_ingest","slow_ingest","hybrid_ingest","keep_memory","release_memory","journal_memory","pause_heartbeat","terminate","rest"]'::jsonb, 'Allowed heartbeat actions'),
     ('heartbeat.max_active_goals', '3'::jsonb, 'Maximum concurrent active goals'),
     ('heartbeat.goal_stale_days', '7'::jsonb, 'Days before a goal is flagged as stale'),
     ('heartbeat.user_contact_cooldown_hours', '4'::jsonb, 'Minimum hours between unsolicited user contact'),
@@ -642,7 +642,10 @@ INSERT INTO config (key, value, description) VALUES
     ('heartbeat.cost_terminate', '0'::jsonb, 'Terminate agent'),
     ('heartbeat.cost_fast_ingest', '2'::jsonb, 'Fast ingestion - chunk and extract facts'),
     ('heartbeat.cost_slow_ingest', '5'::jsonb, 'Slow ingestion - conscious RLM reading per chunk'),
-    ('heartbeat.cost_hybrid_ingest', '3'::jsonb, 'Hybrid ingestion - fast pass then slow on high-signal chunks')
+    ('heartbeat.cost_hybrid_ingest', '3'::jsonb, 'Hybrid ingestion - fast pass then slow on high-signal chunks'),
+    ('heartbeat.cost_keep_memory', '2'::jsonb, 'Spend a point to hold a fading memory back from consolidation'),
+    ('heartbeat.cost_release_memory', '0'::jsonb, 'Let a fading memory go (free)'),
+    ('heartbeat.cost_journal_memory', '3'::jsonb, 'Commit a fading memory to the journal before letting it fade')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('agent.tools', '["recall","sense_memory_availability","request_background_search","recall_recent","recall_episode","explore_concept","explore_cluster","get_procedures","get_strategies","list_recent_episodes","create_goal","schedule_task","list_scheduled_tasks","update_scheduled_task","delete_scheduled_task","queue_user_message"]'::jsonb, 'Allowed tool names for agent tool use')
@@ -714,7 +717,13 @@ INSERT INTO config (key, value, description) VALUES
     ('retention.prune_grace_days', '14'::jsonb, 'Archived originals become hard-deletable only after this grace/undo window'),
     ('retention.fidelity_drop', '0.7'::jsonb, 'Fidelity multiplier applied each time a memory is summarized (lossiness)'),
     ('retention.rest_batch_size', '8'::jsonb, 'Max candidate groups consolidated per rest pass'),
-    ('retention.summarize_batch_size', '8'::jsonb, 'Summarization tasks per worker tick')
+    ('retention.summarize_batch_size', '8'::jsonb, 'Summarization tasks per worker tick'),
+    -- Subconscious triage -> conscious veto (design §5): borderline consolidations are
+    -- escalated to the conscious heartbeat, where Hexis can spend a point to keep them.
+    ('retention.veto_budget_per_chapter', '5'::jsonb, 'Points Hexis may spend to KEEP fading memories, per life chapter (refills on chapter change)'),
+    ('retention.borderline_margin', '0.15'::jsonb, 'A candidate whose importance/felt-intensity/valence is within this of a protection threshold is escalated for conscious review instead of consolidated'),
+    ('retention.escalate_batch', '3'::jsonb, 'Max memories escalated to conscious review per rest pass (avoid flooding the conscious mind)'),
+    ('retention.review_expiry_days', '7'::jsonb, 'A memory awaiting conscious review is let go (consolidated) if undecided after this window')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('heartbeat.use_rlm', 'true'::jsonb, 'Enable RLM loop for heartbeat decisions'),

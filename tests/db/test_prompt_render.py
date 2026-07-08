@@ -72,6 +72,16 @@ _RICH = {
                                 "status": "todo", "has_checkpoint": True}]},
     "allowed_actions": ["observe", "recall", "reflect"],
     "action_costs": {"observe": 0, "recall": 1, "reflect": 2, "reach_out": 5},
+    "memories_at_threshold": {
+        "budget_remaining": 3,
+        "reviews": [
+            {"review_id": "11111111-1111-1111-1111-111111111111",
+             "preview": "a walk in the rain / apples at the market",
+             "reason": "near_protection_threshold",
+             "memory_ids": ["22222222-2222-2222-2222-222222222222"],
+             "expires_at": "2026-07-14T00:00:00Z"},
+        ],
+    },
 }
 
 _EDGE_CASES = {
