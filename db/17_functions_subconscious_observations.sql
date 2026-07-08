@@ -1114,6 +1114,10 @@ BEGIN
                         contra_a,
                         contra_b
                     );
+                    -- Mirror the resolved-contradiction deletion to memory_edges
+                    -- (undirected, so clear both stored directions).
+                    PERFORM delete_memory_edge('memory', contra_a::text, 'CONTRADICTS', 'memory', contra_b::text);
+                    PERFORM delete_memory_edge('memory', contra_b::text, 'CONTRADICTS', 'memory', contra_a::text);
                 END IF;
             EXCEPTION WHEN OTHERS THEN NULL;
             END;

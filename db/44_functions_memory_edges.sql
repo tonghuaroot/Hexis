@@ -195,21 +195,39 @@ BEGIN
     END IF;
 
     WITH RECURSIVE
-    -- Undirected edge view (each edge usable from either endpoint), rel-filtered.
+    -- Live memories only. memory_edges is a DERIVED edge store, not the source of
+    -- truth: `memories` is. As maintenance consolidates/prunes/invalidates
+    -- memories (soft state changes), those memories -- and every edge touching
+    -- them -- drop out here, so the subgraph always reflects the current memory
+    -- set without needing to delete edge rows.
+    live_mem AS (
+        SELECT id FROM memories
+        WHERE status = 'active' AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP)
+    ),
+    -- Edges whose memory/goal endpoints are live (concept/cluster/episode/self
+    -- endpoints carry no memory status and pass through). rel-filtered here so
+    -- both traversal and output see the same live edge set.
+    edges_live AS (
+        SELECT e.src_type, e.src_id, e.dst_type, e.dst_id, e.weight, e.rel_type
+        FROM memory_edges e
+        WHERE (p_rel_types IS NULL OR e.rel_type = ANY(p_rel_types))
+          AND (e.src_type NOT IN ('memory', 'goal') OR _safe_uuid(e.src_id) IN (SELECT id FROM live_mem))
+          AND (e.dst_type NOT IN ('memory', 'goal') OR _safe_uuid(e.dst_id) IN (SELECT id FROM live_mem))
+    ),
+    -- Undirected view (each live edge usable from either endpoint).
     adj AS (
         SELECT src_type AS from_type, src_id AS from_id,
                dst_type AS to_type,   dst_id AS to_id, weight, rel_type
-        FROM memory_edges
-        WHERE p_rel_types IS NULL OR rel_type::text = ANY(p_rel_types)
+        FROM edges_live
         UNION ALL
         SELECT dst_type, dst_id, src_type, src_id, weight, rel_type
-        FROM memory_edges
-        WHERE p_rel_types IS NULL OR rel_type::text = ANY(p_rel_types)
+        FROM edges_live
     ),
     frontier AS (
         SELECT 'memory'::text AS node_type, s::text AS node_id, 0 AS depth,
                1.0::float AS path_weight, ARRAY['memory:' || s::text] AS visited
         FROM unnest(p_seed_ids) s
+        WHERE s IN (SELECT id FROM live_mem)   -- only live seeds enter
         UNION ALL
         SELECT a.to_type, a.to_id, f.depth + 1, f.path_weight * COALESCE(a.weight, 1.0),
                f.visited || (a.to_type || ':' || a.to_id)
@@ -251,10 +269,9 @@ BEGIN
             'dst_type', e.dst_type, 'dst_id', e.dst_id,
             'weight', round(e.weight::numeric, 4)
         )) AS arr
-        FROM memory_edges e
+        FROM edges_live e
         WHERE (e.src_type, e.src_id) IN (SELECT node_type, node_id FROM kept)
           AND (e.dst_type, e.dst_id) IN (SELECT node_type, node_id FROM kept)
-          AND (p_rel_types IS NULL OR e.rel_type::text = ANY(p_rel_types))
     )
     SELECT jsonb_build_object(
         'nodes', COALESCE(node_json.arr, '[]'::jsonb),
