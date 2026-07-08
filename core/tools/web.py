@@ -518,56 +518,39 @@ URL: {url}
 
         prompt += f"\nContent:\n{content}"
 
-        # Use external_calls to queue LLM request
+        # Summarize with a direct in-process LLM call (the configured provider).
         try:
-            import json
+            from core.llm import chat_completion
+            from core.llm_config import load_llm_config
 
-            async with context.registry.pool.acquire() as conn:
-                # Queue the summarization request
-                call_id = await conn.fetchval(
-                    """
-                    INSERT INTO external_calls (call_type, input, status)
-                    VALUES ('llm_completion', $1::jsonb, 'pending')
-                    RETURNING id
-                    """,
-                    json.dumps({
-                        "prompt": prompt,
-                        "max_tokens": 500,
-                        "purpose": "web_summarize",
-                    }),
+            try:
+                llm_config = await load_llm_config(context.registry.pool, preference="cheap")
+            except Exception:
+                llm_config = await load_llm_config(context.registry.pool)
+
+            response = await chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                **{**llm_config, "max_tokens": 500},
+            )
+
+            summary = response.get("content", "") if response else ""
+            if isinstance(summary, list):  # some providers return content blocks
+                summary = "".join(
+                    b.get("text", "")
+                    for b in summary
+                    if isinstance(b, dict) and b.get("type") == "text"
                 )
-
-            # Wait for completion (with timeout)
-            import asyncio
-            for _ in range(30):  # 30 second timeout
-                async with context.registry.pool.acquire() as conn:
-                    result = await conn.fetchrow(
-                        "SELECT status, output, error FROM external_calls WHERE id = $1",
-                        call_id,
-                    )
-                if result["status"] == "completed":
-                    output_data = json.loads(result["output"]) if result["output"] else {}
-                    summary = output_data.get("text", "")
-                    return ToolResult.success_result(
-                        output={
-                            "url": url,
-                            "title": title,
-                            "summary": summary,
-                            "focus": focus,
-                        },
-                        display_output=f"Summary of {title or url}:\n{summary}",
-                    )
-                elif result["status"] == "failed":
-                    return ToolResult.error_result(
-                        result["error"] or "Summarization failed",
-                        ToolErrorType.EXECUTION_FAILED,
-                    )
-                await asyncio.sleep(1)
-
+            summary = (summary or "").strip()
+            if not summary:
                 return ToolResult.error_result(
-                    "Summarization timed out",
-                    ToolErrorType.TIMEOUT,
+                    "Summarization returned an empty result",
+                    ToolErrorType.EXECUTION_FAILED,
                 )
+
+            return ToolResult.success_result(
+                output={"url": url, "title": title, "summary": summary, "focus": focus},
+                display_output=f"Summary of {title or url}:\n{summary}",
+            )
 
         except Exception as e:
             logger.exception("Web summarize failed")
