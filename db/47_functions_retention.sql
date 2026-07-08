@@ -32,6 +32,9 @@ AS $$
              OR abs(COALESCE((m.metadata->>'emotional_valence')::float, 0))
                     >= COALESCE(get_config_float('retention.protect_valence_abs'), 0.7)
              OR COALESCE((m.metadata->>'protected')::boolean, false)
+             -- Ingested documents are the USER's data: never auto-fade them.
+             -- They leave only with explicit user approval (resolve_document_fade).
+             OR m.source_attribution->>'content_hash' IS NOT NULL
           )
     );
 $$;
@@ -600,4 +603,167 @@ AS $$
                   WHERE status = 'pending' ORDER BY created_at LIMIT GREATEST(p_limit, 1)) q
         ), '[]'::jsonb)
     );
+$$;
+
+-- ============================================================================
+-- Part G: ingested-document approval (the USER's data; user keeps control)
+-- Ingested memories are auto-fade-immune (see is_memory_protected). Hexis instead
+-- ASKS the user via the outbox before letting a stale document go; the user
+-- approves/keeps via a chat tool. A document's memories share source_attribution
+-- ->>'content_hash'; label = ->>'label'; ingest time = ->>'observed_at'.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS document_fade_requests (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    content_hash  TEXT NOT NULL UNIQUE,
+    label         TEXT,
+    memory_count  INT  NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'pending',   -- pending|approved|kept
+    requested_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    decided_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_document_fade_requests_status
+    ON document_fade_requests (status);
+
+-- Ingested documents old enough AND untouched long enough to seem stale, with no
+-- outstanding request. Grouped by content_hash (a document's shared identity).
+CREATE OR REPLACE FUNCTION find_stale_ingested_documents()
+RETURNS TABLE (content_hash TEXT, label TEXT, memory_count INT)
+LANGUAGE sql STABLE
+AS $$
+    SELECT g.content_hash, g.label, g.memory_count
+    FROM (
+        SELECT m.source_attribution->>'content_hash' AS content_hash,
+               max(m.source_attribution->>'label') AS label,
+               count(*)::int AS memory_count
+        FROM memories m
+        WHERE m.status = 'active'
+          AND m.source_attribution->>'content_hash' IS NOT NULL
+        GROUP BY m.source_attribution->>'content_hash'
+        HAVING max(age_in_days(COALESCE((m.source_attribution->>'observed_at')::timestamptz, m.created_at)))
+                 >= COALESCE(get_config_float('retention.doc_stale_days'), 180)
+           AND min(age_in_days(GREATEST(m.last_reinforced, m.last_accessed, m.created_at)))
+                 >= COALESCE(get_config_float('retention.doc_idle_days'), 90)
+    ) g
+    WHERE NOT EXISTS (
+        SELECT 1 FROM document_fade_requests r
+        WHERE r.content_hash = g.content_hash AND r.status = 'pending');
+$$;
+
+-- Seek the user's approval for up to doc_request_batch stale documents (records a
+-- pending request + queues one outbox message each). No-op unless retention.enabled.
+CREATE OR REPLACE FUNCTION request_stale_document_fades()
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_batch INT := GREATEST(0, COALESCE(get_config_int('retention.doc_request_batch'), 2));
+    v_sent INT := 0;
+    rec RECORD;
+BEGIN
+    IF NOT COALESCE(get_config_bool('retention.enabled'), false) THEN
+        RETURN jsonb_build_object('skipped', true);
+    END IF;
+    FOR rec IN SELECT content_hash, label, memory_count
+               FROM find_stale_ingested_documents() LIMIT GREATEST(v_batch, 1)
+    LOOP
+        EXIT WHEN v_sent >= v_batch;
+        INSERT INTO document_fade_requests (content_hash, label, memory_count)
+        VALUES (rec.content_hash, rec.label, rec.memory_count)
+        ON CONFLICT (content_hash) DO NOTHING;
+        IF FOUND THEN
+            PERFORM queue_outbox_message(
+                'I read "' || COALESCE(rec.label, 'a document') || '" a while back and haven''t drawn on it since. '
+                || 'Want me to let it fade, or keep it? Just tell me.',
+                'document_fade', 'retention');
+            v_sent := v_sent + 1;
+        END IF;
+    END LOOP;
+    RETURN jsonb_build_object('requested', v_sent);
+END;
+$$;
+
+-- The user's verdict on a stale-document approval. Matches a pending request by
+-- exact content_hash or (fuzzy) label -- so the LLM can pass the doc name the user
+-- used. 'approve' truly deletes every memory of the document; anything else KEEPS
+-- them (the safe default -- never delete without an explicit approve) and lifts them.
+CREATE OR REPLACE FUNCTION resolve_document_fade(p_ref TEXT, p_decision TEXT)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_hash  TEXT;
+    v_label TEXT;
+    v_ids   UUID[];
+    v_affected INT := 0;
+    v_id UUID;
+BEGIN
+    IF p_ref IS NULL OR btrim(p_ref) = '' THEN
+        RETURN jsonb_build_object('error', 'no document reference given');
+    END IF;
+    SELECT content_hash, label INTO v_hash, v_label
+    FROM document_fade_requests
+    WHERE status = 'pending'
+      AND (content_hash = p_ref OR label ILIKE p_ref OR label ILIKE '%' || p_ref || '%')
+    ORDER BY (content_hash = p_ref) DESC, requested_at
+    LIMIT 1;
+    IF v_hash IS NULL THEN
+        RETURN jsonb_build_object('error', 'no pending document approval matches', 'ref', p_ref);
+    END IF;
+
+    v_ids := ARRAY(SELECT id FROM memories
+                   WHERE status = 'active' AND source_attribution->>'content_hash' = v_hash);
+
+    IF lower(COALESCE(p_decision, '')) = 'approve' THEN
+        FOREACH v_id IN ARRAY v_ids LOOP
+            IF delete_memory_fully(v_id) THEN v_affected := v_affected + 1; END IF;
+        END LOOP;
+        UPDATE document_fade_requests SET status = 'approved', decided_at = CURRENT_TIMESTAMP
+         WHERE content_hash = v_hash;
+        RETURN jsonb_build_object('decision', 'approve', 'label', v_label, 'faded', v_affected);
+    ELSE
+        IF array_length(v_ids, 1) > 0 THEN PERFORM touch_memories(v_ids); END IF;
+        v_affected := COALESCE(array_length(v_ids, 1), 0);
+        UPDATE document_fade_requests SET status = 'kept', decided_at = CURRENT_TIMESTAMP
+         WHERE content_hash = v_hash;
+        RETURN jsonb_build_object('decision', 'keep', 'label', v_label, 'kept', v_affected);
+    END IF;
+END;
+$$;
+
+-- Pending stale-document approval asks, so the agent can enumerate/confirm.
+CREATE OR REPLACE FUNCTION list_document_fade_requests()
+RETURNS JSONB
+LANGUAGE sql STABLE
+AS $$
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'content_hash', content_hash, 'label', label,
+        'memory_count', memory_count, 'requested_at', requested_at
+    ) ORDER BY requested_at), '[]'::jsonb)
+    FROM document_fade_requests WHERE status = 'pending';
+$$;
+
+-- Tool dispatch (mirrors execute_journal_tool: {success, output, display_output}).
+CREATE OR REPLACE FUNCTION execute_document_tool(p_tool TEXT, p_params JSONB DEFAULT '{}'::jsonb)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_out JSONB;
+BEGIN
+    IF p_tool = 'list_document_fade_requests' THEN
+        v_out := list_document_fade_requests();
+        RETURN jsonb_build_object('success', true, 'output', v_out,
+            'display_output', 'Documents awaiting your approval to fade: ' || jsonb_array_length(v_out));
+    ELSIF p_tool = 'resolve_document_fade' THEN
+        v_out := resolve_document_fade(p_params->>'document', p_params->>'decision');
+        IF v_out ? 'error' THEN
+            RETURN jsonb_build_object('success', false, 'error', v_out->>'error');
+        END IF;
+        RETURN jsonb_build_object('success', true, 'output', v_out,
+            'display_output', initcap(COALESCE(v_out->>'decision', 'kept')) || ' "' || COALESCE(v_out->>'label', 'document') || '"');
+    ELSE
+        RETURN jsonb_build_object('success', false, 'error', 'unknown document tool: ' || COALESCE(p_tool, '<null>'));
+    END IF;
+END;
 $$;

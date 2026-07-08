@@ -723,7 +723,11 @@ INSERT INTO config (key, value, description) VALUES
     ('retention.veto_budget_per_chapter', '5'::jsonb, 'Points Hexis may spend to KEEP fading memories, per life chapter (refills on chapter change)'),
     ('retention.borderline_margin', '0.15'::jsonb, 'A candidate whose importance/felt-intensity/valence is within this of a protection threshold is escalated for conscious review instead of consolidated'),
     ('retention.escalate_batch', '3'::jsonb, 'Max memories escalated to conscious review per rest pass (avoid flooding the conscious mind)'),
-    ('retention.review_expiry_days', '7'::jsonb, 'A memory awaiting conscious review is let go (consolidated) if undecided after this window')
+    ('retention.review_expiry_days', '7'::jsonb, 'A memory awaiting conscious review is let go (consolidated) if undecided after this window'),
+    -- Ingested documents are the USER's data: auto-fade-immune, removed only with approval.
+    ('retention.doc_stale_days', '180'::jsonb, 'An ingested document older than this may be flagged as possibly stale'),
+    ('retention.doc_idle_days', '90'::jsonb, 'An ingested document not drawn on within this window counts as unused'),
+    ('retention.doc_request_batch', '2'::jsonb, 'Max stale-document approval requests sent to the user per rest pass (do not nag)')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('heartbeat.use_rlm', 'true'::jsonb, 'Enable RLM loop for heartbeat decisions'),

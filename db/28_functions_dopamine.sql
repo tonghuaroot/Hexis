@@ -626,6 +626,7 @@ BEGIN
     BEGIN
         PERFORM run_memory_rest();
         PERFORM run_retention_gc();
+        PERFORM request_stale_document_fades();  -- ask the user before fading their documents
     EXCEPTION WHEN OTHERS THEN
         RAISE WARNING 'memory retention pass failed: %', SQLERRM;
     END;

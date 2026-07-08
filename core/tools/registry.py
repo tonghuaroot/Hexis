@@ -659,6 +659,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     """Create a registry with all default tools (no plugins)."""
     from .memory import create_memory_tools
     from .journal import create_journal_tools
+    from .documents import create_document_tools
     from .web import create_web_tools
     from .filesystem import create_filesystem_tools
     from .shell import create_shell_tools
@@ -715,6 +716,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     builder = ToolRegistryBuilder(pool)
     builder.add_all(create_memory_tools())
     builder.add_all(create_journal_tools())
+    builder.add_all(create_document_tools())
     builder.add_all(create_web_tools())
     builder.add_all(create_filesystem_tools())
     builder.add_all(create_shell_tools())
