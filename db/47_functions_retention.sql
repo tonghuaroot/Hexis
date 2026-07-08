@@ -767,3 +767,36 @@ BEGIN
     END IF;
 END;
 $$;
+
+-- ============================================================================
+-- Observability: a single snapshot of everything the retention system holds and
+-- would do -- so an operator can SEE it before (and after) flipping retention on.
+-- Candidate counts are computed even while disabled (a preview of what would fade).
+-- ============================================================================
+CREATE OR REPLACE FUNCTION retention_status()
+RETURNS JSONB
+LANGUAGE sql STABLE
+AS $$
+    SELECT jsonb_build_object(
+        'enabled', COALESCE(get_config_bool('retention.enabled'), false),
+        'episodic', jsonb_build_object(
+            'active', (SELECT count(*) FROM memories WHERE status = 'active' AND type = 'episodic'),
+            'mass', (SELECT round(COALESCE(sum(calculate_strength(importance, decay_rate, created_at, last_reinforced)), 0)::numeric, 2)
+                     FROM memories WHERE status = 'active' AND type = 'episodic'),
+            'capacity', COALESCE(get_config_float('retention.capacity'), 0),
+            'archived', (SELECT count(*) FROM memories WHERE status = 'archived')),
+        'consolidation', jsonb_build_object(
+            'candidate_groups', (SELECT count(*) FROM find_consolidation_candidates()),
+            'gists', (SELECT count(*) FROM memories WHERE status = 'active' AND metadata->'consolidation'->>'role' = 'merged'),
+            'summarize_pending', (SELECT count(*) FROM memory_summarization_queue WHERE status = 'pending')),
+        'conscious_review', jsonb_build_object(
+            'pending', (SELECT count(*) FROM memory_review_queue WHERE status = 'pending'),
+            'veto_budget', get_state('retention_veto_budget')),
+        'documents', jsonb_build_object(
+            'protected', (SELECT count(DISTINCT source_attribution->>'content_hash')
+                          FROM memories WHERE status = 'active' AND source_attribution->>'content_hash' IS NOT NULL),
+            'approvals_pending', (SELECT count(*) FROM document_fade_requests WHERE status = 'pending'),
+            'approval_labels', (SELECT COALESCE(jsonb_agg(label ORDER BY requested_at), '[]'::jsonb)
+                                FROM document_fade_requests WHERE status = 'pending'))
+    );
+$$;

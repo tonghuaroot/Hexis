@@ -206,6 +206,7 @@ _HELP_GROUPS = [
         ("recall", "Search memories by semantic query"),
         ("goals", "Manage agent goals"),
         ("ingest", "Ingest documents and knowledge"),
+        ("retention", "Show memory-retention status"),
         ("schedule", "Manage scheduled tasks"),
     ]),
     ("Configuration", [
@@ -392,6 +393,10 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--no-docker", action="store_true", help="Skip docker compose checks")
     status.add_argument("--raw", action="store_true", help="Show raw status (legacy format)")
     status.set_defaults(func="status")
+
+    retention = sub.add_parser("retention", parents=[_db], help="Show memory-retention status")
+    retention.add_argument("--json", action="store_true", help="Output JSON")
+    retention.set_defaults(func="retention")
 
     doctor = sub.add_parser("doctor", parents=[_db], help="Diagnose common issues")
     doctor.add_argument("--json", action="store_true", help="Output JSON")
@@ -1637,6 +1642,66 @@ async def _channels_status(dsn: str, as_json: bool) -> int:
         await pool.close()
 
 
+async def _retention_status(dsn: str, as_json: bool) -> int:
+    """Show what the memory-retention system holds and would do."""
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT retention_status()")
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        if as_json:
+            sys.stdout.write(json.dumps(data, indent=2) + "\n")
+            return 0
+
+        epi = data.get("episodic", {})
+        con = data.get("consolidation", {})
+        rev = data.get("conscious_review", {})
+        doc = data.get("documents", {})
+        budget = rev.get("veto_budget") or {}
+        cap = epi.get("capacity") or 0
+        cap_str = f"{cap}" if cap and float(cap) > 0 else "unlimited"
+
+        state = "ENABLED" if data.get("enabled") else "DISABLED (dark — nothing fades)"
+        out = [
+            f"Memory Retention  [{state}]",
+            "",
+            "Episodic memory",
+            f"  active memories        {epi.get('active', 0)}",
+            f"  representational mass  {epi.get('mass', 0)}  (capacity: {cap_str})",
+            f"  archived (awaiting prune)  {epi.get('archived', 0)}",
+            "",
+            "Consolidation",
+            f"  candidate groups (would consolidate)  {con.get('candidate_groups', 0)}",
+            f"  gists formed                          {con.get('gists', 0)}",
+            f"  summarization pending                 {con.get('summarize_pending', 0)}",
+            "",
+            "Conscious review (Hexis's veto)",
+            f"  pending      {rev.get('pending', 0)}",
+            f"  keep-budget  {budget.get('remaining', '-')}/{budget.get('total', '-')}"
+            + (f'  (chapter: "{budget.get("chapter")}")' if budget.get("chapter") else ""),
+            "",
+            "Documents (your data — removed only with your approval)",
+            f"  ingested documents protected  {doc.get('protected', 0)}",
+            f"  approvals awaiting you         {doc.get('approvals_pending', 0)}"
+            + (f"  — {', '.join(doc.get('approval_labels') or [])}" if doc.get("approvals_pending") else ""),
+        ]
+        sys.stdout.write("\n".join(out) + "\n")
+        return 0
+    except Exception as e:
+        if "does not exist" in str(e) or "retention_status" in str(e):
+            _print_err(
+                "Retention functions not found — your schema is out of date. "
+                "Run `hexis reset` to rebuild it (it will confirm before wiping data)."
+            )
+        else:
+            _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
+
+
 async def _channels_setup(dsn: str, channel_type: str) -> int:
     """Interactive channel setup."""
     import asyncpg
@@ -2833,6 +2898,9 @@ def _dispatch(argv: list[str] | None = None) -> int:
         else:
             _print_rich_status(payload)
         return 0
+    if func == "retention":
+        dsn = _get_dsn(args)
+        return asyncio.run(_retention_status(dsn, args.json))
     if func == "config":
         # Bare `config` shows the grouped table like `config show` (not raw JSON),
         # matching how `goals`/`schedule`/`channels` default to their list view.

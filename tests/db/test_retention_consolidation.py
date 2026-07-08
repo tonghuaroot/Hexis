@@ -104,3 +104,15 @@ async def test_run_memory_rest_noop_when_disabled(db_pool):
     async with db_pool.acquire() as conn:
         assert _j(await conn.fetchval("SELECT run_memory_rest()")).get("skipped") is True
         assert _j(await conn.fetchval("SELECT run_retention_gc()")).get("skipped") is True
+
+
+async def test_retention_status_snapshot(db_pool):
+    """The operator-facing snapshot summarizes every part of the system."""
+    async with db_pool.acquire() as conn:
+        st = _j(await conn.fetchval("SELECT retention_status()"))
+        assert "enabled" in st
+        for section in ("episodic", "consolidation", "conscious_review", "documents"):
+            assert section in st, section
+        assert "mass" in st["episodic"] and "capacity" in st["episodic"]
+        assert "candidate_groups" in st["consolidation"]
+        assert "protected" in st["documents"] and "approvals_pending" in st["documents"]
