@@ -715,6 +715,11 @@ BEGIN
         -- Python defaults absent keys: narrative/backlog -> {}, allowed_actions -> []
         || '## Narrative' || E'\n' || render_narrative(CASE WHEN ctx ? 'narrative' THEN ctx->'narrative' ELSE '{}'::jsonb END) || E'\n\n'
         || '## Recent Experience' || E'\n' || render_memories(ctx->'recent_memories') || E'\n\n'
+        || CASE WHEN render_subgraph(ctx->'subgraph') IS NOT NULL
+                THEN '## Knowledge Subgraph' || E'\n'
+                     || 'How your recent memories connect (typed links among + around them):' || E'\n'
+                     || render_subgraph(ctx->'subgraph') || E'\n\n'
+                ELSE '' END
         || '## Your Identity' || E'\n' || render_identity(ctx->'identity') || E'\n\n'
         || '## Your Self-Model' || E'\n' || render_self_model(ctx->'self_model') || E'\n\n'
         || '## Relationships' || E'\n' || render_relationships(ctx->'relationships') || E'\n\n'

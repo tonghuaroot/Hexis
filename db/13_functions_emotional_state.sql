@@ -719,6 +719,7 @@ DECLARE
     action_costs JSONB;
     contradictions JSONB;
     allowed_actions JSONB;
+    v_seed_ids UUID[];
 BEGIN
     SELECT * INTO state_record FROM heartbeat_state WHERE id = 1;
     allowed_actions := get_config('heartbeat.allowed_actions');
@@ -744,11 +745,24 @@ BEGIN
 
     contradictions := get_contradictions_context(5);
 
+    -- Seed the dynamic sub-knowledge-graph from the most recently active memories
+    -- so the heartbeat reasons over their belief/causal structure, not a flat list.
+    SELECT array_agg(id) INTO v_seed_ids FROM (
+        SELECT id FROM memories
+        WHERE status = 'active'
+        ORDER BY COALESCE(last_accessed, created_at) DESC
+        LIMIT 8
+    ) s;
+
     RETURN jsonb_build_object(
         'agent', get_agent_profile_context(),
         'environment', get_environment_snapshot(),
         'goals', get_goals_snapshot(),
         'recent_memories', get_recent_context(5),
+        'subgraph', build_context_subgraph(
+            v_seed_ids, 2,
+            ARRAY['CAUSES','SUPPORTS','CONTRADICTS','DERIVED_FROM','CONTESTED_BECAUSE',
+                  'INSTANCE_OF','ASSOCIATED','TEMPORAL_NEXT'], 30),
         'identity', get_identity_context(),
         'worldview', get_worldview_context(),
         'self_model', get_self_model_context(25),
