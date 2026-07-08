@@ -447,7 +447,8 @@ INSERT INTO config (key, value, description) VALUES
     ('embedding.model_id', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_model_id', true), ''), 'embeddinggemma:300m-qat-q4_0')), 'Embedding model id for Ollama / custom services'),
     ('embedding.dimension', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_dimension', true), ''), '768')::int), 'Embedding vector dimension'),
     ('embedding.retry_seconds', '30'::jsonb, 'Total seconds to retry embedding requests'),
-    ('embedding.retry_interval_seconds', '1.0'::jsonb, 'Seconds between retry attempts')
+    ('embedding.retry_interval_seconds', '1.0'::jsonb, 'Seconds between retry attempts'),
+    ('embedding.http_timeout_ms', '9000'::jsonb, 'Per-request HTTP timeout (ms) for embedding calls; must exceed the server cold model-load time (~8s for Ollama) so a request rides through a cold load instead of aborting it')
 ON CONFLICT (key) DO NOTHING;
 -- Note: embedding_dimension runs during schema init; avoid helpers defined later.
 CREATE OR REPLACE FUNCTION embedding_dimension()
