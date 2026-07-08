@@ -5,7 +5,7 @@ import logging
 import uuid
 from typing import Any, TYPE_CHECKING
 
-from services.heartbeat_prompt import build_heartbeat_decision_prompt
+from services.heartbeat_prompt import render_heartbeat_decision_prompt_db
 from core.llm_config import load_llm_config
 from core.llm_json import chat_json
 from core.state import apply_external_call_result
@@ -159,7 +159,7 @@ class ExternalCallProcessor:
             max_tokens = 2048
         if max_tokens <= 0:
             max_tokens = 2048
-        user_prompt = build_heartbeat_decision_prompt(context)
+        user_prompt = await render_heartbeat_decision_prompt_db(conn, context)
         base_prompt = load_heartbeat_prompt().strip()
         system_prompt = (
             base_prompt

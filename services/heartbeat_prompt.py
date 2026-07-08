@@ -4,6 +4,19 @@ import json
 from typing import Any
 
 
+async def render_heartbeat_decision_prompt_db(conn: Any, context: dict[str, Any]) -> str:
+    """Render the heartbeat decision prompt in the DB (db/39 render_heartbeat_decision_prompt).
+
+    This is the production path — the heartbeat context is already produced by
+    the DB (gather_turn_context), so the prompt is rendered there too. The
+    Python ``build_heartbeat_decision_prompt`` below is retained as the
+    byte-parity reference exercised by tests/db/test_prompt_render.py.
+    """
+    return await conn.fetchval(
+        "SELECT render_heartbeat_decision_prompt($1::jsonb)", json.dumps(context)
+    )
+
+
 def build_heartbeat_decision_prompt(context: dict[str, Any]) -> str:
     agent = context.get("agent", {})
     env = context.get("environment", {})
