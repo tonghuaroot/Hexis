@@ -1018,19 +1018,17 @@ class QueueUserMessageHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        import json
-
         message = arguments["message"]
         intent = arguments.get("intent")
 
         try:
+            # Durably enqueue in the DB-native outbox; the maintenance worker
+            # drains it to the RabbitMQ outbox for delivery.
             async with context.registry.pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO external_calls (call_type, input, status)
-                    VALUES ('outbox_message', $1::jsonb, 'pending')
-                    """,
-                    json.dumps({"message": message, "intent": intent}),
+                await conn.fetchval(
+                    "SELECT queue_outbox_message($1::text, $2::text, 'tool')",
+                    message,
+                    intent,
                 )
 
             return ToolResult.success_result(

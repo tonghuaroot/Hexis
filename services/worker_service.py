@@ -395,6 +395,28 @@ class MaintenanceWorker:
         if self.bridge:
             await self.bridge.publish_outbox_payloads(messages)
 
+    async def _run_outbox_delivery(self) -> None:
+        """Drain the DB-native outbox (tool-queued user messages) to RabbitMQ.
+
+        publish_outbox_payloads publishes in order and returns the count that
+        succeeded (stopping at the first failure), so mark that prefix published
+        and requeue the rest for the next tick.
+        """
+        if not self.pool or not self.bridge:
+            return
+        async with self.pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT claim_pending_outbox($1::int)", 50)
+            claimed = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            if not claimed:
+                return
+            ids = [c["id"] for c in claimed]
+            envelopes = [c["envelope"] for c in claimed]
+            published = await self.bridge.publish_outbox_payloads(envelopes)
+            if published > 0:
+                await conn.fetchval("SELECT mark_outbox_published($1::uuid[])", ids[:published])
+            if published < len(ids):
+                await conn.fetchval("SELECT requeue_outbox($1::uuid[])", ids[published:])
+
     async def _run_scheduled_tasks(self) -> None:
         if not self.pool:
             return
@@ -502,6 +524,7 @@ class MaintenanceWorker:
                         continue
                     if self.bridge:
                         await self.bridge.poll_inbox_messages()
+                    await self._run_outbox_delivery()
                     await self._run_scheduled_tasks()
                     await self._run_maintenance_if_due()
                     await self._run_subconscious_if_due()

@@ -119,32 +119,9 @@ async def test_execute_batch_parallel_energy_budget(monkeypatch):
 
 @pytest.mark.asyncio(loop_scope="session")
 @pytest.mark.core
-async def test_web_summarize_releases_connections(monkeypatch):
-    class DummyConn:
-        async def fetchval(self, *args, **kwargs):
-            return "call_id"
-
-        async def fetchrow(self, *args, **kwargs):
-            return {"status": "completed", "output": json.dumps({"text": "summary"}), "error": None}
-
-    class DummyAcquire:
-        def __init__(self, pool):
-            self.pool = pool
-
-        async def __aenter__(self):
-            self.pool.acquire_calls += 1
-            return DummyConn()
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    class DummyPool:
-        def __init__(self):
-            self.acquire_calls = 0
-
-        def acquire(self):
-            return DummyAcquire(self)
-
+async def test_web_summarize_uses_direct_llm(monkeypatch):
+    """web_summarize summarizes via a single in-process LLM call (the broken
+    external_calls queue+poll path is gone)."""
     dummy_trafilatura = types.SimpleNamespace(
         fetch_url=lambda url: "<html></html>",
         extract=lambda downloaded, include_tables=True: "content",
@@ -152,12 +129,25 @@ async def test_web_summarize_releases_connections(monkeypatch):
     )
     monkeypatch.setitem(sys.modules, "trafilatura", dummy_trafilatura)
 
-    registry = SimpleNamespace(pool=DummyPool())
+    async def _fake_load_llm_config(pool, **kwargs):
+        return {"provider": "openai", "model": "gpt-4o", "endpoint": None, "api_key": "t"}
+
+    captured: dict = {}
+
+    async def _fake_chat_completion(**kwargs):
+        captured.update(kwargs)
+        return {"content": "A concise summary.", "raw": None}
+
+    monkeypatch.setattr("core.llm_config.load_llm_config", _fake_load_llm_config)
+    monkeypatch.setattr("core.llm.chat_completion", _fake_chat_completion)
+
     context = ToolExecutionContext(tool_context=ToolContext.CHAT, call_id="x")
-    context.registry = registry
+    context.registry = SimpleNamespace(pool=SimpleNamespace())  # only handed to load_llm_config
 
     handler = WebSummarizeHandler()
     result = await handler.execute({"url": "http://example.com"}, context)
 
     assert result.success is True
-    assert registry.pool.acquire_calls >= 2
+    assert result.output["summary"] == "A concise summary."
+    assert captured["max_tokens"] == 500
+    assert captured["messages"][0]["role"] == "user"
