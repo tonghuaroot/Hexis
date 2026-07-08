@@ -1618,6 +1618,23 @@ class MemoryStore:
             memory_types=[ApiMemoryType.SEMANTIC],
         ).memories
 
+    def route_extractions(self, extractions: list, min_confidence: float) -> list:
+        """Route extractions through the DB dedup/related/create policy
+        (db/41 ingest_route_extractions): config-driven thresholds + one batched
+        nearest-neighbor search. Returns a per-extraction plan with 'index',
+        'decision' (duplicate|related|create) and 'matched_memory_id'."""
+        if self.client is None:
+            self.connect()
+        payload = json.dumps([
+            {"content": ext.content, "confidence": ext.confidence}
+            for ext in extractions
+        ])
+        raw = self._fetchval(
+            "SELECT ingest_route_extractions($1::jsonb, $2::float)", payload, min_confidence
+        )
+        plan = json.loads(raw) if isinstance(raw, str) else raw
+        return plan or []
+
     def connect_memories(self, from_id: str, to_id: str, relationship: RelationshipType, confidence: float = 0.8) -> None:
         if self.client is None:
             self.connect()
@@ -2221,31 +2238,31 @@ class IngestionPipeline:
         deferred_worldview_edges: list[tuple[str, str | list, str, float]] = []  # (memory_id, hint, rel_type_name, confidence)
         deferred_edges: list[tuple[str, str, RelationshipType, float]] = []
 
-        for ext in extractions:
-            if ext.confidence < self.config.min_confidence_threshold:
+        # Dedup/related/create routing is DB-owned (db/41 ingest_route_extractions):
+        # thresholds live in config and the nearest-neighbor search runs in one
+        # batched call instead of a Python recall per extraction.
+        plan = self.store.route_extractions(extractions, self.config.min_confidence_threshold)
+        plan_by_index = {p["index"]: p for p in plan if isinstance(p, dict) and "index" in p}
+
+        for idx, ext in enumerate(extractions):
+            routed = plan_by_index.get(idx)
+            if routed is None:
+                continue  # dropped below the confidence threshold by the router
+            decision = routed.get("decision")
+            matched_id = routed.get("matched_memory_id")
+
+            if decision == "duplicate" and matched_id:
+                try:
+                    self.store.add_source(str(matched_id), source)
+                    self.store.boost_confidence(str(matched_id), 0.05)
+                except Exception:
+                    pass
                 continue
+
             importance = ext.importance
             if self.config.min_importance_floor is not None:
                 importance = max(importance, self.config.min_importance_floor)
             trust = self.config.base_trust
-            # Dedup check
-            similar = self.store.recall_similar_semantic(ext.content, limit=5)
-            match = None
-            for mem in similar:
-                if mem.similarity is None:
-                    continue
-                if mem.similarity >= 0.92:
-                    match = (mem, "duplicate")
-                    break
-                if mem.similarity >= 0.8:
-                    match = (mem, "related")
-            if match and match[1] == "duplicate":
-                try:
-                    self.store.add_source(str(match[0].id), source)
-                    self.store.boost_confidence(str(match[0].id), 0.05)
-                except Exception:
-                    pass
-                continue
 
             memory_id = self.store.create_semantic_memory(
                 content=ext.content,
@@ -2275,8 +2292,8 @@ class IngestionPipeline:
 
             if encounter_id:
                 deferred_edges.append((memory_id, encounter_id, RelationshipType.DERIVED_FROM, 0.9))
-            if match and match[1] == "related":
-                deferred_edges.append((memory_id, str(match[0].id), RelationshipType.ASSOCIATED, 0.6))
+            if decision == "related" and matched_id:
+                deferred_edges.append((memory_id, str(matched_id), RelationshipType.ASSOCIATED, 0.6))
             self._apply_decay(memory_id, intensity=appraisal.intensity)
 
         # --- Batch flush phase ---
