@@ -14,7 +14,7 @@ from typing import Any, TYPE_CHECKING
 
 from core.tools.config import ContextOverrides
 from services.agent import run_agent
-from services.heartbeat_prompt import build_heartbeat_decision_prompt
+from services.heartbeat_prompt import render_heartbeat_decision_prompt_db
 
 if TYPE_CHECKING:
     import asyncpg
@@ -122,8 +122,8 @@ async def run_agentic_heartbeat(
     if has_tasks:
         logger.info("Backlog has actionable items — scaling resources + granting permissions")
 
-    # Build the user message (heartbeat context snapshot)
-    user_message = build_heartbeat_decision_prompt(context)
+    # Build the user message (heartbeat context snapshot) — rendered in the DB.
+    user_message = await render_heartbeat_decision_prompt_db(conn, context)
 
     # Append checkpoint resume context if there are in-progress items with checkpoints
     if has_tasks:

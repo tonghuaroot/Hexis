@@ -177,7 +177,12 @@ class AgentLoop:
         user_message: str,
         history: list[dict[str, Any]] | None = None,
     ) -> AgentLoopResult:
-        """Run the agent loop to completion."""
+        """Run the agent loop to completion.
+
+        The DB (``agent_turns``) owns the authoritative message log, energy
+        accounting and stop decisions. Python builds only the *initial*
+        messages, then reads the conversation back from the DB each step.
+        """
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.config.system_prompt},
         ]
@@ -185,6 +190,8 @@ class AgentLoop:
         messages.append({"role": "user", "content": user_message})
 
         tools = await self.config.registry.get_specs(self.config.tool_context)
+        # Fail loud: turn state is authoritative, so a failed start must surface
+        # rather than silently degrading to a Python-only loop.
         await self._start_turn(user_message, messages)
 
         await self._emit(AgentEvent.LOOP_START, {
@@ -195,19 +202,12 @@ class AgentLoop:
 
         try:
             result = await asyncio.wait_for(
-                self._loop(messages, tools),
+                self._loop(tools),
                 timeout=self.config.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            result = AgentLoopResult(
-                text=self._last_text,
-                messages=messages,
-                tool_calls_made=self._tool_calls_made,
-                iterations=self._iteration_count,
-                energy_spent=self._energy_spent,
-                timed_out=True,
-                stopped_reason="timeout",
-            )
+            result = self._make_result(await self._get_messages(), "timeout")
+            result.timed_out = True
 
         await self._emit(AgentEvent.LOOP_END, {
             "stopped_reason": result.stopped_reason,
@@ -215,6 +215,8 @@ class AgentLoop:
             "energy_spent": result.energy_spent,
             "timed_out": result.timed_out,
         })
+        # The DB message log is authoritative for the final transcript.
+        result.messages = await self._get_messages()
         await self._finish_turn(result)
 
         return result
@@ -275,13 +277,12 @@ class AgentLoop:
 
     async def _loop(
         self,
-        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> AgentLoopResult:
         """Dispatcher: routes to planned or direct execution loop."""
         if not self.config.enable_planning:
-            return await self._execute_loop(messages, tools)
-        return await self._planned_loop(messages, tools)
+            return await self._execute_loop(tools)
+        return await self._planned_loop(tools)
 
     async def _llm_call(
         self,
@@ -346,10 +347,16 @@ class AgentLoop:
 
     async def _execute_loop(
         self,
-        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> AgentLoopResult:
-        """Core agentic loop: LLM -> tool calls -> results -> LLM."""
+        """Core agentic loop: LLM -> tool calls -> results -> LLM.
+
+        The DB drives the loop: ``next_agent_step`` decides stop-vs-continue
+        (energy/iteration budgets) and hands back the authoritative message
+        log; each LLM/tool result is applied back to ``agent_turns`` so the
+        next step sees the updated conversation. Python owns only the model
+        call, tool execution and event emission.
+        """
         cfg = self.config
 
         while True:
@@ -361,21 +368,14 @@ class AgentLoop:
                         "budget": cfg.energy_budget,
                         "spent": self._energy_spent,
                     })
-                return self._make_result(messages, reason)
+                return self._make_result(await self._get_messages(), reason)
 
-            # Check iteration limit
-            if cfg.max_iterations is not None and self._iteration_count >= cfg.max_iterations:
-                return self._make_result(messages, "max_iterations")
-
-            # Check energy budget
-            if cfg.energy_budget is not None and self._energy_spent >= cfg.energy_budget:
-                await self._emit(AgentEvent.ENERGY_EXHAUSTED, {
-                    "budget": cfg.energy_budget,
-                    "spent": self._energy_spent,
-                })
-                return self._make_result(messages, "energy")
-
-            self._iteration_count += 1
+            # DB owns iteration/energy budgets; trust its decision above and use
+            # the message log it hands back for this LLM call (no parallel list).
+            self._iteration_count = int(db_step.get("iteration", self._iteration_count + 1))
+            messages = db_step.get("messages")
+            if messages is None:
+                messages = await self._get_messages()
 
             # LLM call
             try:
@@ -383,10 +383,12 @@ class AgentLoop:
             except Exception as e:
                 logger.error("LLM call failed at iteration %d: %s", self._iteration_count, e)
                 await self._emit(AgentEvent.ERROR, {"error": str(e), "iteration": self._iteration_count})
-                return self._make_result(messages, "error")
+                return self._make_result(await self._get_messages(), "error")
 
             text = response.get("content", "") or ""
             tool_calls = response.get("tool_calls") or []
+            # Record the assistant message in the DB (OpenAI-format tool_calls),
+            # which appends to agent_turns.messages and bumps the iteration count.
             await self._apply_llm_result(response)
 
             if text:
@@ -396,38 +398,24 @@ class AgentLoop:
                 if not self._streaming:
                     await self._emit(AgentEvent.TEXT_DELTA, {"text": text, "iteration": self._iteration_count})
 
-            # Build assistant message with tool_calls in OpenAI format
-            assistant_msg: dict[str, Any] = {"role": "assistant", "content": text}
-            if tool_calls:
-                assistant_msg["tool_calls"] = [
-                    _to_openai_tool_call(tc) for tc in tool_calls
-                ]
-            messages.append(assistant_msg)
-
             if not tool_calls:
                 if (
-                    self.config.continuation_prompt is not None
-                    and self._continuations_used < self.config.max_continuations
+                    cfg.continuation_prompt is not None
+                    and self._continuations_used < cfg.max_continuations
                 ):
                     self._continuations_used += 1
                     await self._emit(AgentEvent.CONTINUATION, {
                         "continuation_number": self._continuations_used,
-                        "max_continuations": self.config.max_continuations,
+                        "max_continuations": cfg.max_continuations,
                     })
-                    messages.append({
-                        "role": "user",
-                        "content": self.config.continuation_prompt,
-                    })
+                    await self._append_user_message(cfg.continuation_prompt)
                     continue
-                return self._make_result(messages, "completed")
+                return self._make_result(await self._get_messages(), "completed")
 
-            # Process tool calls
+            # Process tool calls. Energy budgets are enforced at the step
+            # boundary by next_agent_step, so every tool the model requested in
+            # one turn runs before the next budget check.
             for call in tool_calls:
-                # Check energy before each tool call
-                if cfg.energy_budget is not None and self._energy_spent >= cfg.energy_budget:
-                    # Skip remaining tools - budget exhausted mid-iteration
-                    break
-
                 tool_name = call.get("name", "")
                 arguments = call.get("arguments", {})
                 call_id = call.get("id") or str(uuid.uuid4())
@@ -445,10 +433,12 @@ class AgentLoop:
                         approved = False
 
                     if not approved:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": call_id,
-                            "content": f"Tool call '{tool_name}' was denied by the user.",
+                        await self._record_tool_result(call_id, {
+                            "tool_name": tool_name,
+                            "success": False,
+                            "error": "denied",
+                            "energy_spent": 0,
+                            "model_output": f"Tool call '{tool_name}' was denied by the user.",
                         })
                         self._tool_calls_made.append({
                             "name": tool_name,
@@ -470,8 +460,20 @@ class AgentLoop:
 
                 # Execute tool via registry (policy + hooks + audit)
                 result = await cfg.registry.execute(tool_name, arguments, exec_ctx)
-                self._energy_spent += result.energy_spent
-                await self._apply_tool_result(call_id, tool_name, result)
+                # DB appends the tool message and sums energy into runtime_state;
+                # read the authoritative running total back from it.
+                applied = await self._record_tool_result(call_id, {
+                    "tool_name": tool_name,
+                    "success": result.success,
+                    "output": result.output,
+                    "display_output": result.display_output,
+                    "model_output": result.to_model_output(),
+                    "error": result.error,
+                    "error_type": result.error_type.value if result.error_type else None,
+                    "energy_spent": result.energy_spent,
+                    "duration_seconds": result.duration_seconds,
+                })
+                self._energy_spent = int(applied.get("energy_spent", self._energy_spent + result.energy_spent))
 
                 await self._emit(AgentEvent.TOOL_RESULT, {
                     "tool_name": tool_name,
@@ -492,14 +494,8 @@ class AgentLoop:
                     "error": result.error,
                 })
 
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": result.to_model_output(),
-                })
-
         # Should not reach here, but safety net
-        return self._make_result(messages, "completed")  # pragma: no cover
+        return self._make_result(await self._get_messages(), "completed")  # pragma: no cover
 
     # ------------------------------------------------------------------
     # Planned loop (Gap 1: plan → execute → verify)
@@ -516,7 +512,6 @@ class AgentLoop:
 
     async def _planned_loop(
         self,
-        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> AgentLoopResult:
         """
@@ -525,21 +520,24 @@ class AgentLoop:
         - Plan: LLM thinks without tools, producing a plan
         - Execute: Normal tool-use loop (_execute_loop)
         - Verify: LLM reviews results, may call tools for corrections
+
+        Like _execute_loop, the message log lives in the DB — plan/verify
+        prompts and the plan response are appended there, not to a Python list.
         """
         # Phase 1: Plan
         await self._emit(AgentEvent.PHASE_CHANGE, {"phase": "plan"})
         self._phases_completed.append("plan")
 
         planning_prompt = self.config.planning_prompt or self._DEFAULT_PLANNING_PROMPT
-        messages.append({"role": "user", "content": planning_prompt})
-        self._iteration_count += 1
+        await self._append_user_message(planning_prompt)
+        messages = await self._get_messages()
 
         try:
             response = await self._llm_call(messages, tools=None)
         except Exception as e:
             logger.error("Plan phase LLM call failed: %s", e)
             await self._emit(AgentEvent.ERROR, {"error": str(e), "phase": "plan"})
-            return self._make_result(messages, "error")
+            return self._make_result(await self._get_messages(), "error")
 
         plan_text = response.get("content", "") or ""
         if plan_text:
@@ -548,13 +546,14 @@ class AgentLoop:
             if not self._streaming:
                 await self._emit(AgentEvent.TEXT_DELTA, {"text": plan_text, "iteration": self._iteration_count})
 
-        messages.append({"role": "assistant", "content": plan_text})
+        # Record the plan as an assistant message (no tool calls) in the DB.
+        await self._apply_llm_result(response)
 
         # Phase 2: Execute
         await self._emit(AgentEvent.PHASE_CHANGE, {"phase": "execute"})
         self._phases_completed.append("execute")
 
-        exec_result = await self._execute_loop(messages, tools)
+        exec_result = await self._execute_loop(tools)
 
         # If execute didn't complete normally, skip verify
         if exec_result.stopped_reason != "completed":
@@ -565,13 +564,12 @@ class AgentLoop:
         self._phases_completed.append("verify")
 
         verify_prompt = self.config.verify_prompt or self._DEFAULT_VERIFY_PROMPT
-        messages.append({"role": "user", "content": verify_prompt})
+        await self._append_user_message(verify_prompt)
 
         # Reset continuation counter for verify phase
         self._continuations_used = 0
 
-        verify_result = await self._execute_loop(messages, tools)
-        return verify_result
+        return await self._execute_loop(tools)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -630,82 +628,85 @@ class AgentLoop:
             return None
 
     async def _start_turn(self, user_message: str, messages: list[dict[str, Any]]) -> None:
-        try:
-            async with self.config.pool.acquire() as conn:
-                raw = await conn.fetchval(
-                    "SELECT start_agent_turn($1::text, $2::text, $3::uuid, $4::jsonb)",
-                    self.config.tool_context.value,
-                    user_message,
-                    self._session_uuid_or_none(),
-                    json.dumps({
-                        "messages": messages,
-                        "energy_budget": self.config.energy_budget,
-                        "max_iterations": self.config.max_iterations,
-                        "max_continuations": self.config.max_continuations,
-                        "heartbeat_id": self.config.heartbeat_id,
-                    }),
-                )
-            payload = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(payload, dict) and payload.get("turn_id"):
-                self._turn_id = str(payload["turn_id"])
-        except Exception:
-            logger.debug("DB agent turn start unavailable; continuing without DB turn state", exc_info=True)
+        """Open a DB-owned turn. Fails loud — the turn state is authoritative,
+        so a failed start must surface instead of degrading to a Python loop."""
+        async with self.config.pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT start_agent_turn($1::text, $2::text, $3::uuid, $4::jsonb)",
+                self.config.tool_context.value,
+                user_message,
+                self._session_uuid_or_none(),
+                json.dumps({
+                    "messages": messages,
+                    "energy_budget": self.config.energy_budget,
+                    "max_iterations": self.config.max_iterations,
+                    "max_continuations": self.config.max_continuations,
+                    "heartbeat_id": self.config.heartbeat_id,
+                }),
+            )
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not (isinstance(payload, dict) and payload.get("turn_id")):
+            raise RuntimeError(f"start_agent_turn returned no turn_id: {payload!r}")
+        self._turn_id = str(payload["turn_id"])
 
     async def _next_agent_step(self) -> dict[str, Any]:
-        if not self._turn_id:
-            return {"action": "llm"}
-        try:
-            async with self.config.pool.acquire() as conn:
-                raw = await conn.fetchval("SELECT next_agent_step($1::uuid)", self._turn_id)
-            payload = json.loads(raw) if isinstance(raw, str) else raw
-            return payload if isinstance(payload, dict) else {"action": "llm"}
-        except Exception:
-            logger.debug("DB agent next step unavailable; using local loop policy", exc_info=True)
-            return {"action": "llm"}
+        """Ask the DB what to do next; the DB owns the loop (stop) decision."""
+        async with self.config.pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT next_agent_step($1::uuid)", self._turn_id)
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"next_agent_step returned non-dict: {payload!r}")
+        return payload
+
+    async def _get_messages(self) -> list[dict[str, Any]]:
+        """Read the DB-authoritative message log for this turn."""
+        async with self.config.pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT messages FROM agent_turns WHERE id = $1::uuid", self._turn_id
+            )
+        if raw is None:
+            return []
+        return json.loads(raw) if isinstance(raw, str) else raw
+
+    async def _append_user_message(self, content: str) -> None:
+        """Append a user message (continuation / plan / verify) to the DB log."""
+        async with self.config.pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT append_agent_message($1::uuid, $2::text, $3::text)",
+                self._turn_id, "user", content,
+            )
 
     async def _apply_llm_result(self, response: dict[str, Any]) -> None:
-        if not self._turn_id:
-            return
-        try:
-            async with self.config.pool.acquire() as conn:
-                await conn.fetchval(
-                    "SELECT apply_agent_llm_result($1::uuid, $2::jsonb)",
-                    self._turn_id,
-                    json.dumps({
-                        "content": response.get("content", "") or "",
-                        "tool_calls": response.get("tool_calls") or [],
-                    }),
-                )
-        except Exception:
-            logger.debug("DB agent LLM result apply failed", exc_info=True)
+        """Record the assistant message in the DB. tool_calls are stored in
+        OpenAI format so the log is directly replayable to the model."""
+        tool_calls = response.get("tool_calls") or []
+        openai_tool_calls = [_to_openai_tool_call(tc) for tc in tool_calls]
+        async with self.config.pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT apply_agent_llm_result($1::uuid, $2::jsonb)",
+                self._turn_id,
+                json.dumps({
+                    "content": response.get("content", "") or "",
+                    "tool_calls": openai_tool_calls,
+                }),
+            )
 
-    async def _apply_tool_result(self, call_id: str, tool_name: str, result: Any) -> None:
-        if not self._turn_id:
-            return
-        try:
-            async with self.config.pool.acquire() as conn:
-                await conn.fetchval(
-                    "SELECT apply_agent_tool_result($1::uuid, $2::text, $3::jsonb)",
-                    self._turn_id,
-                    call_id,
-                    json.dumps({
-                        "tool_name": tool_name,
-                        "success": result.success,
-                        "output": result.output,
-                        "display_output": result.display_output,
-                        "model_output": result.to_model_output(),
-                        "error": result.error,
-                        "error_type": result.error_type.value if result.error_type else None,
-                        "energy_spent": result.energy_spent,
-                        "duration_seconds": result.duration_seconds,
-                    }),
-                )
-        except Exception:
-            logger.debug("DB agent tool result apply failed", exc_info=True)
+    async def _record_tool_result(self, call_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Append a tool result to the DB log; return the DB's running state
+        (incl. the authoritative total energy_spent)."""
+        async with self.config.pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT apply_agent_tool_result($1::uuid, $2::text, $3::jsonb)",
+                self._turn_id,
+                call_id,
+                json.dumps(payload),
+            )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, dict) else {}
 
     async def _finish_turn(self, result: AgentLoopResult) -> None:
-        if not self._turn_id:
-            return
+        """Mark the turn complete. Best-effort with a loud warning: the reply is
+        already in hand, so a finalize failure must not drop it."""
         try:
             async with self.config.pool.acquire() as conn:
                 await conn.fetchval(
@@ -721,7 +722,7 @@ class AgentLoop:
                     }),
                 )
         except Exception:
-            logger.debug("DB agent finish failed", exc_info=True)
+            logger.warning("finish_agent_turn failed for turn %s", self._turn_id, exc_info=True)
 
     async def _emit(self, event: AgentEvent, data: dict[str, Any] | None = None) -> None:
         """Emit an event via the configured callback."""
@@ -745,11 +746,11 @@ class AgentLoop:
             except Exception:
                 logger.debug("Event callback failed for %s", event, exc_info=True)
 
-    def _make_result(self, messages: list[dict[str, Any]], stopped_reason: str) -> AgentLoopResult:
+    def _make_result(self, messages: list[dict[str, Any]] | None, stopped_reason: str) -> AgentLoopResult:
         """Build an AgentLoopResult from current state."""
         return AgentLoopResult(
             text=self._last_text,
-            messages=messages,
+            messages=messages or [],
             tool_calls_made=self._tool_calls_made,
             iterations=self._iteration_count,
             energy_spent=self._energy_spent,

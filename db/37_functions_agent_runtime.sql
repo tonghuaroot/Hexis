@@ -109,7 +109,14 @@ BEGIN
         RETURN jsonb_build_object('action', 'stop', 'reason', 'energy', 'iterations', iterations, 'energy_spent', energy_spent);
     END IF;
 
-    RETURN jsonb_build_object('action', 'llm', 'iteration', iterations + 1, 'energy_spent', energy_spent);
+    -- Hand the caller the DB-authoritative message log to send to the model.
+    -- The loop reads this back each step instead of keeping a parallel Python list.
+    RETURN jsonb_build_object(
+        'action', 'llm',
+        'iteration', iterations + 1,
+        'energy_spent', energy_spent,
+        'messages', COALESCE(turn.messages, '[]'::jsonb)
+    );
 END;
 $$;
 
@@ -192,6 +199,37 @@ BEGIN
     PERFORM record_agent_turn_event(p_turn_id, 'tool_result', p_result || jsonb_build_object('total_energy_spent', total_spent));
 
     RETURN jsonb_build_object('turn_id', p_turn_id::text, 'energy_spent', total_spent);
+END;
+$$;
+
+-- Append an arbitrary message (user/system/etc.) to the DB-owned message log.
+-- Used for continuation nudges and plan/verify phase prompts so the message
+-- list stays authoritative in the DB rather than in a parallel Python list.
+CREATE OR REPLACE FUNCTION append_agent_message(
+    p_turn_id UUID,
+    p_role TEXT,
+    p_content TEXT
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    turn agent_turns%ROWTYPE;
+BEGIN
+    UPDATE agent_turns
+    SET messages = COALESCE(messages, '[]'::jsonb)
+            || jsonb_build_array(jsonb_build_object(
+                'role', COALESCE(NULLIF(p_role, ''), 'user'),
+                'content', COALESCE(p_content, '')
+            )),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = p_turn_id
+    RETURNING * INTO turn;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'agent turn not found: %', p_turn_id;
+    END IF;
+
+    RETURN jsonb_build_object('turn_id', p_turn_id::text, 'messages', turn.messages);
 END;
 $$;
 

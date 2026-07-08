@@ -394,8 +394,8 @@ async def run_agent(
                 # For heartbeat, use the heartbeat context as memory context
                 sub_memory_ctx = memory_context
                 if mode == "heartbeat" and heartbeat_context:
-                    from services.heartbeat_prompt import build_heartbeat_decision_prompt
-                    sub_memory_ctx = build_heartbeat_decision_prompt(heartbeat_context)
+                    from services.heartbeat_prompt import render_heartbeat_decision_prompt_db
+                    sub_memory_ctx = await render_heartbeat_decision_prompt_db(conn, heartbeat_context)
 
                 subconscious_output = await run_subconscious_appraisal(
                     conn, user_message, sub_memory_ctx,

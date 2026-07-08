@@ -50,6 +50,14 @@ def _mock_registry(tool_names: list[str] | None = None) -> MagicMock:
     return registry
 
 
+def _mock_conn(prompt: str = "[heartbeat decision prompt]") -> AsyncMock:
+    """A connection mock whose fetchval returns a string, so the DB-rendered
+    heartbeat prompt (render_heartbeat_decision_prompt_db) yields a real value."""
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=prompt)
+    return conn
+
+
 def _base_context(**overrides: Any) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "agent": {"objectives": ["Test"], "guardrails": [], "tools": [], "budget": {}},
@@ -248,7 +256,7 @@ class TestRunAgenticHeartbeatScaling:
         ctx["energy"]["current"] = 10
 
         result = await run_agentic_heartbeat(
-            AsyncMock(), pool=MagicMock(), registry=_mock_registry(),
+            _mock_conn(), pool=MagicMock(), registry=_mock_registry(),
             heartbeat_id="hb-tm-001", context=ctx,
         )
 
@@ -267,7 +275,7 @@ class TestRunAgenticHeartbeatScaling:
         ctx["energy"]["current"] = 10
 
         result = await run_agentic_heartbeat(
-            AsyncMock(), pool=MagicMock(), registry=_mock_registry(),
+            _mock_conn(), pool=MagicMock(), registry=_mock_registry(),
             heartbeat_id="hb-tm-002", context=ctx,
         )
 
@@ -288,7 +296,7 @@ class TestRunAgenticHeartbeatScaling:
         })
 
         await run_agentic_heartbeat(
-            AsyncMock(), pool=MagicMock(), registry=_mock_registry(),
+            _mock_conn(), pool=MagicMock(), registry=_mock_registry(),
             heartbeat_id="hb-tm-003", context=ctx,
         )
 
@@ -308,7 +316,7 @@ class TestRunAgenticHeartbeatScaling:
         })
 
         await run_agentic_heartbeat(
-            AsyncMock(), pool=MagicMock(), registry=_mock_registry(),
+            _mock_conn(), pool=MagicMock(), registry=_mock_registry(),
             heartbeat_id="hb-tm-004", context=ctx,
         )
 
@@ -332,7 +340,7 @@ class TestRunAgenticHeartbeatScaling:
         })
 
         await run_agentic_heartbeat(
-            AsyncMock(), pool=MagicMock(), registry=_mock_registry(),
+            _mock_conn(), pool=MagicMock(), registry=_mock_registry(),
             heartbeat_id="hb-tm-005", context=ctx,
         )
 
@@ -573,7 +581,7 @@ class TestHeartbeatAgentLoopWiring:
         ctx = _base_context(backlog={"counts": {}, "actionable": []})
 
         await run_agentic_heartbeat(
-            AsyncMock(), pool=mock_pool, registry=_mock_registry(),
+            _mock_conn(), pool=mock_pool, registry=_mock_registry(),
             heartbeat_id="hb-always-plan", context=ctx,
         )
 
@@ -606,7 +614,7 @@ class TestHeartbeatAgentLoopWiring:
         ctx = _base_context(backlog={"counts": {}, "actionable": []})
 
         await run_agentic_heartbeat(
-            AsyncMock(), pool=mock_pool, registry=_mock_registry(),
+            _mock_conn(), pool=mock_pool, registry=_mock_registry(),
             heartbeat_id="hb-always-cont", context=ctx,
         )
 
@@ -628,7 +636,7 @@ class TestHeartbeatAgentLoopWiring:
         })
 
         await run_agentic_heartbeat(
-            AsyncMock(), pool=MagicMock(), registry=_mock_registry(),
+            _mock_conn(), pool=MagicMock(), registry=_mock_registry(),
             heartbeat_id="hb-perms", context=ctx,
         )
 
@@ -649,7 +657,7 @@ class TestHeartbeatAgentLoopWiring:
         ctx = _base_context(backlog={"counts": {}, "actionable": []})
 
         await run_agentic_heartbeat(
-            AsyncMock(), pool=MagicMock(), registry=_mock_registry(),
+            _mock_conn(), pool=MagicMock(), registry=_mock_registry(),
             heartbeat_id="hb-no-perms", context=ctx,
         )
 
@@ -685,7 +693,7 @@ class TestHeartbeatAgentLoopWiring:
             "actionable": [{"title": "Task", "status": "todo"}],
         })
         await run_agentic_heartbeat(
-            AsyncMock(), pool=mock_pool, registry=_mock_registry(),
+            _mock_conn(), pool=mock_pool, registry=_mock_registry(),
             heartbeat_id="hb-cont-tasks", context=ctx_tasks,
         )
         config_tasks = mock_agent_class.call_args[0][0]
@@ -693,7 +701,7 @@ class TestHeartbeatAgentLoopWiring:
         # Without backlog
         ctx_empty = _base_context(backlog={"counts": {}, "actionable": []})
         await run_agentic_heartbeat(
-            AsyncMock(), pool=mock_pool, registry=_mock_registry(),
+            _mock_conn(), pool=mock_pool, registry=_mock_registry(),
             heartbeat_id="hb-cont-empty", context=ctx_empty,
         )
         config_empty = mock_agent_class.call_args[0][0]
