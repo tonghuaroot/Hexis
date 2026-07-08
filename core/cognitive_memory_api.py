@@ -81,6 +81,9 @@ class Memory:
     # gist it is (1.0 until consolidation exists). Drives graded recall rendering.
     strength: float | None = None
     fidelity: float | None = None
+    # SIGNED felt emotional intensity: >0 = warm/positive, <0 = painful/negative,
+    # magnitude = how vivid the feeling is NOW (embered / healed / re-kindled).
+    emotional_intensity: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1234,6 +1237,7 @@ class CognitiveMemory:
                     source_unit_ids=list(row["source_unit_ids"] or []),
                     strength=float(row["strength"]) if row["strength"] is not None else None,
                     fidelity=float(row["fidelity"]) if row["fidelity"] is not None else None,
+                    emotional_intensity=float(row["emotional_intensity"]) if row["emotional_intensity"] is not None else None,
                 )
             )
 
@@ -1548,6 +1552,20 @@ def _recall_hedge(m: Memory) -> str:
     return ""
 
 
+# Recalled memories with signed felt intensity at/above this get a felt-emotion cue.
+_EMOTION_CUE_THRESHOLD = 0.4
+
+
+def _emotion_cue(m: Memory) -> str:
+    """A tag reflecting the memory's CURRENT felt tone (signed intensity, decayed
+    asymmetrically): a positive peak stays '(still warm)', fresh pain reads
+    '(still painful)'; healed pain and mundane memories get nothing (calm)."""
+    felt = m.emotional_intensity
+    if felt is None or abs(felt) < _EMOTION_CUE_THRESHOLD:
+        return ""
+    return "(still warm) " if felt > 0 else "(still painful) "
+
+
 def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5, max_partials: int = 3) -> str:
     parts: list[str] = []
 
@@ -1570,7 +1588,7 @@ def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5
                 for m in group:
                     score = f" (score: {m.similarity:.2f})" if m.similarity is not None else ""
                     trust = f", trust: {m.trust_level:.2f}" if m.trust_level is not None else ""
-                    parts.append(f"- {_recall_hedge(m)}{m.content}{score}{trust}")
+                    parts.append(f"- {_recall_hedge(m)}{_emotion_cue(m)}{m.content}{score}{trust}")
         else:
             parts.append("## Relevant Memories")
             for m in context.memories[:max_memories]:
@@ -1584,7 +1602,7 @@ def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5
                         src_kind = f", source: {kind} ({ref})"
                     elif kind:
                         src_kind = f", source: {kind}"
-                parts.append(f"- {_recall_hedge(m)}{m.content}{score}{trust}{src_kind}")
+                parts.append(f"- {_recall_hedge(m)}{_emotion_cue(m)}{m.content}{score}{trust}{src_kind}")
 
     subgraph_md = _format_subgraph(context.subgraph)
     if subgraph_md:

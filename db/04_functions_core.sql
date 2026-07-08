@@ -78,7 +78,8 @@ CREATE OR REPLACE FUNCTION fast_recall(
     memory_type memory_type,
     score FLOAT,
     source TEXT,
-    fidelity FLOAT
+    fidelity FLOAT,
+    emotional_intensity FLOAT
 ) AS $$
 	DECLARE
 	    query_embedding vector;
@@ -180,7 +181,12 @@ CREATE OR REPLACE FUNCTION fast_recall(
 	            COALESCE(sc.vector_score, 0) * 0.5 +
 	            COALESCE(sc.assoc_score, 0) * 0.2 +
 	            COALESCE(sc.temp_score, 0) * 0.15 +
-	            calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced) * 0.05 +
+	            GREATEST(
+                calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced),
+                COALESCE(get_config_float('memory.recall_intensity_weight'), 0.5)
+                  * current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
+                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
+            ) * 0.05 +
                 COALESCE(m.trust_level, 0.5) * 0.1 +
 	            (CASE
 	                WHEN m.metadata ? 'emotional_context' THEN
@@ -221,7 +227,10 @@ CREATE OR REPLACE FUNCTION fast_recall(
 	            WHEN sc.temp_score IS NOT NULL THEN 'temporal'
 	            ELSE 'fallback'
 	        END as source,
-	        m.fidelity
+	        m.fidelity,
+	        (current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
+	            (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
+	         * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0))) AS emotional_intensity
 	    FROM scored sc
 	    JOIN memories m ON sc.mem_id = m.id
 	    WHERE m.status = 'active'

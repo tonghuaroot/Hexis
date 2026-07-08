@@ -49,6 +49,47 @@ AS $$
         )
     ));
 $$;
+-- Current FELT emotional intensity in [0, encoded] (docs/memory_retention_design.md §8/§9).
+-- Distinct from the immutable encoded PEAK (emotional_context.intensity) that drives
+-- persistence/protection. Asymmetric + computed-on-read:
+--   * base decays by AGE (created_at, never reset by recall) toward a floor -> a positive
+--     memory keeps a permanent EMBER (floor > 0); a negative one heals toward CALM (floor 0);
+--   * a transient RE-KINDLE keyed to last_reinforced recency stirs it back up on recall,
+--     bounded by the encoded peak; negative re-kindle is weighted down so rumination can't
+--     hold a wound hot while the base keeps healing.
+CREATE OR REPLACE FUNCTION current_emotional_intensity(
+    p_encoded_intensity FLOAT,
+    p_valence FLOAT,
+    p_created_at TIMESTAMPTZ,
+    p_last_reinforced TIMESTAMPTZ
+) RETURNS FLOAT
+LANGUAGE sql STABLE
+AS $$
+    WITH p AS (
+        SELECT
+            GREATEST(0.0, LEAST(1.0, COALESCE(p_encoded_intensity, 0.0))) AS enc,
+            COALESCE(p_valence, 0.0) AS val,
+            COALESCE(get_config_float('memory.intensity_ember_factor'), 0.5) AS ember,
+            COALESCE(get_config_float('memory.intensity_decay_rate'), 0.02) AS drate,
+            COALESCE(get_config_float('memory.intensity_rekindle_rate'), 0.5) AS rrate,
+            COALESCE(get_config_float('memory.intensity_negative_rekindle_weight'), 0.4) AS nrw
+    ),
+    b AS (
+        SELECT enc, val, rrate, nrw,
+               (GREATEST(0.0, val) * enc * ember) AS floor,
+               (GREATEST(0.0, val) * enc * ember)
+                 + (enc - GREATEST(0.0, val) * enc * ember)
+                   * EXP(GREATEST(-700.0, -drate * GREATEST(age_in_days(p_created_at), 0.0))) AS base
+        FROM p
+    )
+    SELECT LEAST(b.enc, GREATEST(b.floor,
+        b.base
+        + (CASE WHEN b.val >= 0 THEN 1.0 ELSE b.nrw END)
+          * (b.enc - b.base)
+          * EXP(GREATEST(-700.0, -b.rrate * GREATEST(age_in_days(COALESCE(p_last_reinforced, p_created_at)), 0.0)))
+    ))
+    FROM b;
+$$;
 CREATE OR REPLACE FUNCTION sync_embedding_service_config()
 RETURNS VOID AS $$
 DECLARE

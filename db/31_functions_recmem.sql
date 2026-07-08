@@ -939,17 +939,22 @@ CREATE OR REPLACE FUNCTION recmem_recall_context(
     created_at TIMESTAMPTZ,
     trust_level FLOAT,
     fidelity FLOAT,
-    strength FLOAT
+    strength FLOAT,
+    emotional_intensity FLOAT
 ) AS $$
 DECLARE
     query_embedding vector;
     strength_weight FLOAT;
+    intensity_weight FLOAT;
 BEGIN
     query_embedding := (get_embedding(ARRAY[ensure_embedding_prefix(p_query, 'search_query')]))[1];
     -- How much computed memory strength (recency/reinforcement/decay) reshapes
     -- the pure-cosine recall score: 0 = pure similarity (old behavior),
     -- 0.5 = gentle default, 1 = score fully scaled by strength.
     strength_weight := LEAST(1.0, GREATEST(0.0, COALESCE(get_config_float('memory.recall_strength_weight'), 0.5)));
+    -- Felt emotional intensity contributes to salience too, so an embered peak
+    -- stays recallable even after its strength has decayed.
+    intensity_weight := LEAST(1.0, GREATEST(0.0, COALESCE(get_config_float('memory.recall_intensity_weight'), 0.5)));
 
     RETURN QUERY
     WITH raw_hits AS (
@@ -964,7 +969,8 @@ BEGIN
             s.created_at,
             s.trust_level,
             1.0::float AS fidelity,
-            1.0::float AS strength
+            1.0::float AS strength,
+            NULL::float AS emotional_intensity
         FROM subconscious_units s
         WHERE s.status = 'active'
           AND s.embedding_status = 'embedded'
@@ -984,7 +990,8 @@ BEGIN
             s.created_at,
             s.trust_level,
             1.0::float AS fidelity,
-            1.0::float AS strength
+            1.0::float AS strength,
+            NULL::float AS emotional_intensity
         FROM subconscious_units s
         WHERE p_session_id IS NOT NULL
           AND s.session_id = p_session_id
@@ -1001,13 +1008,20 @@ BEGIN
             m.type::text AS memory_type,
             ((1 - (m.embedding <=> query_embedding))
              * (1.0 - strength_weight + strength_weight
-                * calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)))::float AS score,
+                * GREATEST(
+                    calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced),
+                    intensity_weight * current_emotional_intensity(
+                        (m.metadata->'emotional_context'->>'intensity')::float,
+                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced))))::float AS score,
             COALESCE(array_agg(msu.subconscious_unit_id) FILTER (WHERE msu.subconscious_unit_id IS NOT NULL), '{}'::uuid[]) AS source_unit_ids,
             m.source_attribution,
             m.created_at,
             m.trust_level,
             m.fidelity,
-            calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)::float AS strength
+            calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)::float AS strength,
+            (current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
+                (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
+             * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0)))::float AS emotional_intensity
         FROM memories m
         LEFT JOIN memory_source_units msu ON msu.memory_id = m.id
         WHERE m.status = 'active'
@@ -1025,13 +1039,20 @@ BEGIN
             m.type::text AS memory_type,
             ((1 - (m.embedding <=> query_embedding))
              * (1.0 - strength_weight + strength_weight
-                * calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)))::float AS score,
+                * GREATEST(
+                    calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced),
+                    intensity_weight * current_emotional_intensity(
+                        (m.metadata->'emotional_context'->>'intensity')::float,
+                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced))))::float AS score,
             COALESCE(array_agg(msu.subconscious_unit_id) FILTER (WHERE msu.subconscious_unit_id IS NOT NULL), '{}'::uuid[]) AS source_unit_ids,
             m.source_attribution,
             m.created_at,
             m.trust_level,
             m.fidelity,
-            calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)::float AS strength
+            calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)::float AS strength,
+            (current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
+                (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
+             * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0)))::float AS emotional_intensity
         FROM memories m
         LEFT JOIN memory_source_units msu ON msu.memory_id = m.id
         WHERE m.status = 'active'
