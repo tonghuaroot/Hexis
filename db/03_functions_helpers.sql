@@ -105,6 +105,7 @@ RETURNS vector[] AS $$
 	    start_ts TIMESTAMPTZ;
 	    retry_seconds INT;
 	    retry_interval_seconds FLOAT;
+	    http_timeout_ms INT;
 	    last_error TEXT;
 	    result vector[];
 	    missing_texts TEXT[] := ARRAY[]::text[];
@@ -182,6 +183,15 @@ RETURNS vector[] AS $$
 	        (SELECT (value #>> '{}')::float FROM config WHERE key = 'embedding.retry_interval_seconds'),
 	        1.0
 	    );
+	    -- Bound each HTTP attempt above the embedding server's cold model-load
+	    -- time (~8s for Ollama). The pgsql-http default (5s) is shorter, so the
+	    -- first embed after an idle unload aborts mid-load -- which cancels the
+	    -- load -- and never recovers within retry_seconds. 9s rides it through.
+	    http_timeout_ms := COALESCE(
+	        (SELECT (value #>> '{}')::int FROM config WHERE key = 'embedding.http_timeout_ms'),
+	        9000
+	    );
+	    PERFORM http_set_curlopt('CURLOPT_TIMEOUT_MS', http_timeout_ms::text);
 	    max_batch_size := COALESCE(
 	        NULLIF((SELECT (value #>> '{}')::int FROM config WHERE key = 'embedding.max_batch_size'), 0),
 	        total  -- send all at once; let the embedding server handle internal batching
