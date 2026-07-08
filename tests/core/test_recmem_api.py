@@ -106,6 +106,8 @@ async def test_hydrate_recmem_maps_tiers_and_dedupes_raw_sources():
             "source_attribution": {},
             "created_at": datetime.now(timezone.utc),
             "source_unit_ids": [],
+            "strength": 1.0,
+            "fidelity": 1.0,
         },
         {
             "tier": "episodic",
@@ -117,6 +119,8 @@ async def test_hydrate_recmem_maps_tiers_and_dedupes_raw_sources():
             "source_attribution": {},
             "created_at": datetime.now(timezone.utc),
             "source_unit_ids": [raw_id],
+            "strength": 0.8,
+            "fidelity": 1.0,
         },
         {
             "tier": "subconscious",
@@ -128,6 +132,8 @@ async def test_hydrate_recmem_maps_tiers_and_dedupes_raw_sources():
             "source_attribution": {},
             "created_at": datetime.now(timezone.utc),
             "source_unit_ids": [],
+            "strength": 1.0,
+            "fidelity": 1.0,
         },
     ]
     mem = CognitiveMemory(_Pool(conn))

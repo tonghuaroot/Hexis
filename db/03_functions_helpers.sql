@@ -25,6 +25,30 @@ AS $$
         )
     );
 $$;
+-- Memory strength in (0, 1] for the compression-native substrate
+-- (docs/memory_retention_design.md §2). Encoded/grown importance decayed by the
+-- time SINCE LAST REINFORCEMENT -- recall/attention resets the clock, so
+-- reinforcement moves strength UP; an un-reinforced memory decays from creation
+-- and fades. Generalizes calculate_relevance; STRENGTH IS COMPUTED ON READ,
+-- never stored or mass-written. (The rehearsal "ceiling raise" is already
+-- supplied by update_memory_importance on access; reinforcement_count is tracked
+-- on the row for telemetry / later phases, not double-counted here.)
+CREATE OR REPLACE FUNCTION calculate_strength(
+    p_importance FLOAT,
+    p_decay_rate FLOAT,
+    p_created_at TIMESTAMPTZ,
+    p_last_reinforced TIMESTAMPTZ
+) RETURNS FLOAT
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT GREATEST(0.0, LEAST(1.0,
+        COALESCE(p_importance, 0.5) * EXP(
+            -GREATEST(COALESCE(p_decay_rate, 0.01), 0.0)
+            * GREATEST(COALESCE(age_in_days(p_last_reinforced), age_in_days(p_created_at)), 0.0)
+        )
+    ));
+$$;
 CREATE OR REPLACE FUNCTION sync_embedding_service_config()
 RETURNS VOID AS $$
 DECLARE

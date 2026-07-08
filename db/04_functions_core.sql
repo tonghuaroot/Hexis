@@ -77,7 +77,8 @@ CREATE OR REPLACE FUNCTION fast_recall(
     content TEXT,
     memory_type memory_type,
     score FLOAT,
-    source TEXT
+    source TEXT,
+    fidelity FLOAT
 ) AS $$
 	DECLARE
 	    query_embedding vector;
@@ -179,7 +180,7 @@ CREATE OR REPLACE FUNCTION fast_recall(
 	            COALESCE(sc.vector_score, 0) * 0.5 +
 	            COALESCE(sc.assoc_score, 0) * 0.2 +
 	            COALESCE(sc.temp_score, 0) * 0.15 +
-	            calculate_relevance(m.importance, m.decay_rate, m.created_at, m.last_accessed) * 0.05 +
+	            calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced) * 0.05 +
                 COALESCE(m.trust_level, 0.5) * 0.1 +
 	            (CASE
 	                WHEN m.metadata ? 'emotional_context' THEN
@@ -219,7 +220,8 @@ CREATE OR REPLACE FUNCTION fast_recall(
 	            WHEN sc.assoc_score IS NOT NULL THEN 'association'
 	            WHEN sc.temp_score IS NOT NULL THEN 'temporal'
 	            ELSE 'fallback'
-	        END as source
+	        END as source,
+	        m.fidelity
 	    FROM scored sc
 	    JOIN memories m ON sc.mem_id = m.id
 	    WHERE m.status = 'active'

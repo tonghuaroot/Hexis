@@ -234,9 +234,14 @@ BEGIN
     IF p_ids IS NULL OR array_length(p_ids, 1) IS NULL THEN
         RETURN 0;
     END IF;
+    -- Access IS reinforcement: recalling a memory strengthens it (resets the
+    -- decay clock via last_reinforced) -- the "up-ladder" of the compression-
+    -- native substrate (docs/memory_retention_design.md §2).
     UPDATE memories
     SET access_count = access_count + 1,
-        last_accessed = CURRENT_TIMESTAMP
+        last_accessed = CURRENT_TIMESTAMP,
+        last_reinforced = CURRENT_TIMESTAMP,
+        reinforcement_count = reinforcement_count + 1
     WHERE id = ANY(p_ids);
     GET DIAGNOSTICS updated_count = ROW_COUNT;
     RETURN COALESCE(updated_count, 0);

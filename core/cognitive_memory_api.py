@@ -76,6 +76,11 @@ class Memory:
     tier: str | None = None
     source_unit_ids: list[UUID] | None = None
     valid_until: datetime | None = None
+    # Compression-native substrate: how vividly the memory is currently held.
+    # strength = recency/reinforcement/decay (varies now); fidelity = how lossy a
+    # gist it is (1.0 until consolidation exists). Drives graded recall rendering.
+    strength: float | None = None
+    fidelity: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1227,8 +1232,21 @@ class CognitiveMemory:
                     created_at=row["created_at"],
                     tier=row["tier"],
                     source_unit_ids=list(row["source_unit_ids"] or []),
+                    strength=float(row["strength"]) if row["strength"] is not None else None,
+                    fidelity=float(row["fidelity"]) if row["fidelity"] is not None else None,
                 )
             )
+
+        # Reinforce-on-recall: recalling a memory strengthens it (resets its decay
+        # clock -- the up-ladder). Only episodic/semantic tiers are `memories`
+        # rows; subconscious item_ids are raw units. The chat/hydrate path did not
+        # reinforce before this. Advisory -- never fail recall on it.
+        recalled_ids = [r["item_id"] for r in rows if r["tier"] in ("episodic", "semantic")]
+        if recalled_ids:
+            try:
+                await conn.execute("SELECT touch_memories($1::uuid[])", recalled_ids)
+            except Exception:
+                pass
         return memories
 
     async def _find_partial_activations(self, conn: asyncpg.Connection, query: str) -> list[PartialActivation]:
@@ -1511,6 +1529,25 @@ def _format_subgraph(subgraph: dict[str, Any] | None, *, max_edges: int = 20) ->
     return "\n".join(lines) if lines else None
 
 
+# Below this vividness, recall renders as a hedged reconstruction rather than an
+# assertion of detail (mirrors config memory.recall_low_vividness_threshold).
+_LOW_VIVIDNESS_THRESHOLD = 0.35
+
+
+def _recall_hedge(m: Memory) -> str:
+    """Prefix that renders a faint/low-fidelity memory honestly ("I vaguely
+    recall…") instead of asserting faded detail. Vividness = min(strength,
+    fidelity): strength varies now; fidelity drops only once consolidation exists."""
+    strength = m.strength if m.strength is not None else 1.0
+    fidelity = m.fidelity if m.fidelity is not None else 1.0
+    vividness = min(strength, fidelity)
+    if vividness < 0.15:
+        return "(faint, uncertain) "
+    if vividness < _LOW_VIVIDNESS_THRESHOLD:
+        return "(vaguely recall) "
+    return ""
+
+
 def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5, max_partials: int = 3) -> str:
     parts: list[str] = []
 
@@ -1533,7 +1570,7 @@ def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5
                 for m in group:
                     score = f" (score: {m.similarity:.2f})" if m.similarity is not None else ""
                     trust = f", trust: {m.trust_level:.2f}" if m.trust_level is not None else ""
-                    parts.append(f"- {m.content}{score}{trust}")
+                    parts.append(f"- {_recall_hedge(m)}{m.content}{score}{trust}")
         else:
             parts.append("## Relevant Memories")
             for m in context.memories[:max_memories]:
@@ -1547,7 +1584,7 @@ def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5
                         src_kind = f", source: {kind} ({ref})"
                     elif kind:
                         src_kind = f", source: {kind}"
-                parts.append(f"- {m.content}{score}{trust}{src_kind}")
+                parts.append(f"- {_recall_hedge(m)}{m.content}{score}{trust}{src_kind}")
 
     subgraph_md = _format_subgraph(context.subgraph)
     if subgraph_md:

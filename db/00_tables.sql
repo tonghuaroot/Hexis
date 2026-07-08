@@ -204,6 +204,14 @@ CREATE TABLE memories (
     access_count INTEGER DEFAULT 0,
     last_accessed TIMESTAMPTZ,
     decay_rate FLOAT DEFAULT 0.01,
+    -- Compression-native substrate (docs/memory_retention_design.md):
+    -- reinforcement resets the decay clock (recall strengthens memory); fidelity
+    -- falls only at consolidation (a later phase) so recall knows when a memory
+    -- is a lossy gist. strength itself is COMPUTED on read (calculate_strength),
+    -- never stored/mass-written.
+    last_reinforced TIMESTAMPTZ,
+    reinforcement_count INTEGER DEFAULT 0,
+    fidelity FLOAT NOT NULL DEFAULT 1.0 CHECK (fidelity >= 0 AND fidelity <= 1),
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 CREATE UNLOGGED TABLE working_memory (
@@ -650,6 +658,8 @@ INSERT INTO config (key, value, description) VALUES
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('memory.recall_min_trust_level', '0'::jsonb, 'Minimum trust_level to include in recall (0 disables filtering)'),
+    ('memory.recall_strength_weight', '0.5'::jsonb, 'How much computed memory strength (recency/reinforcement/decay) reshapes the pure-cosine recall score: 0=pure similarity, 0.5=gentle, 1=score fully scaled by strength'),
+    ('memory.recall_low_vividness_threshold', '0.35'::jsonb, 'Recall below this strength/fidelity vividness renders as a hedged reconstruction ("I vaguely recall...")'),
     ('memory.worldview_support_threshold', '0.8'::jsonb, 'Similarity threshold for SUPPORTS alignment edges'),
     ('memory.worldview_contradict_threshold', '-0.5'::jsonb, 'Similarity threshold for CONTRADICTS alignment edges'),
     ('chat.inline_subconscious_enabled', 'true'::jsonb, 'Run inline subconscious appraisal during chat'),

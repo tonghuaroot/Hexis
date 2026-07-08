@@ -254,6 +254,9 @@ BEGIN
             'label', left(COALESCE(m.content, cl.name, ep.summary, k.node_id), 200),
             'memory_type', m.type,
             'importance', m.importance,
+            'strength', CASE WHEN m.id IS NULL THEN NULL
+                             ELSE round(calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)::numeric, 4) END,
+            'fidelity', m.fidelity,
             'depth', k.depth,
             'relevance', round(k.relevance::numeric, 4)
         ) ORDER BY k.depth, k.relevance DESC) AS arr
