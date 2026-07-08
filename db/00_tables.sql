@@ -39,6 +39,20 @@ DECLARE
         $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_clusternode_cluster_id ON memory_graph."ClusterNode" USING BTREE (ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"cluster_id"'::ag_catalog.agtype]))$idx$,
         $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_episodenode_id ON memory_graph."EpisodeNode" USING BTREE (id)$idx$,
         $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_episodenode_episode_id ON memory_graph."EpisodeNode" USING BTREE (ag_catalog.agtype_access_operator(VARIADIC ARRAY[properties, '"episode_id"'::ag_catalog.agtype]))$idx$,
+        -- GIN on properties: AGE compiles an inline anchor MATCH (n:Label {key: $v})
+        -- to a `properties @> {...}` containment op, which the BTREE expression
+        -- indexes above do NOT serve (verified via EXPLAIN: they only fire for the
+        -- `WHERE n.key = $v` form). Since Hexis anchors almost exclusively with
+        -- inline maps, these GIN indexes are what actually turn those lookups from
+        -- Seq Scan into Bitmap Index Scan. See docs/optimize.md §8.
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_memorynode_props_gin ON memory_graph."MemoryNode" USING GIN (properties)$idx$,
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_conceptnode_props_gin ON memory_graph."ConceptNode" USING GIN (properties)$idx$,
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_clusternode_props_gin ON memory_graph."ClusterNode" USING GIN (properties)$idx$,
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_episodenode_props_gin ON memory_graph."EpisodeNode" USING GIN (properties)$idx$,
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_goalnode_props_gin ON memory_graph."GoalNode" USING GIN (properties)$idx$,
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_selfnode_props_gin ON memory_graph."SelfNode" USING GIN (properties)$idx$,
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_goalsroot_props_gin ON memory_graph."GoalsRoot" USING GIN (properties)$idx$,
+        $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_lifechapternode_props_gin ON memory_graph."LifeChapterNode" USING GIN (properties)$idx$,
         $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_in_episode_start ON memory_graph."IN_EPISODE" USING BTREE (start_id)$idx$,
         $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_in_episode_end ON memory_graph."IN_EPISODE" USING BTREE (end_id)$idx$,
         $idx$CREATE INDEX IF NOT EXISTS idx_memory_graph_contradicts_start ON memory_graph."CONTRADICTS" USING BTREE (start_id)$idx$,

@@ -24,6 +24,14 @@ services:
       - postgres
       - -c
       - search_path=ag_catalog,public
+      # AGE tuning (see docs/optimize.md): a Cypher query compiles to many
+      # per-row agtype expressions, so PostgreSQL's JIT usually costs more to
+      # compile than it saves -> turn it off. Lower random_page_cost so the
+      # planner actually picks the edge-endpoint / property indexes on SSD/NVMe.
+      - -c
+      - jit=off
+      - -c
+      - random_page_cost=1.1
       - -c
       - app.embedding_dimension=${EMBEDDING_DIMENSION:-768}
       - -c
