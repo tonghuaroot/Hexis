@@ -19,6 +19,8 @@ BEGIN
         RETURN m
     $q$) as (result ag_catalog.agtype)', p_memory_id, p_episode_id, p_sequence_order);
 
+    PERFORM upsert_memory_edge('memory', p_memory_id::text, 'IN_EPISODE', 'episode', p_episode_id::text,
+                               1.0, NULL, NULL, jsonb_build_object('sequence_order', p_sequence_order));
     RETURN TRUE;
 EXCEPTION WHEN OTHERS THEN
     RETURN FALSE;

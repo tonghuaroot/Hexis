@@ -1170,6 +1170,9 @@ BEGIN
             p_category,
             p_stability
         );
+        PERFORM upsert_memory_edge('self', 'self', 'HAS_BELIEF', 'memory', new_memory_id::text,
+                                   p_stability, p_category, NULL,
+                                   jsonb_build_object('category', p_category, 'stability', p_stability));
     EXCEPTION WHEN OTHERS THEN NULL;
     END;
 
@@ -1636,11 +1639,13 @@ BEGIN
         p_relationship_type,
         CASE WHEN p_properties = '{}'::jsonb 
              THEN '' 
-             ELSE format('{%s}', 
+             ELSE format('{%s}',
                   (SELECT string_agg(format('%I: %s', key, value), ', ')
                    FROM jsonb_each(p_properties)))
         END
     );
+    -- Dual-write to the relational edge substrate (db/44) for subgraph reasoning.
+    PERFORM upsert_memory_edge(p_from_id, p_to_id, p_relationship_type, p_properties);
 END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION auto_check_worldview_alignment()
@@ -1727,6 +1732,8 @@ BEGIN
         p_concept_name,
         p_strength
     );
+    PERFORM upsert_memory_edge('memory', p_memory_id::text, 'INSTANCE_OF', 'concept', p_concept_name,
+                               p_strength, NULL, NULL, jsonb_build_object('strength', p_strength));
     RETURN TRUE;
 EXCEPTION
     WHEN OTHERS THEN
@@ -1783,6 +1790,7 @@ BEGIN
         RETURN parent
     $q$) as (result ag_catalog.agtype)', p_child_name, p_parent_name);
 
+    PERFORM upsert_memory_edge('concept', p_parent_name, 'PARENT_OF', 'concept', p_child_name, 1.0);
     RETURN TRUE;
 EXCEPTION WHEN OTHERS THEN
     RETURN FALSE;

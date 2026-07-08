@@ -306,6 +306,10 @@ BEGIN
             now_text,
             now_text
         );
+        PERFORM upsert_memory_edge('self', 'self', 'ASSOCIATED', 'life_chapter', 'current',
+                                   1.0, 'life_chapter_current', NULL,
+                                   jsonb_build_object('kind', 'life_chapter_current',
+                                                      'name', COALESCE(NULLIF(p_name, ''), 'Foundations')));
     EXCEPTION
         WHEN OTHERS THEN
             NULL;
@@ -348,6 +352,9 @@ BEGIN
             now_text,
             evidence_text
         );
+        PERFORM upsert_memory_edge('self', 'self', 'ASSOCIATED', 'concept', p_concept,
+                                   LEAST(1.0, GREATEST(0.0, COALESCE(p_strength, 0.8))), p_kind, NULL,
+                                   jsonb_build_object('kind', p_kind, 'evidence_memory_id', evidence_text));
     EXCEPTION
         WHEN OTHERS THEN
             NULL;
