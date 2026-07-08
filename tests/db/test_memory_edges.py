@@ -27,7 +27,17 @@ def _j(v):
 
 
 async def _seed(conn):
-    """A --causes--> B --causes--> C ; A --instance_of--> concept ; A --member_of--> cluster."""
+    """A --causes--> B --causes--> C ; A --instance_of--> concept ; A --member_of--> cluster.
+    A/B/C are inserted as live memories -- build_context_subgraph filters memory
+    endpoints to live rows, so synthetic (non-existent) memory nodes are excluded."""
+    for mid, content in ((A, "A"), (B, "B"), (C, "C")):
+        await conn.execute(
+            "INSERT INTO memories (id, type, content, embedding, importance, trust_level, status) "
+            "VALUES ($1::uuid, 'episodic', $2, array_fill(0.1, ARRAY[embedding_dimension()])::vector, "
+            "0.7, 0.9, 'active')",
+            mid, content,
+        )
+
     async def edge(st, si, rel, dt, di, w=1.0):
         await conn.execute(
             "SELECT upsert_memory_edge($1::text,$2::text,$3::text,$4::text,$5::text,$6::float,"
@@ -81,7 +91,8 @@ async def test_full_subgraph_reaches_causal_chain_and_bridges(db_pool):
         await tr.start()
         try:
             await _seed(conn)
-            sg = await _subgraph(conn, [A], 3, None, 40)
+            # Filter to the seeded rel types (memory inserts may add IN_EPISODE).
+            sg = await _subgraph(conn, [A], 3, ["CAUSES", "INSTANCE_OF", "MEMBER_OF"], 40)
             # A (seed) + B + C (2-hop causal) + concept + cluster.
             assert _ids(sg) == {A, B, C, CONCEPT, CLUSTER}
             # heterogeneous-node resolution: correct node types.
@@ -102,7 +113,7 @@ async def test_depth_bound(db_pool):
         await tr.start()
         try:
             await _seed(conn)
-            sg = await _subgraph(conn, [A], 1, None, 40)
+            sg = await _subgraph(conn, [A], 1, ["CAUSES", "INSTANCE_OF", "MEMBER_OF"], 40)
             # depth 1 from A reaches direct neighbours only: B, concept, cluster -- not C.
             assert _ids(sg) == {A, B, CONCEPT, CLUSTER}
             assert C not in _ids(sg)
@@ -144,6 +155,44 @@ async def test_empty_seed_returns_empty(db_pool):
         try:
             sg = await _subgraph(conn, [], 3, None, 40)
             assert sg["nodes"] == [] and sg["edges"] == []
+        finally:
+            await tr.rollback()
+
+
+async def test_archived_memory_drops_from_subgraph(db_pool):
+    """memory_edges is a derived store; `memories` is the source of truth. When
+    maintenance archives/prunes a memory, it -- and anything only reachable
+    through it -- must drop out of the subgraph without deleting any edge rows."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            ids = []
+            for content in ("A live", "B middle", "C downstream"):
+                ids.append(await conn.fetchval(
+                    "INSERT INTO memories (type, content, embedding, importance, trust_level, status) "
+                    "VALUES ('episodic', $1, array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.7, 0.9, 'active') "
+                    "RETURNING id", content))
+            A, B, C = ids
+            for s, d, w in ((A, B, 0.8), (B, C, 0.9)):
+                await conn.execute(
+                    "SELECT upsert_memory_edge('memory',$1::text,'CAUSES','memory',$2::text,$3::float,"
+                    "NULL::text,NULL::text,'{}'::jsonb)", str(s), str(d), w)
+
+            sg = _j(await conn.fetchval(
+                "SELECT build_context_subgraph($1::uuid[],3,ARRAY['CAUSES'],40)", [A]))
+            assert {n["id"] for n in sg["nodes"]} == {str(A), str(B), str(C)}
+
+            # Archive the middle memory (as consolidation/pruning would).
+            await conn.execute("UPDATE memories SET status='archived' WHERE id=$1", B)
+            sg2 = _j(await conn.fetchval(
+                "SELECT build_context_subgraph($1::uuid[],3,ARRAY['CAUSES'],40)", [A]))
+            ids2 = {n["id"] for n in sg2["nodes"]}
+            assert ids2 == {str(A)}           # B pruned; C unreachable through it
+            assert str(B) not in ids2
+            # The edge rows still exist -- only the read reflects liveness.
+            assert await conn.fetchval(
+                "SELECT count(*) FROM memory_edges WHERE rel_type='CAUSES'") == 2
         finally:
             await tr.rollback()
 
