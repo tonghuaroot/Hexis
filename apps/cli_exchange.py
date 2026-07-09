@@ -17,16 +17,25 @@ from typing import Any
 import asyncpg
 
 from core.memory_exchange import (
+    HmxAnalysisResult,
     HmxDryRunResult,
     HmxImportResult,
     HmxPolicyError,
     HmxSchemaError,
+    HmxStagingResult,
+    accept_staged_import,
     default_import_strategy,
+    demote_staged_to_analysis,
     dry_run_hmx,
     export_hmx,
     import_hmx,
     iter_hmx_jsonl,
     parse_hmx_jsonl,
+    pending_hmx_reviews,
+    promote_analysis_to_staged,
+    quote_staged_import,
+    reject_staged_import,
+    modify_staged_import,
 )
 
 
@@ -205,7 +214,10 @@ def _print_dry_run(
 
 
 def _print_import_result(
-    result: HmxImportResult, *, as_json: bool, skipped: list[str]
+    result: HmxImportResult | HmxStagingResult | HmxAnalysisResult,
+    *,
+    as_json: bool,
+    skipped: list[str],
 ) -> None:
     payload = asdict(result)
     payload["skipped_sections"] = skipped
@@ -217,15 +229,33 @@ def _print_import_result(
 
     from apps.cli_theme import console, make_table
 
-    console.print(f"[ok]HMX import complete.[/ok] [muted]{result.export_id}[/muted]")
+    if isinstance(result, HmxStagingResult):
+        console.print(
+            f"[ok]HMX import staged for review.[/ok] [muted]{result.export_id}[/muted]"
+        )
+        counts = result.staged
+        footer = f"Pending review records: [accent]{len(result.staging_ids)}[/accent]"
+    elif isinstance(result, HmxAnalysisResult):
+        console.print(
+            f"[ok]HMX import loaded into isolated analysis storage.[/ok] "
+            f"[muted]{result.export_id}[/muted]"
+        )
+        counts = result.loaded
+        footer = f"Analysis records: [accent]{len(result.analysis_ids)}[/accent]"
+    else:
+        console.print(
+            f"[ok]HMX import complete.[/ok] [muted]{result.export_id}[/muted]"
+        )
+        counts = result.inserted
+        footer = (
+            f"Duplicates reused: [warn]{len(result.duplicate_refs)}[/warn]  "
+            f"Warnings: [warn]{len(result.warnings)}[/warn]"
+        )
     table = make_table("Section", ("Imported", {"justify": "right"}))
-    for section, count in result.inserted.items():
+    for section, count in counts.items():
         table.add_row(section, str(count))
     console.print(table)
-    console.print(
-        f"Duplicates reused: [warn]{len(result.duplicate_refs)}[/warn]  "
-        f"Warnings: [warn]{len(result.warnings)}[/warn]"
-    )
+    console.print(footer)
     if skipped:
         console.print(f"Skipped by operator: [muted]{', '.join(skipped)}[/muted]")
     for warning in result.warnings:
@@ -320,4 +350,88 @@ async def run_import(dsn: str, args: Any) -> int:
         await conn.close()
 
     _print_import_result(result, as_json=args.json, skipped=skipped)
+    return 0
+
+
+async def run_review(dsn: str, args: Any) -> int:
+    conn = await _connect(dsn, args.wait_seconds)
+    try:
+        if args.review_command in (None, "list"):
+            result: Any = await pending_hmx_reviews(conn)
+        elif args.review_command == "accept":
+            result = asdict(
+                await accept_staged_import(
+                    conn, args.staging_id, rationale=args.rationale
+                )
+            )
+        elif args.review_command == "reject":
+            result = asdict(
+                await reject_staged_import(
+                    conn, args.staging_id, rationale=args.rationale
+                )
+            )
+        elif args.review_command == "modify":
+            try:
+                changes = json.loads(args.changes)
+            except json.JSONDecodeError as exc:
+                raise HmxPolicyError(
+                    f"--changes must be a JSON object: {exc.msg}"
+                ) from exc
+            if not isinstance(changes, dict):
+                raise HmxPolicyError("--changes must be a JSON object")
+            result = asdict(
+                await modify_staged_import(
+                    conn,
+                    args.staging_id,
+                    changes,
+                    modification_kind=args.modification_kind,
+                    rationale=args.rationale,
+                )
+            )
+        elif args.review_command == "quote":
+            result = asdict(
+                await quote_staged_import(
+                    conn, args.staging_id, rationale=args.rationale
+                )
+            )
+        elif args.review_command == "promote":
+            staging_id = await promote_analysis_to_staged(
+                conn, args.analysis_id, rationale=args.rationale
+            )
+            result = {"decision": "promoted", "staging_id": staging_id}
+        elif args.review_command == "demote":
+            analysis_id = await demote_staged_to_analysis(
+                conn, args.staging_id, rationale=args.rationale
+            )
+            result = {"decision": "demoted", "analysis_id": analysis_id}
+        else:  # pragma: no cover - argparse constrains this
+            raise HmxPolicyError(
+                f"unknown import review command: {args.review_command}"
+            )
+    finally:
+        await conn.close()
+
+    if args.json:
+        sys.stdout.write(
+            json.dumps(result, indent=2, sort_keys=True, default=str) + "\n"
+        )
+    else:
+        from apps.cli_theme import console
+
+        if args.review_command in (None, "list"):
+            console.print(
+                f"[heading]Pending HMX review[/heading]  [accent]{result['total']}[/accent] records"
+            )
+            for item in result["records"]:
+                console.print(
+                    f"  [key]{item['id']}[/key]  {item['section']}  "
+                    f"[muted]{item.get('source_ref') or ''}[/muted]"
+                )
+        else:
+            console.print(
+                f"[ok]HMX review decision complete:[/ok] {result['decision']}"
+            )
+            for key in ("staging_id", "analysis_id", "local_ref"):
+                if result.get(key):
+                    console.print(f"  [key]{key}:[/key] {result[key]}")
     return 0

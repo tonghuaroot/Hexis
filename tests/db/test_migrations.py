@@ -37,6 +37,7 @@ async def test_migrations_recorded_and_idempotent(db_pool):
         assert "0006_hmx_optional_export_sections" in st["applied"]
         assert "0007_hmx_additive_import" in st["applied"]
         assert "0008_hmx_protected_import" in st["applied"]
+        assert "0009_hmx_deliberative_analysis" in st["applied"]
         assert st["pending"] == []
         assert await apply_pending_migrations(conn) == []  # nothing left to do
         # the deltas are live
@@ -92,6 +93,7 @@ async def test_migrate_existing_database_preserves_data():
             assert "0006_hmx_optional_export_sections" in applied
             assert "0007_hmx_additive_import" in applied
             assert "0008_hmx_protected_import" in applied
+            assert "0009_hmx_deliberative_analysis" in applied
 
             # AFTER: the data is intact AND the schema evolved
             assert (
@@ -109,6 +111,10 @@ async def test_migrate_existing_database_preserves_data():
             )
             assert await conn.fetchval(
                 "SELECT EXISTS(SELECT 1 FROM ag_catalog.ag_label WHERE name='SUPERSEDES')"
+            )
+            assert await conn.fetchval(
+                "SELECT to_regclass('public.hmx_import_staging') IS NOT NULL "
+                "AND to_regclass('public.hmx_analysis_records') IS NOT NULL"
             )
             # 0003's backfill classified the pre-migration row as lived experience
             assert (

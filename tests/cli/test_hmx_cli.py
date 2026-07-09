@@ -30,6 +30,41 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _single_memory_document(intent: str, content: str) -> dict:
+    document = build_envelope(
+        intent=intent,
+        plan=resolve_export_sections(intent),
+        instance_id="cli-test-source",
+        schema_version="0009_hmx_deliberative_analysis",
+        embedding_model="embeddinggemma:300m",
+        embedding_dimension=768,
+        lineage_id=str(uuid.uuid4()),
+        relationship_edge_types=["SUPPORTS"],
+    )
+    document["sections"] = {
+        "memories": [
+            {
+                "ref": f"{document['export_id']}:{uuid.uuid4()}",
+                "type": "semantic",
+                "status": "active",
+                "content": content,
+                "content_hash_v1": content_hash_v1(content),
+                "importance": 0.6,
+                "trust_level": 0.7,
+                "metadata": {},
+                "provenance": {
+                    "acquisition_mode": "experienced",
+                    "origin_instance": "cli-test-source",
+                    "origin_id": str(uuid.uuid4()),
+                    "import_chain": [],
+                    "modification_chain": [],
+                },
+            }
+        ]
+    }
+    return document
+
+
 async def test_export_jsonl_and_database_aware_dry_run(db_pool, tmp_path):
     output = tmp_path / "memory.hmx.jsonl"
     async with db_pool.acquire() as conn:
@@ -129,37 +164,7 @@ async def test_import_requires_exact_intent_confirmation(db_pool, tmp_path):
 
 async def test_confirmed_additive_import_completes_in_place(db_pool, tmp_path):
     content = f"HMX CLI accepted import {uuid.uuid4().hex}"
-    document = build_envelope(
-        intent="telepathy",
-        plan=resolve_export_sections("telepathy"),
-        instance_id="cli-test-source",
-        schema_version="0008_hmx_protected_import",
-        embedding_model="embeddinggemma:300m",
-        embedding_dimension=768,
-        lineage_id=str(uuid.uuid4()),
-        relationship_edge_types=["SUPPORTS"],
-    )
-    document["sections"] = {
-        "memories": [
-            {
-                "ref": f"{document['export_id']}:{uuid.uuid4()}",
-                "type": "semantic",
-                "status": "active",
-                "content": content,
-                "content_hash_v1": content_hash_v1(content),
-                "importance": 0.6,
-                "trust_level": 0.7,
-                "metadata": {},
-                "provenance": {
-                    "acquisition_mode": "experienced",
-                    "origin_instance": "cli-test-source",
-                    "origin_id": str(uuid.uuid4()),
-                    "import_chain": [],
-                    "modification_chain": [],
-                },
-            }
-        ]
-    }
+    document = _single_memory_document("telepathy", content)
     source = tmp_path / "accepted.hmx.json"
     source.write_text(json.dumps(document), encoding="utf-8")
 
@@ -190,3 +195,67 @@ async def test_confirmed_additive_import_completes_in_place(db_pool, tmp_path):
             assert metadata["embedding_status"] == "pending_import"
         finally:
             await conn.execute("DELETE FROM memories WHERE id = $1", row["id"])
+
+
+@pytest.mark.parametrize(
+    ("intent", "result_key", "table"),
+    [
+        ("telepathy", "staging_ids", "hmx_import_staging"),
+        ("analysis", "analysis_ids", "hmx_analysis_records"),
+    ],
+)
+async def test_import_uses_intent_derived_isolated_strategy(
+    db_pool, tmp_path, intent, result_key, table
+):
+    document = _single_memory_document(
+        intent, f"CLI isolated default {intent} {uuid.uuid4().hex}"
+    )
+    source = tmp_path / f"{intent}.hmx.json"
+    source.write_text(json.dumps(document), encoding="utf-8")
+    async with db_pool.acquire() as conn:
+        before_memories = await conn.fetchval("SELECT count(*) FROM memories")
+
+    imported = _run(
+        "import",
+        str(source),
+        "--confirm-intent",
+        intent,
+        "--json",
+        "--wait-seconds",
+        "60",
+    )
+    assert imported.returncode == 0, imported.stderr
+    report = json.loads(imported.stdout)
+    assert len(report[result_key]) == 1
+    record_id = report[result_key][0]
+    if intent == "telepathy":
+        pending = _run("import-review", "list", "--json", "--wait-seconds", "60")
+        assert pending.returncode == 0, pending.stderr
+        assert any(
+            item["id"] == record_id for item in json.loads(pending.stdout)["records"]
+        )
+        rejected = _run(
+            "import-review",
+            "reject",
+            record_id,
+            "--rationale",
+            "CLI lifecycle test",
+            "--json",
+            "--wait-seconds",
+            "60",
+        )
+        assert rejected.returncode == 0, rejected.stderr
+        assert json.loads(rejected.stdout)["decision"] == "rejected"
+    async with db_pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM memories") == before_memories
+        assert (
+            await conn.fetchval(
+                f"SELECT count(*) FROM {table} WHERE id=$1::uuid", record_id
+            )
+            == 1
+        )
+        batch_table = (
+            "hmx_import_batches" if intent == "telepathy" else "hmx_analysis_batches"
+        )
+        batch_id = report["batch_id"]
+        await conn.execute(f"DELETE FROM {batch_table} WHERE id=$1::uuid", batch_id)

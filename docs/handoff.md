@@ -1,15 +1,16 @@
 # Hexis Handoff
 
-Last updated: 2026-07-09 (HMX Slice 3 CLI and dry-run complete locally)
+Last updated: 2026-07-09 (HMX Slice 4 isolated review storage complete locally)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-3 are complete locally:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-4 are complete locally:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
-additive import with full reference remapping, and the operator CLI with
-side-effect-free dry-run reporting. The next implementation boundary is Slice 4
-(deliberative staging and physically isolated analysis-only storage).
+additive import with full reference remapping, the operator CLI with
+side-effect-free dry-run reporting, and isolated deliberative/analysis storage
+with explicit review transitions. The next implementation boundary is Slice 5
+(agent tool handlers for the HMX workflows now available through Python/CLI).
 
 The prior hosted green baseline was `c3be2f8` (`Wait for DB init completion in
 CI`), run https://github.com/QuixiAI/Hexis/actions/runs/29042281848 (all jobs
@@ -290,9 +291,47 @@ Important behavior:
 - Focused HMX/CLI validation: 91 tests pass. Full validation: 2051 tests pass;
   the existing 421 pytest marker warnings remain advisory.
 
-Next: Slice 4 deliberative staging and analysis-only storage, including review,
-promotion, and demotion paths. Slice 6 later connects accepted pending imports
-to the maintenance embedding queue.
+### HMX Slice 4 isolated review storage complete locally
+
+Key files:
+
+- `db/49_hmx_import_staging.sql` and migration `0009` — deliberative batches,
+  staged records, persistent per-batch reference maps, conflict grouping, and
+  pending-review summaries.
+- `db/50_hmx_analysis_storage.sql` — physically separate analysis batches and
+  records plus copy-on-promote and provenance-preserving demotion.
+- `core/memory_exchange.py` — strategy dispatch, isolated loading, acceptance,
+  rejection, material modification, archived quoting, promotion, and demotion.
+- `apps/cli_exchange.py` / `apps/hexis_cli.py` — intent-derived strategies and
+  `hexis import-review` operator commands, so staging has no dead-end.
+- `services/heartbeat_agentic.py` — pending deliberative review count enters
+  heartbeat context; analysis-only records remain absent.
+- `tests/db/test_hmx_staging.py` — live-DB isolation and lifecycle coverage.
+
+Important behavior:
+
+- Deliberative and analysis-only imports never insert into `memories`, create
+  neighborhoods, update drives/emotions, or enter active recall on load.
+- Analysis storage has no embedding column and never appears in heartbeat
+  context. Promotion copies the source record and does not remove analysis
+  history or copy an embedding.
+- Accepted records become `imported_and_accepted`; materially modified records
+  become `derived_from_import`. The staging import event is not duplicated in
+  the provenance chain when review completes.
+- Relationship acceptance requires its referenced records to have persistent
+  batch mappings first. Other partial structures retain the existing additive
+  import warnings.
+- Protected records can be staged and inspected. Acceptance into an active
+  target still fails with `bootstrap_state_violation` until the Protected
+  Replacement Protocol lands; review does not bypass that boundary.
+- Reject, quote, and demote decisions retain their source record and rationale.
+  Quoted material is archived and excluded from ordinary active recall.
+- Focused HMX/CLI validation: 102 tests pass. Full validation: 2063 tests pass;
+  the existing 421 pytest marker warnings remain advisory.
+
+Next: Slice 5 agent tool handlers for export/import/dry-run/review decisions and
+analysis promotion/demotion. Slice 6 then connects accepted pending imports to
+the maintenance embedding queue.
 
 ## Current Roadmap
 
@@ -474,15 +513,15 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 ## Resume Recommendation
 
 Do not continue debugging the old CI failures first. Continue the HMX thread at
-Slice 4 from the CLI/import contract now pinned in tests. Read
+Slice 5 from the isolated review contract now pinned in tests. Read
 `core/memory_exchange.py`, `apps/cli_exchange.py`,
-`tests/db/test_hmx_import.py`, `tests/cli/test_hmx_cli.py`, and the Slice 4 plan
+`tests/db/test_hmx_staging.py`, `tests/cli/test_hmx_cli.py`, and the Slice 5 plan
 section before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 4: deliberative staging, physically isolated analysis-only
-   storage, review decisions, and promotion/demotion paths.
+1. HMX Slice 5: skill-first agent tool handlers for export/import/dry-run,
+   deliberative review decisions, and analysis promotion/demotion.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

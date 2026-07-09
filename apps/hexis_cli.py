@@ -212,6 +212,7 @@ _HELP_GROUPS = [
         ("ingest", "Ingest documents and knowledge"),
         ("export", "Export memory as an HMX exchange"),
         ("import", "Inspect or import an HMX exchange"),
+        ("import-review", "Review staged HMX records"),
         ("retention", "Show memory-retention status"),
         ("schedule", "Manage scheduled tasks"),
     ]),
@@ -653,6 +654,48 @@ def build_parser() -> argparse.ArgumentParser:
     hmx_import.add_argument("--skip-narrative", action="store_true")
     hmx_import.add_argument("--json", action="store_true", help="Print a machine-readable report")
     hmx_import.set_defaults(func="hmx_import")
+
+    hmx_review = sub.add_parser(
+        "import-review", parents=[_db], help="Review staged HMX records"
+    )
+    hmx_review.add_argument("--json", action="store_true", help="Print JSON")
+    review_sub = hmx_review.add_subparsers(dest="review_command")
+    review_list = review_sub.add_parser("list", parents=[_db], help="List pending records")
+    review_list.add_argument("--json", action="store_true", help="Print JSON")
+    review_list.set_defaults(func="hmx_review")
+    review_accept = review_sub.add_parser("accept", parents=[_db], help="Accept a staged record")
+    review_accept.add_argument("staging_id")
+    review_accept.add_argument("--rationale", default=None)
+    review_accept.add_argument("--json", action="store_true", help="Print JSON")
+    review_accept.set_defaults(func="hmx_review")
+    review_reject = review_sub.add_parser("reject", parents=[_db], help="Reject a staged record")
+    review_reject.add_argument("staging_id")
+    review_reject.add_argument("--rationale", required=True)
+    review_reject.add_argument("--json", action="store_true", help="Print JSON")
+    review_reject.set_defaults(func="hmx_review")
+    review_modify = review_sub.add_parser("modify", parents=[_db], help="Modify a staged record")
+    review_modify.add_argument("staging_id")
+    review_modify.add_argument("--changes", required=True, help="JSON object of record fields")
+    review_modify.add_argument("--modification-kind", required=True)
+    review_modify.add_argument("--rationale", required=True)
+    review_modify.add_argument("--json", action="store_true", help="Print JSON")
+    review_modify.set_defaults(func="hmx_review")
+    review_quote = review_sub.add_parser("quote", parents=[_db], help="Archive as foreign quoted context")
+    review_quote.add_argument("staging_id")
+    review_quote.add_argument("--rationale", required=True)
+    review_quote.add_argument("--json", action="store_true", help="Print JSON")
+    review_quote.set_defaults(func="hmx_review")
+    review_promote = review_sub.add_parser("promote", parents=[_db], help="Promote analysis to staging")
+    review_promote.add_argument("analysis_id")
+    review_promote.add_argument("--rationale", required=True)
+    review_promote.add_argument("--json", action="store_true", help="Print JSON")
+    review_promote.set_defaults(func="hmx_review")
+    review_demote = review_sub.add_parser("demote", parents=[_db], help="Demote staging to analysis")
+    review_demote.add_argument("staging_id")
+    review_demote.add_argument("--rationale", required=True)
+    review_demote.add_argument("--json", action="store_true", help="Print JSON")
+    review_demote.set_defaults(func="hmx_review")
+    hmx_review.set_defaults(func="hmx_review")
 
     # -- Goals command (defaults to 'list') --
     goals = sub.add_parser("goals", parents=[_db], help="Manage agent goals")
@@ -2898,10 +2941,14 @@ def _dispatch(argv: list[str] | None = None) -> int:
         dsn = _get_dsn(args)
         return asyncio.run(_characters_export(dsn, args.name, args.output))
 
-    if func in {"hmx_export", "hmx_import"}:
-        from apps.cli_exchange import run_export, run_import
+    if func in {"hmx_export", "hmx_import", "hmx_review"}:
+        from apps.cli_exchange import run_export, run_import, run_review
 
-        handler = run_export if func == "hmx_export" else run_import
+        handler = {
+            "hmx_export": run_export,
+            "hmx_import": run_import,
+            "hmx_review": run_review,
+        }[func]
         return asyncio.run(handler(_get_dsn(args), args))
 
     docker_cmds = {"up", "down", "ps", "logs", "start", "stop", "reset", "upgrade"}

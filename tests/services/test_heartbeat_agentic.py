@@ -151,6 +151,32 @@ class TestBuildSystemPrompt:
 
 class TestRunAgenticHeartbeat:
     @patch("services.heartbeat_agentic.run_agent")
+    async def test_surfaces_pending_hmx_review_in_context(self, mock_run_agent):
+        mock_run_agent.return_value = MagicMock(
+            text="Done.", tool_calls_made=[], iterations=1,
+            energy_spent=0, timed_out=False, stopped_reason="completed",
+        )
+        conn = AsyncMock()
+        conn.fetchval.side_effect = [
+            '{"count": 2, "by_section": {"memories": 2}}',
+            "rendered heartbeat prompt",
+        ]
+
+        await run_agentic_heartbeat(
+            conn,
+            pool=MagicMock(),
+            registry=_mock_registry(),
+            heartbeat_id="hb-hmx-review",
+            context=_mock_context(),
+        )
+
+        heartbeat_context = mock_run_agent.call_args.kwargs["heartbeat_context"]
+        assert heartbeat_context["pending_import_review"] == {
+            "count": 2,
+            "by_section": {"memories": 2},
+        }
+
+    @patch("services.heartbeat_agentic.run_agent")
     async def test_runs_agent_loop(self, mock_run_agent):
         """run_agentic_heartbeat creates and runs an AgentLoop via run_agent."""
         mock_run_agent.return_value = MagicMock(

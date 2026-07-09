@@ -324,10 +324,10 @@ class TestImportPreflight:
             await import_hmx(None, env)
 
     @pytest.mark.asyncio
-    async def test_unimplemented_strategy_fails_explicitly(self):
+    async def test_authoritative_strategy_fails_explicitly(self):
         env = self._envelope()
-        with pytest.raises(HmxPolicyError, match="supports strategy='additive'"):
-            await import_hmx(None, env, strategy="analysis_only")
+        with pytest.raises(HmxPolicyError, match="authoritative replacement"):
+            await import_hmx(None, env, strategy="authoritative")
 
     @pytest.mark.asyncio
     async def test_malformed_sections_fail_before_database_access(self):

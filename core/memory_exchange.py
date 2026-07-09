@@ -137,6 +137,38 @@ class HmxDryRunResult:
     estimated_embedding_items: int
 
 
+@dataclass(frozen=True)
+class HmxStagingResult:
+    export_id: str
+    intent: str
+    strategy: str
+    batch_id: str
+    staged: dict[str, int]
+    staging_ids: tuple[str, ...]
+    conflicts: tuple[dict[str, Any], ...]
+    warnings: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class HmxAnalysisResult:
+    export_id: str
+    intent: str
+    strategy: str
+    batch_id: str
+    loaded: dict[str, int]
+    analysis_ids: tuple[str, ...]
+    warnings: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class HmxReviewResult:
+    staging_id: str
+    decision: str
+    section: str
+    local_ref: str | None = None
+    warnings: tuple[dict[str, Any], ...] = ()
+
+
 @lru_cache(maxsize=1)
 def load_hmx_schema() -> dict[str, Any]:
     """Load the packaged canonical schema for the supported HMX version."""
@@ -994,6 +1026,7 @@ def _append_import_provenance(
     export_id: str,
     local_instance_id: str,
     imported_at: str,
+    acquisition_mode: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     prepared = copy.deepcopy(record)
     provenance = copy.deepcopy(prepared.get("provenance") or {})
@@ -1002,19 +1035,29 @@ def _append_import_provenance(
     )
     provenance.setdefault("origin_id", origin_id)
     provenance.setdefault("modification_chain", [])
-    if intent not in ("port", "duplicate"):
-        provenance["acquisition_mode"] = "imported_and_accepted"
+    if acquisition_mode is not None:
+        provenance["acquisition_mode"] = acquisition_mode
+    elif intent not in ("port", "duplicate"):
+        if provenance.get("acquisition_mode") not in {
+            "derived_from_import",
+            "imported_and_archived",
+        }:
+            provenance["acquisition_mode"] = "imported_and_accepted"
     else:
         provenance.setdefault("acquisition_mode", "experienced")
 
     import_chain = list(provenance.get("import_chain") or [])
-    import_chain.append(
-        {
-            "instance_id": local_instance_id,
-            "imported_at": imported_at,
-            "export_id": export_id,
-        }
-    )
+    if not import_chain or not (
+        import_chain[-1].get("instance_id") == local_instance_id
+        and import_chain[-1].get("export_id") == export_id
+    ):
+        import_chain.append(
+            {
+                "instance_id": local_instance_id,
+                "imported_at": imported_at,
+                "export_id": export_id,
+            }
+        )
     provenance["import_chain"] = import_chain
     prepared["provenance"] = provenance
 
@@ -1162,14 +1205,22 @@ async def dry_run_hmx(
 
     for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
+            isolated = strategy in {"deliberative", "analysis_only"}
             warnings.append(
                 {
                     "code": "unsupported_section",
                     "section": deferred_section,
-                    "error": "section import is assigned to a later HMX slice and would not be applied",
+                    "error": (
+                        "section will remain isolated and cannot be admitted to active state"
+                        if isolated
+                        else "section import is assigned to a later HMX slice and would not be applied"
+                    ),
                 }
             )
-            counts[deferred_section] = 0
+            if strategy == "additive":
+                counts[deferred_section] = 0
+            elif deferred_section != "raw_units":
+                counts[deferred_section] = 1
 
     memory_candidates: list[tuple[str, str, str]] = []
     for section in ("memories", "worldview", "goals"):
@@ -1202,7 +1253,8 @@ async def dry_run_hmx(
         else:
             seen.add(normalized)
             new_by_section[section] += 1
-    counts.update(new_by_section)
+    if strategy == "additive":
+        counts.update(new_by_section)
     counts["duplicate_memories"] = len(duplicate_refs)
     counts["invalid_records"] = invalid_records
     counts["total_records"] = sum(
@@ -1227,10 +1279,10 @@ async def dry_run_hmx(
         for section in PROTECTED_SECTIONS
         if _section_has_records(section, sections.get(section))
     )
-    protected_allowed = not protected_present or (
+    direct_protected_allowed = not protected_present or (
         intent in ("port", "duplicate") and bool(target_state.get("is_empty"))
     )
-    if protected_present and not protected_allowed:
+    if strategy == "additive" and protected_present and not direct_protected_allowed:
         conflicts.append(
             {
                 "code": "bootstrap_state_violation",
@@ -1247,13 +1299,13 @@ async def dry_run_hmx(
         )
         or ""
     )
-    lineage_allowed = not (
+    direct_lineage_allowed = not (
         intent in ("port", "duplicate")
         and not target_state.get("is_empty", False)
         and source_lineage
         and source_lineage != local_lineage
     )
-    if not lineage_allowed:
+    if strategy == "additive" and not direct_lineage_allowed:
         conflicts.append(
             {
                 "code": "lineage_mismatch",
@@ -1262,14 +1314,12 @@ async def dry_run_hmx(
             }
         )
 
-    strategy_available = strategy == "additive"
+    strategy_available = strategy in {"additive", "deliberative", "analysis_only"}
     if not strategy_available:
         if strategy == "authoritative":
             strategy_error = "authoritative replacement arrives with the Protected Replacement Protocol"
         else:
-            strategy_error = (
-                "deliberative and analysis-only storage arrive in HMX Slice 4"
-            )
+            strategy_error = "unknown HMX import strategy"
         warnings.append(
             {
                 "code": "strategy_not_available",
@@ -1288,24 +1338,262 @@ async def dry_run_hmx(
             }
         )
 
+    if strategy == "deliberative":
+        protected_decision = "staged_review"
+        policy_allowed = True
+    elif strategy == "analysis_only":
+        protected_decision = "analysis_only"
+        policy_allowed = True
+    else:
+        protected_decision = "direct_import" if direct_protected_allowed else "blocked"
+        policy_allowed = direct_protected_allowed and direct_lineage_allowed
+
     return HmxDryRunResult(
         export_id=export_id,
         intent=intent,
         strategy=strategy,
         target_state=target_state,
-        can_import=protected_allowed and lineage_allowed and strategy_available,
+        can_import=policy_allowed and strategy_available,
         counts=counts,
         duplicate_refs=tuple(duplicate_refs),
         conflicts=tuple(conflicts),
         warnings=tuple(warnings),
         protected_policy={
             "sections": protected_present,
-            "allowed": protected_allowed,
-            "decision": "direct_import" if protected_allowed else "blocked",
-            "requires_empty_target": bool(protected_present),
+            "allowed": policy_allowed,
+            "decision": protected_decision,
+            "requires_empty_target": strategy == "additive" and bool(protected_present),
         },
         privacy=privacy,
-        estimated_embedding_items=sum(new_by_section.values()),
+        estimated_embedding_items=(
+            sum(new_by_section.values()) if strategy == "additive" else 0
+        ),
+    )
+
+
+_LIST_SECTIONS = frozenset(
+    {
+        "memories",
+        "episodes",
+        "relationships",
+        "identity",
+        "worldview",
+        "goals",
+        "drives",
+        "emotional_triggers",
+        "clusters",
+        "raw_units",
+    }
+)
+
+
+def _exchange_records(
+    data: dict[str, Any],
+) -> list[tuple[str, str | None, dict[str, Any]]]:
+    """Return independently reviewable valid records from an HMX document."""
+
+    sections = _import_sections(data)
+    records: list[tuple[str, str | None, dict[str, Any]]] = []
+    for section, value in sections.items():
+        if not _section_has_records(section, value):
+            continue
+        if section in _LIST_SECTIONS:
+            valid, _ = _validated_records(data, section, value)
+            for index, record in enumerate(valid):
+                source_ref = str(
+                    record.get("ref")
+                    or record.get("source_ref")
+                    or record.get("name")
+                    or record.get("key")
+                    or f"{section}:{index}"
+                )
+                records.append((section, source_ref, record))
+        elif section == "narrative":
+            try:
+                validate_hmx_document(_document_probe(data, {section: value}))
+            except HmxSchemaError:
+                continue
+            records.append((section, f"{section}:bundle", copy.deepcopy(value)))
+        else:
+            # Object-shaped and future sections remain inspectable even when
+            # this importer cannot admit them into active state yet.
+            records.append((section, f"{section}:bundle", copy.deepcopy(value)))
+    return records
+
+
+def _with_isolated_provenance(
+    record: Any,
+    *,
+    source_ref: str,
+    mode: str,
+    intent: str,
+    source: dict[str, Any],
+    export_id: str,
+    local_instance_id: str,
+    imported_at: str,
+) -> Any:
+    if not isinstance(record, dict):
+        return copy.deepcopy(record)
+    prepared, _ = _append_import_provenance(
+        record,
+        origin_id=source_ref.split(":", 1)[-1],
+        intent=intent,
+        source=source,
+        export_id=export_id,
+        local_instance_id=local_instance_id,
+        imported_at=imported_at,
+        acquisition_mode=mode,
+    )
+    return prepared
+
+
+async def stage_hmx(conn, data: dict[str, Any]) -> HmxStagingResult:
+    """Load valid HMX records into the deliberative review store only."""
+
+    forecast = await dry_run_hmx(conn, data, strategy="deliberative")
+    records = _exchange_records(data)
+    source = data.get("source") or {}
+    export_id = str(data["export_id"])
+    imported_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    local_context = await load_source_context(conn)
+    duplicate_refs = set(forecast.duplicate_refs)
+    unsupported = {"raw_units", "config", "in_flight_work", "audit_records"}
+    counts: dict[str, int] = {}
+    staging_ids: list[str] = []
+
+    header = copy.deepcopy(data)
+    header.pop("sections", None)
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('hmx_import'))")
+        batch_id = await conn.fetchval(
+            "INSERT INTO hmx_import_batches "
+            "(export_id, export_intent, strategy, source, privacy, envelope) "
+            "VALUES ($1, $2, 'deliberative', $3::jsonb, $4::jsonb, $5::jsonb) RETURNING id",
+            export_id,
+            forecast.intent,
+            json.dumps(source),
+            json.dumps(data.get("privacy") or {}),
+            json.dumps(header),
+        )
+        for section, source_ref, record in records:
+            prepared = _with_isolated_provenance(
+                record,
+                source_ref=source_ref or section,
+                mode="imported_staged",
+                intent=forecast.intent,
+                source=source,
+                export_id=export_id,
+                local_instance_id=local_context["instance_id"],
+                imported_at=imported_at,
+            )
+            record_conflicts: list[dict[str, Any]] = []
+            if source_ref in duplicate_refs:
+                record_conflicts.append(
+                    {"code": "duplicate_content", "ref": source_ref}
+                )
+            if section in PROTECTED_SECTIONS:
+                record_conflicts.append(
+                    {
+                        "code": "protected_replacement_requested",
+                        "section": section,
+                        "target_state": forecast.target_state.get("state"),
+                    }
+                )
+            if section in unsupported:
+                record_conflicts.append(
+                    {"code": "unsupported_section", "section": section}
+                )
+            staging_id = await conn.fetchval(
+                "INSERT INTO hmx_import_staging "
+                "(batch_id, section, source_ref, record, conflicts) "
+                "VALUES ($1, $2, $3, $4::jsonb, $5::jsonb) RETURNING id",
+                batch_id,
+                section,
+                source_ref,
+                json.dumps(prepared),
+                json.dumps(record_conflicts),
+            )
+            staging_ids.append(str(staging_id))
+            counts[section] = counts.get(section, 0) + 1
+
+    return HmxStagingResult(
+        export_id=export_id,
+        intent=forecast.intent,
+        strategy="deliberative",
+        batch_id=str(batch_id),
+        staged=counts,
+        staging_ids=tuple(staging_ids),
+        conflicts=forecast.conflicts,
+        warnings=forecast.warnings,
+    )
+
+
+async def load_analysis_hmx(conn, data: dict[str, Any]) -> HmxAnalysisResult:
+    """Load valid HMX records into physically isolated analysis storage."""
+
+    forecast = await dry_run_hmx(conn, data, strategy="analysis_only")
+    records = _exchange_records(data)
+    source = data.get("source") or {}
+    export_id = str(data["export_id"])
+    imported_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    local_context = await load_source_context(conn)
+    counts: dict[str, int] = {}
+    analysis_ids: list[str] = []
+    header = copy.deepcopy(data)
+    header.pop("sections", None)
+
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('hmx_import'))")
+        batch_id = await conn.fetchval(
+            "INSERT INTO hmx_analysis_batches "
+            "(export_id, export_intent, source, privacy, envelope) "
+            "VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb) RETURNING id",
+            export_id,
+            forecast.intent,
+            json.dumps(source),
+            json.dumps(data.get("privacy") or {}),
+            json.dumps(header),
+        )
+        for section, source_ref, record in records:
+            prepared = _with_isolated_provenance(
+                record,
+                source_ref=source_ref or section,
+                mode="analysis_only",
+                intent=forecast.intent,
+                source=source,
+                export_id=export_id,
+                local_instance_id=local_context["instance_id"],
+                imported_at=imported_at,
+            )
+            analysis_id = await conn.fetchval(
+                "INSERT INTO hmx_analysis_records "
+                "(batch_id, section, source_ref, record, metadata) "
+                "VALUES ($1, $2, $3, $4::jsonb, $5::jsonb) RETURNING id",
+                batch_id,
+                section,
+                source_ref,
+                json.dumps(prepared),
+                json.dumps(
+                    {
+                        "conflicts": [
+                            conflict
+                            for conflict in forecast.conflicts
+                            if conflict.get("ref") == source_ref
+                        ]
+                    }
+                ),
+            )
+            analysis_ids.append(str(analysis_id))
+            counts[section] = counts.get(section, 0) + 1
+
+    return HmxAnalysisResult(
+        export_id=export_id,
+        intent=forecast.intent,
+        strategy="analysis_only",
+        batch_id=str(batch_id),
+        loaded=counts,
+        analysis_ids=tuple(analysis_ids),
+        warnings=forecast.warnings,
     )
 
 
@@ -1314,7 +1602,9 @@ async def import_hmx(
     data: dict[str, Any],
     *,
     strategy: str = "additive",
-) -> HmxImportResult:
+    initial_ref_map: dict[str, str] | None = None,
+    reviewed: bool = False,
+) -> HmxImportResult | HmxStagingResult | HmxAnalysisResult:
     """Import HMX with the additive Slice 2 strategy in one transaction.
 
     Deliberative, analysis-only, and authoritative storage arrive in later
@@ -1326,10 +1616,14 @@ async def import_hmx(
         raise HmxSchemaError("HMX input must be a JSON object")
     _validate_import_header(data)
     intent = validate_intent(str(data["export_intent"]))
+    if strategy == "deliberative":
+        return await stage_hmx(conn, data)
+    if strategy == "analysis_only":
+        return await load_analysis_hmx(conn, data)
     if strategy != "additive":
         raise HmxPolicyError(
-            f"Slice 2 supports strategy='additive'; got {strategy!r}. "
-            "Use a later deliberative/analysis import path for foreign protected state."
+            f"unsupported import strategy {strategy!r}; authoritative replacement "
+            "arrives with the Protected Replacement Protocol"
         )
 
     sections = _import_sections(data)
@@ -1475,10 +1769,11 @@ async def import_hmx(
         target_state = _coerce_json(
             await conn.fetchval("SELECT hexis_instance_is_empty()")
         )
-        if protected_present and (
-            intent not in ("port", "duplicate")
-            or not target_state.get("is_empty", False)
-        ):
+        protected_direct = intent in ("port", "duplicate") and target_state.get(
+            "is_empty", False
+        )
+        protected_reviewed = reviewed and target_state.get("is_empty", False)
+        if protected_present and not (protected_direct or protected_reviewed):
             reason = (
                 "protected sections may be imported directly only into an empty target "
                 "with export_intent port or duplicate; use deliberative handling or the "
@@ -1496,6 +1791,7 @@ async def import_hmx(
         if (
             intent in ("port", "duplicate")
             and not target_state.get("is_empty", False)
+            and not reviewed
             and source_lineage
             and source_lineage != local_lineage
         ):
@@ -1519,7 +1815,8 @@ async def import_hmx(
                 for error in memory_result["errors"]
             )
 
-        ref_map = dict(memory_result.get("ref_map") or {})
+        ref_map = dict(initial_ref_map or {})
+        ref_map.update(memory_result.get("ref_map") or {})
         goal_result = _coerce_json(
             await conn.fetchval(
                 "SELECT hmx_remap_goal_references($1::jsonb, $2::jsonb)",
@@ -1617,4 +1914,302 @@ async def import_hmx(
         ref_map=ref_map,
         conflicts=conflicts,
         warnings=tuple(warnings),
+    )
+
+
+def _review_document(
+    envelope: Any, section: str, record: dict[str, Any]
+) -> dict[str, Any]:
+    document = copy.deepcopy(_coerce_json(envelope) or {})
+    document["sections"] = {
+        section: (
+            record
+            if section in {"narrative", "config", "in_flight_work", "audit_records"}
+            else [record]
+        )
+    }
+    return document
+
+
+async def pending_hmx_reviews(conn) -> dict[str, Any]:
+    return _coerce_json(await conn.fetchval("SELECT hmx_pending_review()"))
+
+
+async def accept_staged_import(
+    conn, staging_id: str, *, rationale: str | None = None
+) -> HmxReviewResult:
+    """Accept one reviewed record, preserving the batch reference map."""
+
+    unsupported = {"raw_units", "config", "in_flight_work", "audit_records"}
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT s.*, b.envelope, b.export_intent FROM hmx_import_staging s "
+            "JOIN hmx_import_batches b ON b.id=s.batch_id "
+            "WHERE s.id=$1::uuid FOR UPDATE OF s",
+            staging_id,
+        )
+        if row is None:
+            raise HmxPolicyError(f"staged import not found: {staging_id}")
+        if row["status"] != "pending":
+            raise HmxPolicyError(
+                f"staged import {staging_id} is already {row['status']}"
+            )
+        section = str(row["section"])
+        if section in unsupported or section not in set(ALL_SECTIONS):
+            raise HmxPolicyError(
+                f"staged section {section!r} cannot enter active state in this HMX slice"
+            )
+
+        record = copy.deepcopy(_coerce_json(row["record"]))
+        provenance = copy.deepcopy(record.get("provenance") or {})
+        provenance["acquisition_mode"] = (
+            "derived_from_import"
+            if row["modification_kind"]
+            else "imported_and_accepted"
+        )
+        record["provenance"] = provenance
+        document = _review_document(row["envelope"], section, record)
+        ref_rows = await conn.fetch(
+            "SELECT source_ref, local_ref FROM hmx_import_ref_map WHERE batch_id=$1",
+            row["batch_id"],
+        )
+        ref_map = {str(item["source_ref"]): str(item["local_ref"]) for item in ref_rows}
+        if section == "relationships":
+            missing = [
+                ref
+                for ref in (record.get("source_ref"), record.get("target_ref"))
+                if ref and ref not in ref_map
+            ]
+            if missing:
+                raise HmxPolicyError(
+                    "unresolved_dependencies: accept referenced records first: "
+                    + ", ".join(missing)
+                )
+
+        result = await import_hmx(
+            conn,
+            document,
+            strategy="additive",
+            initial_ref_map=ref_map,
+            reviewed=True,
+        )
+        assert isinstance(result, HmxImportResult)
+        for source_ref, local_ref in result.ref_map.items():
+            await conn.execute(
+                "INSERT INTO hmx_import_ref_map (batch_id, source_ref, local_ref) "
+                "VALUES ($1, $2, $3) ON CONFLICT (batch_id, source_ref) "
+                "DO UPDATE SET local_ref=EXCLUDED.local_ref",
+                row["batch_id"],
+                source_ref,
+                local_ref,
+            )
+        local_ref = result.ref_map.get(str(row["source_ref"]))
+        await conn.execute(
+            "UPDATE hmx_import_staging SET status='accepted', local_ref=$2, "
+            "decision_rationale=$3, reviewed_at=CURRENT_TIMESTAMP, "
+            "updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid",
+            staging_id,
+            local_ref,
+            rationale,
+        )
+        await conn.execute(
+            "UPDATE hmx_import_batches SET status=CASE WHEN EXISTS "
+            "(SELECT 1 FROM hmx_import_staging WHERE batch_id=$1 AND status='pending') "
+            "THEN 'pending' ELSE 'reviewed' END, updated_at=CURRENT_TIMESTAMP WHERE id=$1",
+            row["batch_id"],
+        )
+    return HmxReviewResult(
+        staging_id=staging_id,
+        decision="accepted",
+        section=section,
+        local_ref=local_ref,
+        warnings=result.warnings,
+    )
+
+
+async def reject_staged_import(
+    conn, staging_id: str, *, rationale: str
+) -> HmxReviewResult:
+    if not rationale.strip():
+        raise HmxPolicyError("rejection rationale is required")
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "UPDATE hmx_import_staging SET status='rejected', decision_rationale=$2, "
+            "reviewed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP "
+            "WHERE id=$1::uuid AND status='pending' RETURNING section, batch_id",
+            staging_id,
+            rationale,
+        )
+        if row is None:
+            raise HmxPolicyError(f"pending staged import not found: {staging_id}")
+        await conn.execute(
+            "UPDATE hmx_import_batches SET status=CASE WHEN EXISTS "
+            "(SELECT 1 FROM hmx_import_staging WHERE batch_id=$1 AND status='pending') "
+            "THEN 'pending' ELSE 'reviewed' END, updated_at=CURRENT_TIMESTAMP WHERE id=$1",
+            row["batch_id"],
+        )
+    return HmxReviewResult(
+        staging_id=staging_id, decision="rejected", section=row["section"]
+    )
+
+
+async def modify_staged_import(
+    conn,
+    staging_id: str,
+    changes: dict[str, Any],
+    *,
+    modification_kind: str,
+    rationale: str,
+) -> HmxReviewResult:
+    from core.digest import content_hash_v1
+
+    if modification_kind not in _KNOWN_MODIFICATION_KINDS:
+        raise HmxPolicyError(f"unknown modification_kind: {modification_kind!r}")
+    if not changes:
+        raise HmxPolicyError("at least one record change is required")
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT s.*, b.envelope FROM hmx_import_staging s "
+            "JOIN hmx_import_batches b ON b.id=s.batch_id "
+            "WHERE s.id=$1::uuid FOR UPDATE OF s",
+            staging_id,
+        )
+        if row is None or row["status"] != "pending":
+            raise HmxPolicyError(f"pending staged import not found: {staging_id}")
+        record = copy.deepcopy(_coerce_json(row["record"]))
+        previous_hash = record.get("content_hash_v1")
+        record.update(copy.deepcopy(changes))
+        if "content" in changes:
+            record["content_hash_v1"] = content_hash_v1(str(record["content"]))
+        provenance = copy.deepcopy(record.get("provenance") or {})
+        chain = list(provenance.get("modification_chain") or [])
+        modification = {
+            "modified_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "modification_kind": modification_kind,
+            "rationale": rationale,
+        }
+        if previous_hash:
+            modification["previous_content_hash_v1"] = previous_hash
+        if record.get("content_hash_v1"):
+            modification["new_content_hash_v1"] = record["content_hash_v1"]
+        chain.append(modification)
+        provenance["modification_chain"] = chain
+        provenance["acquisition_mode"] = "imported_staged"
+        record["provenance"] = provenance
+        review_document = _review_document(row["envelope"], row["section"], record)
+        validate_hmx_document(
+            _document_probe(review_document, review_document["sections"])
+        )
+        await conn.execute(
+            "UPDATE hmx_import_staging SET record=$2::jsonb, modification_kind=$3, "
+            "decision_rationale=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid",
+            staging_id,
+            json.dumps(record),
+            modification_kind,
+            rationale,
+        )
+    return HmxReviewResult(
+        staging_id=staging_id, decision="modified", section=row["section"]
+    )
+
+
+async def quote_staged_import(
+    conn, staging_id: str, *, rationale: str
+) -> HmxReviewResult:
+    """Retain a staged record as archived foreign context, never active recall."""
+
+    if not rationale.strip():
+        raise HmxPolicyError("quote rationale is required")
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT s.*, b.envelope FROM hmx_import_staging s "
+            "JOIN hmx_import_batches b ON b.id=s.batch_id "
+            "WHERE s.id=$1::uuid FOR UPDATE OF s",
+            staging_id,
+        )
+        if row is None or row["status"] != "pending":
+            raise HmxPolicyError(f"pending staged import not found: {staging_id}")
+        record = _coerce_json(row["record"])
+        original_content = str(
+            record.get("content")
+            or record.get("title")
+            or record.get("summary")
+            or json.dumps(record, sort_keys=True)
+        )
+        content = (
+            f"Quoted HMX {row['section']} from {row['source_ref']}:\n{original_content}"
+        )
+        quote = {
+            "ref": str(row["source_ref"] or f"quote:{staging_id}"),
+            "type": "semantic",
+            "status": "archived",
+            "content": content,
+            "importance": float(record.get("importance", 0.3)),
+            "trust_level": float(record.get("trust_level", 0.5)),
+            "metadata": {
+                "hmx": {
+                    "quoted": True,
+                    "source_section": row["section"],
+                    "staging_id": staging_id,
+                    "rationale": rationale,
+                }
+            },
+            "provenance": copy.deepcopy(record.get("provenance") or {}),
+        }
+        quote["provenance"]["acquisition_mode"] = "imported_and_archived"
+        document = _review_document(row["envelope"], "memories", quote)
+        result = await import_hmx(conn, document, strategy="additive", reviewed=True)
+        assert isinstance(result, HmxImportResult)
+        local_ref = result.ref_map.get(quote["ref"])
+        await conn.execute(
+            "UPDATE hmx_import_staging SET status='quoted', local_ref=$2, "
+            "decision_rationale=$3, reviewed_at=CURRENT_TIMESTAMP, "
+            "updated_at=CURRENT_TIMESTAMP WHERE id=$1::uuid",
+            staging_id,
+            local_ref,
+            rationale,
+        )
+        await conn.execute(
+            "UPDATE hmx_import_batches SET status=CASE WHEN EXISTS "
+            "(SELECT 1 FROM hmx_import_staging WHERE batch_id=$1 AND status='pending') "
+            "THEN 'pending' ELSE 'reviewed' END, updated_at=CURRENT_TIMESTAMP WHERE id=$1",
+            row["batch_id"],
+        )
+    return HmxReviewResult(
+        staging_id=staging_id,
+        decision="quoted",
+        section=row["section"],
+        local_ref=local_ref,
+        warnings=result.warnings,
+    )
+
+
+async def promote_analysis_to_staged(conn, analysis_id: str, *, rationale: str) -> str:
+    section = await conn.fetchval(
+        "SELECT section FROM hmx_analysis_records WHERE id=$1::uuid", analysis_id
+    )
+    if section is None:
+        raise HmxPolicyError(f"analysis record not found: {analysis_id}")
+    promotable = set(ALL_SECTIONS) - {
+        "raw_units",
+        "config",
+        "in_flight_work",
+        "audit_records",
+    }
+    if section not in promotable:
+        raise HmxPolicyError(
+            f"analysis section {section!r} cannot be promoted in this HMX slice"
+        )
+    return str(
+        await conn.fetchval(
+            "SELECT hmx_promote_to_staged($1::uuid, $2)", analysis_id, rationale
+        )
+    )
+
+
+async def demote_staged_to_analysis(conn, staging_id: str, *, rationale: str) -> str:
+    return str(
+        await conn.fetchval(
+            "SELECT hmx_demote_to_analysis($1::uuid, $2)", staging_id, rationale
+        )
     )

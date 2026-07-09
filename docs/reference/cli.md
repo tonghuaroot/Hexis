@@ -60,15 +60,25 @@ Complete reference for the `hexis` CLI. Install via `pip install hexis`.
 | `hexis export --intent INTENT [--output FILE] [--format json\|jsonl]` | Export an HMX memory exchange |
 | `hexis import FILE --dry-run [--strategy STRATEGY] [--json]` | Validate and forecast an HMX import without mutation |
 | `hexis import FILE --strategy additive --confirm-intent INTENT` | Run a confirmed additive HMX import |
+| `hexis import-review list [--json]` | List records waiting for deliberative review |
+| `hexis import-review accept ID [--rationale TEXT]` | Admit a staged record when policy permits |
+| `hexis import-review reject ID --rationale TEXT` | Reject a staged record without deleting its review history |
+| `hexis import-review modify ID --changes JSON --modification-kind KIND --rationale TEXT` | Revise a staged record with provenance |
+| `hexis import-review quote ID --rationale TEXT` | Retain foreign material as archived quoted context |
+| `hexis import-review promote ID --rationale TEXT` | Copy an analysis record into staging |
+| `hexis import-review demote ID --rationale TEXT` | Move a pending staged record into isolated analysis storage |
 
 HMX intents are `port`, `duplicate`, `telepathy`, and `analysis`. Exchange files
 contain sensitive data. File exports use mode `0600` and refuse to overwrite an
 existing path unless `--overwrite` is explicit. Import reads JSON or JSONL and
 requires `--confirm-intent` to exactly match the file before any mutation.
 
-The default strategy is derived from the file intent. Deliberative,
-analysis-only, and authoritative storage are reported by dry-run but are not yet
-executable; use `--strategy additive` only when direct acceptance is intended.
+The default strategy is derived from the file intent. Telepathy imports enter
+deliberative staging; analysis imports enter physically isolated analysis-only
+storage. Neither affects ordinary recall, embeddings, drives, emotions, or
+activation until an explicit review accepts a record. Authoritative replacement
+is not yet executable; use `--strategy additive` only when direct acceptance is
+intended.
 Protected sections can be omitted with `--skip-identity`, `--skip-worldview`, or
 `--skip-narrative`. Additive protected-state import remains restricted to
 port/duplicate exchanges targeting an empty instance.

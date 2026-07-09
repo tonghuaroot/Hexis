@@ -117,6 +117,20 @@ async def run_agentic_heartbeat(
     - stopped_reason: str
     - has_backlog_tasks: bool
     """
+    try:
+        pending_review = await conn.fetchval("SELECT hmx_pending_review_summary()")
+        if isinstance(pending_review, str):
+            pending_review = json.loads(pending_review)
+        if not isinstance(pending_review, dict):
+            raise TypeError("pending HMX review summary was not an object")
+        context = dict(context)
+        context["pending_import_review"] = pending_review or {
+            "count": 0,
+            "by_section": {},
+        }
+    except Exception as exc:
+        logger.warning("Could not load pending HMX review summary: %s", exc)
+
     # Check if backlog has actionable tasks (gates resources + permissions)
     has_tasks = _has_backlog_tasks(context)
     if has_tasks:
