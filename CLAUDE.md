@@ -75,9 +75,9 @@ hexis/
 │   ├── core/               # Core API tests
 │   ├── services/           # Service-level tests
 │   └── cli/                # CLI smoke tests
-├── docs/
-│   ├── architecture.md     # Design/architecture consolidation
-│   └── PHILOSOPHY.md       # Philosophical framework
+├── docs/                   # index.md + concepts/ guides/ reference/ operations/ …
+│   ├── philosophy/PHILOSOPHY.md   # Philosophical framework
+│   └── memory_retention_design.md # Compression-native memory substrate design
 └── docker-compose.yml      # Local stack (Postgres + workers; embeddings via host Ollama)
 ```
 
@@ -125,7 +125,10 @@ docker compose up -d
 # Start services (active - adds heartbeat_worker + maintenance_worker)
 docker compose --profile active up -d
 
-# Reset DB volume (required after schema changes)
+# Apply a schema change WITHOUT losing data (add db/migrations/NNNN_*.sql first)
+hexis migrate            # or `hexis upgrade` to also refresh images/code
+
+# Wipe the DB volume — deliberate clean slate only (loses all data)
 docker compose down -v && docker compose up -d
 
 # Configure agent (gates heartbeats until done)
@@ -211,29 +214,40 @@ The heartbeat is the agent's conscious cognitive loop:
 Always activate the venv before running any Python, pytest, or hexis CLI commands:
 
 ```bash
-source /Volumes/SB-XTM5/git/Hexis/.venv/bin/activate
+source /Users/eric/hexis/.venv/bin/activate
 ```
 
 Prefix all shell commands with this activation. Example:
 
 ```bash
-source /Volumes/SB-XTM5/git/Hexis/.venv/bin/activate && pytest tests -q
+source /Users/eric/hexis/.venv/bin/activate && pytest tests -q
 ```
 
-### Bouncing the Database (Applying Schema Changes)
+### Applying Schema Changes — migrations vs. a full bounce
 
-SQL schema files (`db/*.sql`) are **baked into the Docker image at build time** (not bind-mounted). Editing SQL files on disk does NOT automatically take effect in the running container.
+`db/*.sql` is the **baseline** (baked into the image, applied by Postgres only on a
+fresh/empty volume). To evolve an existing database **without losing data**, add a
+forward delta — do NOT reach for `down -v`.
 
-To apply schema changes, you must rebuild the image and recreate the volume:
+**The normal path (keeps data):**
+1. Write the change as `db/migrations/NNNN_slug.sql` (additive + idempotent — see
+   `db/migrations/README.md`; `-- migrate:no-transaction` for `ALTER TYPE ... ADD VALUE`).
+2. Optionally mirror it into the baseline `db/*.sql` for greenfield clarity.
+3. Apply it: **`hexis migrate`** (or `hexis upgrade` to also refresh images/code).
+   Migrations also auto-apply on `hexis up` and on worker/API startup (advisory-locked).
+
+Back up / restore data with **`hexis backup`** and **`hexis restore <file>`** (AGE-aware).
+
+**A full bounce (WIPES data — only for a deliberate clean slate, or when you edit the
+baseline in a non-idempotent way during early dev):**
 
 ```bash
-source /Volumes/SB-XTM5/git/Hexis/.venv/bin/activate && docker-compose down -v && docker-compose build db && docker-compose up -d
+source /Users/eric/hexis/.venv/bin/activate && docker-compose down -v && docker-compose build db && docker-compose up -d
 ```
 
-Breaking this down:
-1. `docker-compose down -v` -- stops containers and **removes the data volume** (required for fresh schema init)
-2. `docker-compose build db` -- rebuilds the `db` service image with the updated SQL files
-3. `docker-compose up -d` -- starts containers with the new image
+`down -v` removes the data volume (all memories/identity/goals) and re-inits from
+`db/*.sql`; `hexis reset` wraps this same flow. Reserve it for when you *want* an
+empty brain — schema changes to a live agent go through `hexis migrate`.
 
 **Important**: The docker-compose service is named `db`, but the container is named `hexis_brain`. Always use the service name (`db`) with docker-compose commands (e.g., `docker-compose build db`), but use the container name with `docker exec` (e.g., `docker exec hexis_brain psql ...`).
 

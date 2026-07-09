@@ -594,6 +594,15 @@ async def _amain(mode: str, instance: str | None = None) -> None:
 
     # Shared resources for the heartbeat consumer
     dsn = db_dsn_from_env(instance)
+    # Bring the schema up to date before doing anything (advisory-locked, idempotent,
+    # no-op if already current). Never wipes data.
+    try:
+        from core.agent_api import apply_migrations
+        applied = await apply_migrations(dsn)
+        if applied:
+            logger.info("applied %d schema migration(s) on startup: %s", len(applied), applied)
+    except Exception as exc:
+        logger.warning("startup migration check failed (continuing): %s", exc)
     consumer_pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
     from core.usage import set_usage_pool
     set_usage_pool(consumer_pool)

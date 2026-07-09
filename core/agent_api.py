@@ -152,16 +152,39 @@ async def get_init_defaults(dsn: str | None = None, wait_seconds: int | None = N
         await conn.close()
 
 
+async def apply_migrations(dsn: str | None = None, wait_seconds: int | None = None) -> list[str]:
+    """Apply any pending schema migrations to the active database (idempotent,
+    advisory-locked, non-destructive). Returns the versions applied this call."""
+    from core.migrations import apply_pending_migrations
+
+    dsn = dsn or db_dsn_from_env()
+    conn = await _connect_with_retry(dsn, wait_seconds=_resolve_wait_seconds(wait_seconds))
+    try:
+        return await apply_pending_migrations(conn)
+    finally:
+        await conn.close()
+
+
 async def ensure_schema_has_config(dsn: str | None = None, wait_seconds: int | None = None) -> None:
     dsn = dsn or db_dsn_from_env()
     conn = await _connect_with_retry(dsn, wait_seconds=_resolve_wait_seconds(wait_seconds))
     try:
         ok = await conn.fetchval("SELECT to_regclass('public.config') IS NOT NULL")
+        if ok:
+            return
+        # Try to bring the schema current before giving up — a change may just
+        # need migrating in, not a wipe.
+        try:
+            from core.migrations import apply_pending_migrations
+            await apply_pending_migrations(conn)
+            ok = await conn.fetchval("SELECT to_regclass('public.config') IS NOT NULL")
+        except Exception:
+            ok = False
         if not ok:
             raise RuntimeError(
-                "Database schema is missing `config` table. "
-                "If you just updated `db/*.sql`, reset the DB volume and retry: "
-                "`docker compose down -v && docker compose up -d`."
+                "Database schema is missing the `config` table. "
+                "Bring it up to date without losing data: `hexis migrate` "
+                "(or `hexis upgrade`). Use `hexis reset` only to deliberately wipe."
             )
     finally:
         await conn.close()

@@ -191,6 +191,10 @@ _HELP_GROUPS = [
     ("Stack", [
         ("up", "Start the stack"),
         ("down", "Stop the stack"),
+        ("upgrade", "Update + migrate the schema, keeping your data"),
+        ("migrate", "Apply pending schema migrations (no data loss)"),
+        ("backup", "Back up the database to a file"),
+        ("restore", "Restore the database from a backup file"),
         ("reset", "Wipe the DB and re-initialize"),
         ("ps", "List services"),
         ("logs", "Show logs"),
@@ -387,6 +391,23 @@ def build_parser() -> argparse.ArgumentParser:
     reset = sub.add_parser("reset", help="Wipe the DB and re-initialize")
     reset.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
     reset.set_defaults(func="reset")
+
+    migrate = sub.add_parser("migrate", parents=[_db], help="Apply pending schema migrations (no data loss)")
+    migrate.add_argument("--status", action="store_true", help="List applied/pending migrations without applying")
+    migrate.set_defaults(func="migrate")
+
+    upgrade = sub.add_parser("upgrade", parents=[_db], help="Update the stack and migrate the schema, keeping your data")
+    upgrade.set_defaults(func="upgrade")
+
+    backup_p = sub.add_parser("backup", parents=[_db], help="Back up the database to a file")
+    backup_p.add_argument("--output", "-o", help="Output directory (default ~/.hexis/backups)")
+    backup_p.add_argument("--label", help="Optional label added to the filename")
+    backup_p.set_defaults(func="backup")
+
+    restore_p = sub.add_parser("restore", parents=[_db], help="Restore the database from a backup file")
+    restore_p.add_argument("path", help="Path to a .dump backup file")
+    restore_p.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
+    restore_p.set_defaults(func="restore")
 
     status = sub.add_parser("status", parents=[_db], help="Show agent status")
     status.add_argument("--json", action="store_true", help="Output JSON")
@@ -1642,7 +1663,7 @@ async def _channels_status(dsn: str, as_json: bool) -> int:
         if "channel_sessions" in str(e):
             _print_err(
                 "Channel tables not found — your schema is out of date. "
-                "Run `hexis reset` to rebuild it (it will confirm before wiping data)."
+                "Run `hexis migrate` (or `hexis upgrade`) to bring it up to date without losing data."
             )
         else:
             _print_err(f"Error: {e}")
@@ -1702,7 +1723,7 @@ async def _retention_status(dsn: str, as_json: bool) -> int:
         if "does not exist" in str(e) or "retention_status" in str(e):
             _print_err(
                 "Retention functions not found — your schema is out of date. "
-                "Run `hexis reset` to rebuild it (it will confirm before wiping data)."
+                "Run `hexis migrate` (or `hexis upgrade`) to bring it up to date without losing data."
             )
         else:
             _print_err(f"Error: {e}")
@@ -1811,6 +1832,76 @@ async def _retention_disable(dsn: str) -> int:
         return 1
     finally:
         await pool.close()
+
+
+async def _migrate(dsn: str, status_only: bool) -> int:
+    """Apply pending schema migrations to the active database (never wipes data)."""
+    import asyncpg
+
+    from core.migrations import apply_pending_migrations, migration_status
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            if status_only:
+                st = await migration_status(conn)
+                for v in st["applied"]:
+                    sys.stdout.write(f"  ✓ {v}\n")
+                for v in st["pending"]:
+                    sys.stdout.write(f"  • {v}  (pending)\n")
+                if not st["applied"] and not st["pending"]:
+                    sys.stdout.write("No migrations found.\n")
+                elif not st["pending"]:
+                    sys.stdout.write("Schema is up to date.\n")
+                return 0
+            applied = await apply_pending_migrations(conn)
+            if applied:
+                sys.stdout.write("Applied migrations (no data was lost):\n")
+                for v in applied:
+                    sys.stdout.write(f"  ✓ {v}\n")
+            else:
+                sys.stdout.write("Schema already up to date — nothing to migrate.\n")
+            return 0
+    except Exception as e:
+        _print_err(f"Migration failed: {e}")
+        return 1
+    finally:
+        await pool.close()
+
+
+def _do_backup(dsn: str, out_dir: str | None, label: str | None) -> int:
+    from core.backup_restore import backup
+    try:
+        path = backup(dsn, out_dir, label)
+        sys.stdout.write(f"Backup written: {path}\n")
+        return 0
+    except Exception as e:
+        _print_err(f"Backup failed: {e}")
+        return 1
+
+
+def _do_restore(dsn: str, path: str, yes: bool) -> int:
+    from core.backup_restore import restore
+    if not yes:
+        from apps.cli_theme import console
+        console.print(
+            "[bold red]WARNING:[/bold red] Restore REPLACES this database (all memories, "
+            "identity, goals) with the backup. Stop the workers first (`hexis stop`)."
+        )
+        try:
+            if input("Type 'restore' to confirm: ").strip().lower() != "restore":
+                console.print("[dim]Aborted.[/dim]")
+                return 1
+        except (KeyboardInterrupt, EOFError):
+            print()
+            return 1
+    try:
+        restore(path, dsn)
+        sys.stdout.write("Restore complete.\n")
+        return 0
+    except Exception as e:
+        _print_err(f"Restore failed: {e}")
+        return 1
 
 
 async def _channels_setup(dsn: str, channel_type: str) -> int:
@@ -2758,7 +2849,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
         dsn = _get_dsn(args)
         return asyncio.run(_characters_export(dsn, args.name, args.output))
 
-    docker_cmds = {"up", "down", "ps", "logs", "start", "stop", "reset"}
+    docker_cmds = {"up", "down", "ps", "logs", "start", "stop", "reset", "upgrade"}
     docker_bin: str | None = None
     compose_cmd: list[str] | None = None
     if func in docker_cmds:
@@ -2795,6 +2886,16 @@ def _dispatch(argv: list[str] | None = None) -> int:
             try:
                 dsn = db_dsn_from_env()
                 asyncio.run(_check_embedding_health(dsn))
+            except Exception:
+                pass  # never block startup
+
+            # Bring the schema up to date without touching data (advisory-locked,
+            # no-op if already current). The workers/API also run this on startup.
+            try:
+                from core.agent_api import apply_migrations
+                applied = asyncio.run(apply_migrations(db_dsn_from_env()))
+                if applied:
+                    console.print(f"[ok]Applied {len(applied)} schema migration(s) — no data lost.[/ok]")
             except Exception:
                 pass  # never block startup
 
@@ -2838,6 +2939,23 @@ def _dispatch(argv: list[str] | None = None) -> int:
         if rc == 0:
             console.print("\n[ok]Database reset complete.[/ok] Run [accent]hexis init[/accent] to reconfigure the agent.\n")
         return rc
+    if func == "upgrade":
+        # The non-destructive counterpart to `reset`: refresh images + code and
+        # migrate the schema, WITHOUT removing the data volume.
+        from apps.cli_theme import console
+        console.print("[accent]Updating the stack (your data is preserved)...[/accent]")
+        if is_source:
+            run_compose(compose_cmd or [], compose_file, stack_root, ["build"], env_file)
+        else:
+            run_compose(compose_cmd or [], compose_file, stack_root, ["pull"], env_file)
+        rc = run_compose(compose_cmd or [], compose_file, stack_root, ["up", "-d"], env_file)
+        if rc != 0:
+            return rc
+        console.print("[accent]Applying schema migrations...[/accent]")
+        mrc = asyncio.run(_migrate(_get_dsn(args), status_only=False))
+        if mrc == 0:
+            console.print("\n[ok]Upgrade complete — data preserved.[/ok]\n")
+        return mrc
     if func == "ps":
         return run_compose(compose_cmd or [], compose_file, stack_root, ["ps"], env_file)
     if func == "logs":
@@ -3018,6 +3136,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return asyncio.run(_retention_enable(_get_dsn(args), args.yes))
     if func == "retention_disable":
         return asyncio.run(_retention_disable(_get_dsn(args)))
+    if func == "migrate":
+        return asyncio.run(_migrate(_get_dsn(args), args.status))
+    if func == "backup":
+        return _do_backup(_get_dsn(args), args.output, args.label)
+    if func == "restore":
+        return _do_restore(_get_dsn(args), args.path, args.yes)
     if func == "config":
         # Bare `config` shows the grouped table like `config show` (not raw JSON),
         # matching how `goals`/`schedule`/`channels` default to their list view.

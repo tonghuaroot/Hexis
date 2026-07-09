@@ -53,6 +53,14 @@ def _dsn() -> str:
 async def lifespan(app: FastAPI):
     global _pool
     dsn = _dsn()
+    # Bring the schema up to date on startup (advisory-locked, idempotent, no data loss).
+    try:
+        from core.agent_api import apply_migrations
+        applied = await apply_migrations(dsn)
+        if applied:
+            logger.info("Applied %d schema migration(s) on startup: %s", len(applied), applied)
+    except Exception as exc:
+        logger.warning("Startup migration check failed (continuing): %s", exc)
     _min, _max = pool_sizes_from_env(2, 10)
     _pool = await asyncpg.create_pool(dsn, min_size=_min, max_size=_max)
     from core.usage import set_usage_pool
