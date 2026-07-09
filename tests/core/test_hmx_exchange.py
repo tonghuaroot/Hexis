@@ -18,8 +18,12 @@ from core.memory_exchange import (
     HmxSchemaError,
     build_envelope,
     default_import_strategy,
+    dry_run_hmx,
+    export_hmx,
     import_hmx,
+    iter_hmx_jsonl,
     new_export_id,
+    parse_hmx_jsonl,
     resolve_export_sections,
     validate_hmx_document,
     validate_intent,
@@ -254,6 +258,50 @@ class TestCanonicalSchema:
         validate_hmx_document(env)
 
 
+class TestJsonlTransport:
+    def _envelope(self):
+        plan = resolve_export_sections(
+            "analysis", include_raw_units=True, include_config=True
+        )
+        env = build_envelope(
+            intent="analysis",
+            plan=plan,
+            instance_id="hexis_test",
+            schema_version="0008_hmx_protected_import",
+            embedding_model="embeddinggemma:300m",
+            embedding_dimension=768,
+            lineage_id="11111111-2222-3333-4444-555555555555",
+            relationship_edge_types=["SUPPORTS"],
+        )
+        env["sections"] = {
+            "memories": [],
+            "relationships": [],
+            "raw_units": [],
+            "config": {"agent.name": "test"},
+            "future_section": {"preserve": True},
+        }
+        return env
+
+    def test_jsonl_round_trip_preserves_empty_config_and_future_sections(self):
+        env = self._envelope()
+        restored = parse_hmx_jsonl(iter_hmx_jsonl(env))
+        assert restored == env
+        validate_hmx_document(restored)
+
+    def test_jsonl_requires_envelope_first(self):
+        with pytest.raises(HmxSchemaError, match="first record must be envelope"):
+            parse_hmx_jsonl(['{"record_type":"memory","data":{}}'])
+
+    def test_jsonl_reports_malformed_line(self):
+        with pytest.raises(HmxSchemaError, match="line 2"):
+            parse_hmx_jsonl(
+                [
+                    '{"record_type":"envelope","data":{}}',
+                    "not-json",
+                ]
+            )
+
+
 class TestImportPreflight:
     def _envelope(self):
         plan = resolve_export_sections("telepathy")
@@ -280,3 +328,20 @@ class TestImportPreflight:
         env = self._envelope()
         with pytest.raises(HmxPolicyError, match="supports strategy='additive'"):
             await import_hmx(None, env, strategy="analysis_only")
+
+    @pytest.mark.asyncio
+    async def test_malformed_sections_fail_before_database_access(self):
+        env = self._envelope()
+        env["sections"] = []
+        with pytest.raises(HmxSchemaError, match=r"\$\.sections"):
+            await dry_run_hmx(None, env)
+
+    @pytest.mark.asyncio
+    async def test_strict_redaction_rejects_raw_units_before_database_access(self):
+        with pytest.raises(HmxPolicyError, match="strict redaction excludes raw"):
+            await export_hmx(
+                None,
+                intent="analysis",
+                include_raw_units=True,
+                redaction_policy="strict",
+            )

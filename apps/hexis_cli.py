@@ -210,6 +210,8 @@ _HELP_GROUPS = [
         ("recall", "Search memories by semantic query"),
         ("goals", "Manage agent goals"),
         ("ingest", "Ingest documents and knowledge"),
+        ("export", "Export memory as an HMX exchange"),
+        ("import", "Inspect or import an HMX exchange"),
         ("retention", "Show memory-retention status"),
         ("schedule", "Manage scheduled tasks"),
     ]),
@@ -581,6 +583,76 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Filter by memory type")
     recall.add_argument("--json", action="store_true", help="Output JSON")
     recall.set_defaults(func="recall")
+
+    # -- Hexis Memory Exchange --
+    hmx_export = sub.add_parser(
+        "export", parents=[_db], help="Export memory as an HMX exchange"
+    )
+    hmx_export.add_argument(
+        "--intent",
+        required=True,
+        choices=("port", "duplicate", "telepathy", "analysis"),
+    )
+    hmx_export.add_argument(
+        "--output", "-o", default=None, help="Output file; defaults to stdout"
+    )
+    hmx_export.add_argument("--format", choices=("json", "jsonl"), default="json")
+    hmx_export.add_argument("--types", default=None, help="Comma-separated memory types")
+    hmx_export.add_argument(
+        "--since", default=None, help="ISO 8601 lower bound for memory creation"
+    )
+    hmx_export.add_argument(
+        "--until", default=None, help="ISO 8601 upper bound for memory creation"
+    )
+    hmx_export.add_argument(
+        "--include-protected",
+        default=None,
+        help="Comma-separated protected sections",
+    )
+    hmx_export.add_argument(
+        "--include-raw", action="store_true", help="Include sensitive raw source units"
+    )
+    hmx_export.add_argument(
+        "--include-config", action="store_true", help="Include non-secret configuration"
+    )
+    hmx_export.add_argument(
+        "--include-in-flight-work", action="store_true", default=None
+    )
+    hmx_export.add_argument(
+        "--include-audit-records", action="store_true", default=None
+    )
+    hmx_export.add_argument(
+        "--redaction",
+        choices=("none", "basic", "strict", "custom"),
+        default="none",
+    )
+    hmx_export.add_argument(
+        "--overwrite", action="store_true", help="Replace an existing output file"
+    )
+    hmx_export.set_defaults(func="hmx_export")
+
+    hmx_import = sub.add_parser(
+        "import", parents=[_db], help="Inspect or import an HMX exchange"
+    )
+    hmx_import.add_argument("path", help="HMX JSON/JSONL file, or - for stdin")
+    hmx_import.add_argument(
+        "--strategy",
+        choices=("additive", "deliberative", "analysis-only"),
+        default=None,
+    )
+    hmx_import.add_argument(
+        "--dry-run", action="store_true", help="Validate and report without changing data"
+    )
+    hmx_import.add_argument(
+        "--confirm-intent",
+        choices=("port", "duplicate", "telepathy", "analysis"),
+        default=None,
+    )
+    hmx_import.add_argument("--skip-identity", action="store_true")
+    hmx_import.add_argument("--skip-worldview", action="store_true")
+    hmx_import.add_argument("--skip-narrative", action="store_true")
+    hmx_import.add_argument("--json", action="store_true", help="Print a machine-readable report")
+    hmx_import.set_defaults(func="hmx_import")
 
     # -- Goals command (defaults to 'list') --
     goals = sub.add_parser("goals", parents=[_db], help="Manage agent goals")
@@ -2825,6 +2897,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if func == "characters_export":
         dsn = _get_dsn(args)
         return asyncio.run(_characters_export(dsn, args.name, args.output))
+
+    if func in {"hmx_export", "hmx_import"}:
+        from apps.cli_exchange import run_export, run_import
+
+        handler = run_export if func == "hmx_export" else run_import
+        return asyncio.run(handler(_get_dsn(args), args))
 
     docker_cmds = {"up", "down", "ps", "logs", "start", "stop", "reset", "upgrade"}
     docker_bin: str | None = None

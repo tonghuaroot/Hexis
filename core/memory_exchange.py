@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import lru_cache
 from importlib.resources import files
-from typing import Any
+from typing import Any, Iterable
 
 HMX_VERSION = "1.7"
 
@@ -117,6 +117,24 @@ class HmxImportResult:
     ref_map: dict[str, str]
     conflicts: tuple[dict[str, Any], ...]
     warnings: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class HmxDryRunResult:
+    """Database-aware import forecast produced without changing state."""
+
+    export_id: str
+    intent: str
+    strategy: str
+    target_state: dict[str, Any]
+    can_import: bool
+    counts: dict[str, int]
+    duplicate_refs: tuple[str, ...]
+    conflicts: tuple[dict[str, Any], ...]
+    warnings: tuple[dict[str, Any], ...]
+    protected_policy: dict[str, Any]
+    privacy: dict[str, Any]
+    estimated_embedding_items: int
 
 
 @lru_cache(maxsize=1)
@@ -463,6 +481,10 @@ _JSONL_RECORD_TYPE = {
     "raw_units": "raw_unit",
 }
 
+_JSONL_SECTION = {
+    record_type: section for section, record_type in _JSONL_RECORD_TYPE.items()
+}
+
 
 def _ref(export_id: str, local_id: Any) -> str:
     return f"{export_id}:{local_id}"
@@ -678,6 +700,11 @@ async def export_hmx(
 
     from core.digest import protected_section_digest_v1
 
+    if redaction_policy == "strict" and include_raw_units:
+        raise HmxPolicyError(
+            "strict redaction excludes raw units; remove include_raw_units or choose another policy"
+        )
+
     plan = resolve_export_sections(
         intent,
         include_protected=include_protected,
@@ -734,6 +761,12 @@ def iter_hmx_jsonl(envelope: dict[str, Any]):
     header = {k: v for k, v in envelope.items() if k not in ("sections", "statistics")}
     yield _json.dumps({"record_type": "envelope", "data": header}, default=str)
     for section, data in envelope["sections"].items():
+        if not _section_has_records(section, data):
+            yield _json.dumps(
+                {"record_type": "section", "section": section, "data": data},
+                default=str,
+            )
+            continue
         record_type = _JSONL_RECORD_TYPE.get(section)
         if record_type:
             for record in data:
@@ -756,9 +789,133 @@ def iter_hmx_jsonl(envelope: dict[str, Any]):
             yield _json.dumps(
                 {"record_type": "audit_record", "data": data}, default=str
             )
+        elif section == "config":
+            yield _json.dumps({"record_type": "config", "data": data}, default=str)
+        else:
+            # Preserve forward-compatible sections instead of dropping them
+            # when an HMX document is transported as JSONL.
+            yield _json.dumps(
+                {"record_type": "section", "section": section, "data": data},
+                default=str,
+            )
     yield _json.dumps(
         {"record_type": "footer", "statistics": envelope["statistics"]}, default=str
     )
+
+
+def parse_hmx_jsonl(lines: Iterable[str]) -> dict[str, Any]:
+    """Reconstruct a single HMX document from typed JSONL records.
+
+    Errors include the source line so malformed exchange files are actionable.
+    Unknown record types fail rather than disappearing silently; newer sections
+    can travel through the generic ``section`` record type.
+    """
+
+    envelope: dict[str, Any] | None = None
+    sections: dict[str, Any] = {}
+    statistics: dict[str, Any] | None = None
+    saw_footer = False
+
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if saw_footer:
+            raise HmxSchemaError(
+                f"invalid HMX JSONL at line {line_number}: records follow the footer"
+            )
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise HmxSchemaError(
+                f"invalid HMX JSONL at line {line_number}, column {exc.colno}: {exc.msg}"
+            ) from exc
+        if not isinstance(item, dict):
+            raise HmxSchemaError(
+                f"invalid HMX JSONL at line {line_number}: record must be an object"
+            )
+
+        record_type = item.get("record_type")
+        if envelope is None and record_type != "envelope":
+            raise HmxSchemaError(
+                f"invalid HMX JSONL at line {line_number}: first record must be envelope"
+            )
+        if record_type == "envelope":
+            if envelope is not None:
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: duplicate envelope"
+                )
+            data = item.get("data")
+            if not isinstance(data, dict):
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: envelope data must be an object"
+                )
+            envelope = copy.deepcopy(data)
+            continue
+        if record_type == "footer":
+            stats = item.get("statistics", {})
+            if not isinstance(stats, dict):
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: footer statistics must be an object"
+                )
+            statistics = copy.deepcopy(stats)
+            saw_footer = True
+            continue
+
+        data = copy.deepcopy(item.get("data"))
+        section = _JSONL_SECTION.get(str(record_type))
+        if section is not None:
+            sections.setdefault(section, []).append(data)
+        elif record_type == "narrative":
+            if "narrative" in sections:
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: duplicate narrative record"
+                )
+            sections["narrative"] = data
+        elif record_type == "in_flight_task":
+            if not isinstance(data, dict):
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: in-flight task data must be an object"
+                )
+            group = data.pop("task_group", None)
+            if group not in ("consolidation_tasks", "reconsolidation_tasks"):
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: invalid task_group {group!r}"
+                )
+            sections.setdefault("in_flight_work", {}).setdefault(group, []).append(data)
+        elif record_type == "audit_record":
+            if "audit_records" in sections:
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: duplicate audit_record"
+                )
+            sections["audit_records"] = data
+        elif record_type == "config":
+            if "config" in sections:
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: duplicate config record"
+                )
+            sections["config"] = data
+        elif record_type == "section":
+            section_name = item.get("section")
+            if not isinstance(section_name, str) or not section_name:
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: generic section name is required"
+                )
+            if section_name in sections:
+                raise HmxSchemaError(
+                    f"invalid HMX JSONL at line {line_number}: duplicate section {section_name!r}"
+                )
+            sections[section_name] = data
+        else:
+            raise HmxSchemaError(
+                f"invalid HMX JSONL at line {line_number}: unknown record_type {record_type!r}"
+            )
+
+    if envelope is None:
+        raise HmxSchemaError("invalid HMX JSONL: file contains no envelope record")
+    envelope["sections"] = sections
+    envelope["statistics"] = statistics or envelope.get("statistics") or {}
+    return envelope
 
 
 async def load_source_context(conn) -> dict[str, Any]:
@@ -819,6 +976,13 @@ def _section_has_records(section: str, value: Any) -> bool:
     if isinstance(value, dict):
         return any(bool(records) for records in value.values())
     return bool(value)
+
+
+def _import_sections(data: dict[str, Any]) -> dict[str, Any]:
+    sections = data.get("sections", {})
+    if not isinstance(sections, dict):
+        raise HmxSchemaError("invalid HMX document at $.sections: expected an object")
+    return sections
 
 
 def _append_import_provenance(
@@ -935,6 +1099,216 @@ def _protected_memory_record(section: str, record: dict[str, Any]) -> dict[str, 
     return converted
 
 
+async def dry_run_hmx(
+    conn,
+    data: dict[str, Any],
+    *,
+    strategy: str = "additive",
+) -> HmxDryRunResult:
+    """Validate and forecast an HMX import without opening a write transaction."""
+
+    from core.digest import normalize_v1
+
+    if not isinstance(data, dict):
+        raise HmxSchemaError("HMX input must be a JSON object")
+    _validate_import_header(data)
+    intent = validate_intent(str(data["export_intent"]))
+    sections = _import_sections(data)
+    export_id = str(data["export_id"])
+    warnings: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    invalid_records = 0
+
+    validated: dict[str, list[dict[str, Any]]] = {}
+    for section in (
+        "memories",
+        "episodes",
+        "relationships",
+        "identity",
+        "worldview",
+        "goals",
+        "drives",
+        "emotional_triggers",
+        "clusters",
+        "raw_units",
+    ):
+        records, section_warnings = _validated_records(
+            data, section, sections.get(section, [])
+        )
+        validated[section] = records
+        counts[section] = len(records)
+        invalid_records += len(section_warnings)
+        warnings.extend(section_warnings)
+
+    narrative = copy.deepcopy(sections.get("narrative") or {})
+    if narrative:
+        try:
+            validate_hmx_document(_document_probe(data, {"narrative": narrative}))
+        except HmxSchemaError as exc:
+            invalid_records += 1
+            counts["narrative"] = 0
+            warnings.append(
+                {
+                    "code": "schema_validation_error",
+                    "section": "narrative",
+                    "error": str(exc),
+                }
+            )
+        else:
+            counts["narrative"] = sum(len(records) for records in narrative.values())
+    else:
+        counts["narrative"] = 0
+
+    for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
+        if _section_has_records(deferred_section, sections.get(deferred_section)):
+            warnings.append(
+                {
+                    "code": "unsupported_section",
+                    "section": deferred_section,
+                    "error": "section import is assigned to a later HMX slice and would not be applied",
+                }
+            )
+            counts[deferred_section] = 0
+
+    memory_candidates: list[tuple[str, str, str]] = []
+    for section in ("memories", "worldview", "goals"):
+        for record in validated[section]:
+            content = record.get("content")
+            if section == "goals":
+                content = record.get("description") or record.get("title")
+            memory_candidates.append(
+                (section, str(record.get("ref") or ""), normalize_v1(content or ""))
+            )
+
+    normalized_values = sorted({normalized for _, _, normalized in memory_candidates})
+    existing_normalized: set[str] = set()
+    if normalized_values:
+        rows = await conn.fetch(
+            "SELECT DISTINCT regexp_replace(lower(btrim(content)), '\\s+', ' ', 'g') "
+            "AS normalized_content FROM memories "
+            "WHERE regexp_replace(lower(btrim(content)), '\\s+', ' ', 'g') = ANY($1::text[])",
+            normalized_values,
+        )
+        existing_normalized = {str(row["normalized_content"]) for row in rows}
+
+    duplicate_refs: list[str] = []
+    seen = set(existing_normalized)
+    new_by_section = {section: 0 for section in ("memories", "worldview", "goals")}
+    for section, ref, normalized in memory_candidates:
+        if normalized in seen:
+            duplicate_refs.append(ref)
+            conflicts.append({"code": "duplicate_content", "ref": ref})
+        else:
+            seen.add(normalized)
+            new_by_section[section] += 1
+    counts.update(new_by_section)
+    counts["duplicate_memories"] = len(duplicate_refs)
+    counts["invalid_records"] = invalid_records
+    counts["total_records"] = sum(
+        counts.get(section, 0)
+        for section in (
+            "memories",
+            "episodes",
+            "relationships",
+            "identity",
+            "worldview",
+            "goals",
+            "drives",
+            "emotional_triggers",
+            "clusters",
+            "narrative",
+        )
+    )
+
+    target_state = _coerce_json(await conn.fetchval("SELECT hexis_instance_is_empty()"))
+    protected_present = sorted(
+        section
+        for section in PROTECTED_SECTIONS
+        if _section_has_records(section, sections.get(section))
+    )
+    protected_allowed = not protected_present or (
+        intent in ("port", "duplicate") and bool(target_state.get("is_empty"))
+    )
+    if protected_present and not protected_allowed:
+        conflicts.append(
+            {
+                "code": "bootstrap_state_violation",
+                "sections": protected_present,
+                "reason": "protected state requires port/duplicate intent and an empty target",
+            }
+        )
+
+    source = data.get("source") or {}
+    source_lineage = str(source.get("hexis_lineage_id") or "")
+    local_lineage = str(
+        await conn.fetchval(
+            "SELECT value #>> '{}' FROM config WHERE key='agent.lineage_id'"
+        )
+        or ""
+    )
+    lineage_allowed = not (
+        intent in ("port", "duplicate")
+        and not target_state.get("is_empty", False)
+        and source_lineage
+        and source_lineage != local_lineage
+    )
+    if not lineage_allowed:
+        conflicts.append(
+            {
+                "code": "lineage_mismatch",
+                "source_lineage": source_lineage,
+                "target_lineage": local_lineage,
+            }
+        )
+
+    strategy_available = strategy == "additive"
+    if not strategy_available:
+        if strategy == "authoritative":
+            strategy_error = "authoritative replacement arrives with the Protected Replacement Protocol"
+        else:
+            strategy_error = (
+                "deliberative and analysis-only storage arrive in HMX Slice 4"
+            )
+        warnings.append(
+            {
+                "code": "strategy_not_available",
+                "strategy": strategy,
+                "error": strategy_error,
+            }
+        )
+
+    privacy = copy.deepcopy(data.get("privacy") or {})
+    if privacy.get("contains_sensitive_content"):
+        warnings.append(
+            {
+                "code": "sensitive_content",
+                "redaction_policy": privacy.get("redaction_policy", "unknown"),
+                "error": "treat this exchange file as sensitive data",
+            }
+        )
+
+    return HmxDryRunResult(
+        export_id=export_id,
+        intent=intent,
+        strategy=strategy,
+        target_state=target_state,
+        can_import=protected_allowed and lineage_allowed and strategy_available,
+        counts=counts,
+        duplicate_refs=tuple(duplicate_refs),
+        conflicts=tuple(conflicts),
+        warnings=tuple(warnings),
+        protected_policy={
+            "sections": protected_present,
+            "allowed": protected_allowed,
+            "decision": "direct_import" if protected_allowed else "blocked",
+            "requires_empty_target": bool(protected_present),
+        },
+        privacy=privacy,
+        estimated_embedding_items=sum(new_by_section.values()),
+    )
+
+
 async def import_hmx(
     conn,
     data: dict[str, Any],
@@ -958,7 +1332,7 @@ async def import_hmx(
             "Use a later deliberative/analysis import path for foreign protected state."
         )
 
-    sections = data.get("sections") or {}
+    sections = _import_sections(data)
     warnings: list[dict[str, Any]] = []
     for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
         if _section_has_records(deferred_section, sections.get(deferred_section)):

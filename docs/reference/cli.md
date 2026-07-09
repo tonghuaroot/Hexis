@@ -57,6 +57,21 @@ Complete reference for the `hexis` CLI. Install via `pip install hexis`.
 |---------|-------------|
 | `hexis chat [--dsn DSN]` | Interactive chat |
 | `hexis recall <query> [--limit N] [--type TYPE] [--json]` | Search memories |
+| `hexis export --intent INTENT [--output FILE] [--format json\|jsonl]` | Export an HMX memory exchange |
+| `hexis import FILE --dry-run [--strategy STRATEGY] [--json]` | Validate and forecast an HMX import without mutation |
+| `hexis import FILE --strategy additive --confirm-intent INTENT` | Run a confirmed additive HMX import |
+
+HMX intents are `port`, `duplicate`, `telepathy`, and `analysis`. Exchange files
+contain sensitive data. File exports use mode `0600` and refuse to overwrite an
+existing path unless `--overwrite` is explicit. Import reads JSON or JSONL and
+requires `--confirm-intent` to exactly match the file before any mutation.
+
+The default strategy is derived from the file intent. Deliberative,
+analysis-only, and authoritative storage are reported by dry-run but are not yet
+executable; use `--strategy additive` only when direct acceptance is intended.
+Protected sections can be omitted with `--skip-identity`, `--skip-worldview`, or
+`--skip-narrative`. Additive protected-state import remains restricted to
+port/duplicate exchanges targeting an empty instance.
 
 ### Auth
 

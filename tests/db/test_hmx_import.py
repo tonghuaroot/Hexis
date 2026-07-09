@@ -11,6 +11,7 @@ from core.digest import content_hash_v1
 from core.memory_exchange import (
     HmxPolicyError,
     build_envelope,
+    dry_run_hmx,
     export_hmx,
     import_hmx,
     resolve_export_sections,
@@ -70,6 +71,72 @@ def _memory(ref: str, content: str, *, provenance: dict | None = None) -> dict:
             "modification_chain": [],
         },
     }
+
+
+class TestDryRun:
+    async def test_predicts_duplicates_and_leaves_database_unchanged(self, db_pool):
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                existing = f"dry run existing {uuid.uuid4().hex}"
+                await conn.execute(
+                    "INSERT INTO memories (type, content, embedding) "
+                    "VALUES ('semantic', $1, array_fill(0.1, ARRAY[embedding_dimension()])::vector)",
+                    existing,
+                )
+                env = _envelope()
+                duplicate_ref = _ref(env["export_id"], str(uuid.uuid4()))
+                new_ref = _ref(env["export_id"], str(uuid.uuid4()))
+                env["sections"] = {
+                    "memories": [
+                        _memory(duplicate_ref, f"  {existing.upper()}  "),
+                        _memory(new_ref, f"dry run new {uuid.uuid4().hex}"),
+                    ]
+                }
+                before = await conn.fetchval("SELECT count(*) FROM memories")
+
+                result = await dry_run_hmx(conn, env, strategy="additive")
+
+                assert result.can_import
+                assert result.counts["memories"] == 1
+                assert result.counts["duplicate_memories"] == 1
+                assert result.duplicate_refs == (duplicate_ref,)
+                assert result.estimated_embedding_items == 1
+                assert any(c["code"] == "duplicate_content" for c in result.conflicts)
+                assert await conn.fetchval("SELECT count(*) FROM memories") == before
+            finally:
+                await tr.rollback()
+
+    async def test_reports_protected_policy_without_mutation(self, db_pool):
+        async with db_pool.acquire() as conn:
+            env = _envelope("telepathy")
+            env["sections"] = {
+                "worldview": [
+                    {
+                        **_memory(
+                            _ref(env["export_id"], str(uuid.uuid4())),
+                            f"foreign worldview {uuid.uuid4().hex}",
+                        ),
+                        "type": "worldview",
+                        "category": "value",
+                        "confidence": 0.8,
+                        "stability": 0.8,
+                        "supporting_refs": [],
+                        "contesting_refs": [],
+                    }
+                ]
+            }
+            before = await conn.fetchval("SELECT count(*) FROM memories")
+
+            result = await dry_run_hmx(conn, env, strategy="additive")
+
+            assert not result.can_import
+            assert result.protected_policy["decision"] == "blocked"
+            assert any(
+                c["code"] == "bootstrap_state_violation" for c in result.conflicts
+            )
+            assert await conn.fetchval("SELECT count(*) FROM memories") == before
 
 
 class TestAdditiveImport:

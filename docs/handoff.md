@@ -1,14 +1,15 @@
 # Hexis Handoff
 
-Last updated: 2026-07-09 (HMX Slice 2 additive import complete locally)
+Last updated: 2026-07-09 (HMX Slice 3 CLI and dry-run complete locally)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-2 are complete locally:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-3 are complete locally:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
-fail-closed trust-anchor boundary, target-state diagnostics, and transactional
-additive import with full reference remapping. The next implementation boundary
-is Slice 3 (`hexis export`, `hexis import --dry-run`, and operator-facing reports).
+fail-closed trust-anchor boundary, target-state diagnostics, transactional
+additive import with full reference remapping, and the operator CLI with
+side-effect-free dry-run reporting. The next implementation boundary is Slice 4
+(deliberative staging and physically isolated analysis-only storage).
 
 The prior hosted green baseline was `c3be2f8` (`Wait for DB init completion in
 CI`), run https://github.com/QuixiAI/Hexis/actions/runs/29042281848 (all jobs
@@ -253,9 +254,45 @@ Important behavior:
   belong to later slices.
 - Focused validation: 79 HMX schema/digest/trust/export/import/migration tests pass.
 
-Next: Slice 3 CLI and side-effect-free dry-run reporting. Slice 4 adds
-deliberative/analysis-only storage and promotion/demotion; Slice 6 connects the
-pending-import embedding queue to maintenance workers.
+### HMX Slice 3 CLI and dry-run complete locally
+
+Key files:
+
+- `apps/cli_exchange.py` — JSON/JSONL input, atomic private-file output,
+  database connection retry, intent confirmation, skip controls, and human/JSON
+  reports.
+- `apps/hexis_cli.py` — top-level `hexis export` and `hexis import` argument and
+  dispatch integration.
+- `core/memory_exchange.py` — `HmxDryRunResult`, `dry_run_hmx()`, and lossless
+  typed JSONL reconstruction (including empty and forward-compatible sections).
+- `tests/cli/test_hmx_cli.py` — real CLI export, overwrite refusal, dry-run,
+  intent mismatch, and confirmed additive import coverage.
+
+Important behavior:
+
+- `hexis import --dry-run` validates records independently, predicts normalized
+  duplicate-content reuse, reports target state and protected-section policy,
+  estimates embedding work, and surfaces privacy/unsupported-section warnings
+  without opening a write transaction.
+- File export is atomic, mode `0600`, and never overwrites without
+  `--overwrite`. JSON/JSONL written to stdout remains machine-readable because
+  status output goes elsewhere.
+- Mutating import requires `--confirm-intent` to exactly match the file. A
+  policy-blocked dry-run exits nonzero, so automation cannot mistake a report
+  for permission to import.
+- Intent-derived safe defaults remain visible: deliberative, analysis-only, and
+  authoritative strategies report their future implementation boundary rather
+  than silently falling back to additive. Operators may explicitly choose
+  additive where current policy permits it.
+- Strict redaction and raw-unit export cannot be combined. Config export still
+  derives its secret exclusions from the export function rather than exposing
+  credential/trust material.
+- Focused HMX/CLI validation: 91 tests pass. Full validation: 2051 tests pass;
+  the existing 421 pytest marker warnings remain advisory.
+
+Next: Slice 4 deliberative staging and analysis-only storage, including review,
+promotion, and demotion paths. Slice 6 later connects accepted pending imports
+to the maintenance embedding queue.
 
 ## Current Roadmap
 
@@ -437,14 +474,15 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 ## Resume Recommendation
 
 Do not continue debugging the old CI failures first. Continue the HMX thread at
-Slice 3 from the import/export contract now pinned in tests. Read
-`core/memory_exchange.py`, `schemas/hmx-1.7.schema.json`,
-`tests/db/test_hmx_import.py`, and the Slice 3 plan section before editing.
+Slice 4 from the CLI/import contract now pinned in tests. Read
+`core/memory_exchange.py`, `apps/cli_exchange.py`,
+`tests/db/test_hmx_import.py`, `tests/cli/test_hmx_cli.py`, and the Slice 4 plan
+section before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 3: `hexis export`, `hexis import --dry-run`, count/conflict/privacy
-   reporting, and safe JSON/JSONL file handling.
+1. HMX Slice 4: deliberative staging, physically isolated analysis-only
+   storage, review decisions, and promotion/demotion paths.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.
