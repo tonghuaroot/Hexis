@@ -3,6 +3,7 @@
 Pins the safety-critical policy matrix: which sections each export intent
 carries by default, what explicit opt-in unlocks, and the envelope shape.
 """
+
 from __future__ import annotations
 
 import re
@@ -12,6 +13,7 @@ import pytest
 from core.memory_exchange import (
     ALL_SECTIONS,
     HMX_VERSION,
+    HmxSchemaError,
     PROTECTED_SECTIONS,
     HmxPolicyError,
     build_envelope,
@@ -19,6 +21,7 @@ from core.memory_exchange import (
     new_export_id,
     resolve_export_sections,
     validate_intent,
+    validate_hmx_document,
 )
 
 
@@ -34,7 +37,12 @@ class TestIntentPolicy:
 
     def test_telepathy_excludes_protected_by_default(self):
         plan = resolve_export_sections("telepathy")
-        assert set(plan.sections) == {"memories", "episodes", "relationships", "clusters"}
+        assert set(plan.sections) == {
+            "memories",
+            "episodes",
+            "relationships",
+            "clusters",
+        }
         assert plan.protected == ()
         assert "in_flight_work" not in plan.sections
         assert "audit_records" not in plan.sections
@@ -44,7 +52,9 @@ class TestIntentPolicy:
         assert plan.protected == ()
 
     def test_telepathy_protected_requires_explicit_opt_in(self):
-        plan = resolve_export_sections("telepathy", include_protected=["worldview", "narrative"])
+        plan = resolve_export_sections(
+            "telepathy", include_protected=["worldview", "narrative"]
+        )
         assert "worldview" in plan.sections
         assert "narrative" in plan.sections
         assert "identity" not in plan.sections
@@ -72,7 +82,18 @@ class TestIntentPolicy:
 
     def test_sections_are_in_canonical_order(self):
         plan = resolve_export_sections("port")
-        assert plan.sections == tuple(s for s in ALL_SECTIONS if s in set(plan.sections))
+        assert plan.sections == tuple(
+            s for s in ALL_SECTIONS if s in set(plan.sections)
+        )
+
+    def test_optional_sections_are_explicit_and_appended(self):
+        default = resolve_export_sections("port")
+        opted_in = resolve_export_sections(
+            "port", include_raw_units=True, include_config=True
+        )
+        assert "raw_units" not in default.sections
+        assert "config" not in default.sections
+        assert opted_in.sections[-2:] == ("raw_units", "config")
 
     def test_default_strategies(self):
         assert default_import_strategy("port") == "authoritative"
@@ -98,10 +119,19 @@ class TestEnvelope:
 
     def test_envelope_required_fields(self):
         env = self._envelope()
-        for field in ("hmx_version", "export_id", "export_intent", "exported_at", "source", "sections"):
+        for field in (
+            "hmx_version",
+            "export_id",
+            "export_intent",
+            "exported_at",
+            "source",
+            "sections",
+        ):
             assert field in env
         assert env["hmx_version"] == HMX_VERSION
-        assert env["source"]["hexis_lineage_id"] == "11111111-2222-3333-4444-555555555555"
+        assert (
+            env["source"]["hexis_lineage_id"] == "11111111-2222-3333-4444-555555555555"
+        )
         assert env["source"]["embedding_dimension"] == 768
 
     def test_export_id_format(self):
@@ -110,7 +140,11 @@ class TestEnvelope:
 
     def test_capabilities_derive_from_given_edge_types(self):
         env = self._envelope()
-        assert env["capabilities"]["relationship_edge_types"] == ["CAUSES", "SUPERSEDES", "SUPPORTS"]
+        assert env["capabilities"]["relationship_edge_types"] == [
+            "CAUSES",
+            "SUPERSEDES",
+            "SUPPORTS",
+        ]
         assert "jsonl" in env["capabilities"]["formats"]
         assert "protected_section_digest_v1" in env["capabilities"]["hash_algorithms"]
 
@@ -142,3 +176,78 @@ class TestEnvelope:
         env = self._envelope()
         assert env["statistics"]["total_memories"] == 0
         assert env["statistics"]["estimated_embedding_cost_units"] is None
+
+
+class TestCanonicalSchema:
+    def _envelope(self):
+        plan = resolve_export_sections("port")
+        return build_envelope(
+            intent="port",
+            plan=plan,
+            instance_id="hexis_test",
+            schema_version="0004_hmx_export_functions",
+            embedding_model="embeddinggemma:300m",
+            embedding_dimension=768,
+            lineage_id="11111111-2222-3333-4444-555555555555",
+            relationship_edge_types=["SUPPORTS"],
+        )
+
+    def test_generated_envelope_is_schema_valid(self):
+        validate_hmx_document(self._envelope())
+
+    def test_unknown_fields_and_sections_are_forward_compatible(self):
+        env = self._envelope()
+        env["future_header"] = {"preserve": True}
+        env["sections"]["future_section"] = [{"shape": "unknown"}]
+        validate_hmx_document(env)
+
+    def test_unknown_major_version_is_rejected(self):
+        env = self._envelope()
+        env["hmx_version"] = "2.0"
+        with pytest.raises(HmxSchemaError, match=r"\$\.hmx_version"):
+            validate_hmx_document(env)
+
+    def test_memory_requires_ref_type_and_content(self):
+        env = self._envelope()
+        env["sections"]["memories"] = [{"type": "semantic", "content": "x"}]
+        with pytest.raises(HmxSchemaError, match="'ref' is a required property"):
+            validate_hmx_document(env)
+
+    def test_audit_union_requires_event_specific_fields(self):
+        env = self._envelope()
+        env["sections"]["audit_records"] = {
+            "protected_section_verified_audit": [
+                {
+                    "audit_id": "audit-1",
+                    "event_type": "protected_section_verified",
+                    "event_time": "2026-07-09T12:00:00Z",
+                    "sections_verified": ["worldview"],
+                    "local_digest_v1": "a" * 64,
+                    "imported_digest_v1": "a" * 64,
+                }
+            ]
+        }
+        with pytest.raises(HmxSchemaError, match="'source' is a required property"):
+            validate_hmx_document(env)
+
+    def test_well_formed_verified_audit_is_valid(self):
+        env = self._envelope()
+        env["sections"]["audit_records"] = {
+            "protected_section_verified_audit": [
+                {
+                    "audit_id": "audit-1",
+                    "event_type": "protected_section_verified",
+                    "event_time": "2026-07-09T12:00:00Z",
+                    "sections_verified": ["worldview"],
+                    "source": {
+                        "export_id": env["export_id"],
+                        "origin_instance": "hexis_test",
+                        "hexis_lineage_id": env["source"]["hexis_lineage_id"],
+                        "export_intent": "port",
+                    },
+                    "local_digest_v1": "a" * 64,
+                    "imported_digest_v1": "a" * 64,
+                }
+            ]
+        }
+        validate_hmx_document(env)

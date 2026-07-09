@@ -19,6 +19,8 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import lru_cache
+from importlib.resources import files
 from typing import Any
 
 HMX_VERSION = "1.7"
@@ -29,14 +31,16 @@ EXPORT_INTENTS = ("port", "duplicate", "telepathy", "analysis")
 # or long-range narrative identity. Excluded by default for telepathy/analysis;
 # replacement in an active target requires the Protected Section Replacement
 # Protocol regardless of intent.
-PROTECTED_SECTIONS = frozenset({
-    "identity",
-    "worldview",
-    "drives",
-    "emotional_triggers",
-    "narrative",
-    "goals",
-})
+PROTECTED_SECTIONS = frozenset(
+    {
+        "identity",
+        "worldview",
+        "drives",
+        "emotional_triggers",
+        "narrative",
+        "goals",
+    }
+)
 
 # Every section HMX can carry, in canonical envelope order.
 ALL_SECTIONS = (
@@ -57,6 +61,19 @@ ALL_SECTIONS = (
 # Optional sections gated by explicit flags rather than intent.
 FLAG_GATED_SECTIONS = frozenset({"raw_units", "config"})
 
+EXCLUDED_SECRET_PATTERNS = (
+    "key",
+    "secret",
+    "token",
+    "password",
+    "signature",
+    "credential",
+    "auth",
+    "trust",
+    "anchor",
+    "certificate",
+)
+
 DEFAULT_IMPORT_STRATEGY = {
     "port": "authoritative",
     "duplicate": "authoritative",
@@ -64,7 +81,11 @@ DEFAULT_IMPORT_STRATEGY = {
     "analysis": "analysis_only",
 }
 
-HASH_ALGORITHMS = ("content_hash_v1", "protected_section_digest_v1", "audit_record_digest_v1")
+HASH_ALGORITHMS = (
+    "content_hash_v1",
+    "protected_section_digest_v1",
+    "audit_record_digest_v1",
+)
 
 OPTIONAL_FEATURES = (
     "raw_units",
@@ -75,6 +96,48 @@ OPTIONAL_FEATURES = (
 
 class HmxPolicyError(ValueError):
     """An export/import request violates HMX intent policy."""
+
+
+class HmxSchemaError(ValueError):
+    """An HMX document does not satisfy the canonical wire schema."""
+
+
+@lru_cache(maxsize=1)
+def load_hmx_schema() -> dict[str, Any]:
+    """Load the packaged canonical schema for the supported HMX version."""
+
+    import json
+
+    schema_file = files("schemas").joinpath(f"hmx-{HMX_VERSION}.schema.json")
+    with schema_file.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def validate_hmx_document(document: dict[str, Any]) -> None:
+    """Validate a complete single-document HMX export.
+
+    The first error includes its JSON path so callers get a useful cause and
+    next debugging location instead of a raw validator traceback.
+    """
+
+    from jsonschema import FormatChecker
+    from jsonschema.validators import validator_for
+
+    schema = load_hmx_schema()
+    validator_class = validator_for(schema)
+    validator_class.check_schema(schema)
+    validator = validator_class(schema, format_checker=FormatChecker())
+    errors = sorted(validator.iter_errors(document), key=lambda error: list(error.path))
+    if not errors:
+        return
+
+    error = errors[0]
+    path = "$" + "".join(
+        f"[{part}]" if isinstance(part, int) else f".{part}" for part in error.path
+    )
+    raise HmxSchemaError(
+        f"invalid HMX {HMX_VERSION} document at {path}: {error.message}"
+    )
 
 
 def validate_intent(intent: str) -> str:
@@ -154,7 +217,9 @@ def resolve_export_sections(
             unknown_sections = sorted(requested - set(ALL_SECTIONS))
             if unknown_sections:
                 raise HmxPolicyError(f"unknown sections: {', '.join(unknown_sections)}")
-            protected_requested = sorted((requested & PROTECTED_SECTIONS) - set(include_protected))
+            protected_requested = sorted(
+                (requested & PROTECTED_SECTIONS) - set(include_protected)
+            )
             if protected_requested:
                 raise HmxPolicyError(
                     f"{intent} exports exclude protected sections by default; "
@@ -182,6 +247,10 @@ def resolve_export_sections(
                 )
 
     ordered = tuple(s for s in ALL_SECTIONS if s in selected)
+    if include_raw_units:
+        ordered += ("raw_units",)
+    if include_config:
+        ordered += ("config",)
     return SectionPlan(
         intent=intent,
         sections=ordered,
@@ -250,7 +319,7 @@ def build_envelope(
             "redaction_policy": redaction_policy,
             "contains_sensitive_content": True,
             "consent_scope": consent_scope,
-            "excluded_secret_patterns": ["key", "secret", "token", "password"],
+            "excluded_secret_patterns": list(EXCLUDED_SECRET_PATTERNS),
         },
         "export_scope": {
             "types": types or [],
@@ -297,6 +366,8 @@ _SECTION_FN = {
     "clusters": "hmx_export_clusters()",
     "in_flight_work": "hmx_export_in_flight_work()",
     "audit_records": "hmx_export_audit_records()",
+    "raw_units": "hmx_export_raw_units()",
+    "config": "hmx_export_config()",
 }
 
 # record_type values for JSONL streaming, per section.
@@ -310,6 +381,7 @@ _JSONL_RECORD_TYPE = {
     "emotional_triggers": "emotional_trigger",
     "clusters": "cluster",
     "identity": "identity",
+    "raw_units": "raw_unit",
 }
 
 
@@ -321,7 +393,17 @@ def _refs(export_id: str, local_ids: Any) -> list[str]:
     return [_ref(export_id, i) for i in (local_ids or [])]
 
 
-def _enrich_provenance(record: dict[str, Any], *, instance_id: str, local_id: Any) -> None:
+def _take_refs(record: dict[str, Any], export_id: str, wire_name: str) -> None:
+    """Scope a raw AGE/SQL reference list under its HMX wire name."""
+
+    raw_name = wire_name.replace("_refs", "_ids")
+    local_ids = record.pop(raw_name, record.pop(wire_name, []))
+    record[wire_name] = _refs(export_id, local_ids)
+
+
+def _enrich_provenance(
+    record: dict[str, Any], *, instance_id: str, local_id: Any
+) -> None:
     """Move provenance out of metadata to the wire position and fill defaults
     (spec field-default table: acquisition_mode=experienced on export)."""
     metadata = record.get("metadata") or {}
@@ -353,8 +435,12 @@ def _postprocess_section(
             record.pop("superseded_by", None)  # normalized into SUPERSEDES edges
             _enrich_provenance(record, instance_id=instance_id, local_id=local_id)
             if section == "worldview":
-                record["supporting_refs"] = _refs(export_id, record.pop("supporting_ids", []))
-                record["contesting_refs"] = _refs(export_id, record.pop("contesting_ids", []))
+                record["supporting_refs"] = _refs(
+                    export_id, record.pop("supporting_ids", [])
+                )
+                record["contesting_refs"] = _refs(
+                    export_id, record.pop("contesting_ids", [])
+                )
     elif section == "episodes":
         for record in data:
             record["ref"] = _ref(export_id, record.pop("id"))
@@ -367,22 +453,72 @@ def _postprocess_section(
             record["properties"] = props
             record["source_ref"] = _ref(export_id, record.pop("source_id"))
             record["target_ref"] = _ref(export_id, record.pop("target_id"))
+    elif section == "narrative":
+        for group, title_field in (
+            ("life_chapters", "title"),
+            ("turning_points", "title"),
+            ("narrative_threads", "name"),
+            ("value_conflicts", "summary"),
+        ):
+            for record in data.get(group, []):
+                local_id = record.pop("id")
+                record["ref"] = _ref(export_id, local_id)
+                if not record.get(title_field):
+                    record[title_field] = str(
+                        record.get("name")
+                        or record.get("title")
+                        or record.get("description")
+                        or record.get("key")
+                        or ""
+                    )
+                for wire_name in (
+                    "memory_refs",
+                    "chapter_refs",
+                    "supporting_refs",
+                    "contesting_refs",
+                ):
+                    if (
+                        wire_name in record
+                        or wire_name.replace("_refs", "_ids") in record
+                    ):
+                        _take_refs(record, export_id, wire_name)
+    elif section == "identity":
+        for record in data:
+            local_id = f"identity:{record.get('key', 'self')}"
+            _enrich_provenance(record, instance_id=instance_id, local_id=local_id)
+            for facet in record.get("facets", []):
+                evidence_id = facet.pop("evidence_memory_id", None)
+                if evidence_id:
+                    facet["evidence_memory_ref"] = _ref(export_id, evidence_id)
     elif section == "goals":
         for record in data:
             local_id = record.pop("id")
             record["ref"] = _ref(export_id, local_id)
             parent = record.pop("parent_goal_id", None)
             record["parent_ref"] = _ref(export_id, parent) if parent else None
+            blocked_by = record.get("blocked_by")
+            if isinstance(blocked_by, list):
+                record["blocked_by"] = _refs(export_id, blocked_by)
             _enrich_provenance(record, instance_id=instance_id, local_id=local_id)
     elif section == "emotional_triggers":
         for record in data:
             record.pop("id", None)
-            record["content_hash_v1"] = content_hash_v1(record.get("trigger_pattern") or "")
-            record["source_memory_refs"] = _refs(export_id, record.pop("source_memory_ids", []))
+            record["content_hash_v1"] = content_hash_v1(
+                record.get("trigger_pattern") or ""
+            )
+            record["source_memory_refs"] = _refs(
+                export_id, record.pop("source_memory_ids", [])
+            )
     elif section == "clusters":
         for record in data:
             record["ref"] = _ref(export_id, record.pop("id"))
             record["member_refs"] = _refs(export_id, record.pop("member_ids", []))
+    elif section == "raw_units":
+        for record in data:
+            record["ref"] = _ref(export_id, record.pop("id"))
+            record["derived_memory_refs"] = _refs(
+                export_id, record.pop("derived_memory_ids", [])
+            )
     elif section == "in_flight_work":
         for task in data.get("consolidation_tasks", []):
             task["ref"] = _ref(export_id, task.pop("id"))
@@ -403,6 +539,7 @@ def _fill_statistics(envelope: dict[str, Any]) -> None:
     stats["total_memories"] = len(sections.get("memories", []))
     stats["total_relationships"] = len(sections.get("relationships", []))
     stats["total_episodes"] = len(sections.get("episodes", []))
+    stats["total_raw_units"] = len(sections.get("raw_units", []))
     narrative = sections.get("narrative") or {}
     stats["total_narrative_nodes"] = sum(len(v) for v in narrative.values())
     in_flight = sections.get("in_flight_work") or {}
@@ -414,8 +551,12 @@ def _fill_statistics(envelope: dict[str, Any]) -> None:
     embeddable += [m.get("content") or "" for m in sections.get("memories", [])]
     embeddable += [w.get("content") or "" for w in sections.get("worldview", [])]
     embeddable += [g.get("title") or "" for g in sections.get("goals", [])]
-    embeddable += [t.get("trigger_pattern") or "" for t in sections.get("emotional_triggers", [])]
-    embeddable += [e.get("summary") or "" for e in sections.get("episodes", []) if e.get("summary")]
+    embeddable += [
+        t.get("trigger_pattern") or "" for t in sections.get("emotional_triggers", [])
+    ]
+    embeddable += [
+        e.get("summary") or "" for e in sections.get("episodes", []) if e.get("summary")
+    ]
     stats["estimated_embedding_items"] = len(embeddable)
     stats["estimated_embedding_tokens"] = sum(len(t) for t in embeddable) // 4
     stats["estimated_uncompressed_bytes"] = len(_json.dumps(envelope, default=str))
@@ -492,6 +633,7 @@ async def export_hmx(
         envelope["export_warnings"] = list(plan.warnings)
 
     _fill_statistics(envelope)
+    validate_hmx_document(envelope)
     return envelope
 
 
@@ -506,19 +648,28 @@ def iter_hmx_jsonl(envelope: dict[str, Any]):
         record_type = _JSONL_RECORD_TYPE.get(section)
         if record_type:
             for record in data:
-                yield _json.dumps({"record_type": record_type, "data": record}, default=str)
+                yield _json.dumps(
+                    {"record_type": record_type, "data": record}, default=str
+                )
         elif section == "narrative":
             yield _json.dumps({"record_type": "narrative", "data": data}, default=str)
         elif section == "in_flight_work":
             for group in ("consolidation_tasks", "reconsolidation_tasks"):
                 for task in data.get(group, []):
                     yield _json.dumps(
-                        {"record_type": "in_flight_task", "data": dict(task, task_group=group)},
+                        {
+                            "record_type": "in_flight_task",
+                            "data": dict(task, task_group=group),
+                        },
                         default=str,
                     )
         elif section == "audit_records":
-            yield _json.dumps({"record_type": "audit_record", "data": data}, default=str)
-    yield _json.dumps({"record_type": "footer", "statistics": envelope["statistics"]}, default=str)
+            yield _json.dumps(
+                {"record_type": "audit_record", "data": data}, default=str
+            )
+    yield _json.dumps(
+        {"record_type": "footer", "statistics": envelope["statistics"]}, default=str
+    )
 
 
 async def load_source_context(conn) -> dict[str, Any]:
@@ -542,7 +693,9 @@ async def load_source_context(conn) -> dict[str, Any]:
         "SELECT COALESCE(max(version), 'baseline') FROM schema_migrations"
     )
     return {
-        "instance_id": str(await _config("agent.instance_id") or await _config("agent.name") or "hexis"),
+        "instance_id": str(
+            await _config("agent.instance_id") or await _config("agent.name") or "hexis"
+        ),
         "schema_version": str(schema_version),
         "embedding_model": str(await _config("embedding.model_id") or "unknown"),
         "embedding_dimension": int(await _config("embedding.dimension") or 768),

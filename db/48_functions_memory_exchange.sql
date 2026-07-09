@@ -199,25 +199,33 @@ DECLARE
     threads JSONB;
     conflicts JSONB;
 BEGIN
-    SELECT COALESCE(jsonb_agg(props::text::jsonb), '[]'::jsonb) INTO chapters
+    SELECT COALESCE(jsonb_agg(
+        props::text::jsonb || jsonb_build_object('id', replace(node_id::text, '"', ''))
+    ), '[]'::jsonb) INTO chapters
     FROM ag_catalog.cypher('memory_graph', $q$
-        MATCH (n:LifeChapterNode) RETURN properties(n)
-    $q$) AS (props ag_catalog.agtype);
+        MATCH (n:LifeChapterNode) RETURN id(n), properties(n)
+    $q$) AS (node_id ag_catalog.agtype, props ag_catalog.agtype);
 
-    SELECT COALESCE(jsonb_agg(props::text::jsonb), '[]'::jsonb) INTO turning_points
+    SELECT COALESCE(jsonb_agg(
+        props::text::jsonb || jsonb_build_object('id', replace(node_id::text, '"', ''))
+    ), '[]'::jsonb) INTO turning_points
     FROM ag_catalog.cypher('memory_graph', $q$
-        MATCH (n:TurningPointNode) RETURN properties(n)
-    $q$) AS (props ag_catalog.agtype);
+        MATCH (n:TurningPointNode) RETURN id(n), properties(n)
+    $q$) AS (node_id ag_catalog.agtype, props ag_catalog.agtype);
 
-    SELECT COALESCE(jsonb_agg(props::text::jsonb), '[]'::jsonb) INTO threads
+    SELECT COALESCE(jsonb_agg(
+        props::text::jsonb || jsonb_build_object('id', replace(node_id::text, '"', ''))
+    ), '[]'::jsonb) INTO threads
     FROM ag_catalog.cypher('memory_graph', $q$
-        MATCH (n:NarrativeThreadNode) RETURN properties(n)
-    $q$) AS (props ag_catalog.agtype);
+        MATCH (n:NarrativeThreadNode) RETURN id(n), properties(n)
+    $q$) AS (node_id ag_catalog.agtype, props ag_catalog.agtype);
 
-    SELECT COALESCE(jsonb_agg(props::text::jsonb), '[]'::jsonb) INTO conflicts
+    SELECT COALESCE(jsonb_agg(
+        props::text::jsonb || jsonb_build_object('id', replace(node_id::text, '"', ''))
+    ), '[]'::jsonb) INTO conflicts
     FROM ag_catalog.cypher('memory_graph', $q$
-        MATCH (n:ValueConflictNode) RETURN properties(n)
-    $q$) AS (props ag_catalog.agtype);
+        MATCH (n:ValueConflictNode) RETURN id(n), properties(n)
+    $q$) AS (node_id ag_catalog.agtype, props ag_catalog.agtype);
 
     RETURN jsonb_build_object(
         'life_chapters', chapters,
@@ -291,6 +299,36 @@ CREATE OR REPLACE FUNCTION hmx_export_audit_records() RETURNS JSONB AS $$
         'protected_replacement_reversion_audit', '[]'::jsonb,
         'transformation_history', '[]'::jsonb
     );
+$$ LANGUAGE sql STABLE;
+
+-- Raw conversation units are explicitly opt-in because they can contain the
+-- most sensitive verbatim user content. Embeddings are never exported.
+CREATE OR REPLACE FUNCTION hmx_export_raw_units() RETURNS JSONB AS $$
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'id', u.id,
+        'user_text', u.user_text,
+        'assistant_text', u.assistant_text,
+        'turn_at', u.turn_at,
+        'importance', u.importance,
+        'route_status', u.route_status,
+        'source_identity', u.source_identity,
+        'idempotency_key', u.idempotency_key,
+        'derived_memory_ids', COALESCE((
+            SELECT jsonb_agg(msu.memory_id ORDER BY msu.memory_id)
+            FROM memory_source_units msu
+            WHERE msu.subconscious_unit_id = u.id
+        ), '[]'::jsonb)
+    ) ORDER BY u.turn_at, u.id), '[]'::jsonb)
+    FROM subconscious_units u
+    WHERE u.status <> 'redacted';
+$$ LANGUAGE sql STABLE;
+
+-- Configuration is also opt-in. Verification material and credentials stay
+-- local; filtering uses the same patterns declared in the privacy envelope.
+CREATE OR REPLACE FUNCTION hmx_export_config() RETURNS JSONB AS $$
+    SELECT COALESCE(jsonb_object_agg(c.key, c.value ORDER BY c.key), '{}'::jsonb)
+    FROM config c
+    WHERE lower(c.key) !~ '(key|secret|token|password|signature|credential|auth|trust|anchor|certificate)';
 $$ LANGUAGE sql STABLE;
 
 SET check_function_bodies = on;

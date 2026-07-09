@@ -1,15 +1,19 @@
 # Hexis Handoff
 
-Last updated: 2026-07-09 (Phase 2 skill-surface work landed)
+Last updated: 2026-07-09 (HMX Slice 1 complete)
 
 ## Current Status
 
-The newest commit is `Compact skill prompt to an index; load plugin skill dirs`
-(Phase 2 of the roadmap below — see "Skill surface: compact index + plugin
-dirs"). The prior green baseline was `c3be2f8` (`Wait for DB init completion
-in CI`), hosted run
-https://github.com/QuixiAI/Hexis/actions/runs/29042281848 (all jobs
-succeeded).
+The active workstream is HMX (`plans/hmx.md`). Slice 1 is complete locally:
+canonical hashing, export policy/envelope construction, schema-valid JSON and
+JSONL export, all SQL section serializers, and a fail-closed pluggable trust
+anchor boundary. The next implementation boundary is Slice 2 (import, target
+state detection, and additive merge).
+
+The prior hosted green baseline was `c3be2f8` (`Wait for DB init completion in
+CI`), run https://github.com/QuixiAI/Hexis/actions/runs/29042281848 (all jobs
+succeeded). Always verify the current head's hosted result with the command in
+"Useful Commands" below rather than assuming this historical baseline applies.
 
 Important recent commits:
 
@@ -165,7 +169,7 @@ baseline LACKS migrated values — deltas are mirrored into the baseline per
 `db/migrations/README.md`, so "old deployment" is simulated only by an empty
 `schema_migrations` table.
 
-### HMX Slice 1 foundations (in progress)
+### HMX Slice 1 complete
 
 Landed so far:
 
@@ -194,9 +198,24 @@ Landed so far:
   `tests/db/test_hmx_export.py`, incl. the invariant that two exports with
   different export_ids produce identical protected digests.
 
-Still open in Slice 1: `schemas/hmx-1.7.schema.json` and
-`core/trust_anchors.py`. Then Slice 2 (import + `hexis_instance_is_empty()` +
-target-state policy) completes the round trip, and Slice 3 adds the CLI
+- `schemas/hmx-1.7.schema.json` — packaged Draft 2020-12 canonical schema with
+  per-section record validation, forward-compatible unknown fields/sections,
+  and the required discriminated union for replacement/verified/reversion
+  audit records. `export_hmx()` validates every completed export and reports a
+  JSON path on failure. Dependency: `jsonschema>=4.18.0`.
+- `core/trust_anchors.py` — deployment-pluggable `TrustAnchorVerifier`, explicit
+  verified/unverified/invalid outcomes, and an `UnconfiguredTrustAnchors`
+  default that never turns signatures or matching lineage labels into proof.
+- Migrations `0005` and `0006` complete the export journey for existing DBs:
+  AGE narrative nodes now carry export-scopeable IDs and normalized wire fields;
+  explicit `include_raw_units` / `include_config` requests now emit the promised
+  sections instead of only setting scope flags. Raw units omit embeddings and
+  redacted rows; config excludes credential/trust material using the exact
+  patterns declared in `privacy.excluded_secret_patterns`.
+- Focused validation: 69 HMX schema/digest/trust/export/migration tests pass.
+
+Next: Slice 2 (`import_hmx`, `hexis_instance_is_empty()`, target-state policy,
+additive merge, ID remapping, acquisition tracking). Slice 3 then adds the CLI
 (`hexis export` / `hexis import --dry-run`).
 
 ## Current Roadmap
@@ -378,17 +397,20 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-Do not continue debugging CI first; it is green. Phase 2's five resume steps
-(prompt audit, compact index, on-demand detail, plugin skill dirs, tests) are
-done and pushed.
+Do not continue debugging the old CI failures first. Finish the current HMX
+thread by starting Slice 2 from the schema and export contract now pinned in
+tests. Read `core/memory_exchange.py`, `schemas/hmx-1.7.schema.json`,
+`core/trust_anchors.py`, and the Slice 2 plan section before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
+1. HMX Slice 2: additive import, reference remapping, acquisition tracking,
+   `hexis_instance_is_empty()`, and dry-run-ready target-state diagnostics.
+2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.
-2. Finish Phase 2 hardening: plugin manifest/config-schema validation and an
+3. Finish Phase 2 hardening: plugin manifest/config-schema validation and an
    explicit agent-vs-user skill provenance guard.
-3. Phase 4 "it learns": FTS cross-session search + a background
+4. Phase 4 "it learns": FTS cross-session search + a background
    self-improvement worker that authors skills from recent experience (the
    `author_skill` provenance footer already exists to build on).
