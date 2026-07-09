@@ -78,8 +78,9 @@ jobs:
             postgres -c search_path=ag_catalog,public -c jit=off \
               -c app.embedding_dimension=768 \
               -c app.embedding_service_url=http://host.docker.internal:11435/api/embed
-          for _ in $(seq 1 60); do
-            if docker exec hexisdb psql -U hexis_user -d hexis_memory -tAc "SELECT count(*) FROM memories" >/dev/null; then
+          for _ in $(seq 1 180); do
+            if docker logs hexisdb 2>&1 | grep -q "PostgreSQL init process complete" \
+               && docker exec hexisdb psql -U hexis_user -d hexis_memory -tAc "SELECT count(*) FROM memories" >/dev/null; then
               exit 0
             fi
             sleep 2
@@ -128,8 +129,9 @@ jobs:
             -e POSTGRES_USER=hexis_user -e POSTGRES_PASSWORD=hexis_password -e POSTGRES_DB=hexis_memory \
             "$HEXIS_BRAIN_IMAGE" \
             postgres -c search_path=ag_catalog,public -c jit=off -c app.embedding_dimension=768
-          for _ in $(seq 1 60); do
-            if docker exec hexisdb psql -U hexis_user -d hexis_memory -tAc "SELECT count(*) FROM memories" >/dev/null; then
+          for _ in $(seq 1 180); do
+            if docker logs hexisdb 2>&1 | grep -q "PostgreSQL init process complete" \
+               && docker exec hexisdb psql -U hexis_user -d hexis_memory -tAc "SELECT count(*) FROM memories" >/dev/null; then
               exit 0
             fi
             sleep 2
