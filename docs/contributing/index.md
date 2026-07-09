@@ -140,15 +140,18 @@ docker push ghcr.io/quixiai/hexis-ui:latest
 - **`docker-compose.yml`** -- used for local development; has `build:` directives that build from source
 - **`ops/docker-compose.runtime.yml`** -- used by `hexis up` when installed via pip; references pre-built `ghcr.io/quixiai/*:latest` images
 
-### Rebuilding after schema changes
+### Applying schema changes
 
-SQL files are baked into the `hexis-brain` image at build time. Editing `db/*.sql` on disk does **not** take effect in a running container. To apply schema changes:
+`db/*.sql` is the fresh-install baseline. Existing databases must evolve through
+additive migrations in `db/migrations/`.
 
 ```bash
-docker compose down -v && docker compose build db && docker compose up -d
+hexis migrate
 ```
 
-See [Database operations](../operations/database.md) for details.
+Use `docker compose down -v` only for a deliberate clean slate; it removes all
+memories, identity, and goals. CI has a migration-survivor lane that verifies
+existing data survives the migration runner.
 
 ## Key Principles
 

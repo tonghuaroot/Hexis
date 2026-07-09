@@ -140,6 +140,11 @@ pytest tests/db -q        # DB integration tests
 pytest tests/core -q      # Core API tests
 pytest tests/cli -q       # CLI smoke tests
 
+# CI parity checks (GitHub Actions)
+# - Required branch check: all-checks-pass
+# - CI uses ops/ci/fake_embeddings.py instead of Ollama
+# - Migration-survivor proves existing DB data survives hexis migrate
+
 # Other CLI commands
 hexis status              # Agent status
 hexis chat                # Interactive chat

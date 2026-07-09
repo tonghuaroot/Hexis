@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.db
     container_name: hexis_brain
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-hexis_memory}
       POSTGRES_USER: ${POSTGRES_USER:-hexis_user}
@@ -45,6 +46,7 @@ services:
   rabbitmq:
     image: rabbitmq:4-management
     container_name: hexis_rabbitmq
+    restart: unless-stopped
     profiles:
       - active
     environment:
@@ -103,6 +105,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.worker
     container_name: hexis_heartbeat_worker
+    restart: unless-stopped
     profiles:
       - active
     command: ["hexis-worker", "--mode", "heartbeat"]
@@ -137,6 +140,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.worker
     container_name: hexis_maintenance_worker
+    restart: unless-stopped
     profiles:
       - active
     command: ["hexis-worker", "--mode", "maintenance"]
@@ -171,6 +175,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.worker
     container_name: hexis_api
+    restart: unless-stopped
     profiles:
       - active
     command: ["hexis-api", "--host", "0.0.0.0", "--port", "43817"]
@@ -179,6 +184,12 @@ services:
         condition: service_healthy
     ports:
       - "${HEXIS_BIND_ADDRESS:-127.0.0.1}:${HEXIS_API_PORT:-43817}:43817"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:43817/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     environment:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
@@ -203,6 +214,7 @@ services:
       context: .
       dockerfile: ops/Dockerfile.channels
     container_name: hexis_channel_worker
+    restart: unless-stopped
     profiles:
       - active
     command: ["hexis-channels"]

@@ -1,0 +1,162 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # ---------------------------------------------------------------- lint / types
+  # Formatting/type checks are ADVISORY for now (the tree isn't black/isort-clean
+  # yet — a one-shot reformat is a separate decision). Import-smoke IS blocking.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e . black isort mypy
+      - name: black (advisory)
+        continue-on-error: true
+        run: black --check .
+      - name: isort (advisory)
+        continue-on-error: true
+        run: isort --check-only .
+      - name: mypy (advisory)
+        continue-on-error: true
+        run: mypy core services apps || true
+      - name: import smoke (blocking)
+        run: python -c "import apps.hexis_cli, core.migrations, core.backup_restore, services.worker_service, apps.hexis_api"
+
+  # ------------------------------------------------------------- the real suite
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e .
+      - name: Start fake embedding server (no Ollama needed)
+        run: |
+          FAKE_EMBEDDINGS_PORT=11435 nohup python ops/ci/fake_embeddings.py >/tmp/fake_emb.log 2>&1 &
+          for _ in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:11435/api/tags >/dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          cat /tmp/fake_emb.log
+          exit 1
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Start the brain DB (AGE + pgvector + pgsql-http)
+        run: |
+          docker run -d --name hexisdb -p 5432:5432 \
+            --add-host=host.docker.internal:host-gateway \
+            -e POSTGRES_USER=hexis_user -e POSTGRES_PASSWORD=hexis_password -e POSTGRES_DB=hexis_memory \
+            ghcr.io/quixiai/hexis-brain:latest \
+            postgres -c search_path=ag_catalog,public -c jit=off \
+              -c app.embedding_dimension=768 \
+              -c app.embedding_service_url=http://host.docker.internal:11435/api/embed
+          for _ in $(seq 1 60); do
+            if docker exec hexisdb pg_isready -U hexis_user -d hexis_memory; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs hexisdb
+          exit 1
+      - name: Run the suite
+        env:
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: hexis_user
+          POSTGRES_PASSWORD: hexis_password
+          POSTGRES_DB: hexis_memory
+          POSTGRES_ADMIN_DB: postgres
+        run: pytest tests -q -m "not ui"
+      - name: DB logs on failure
+        if: failure()
+        run: |
+          docker logs hexisdb | tail -100 || true
+          cat /tmp/fake_emb.log || true
+
+  # ------------------------------------------- prove the published image upgrades
+  # cleanly (schema migration applied to the image's BAKED schema, data preserved).
+  migration-survivor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e .
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Start the published image (its BAKED schema — do NOT re-replay db/*.sql)
+        run: |
+          docker run -d --name hexisdb -p 5432:5432 \
+            -e POSTGRES_USER=hexis_user -e POSTGRES_PASSWORD=hexis_password -e POSTGRES_DB=hexis_memory \
+            ghcr.io/quixiai/hexis-brain:latest \
+            postgres -c search_path=ag_catalog,public -c jit=off -c app.embedding_dimension=768
+          for _ in $(seq 1 60); do
+            if docker exec hexisdb pg_isready -U hexis_user -d hexis_memory; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs hexisdb
+          exit 1
+      - name: Seed data, migrate, assert survival
+        env:
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: hexis_user
+          POSTGRES_PASSWORD: hexis_password
+          POSTGRES_DB: hexis_memory
+        run: python ops/ci/migration_survivor.py
+      - name: DB logs on failure
+        if: failure()
+        run: docker logs hexisdb | tail -100 || true
+
+  workflow-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint GitHub Actions workflows
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+      - name: zizmor advisory scan
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade zizmor
+          zizmor .github/workflows
+
+  # ------------------------------------------------ single required branch check
+  all-checks-pass:
+    if: always()
+    needs: [lint, test, migration-survivor, workflow-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every required lane passed
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "lane results: $results"
+          for r in $results; do
+            if [ "$r" != "success" ]; then echo "A required lane failed."; exit 1; fi
+          done
+          echo "All required lanes passed."
