@@ -13,20 +13,10 @@ Skills differ from memories:
 - Memories = experiential knowledge with trust, decay, embeddings
 - Skills = static documentation, always present when requirements met
 
-Example usage:
-
-    from skills import load_skills, SkillContext
-
-    # Load skills matching current context
-    active_skills = load_skills(
-        context=SkillContext.HEARTBEAT,
-        available_tools={"recall", "web_search", "web_fetch"},
-        available_config={"tavily"},
-    )
-
-    # Inject into system prompt
-    for skill in active_skills:
-        system_prompt += f"\\n\\n{skill.to_prompt_block()}"
+The system prompt carries only a compact index (`SkillSpec.to_index_line()`);
+full instructions (`SkillSpec.to_prompt_block()`) are delivered on demand when
+the model activates a skill via the `use_skill` tool. See
+`services/skill_runtime.py` for selection and prompt formatting.
 """
 
 from .base import InstallMethod, SkillCategory, SkillContext, SkillSpec

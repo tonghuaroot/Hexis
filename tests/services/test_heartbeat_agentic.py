@@ -115,10 +115,10 @@ class TestBuildSystemPrompt:
         assert "tool" in prompt.lower() or "heartbeat" in prompt.lower()
 
     async def test_includes_tool_names(self):
-        """System prompt gives compact tool guidance without duplicating schemas."""
+        """System prompt gives compact skill guidance without duplicating schemas."""
         registry = _mock_registry(tool_names=["recall", "remember", "manage_goals"])
         prompt = await build_heartbeat_system_prompt(registry)
-        assert "## Tool Use" in prompt
+        assert "## Skills" in prompt
         assert "skills first" in prompt.lower()
         assert "list_skills" in prompt
 

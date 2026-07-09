@@ -150,8 +150,13 @@ class SkillSpec:
         return (len(reasons) == 0, reasons)
 
     def to_prompt_block(self) -> str:
-        """Format this skill for injection into a system prompt."""
+        """Format this skill's full instructions (returned by `use_skill`)."""
         return f"<skill name=\"{self.name}\">\n{self.content}\n</skill>"
+
+    def to_index_line(self) -> str:
+        """One-line entry for the compact skill index in the system prompt."""
+        desc = " ".join(self.description.split())
+        return f"- {self.name}: {desc}" if desc else f"- {self.name}"
 
     @classmethod
     def from_frontmatter(cls, metadata: dict[str, Any], content: str, source: str = "") -> "SkillSpec":

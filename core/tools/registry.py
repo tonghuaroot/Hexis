@@ -17,6 +17,7 @@ import time
 import uuid
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from .base import (
@@ -83,6 +84,9 @@ class ToolRegistry:
         self._config_cache: ToolsConfig | None = None
         self._config_cache_time: float = 0
         self._config_cache_ttl: float = 60.0  # Refresh config every 60s
+        # Skill directories contributed by plugins; the skill runtime scans
+        # these in addition to the bundled/user skill dirs.
+        self.extra_skill_dirs: list[Path] = []
 
     @property
     def hooks(self) -> HookRegistry:
@@ -826,6 +830,10 @@ async def create_full_registry(pool: "asyncpg.Pool") -> ToolRegistry:
         # Register plugin hooks
         for event, handler, plugin_id in plugin_registry.get_hooks():
             registry.hooks.register(event, handler, source=plugin_id)
+
+        # Expose plugin skill directories to the skill runtime so plugin
+        # skills are discoverable and activatable like bundled ones.
+        registry.extra_skill_dirs = list(plugin_registry.get_skill_dirs())
 
     except ImportError:
         logger.debug("Plugin system not available")

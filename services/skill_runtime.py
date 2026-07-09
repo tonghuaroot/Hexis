@@ -8,7 +8,8 @@ skills. This keeps prompts smaller and makes capability use intentional.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from core.tools.base import ToolContext
@@ -35,6 +36,9 @@ STOPWORDS = {
 class SkillSelection:
     skills: list[SkillSpec]
     allowed_tool_names: set[str]
+    # Full catalog for this context — used for the compact skill index in the
+    # system prompt, so the model can discover skills without a list_skills call.
+    available: list[SkillSpec] = field(default_factory=list)
 
 
 def tool_context_to_skill_context(context: ToolContext) -> SkillContext:
@@ -90,6 +94,22 @@ def skill_bound_tools(skill: SkillSpec) -> list[str]:
     return list(dict.fromkeys([*(skill.bound_tools or []), *skill.requires_tools]))
 
 
+def _plugin_skill_dirs(registry: "ToolRegistry") -> list[Path]:
+    """Skill directories contributed by plugins, carried on the tool registry."""
+    dirs = getattr(registry, "extra_skill_dirs", None) or []
+    return [Path(d) for d in dirs]
+
+
+def load_available_skills(registry: "ToolRegistry", context: ToolContext) -> list[SkillSpec]:
+    """All loadable skills for a context, including plugin-provided ones."""
+    return load_skills(
+        tool_context_to_skill_context(context),
+        available_tools=set(registry.list_names()),
+        available_config=None,  # tool handlers validate credentials at execution time
+        extra_dirs=_plugin_skill_dirs(registry),
+    )
+
+
 async def select_skills(
     registry: "ToolRegistry",
     tool_context: ToolContext,
@@ -99,12 +119,7 @@ async def select_skills(
 ) -> SkillSelection:
     """Select active skills for this turn and derive the exposed tool set."""
     available_tools = set(registry.list_names())
-    skill_context = tool_context_to_skill_context(tool_context)
-    skills = load_skills(
-        skill_context,
-        available_tools=available_tools,
-        available_config=None,  # tool handlers validate credentials at execution time
-    )
+    skills = load_available_skills(registry, tool_context)
 
     default_names = HEARTBEAT_DEFAULT_SKILL_NAMES if tool_context == ToolContext.HEARTBEAT else DEFAULT_SKILL_NAMES
     selected: list[SkillSpec] = [s for s in skills if s.name in default_names]
@@ -128,28 +143,42 @@ async def select_skills(
     for skill in selected:
         allowed.update(t for t in skill_bound_tools(skill) if t in available_tools)
 
-    return SkillSelection(skills=selected, allowed_tool_names=allowed)
+    return SkillSelection(skills=selected, allowed_tool_names=allowed, available=skills)
 
 
-def format_active_skills(skills: list[SkillSpec]) -> str:
-    if not skills:
-        return ""
-    blocks = [
-        "## Active Skills",
-        "These skills are active for this turn. Use `list_skills` to discover more and `use_skill` to activate one if the task needs it.",
+def format_skills_prompt(
+    active: list[SkillSpec],
+    available: list[SkillSpec] | None = None,
+) -> str:
+    """Compact skill section for the system prompt.
+
+    One index line per skill — never full skill bodies. Full instructions are
+    fetched on demand via `use_skill`, and tool schemas ride the structured
+    tool-calling API, so this block stays flat regardless of skill size.
+    """
+    lines = [
+        "## Skills",
+        "Use skills first: capabilities are packaged as skills, and a skill's "
+        "tools are exposed through the tool API only while that skill is active. "
+        "If the task needs a capability that is not active, call `use_skill` with "
+        "the skill's name — it returns the skill's full instructions and unlocks "
+        "its tools for this turn. `list_skills` shows the catalog with bound tools.",
     ]
-    for skill in skills:
-        blocks.append(skill.to_prompt_block())
-    return "\n\n".join(blocks)
+    if active:
+        lines.append("Active now:\n" + "\n".join(s.to_index_line() for s in active))
+    active_names = {s.name for s in active}
+    inactive = [s for s in (available or []) if s.name not in active_names]
+    if inactive:
+        lines.append(
+            "Available (activate with `use_skill`):\n"
+            + "\n".join(s.to_index_line() for s in inactive)
+        )
+    return "\n\n".join(lines)
 
 
 def skill_catalog(registry: "ToolRegistry", context: ToolContext) -> list[dict[str, Any]]:
     available_tools = set(registry.list_names())
-    skills = load_skills(
-        tool_context_to_skill_context(context),
-        available_tools=available_tools,
-        available_config=None,
-    )
+    skills = load_available_skills(registry, context)
     return [
         {
             "name": s.name,
@@ -163,12 +192,7 @@ def skill_catalog(registry: "ToolRegistry", context: ToolContext) -> list[dict[s
 
 def get_skill_by_name(registry: "ToolRegistry", context: ToolContext, name: str) -> SkillSpec | None:
     wanted = name.strip().lower()
-    available_tools = set(registry.list_names())
-    skills = load_skills(
-        tool_context_to_skill_context(context),
-        available_tools=available_tools,
-        available_config=None,
-    )
+    skills = load_available_skills(registry, context)
     for skill in skills:
         if skill.name.lower() == wanted:
             return skill

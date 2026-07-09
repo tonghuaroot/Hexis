@@ -26,7 +26,11 @@ from services.prompt_resources import (
     load_heartbeat_task_mode_prompt,
     load_subconscious_prompt,
 )
-from services.skill_runtime import format_active_skills, select_skills
+from services.skill_runtime import (
+    format_skills_prompt,
+    load_available_skills,
+    select_skills,
+)
 
 if TYPE_CHECKING:
     import asyncpg
@@ -252,6 +256,7 @@ async def build_system_prompt(
     has_backlog_tasks: bool = False,
     is_group: bool = False,
     active_skills: list["SkillSpec"] | None = None,
+    available_skills: list["SkillSpec"] | None = None,
 ) -> str:
     """Build the system prompt for either chat or heartbeat mode."""
 
@@ -264,43 +269,25 @@ async def build_system_prompt(
     else:
         prompt = load_heartbeat_agentic_prompt().strip()
 
-    # Tools are already supplied to the model through the structured tool-calling
-    # API, including names, descriptions, and JSON schemas. Repeating those
-    # descriptions in the text prompt costs thousands of tokens per call and can
-    # drift from the actual schemas, so the prompt only gives concise usage
-    # guidance here.
-    tool_context = ToolContext.CHAT if mode == "chat" else ToolContext.HEARTBEAT
-    try:
-        specs = await registry.get_specs(tool_context) if registry else []
-        if specs:
-            if mode == "chat":
-                prompt += (
-                    "\n\n## Tool Use\n"
-                    "Use skills first. The current tool API exposes skill discovery plus tools "
-                    "bound by active skills. If the task needs another capability, call "
-                    "`list_skills`, then `use_skill` to activate the right workflow."
-                )
-            else:
-                prompt += (
-                    "\n\n## Tool Use\n"
-                    "Use skills first. The current tool API exposes skill discovery plus tools "
-                    "bound by active skills. Call `list_skills`/`use_skill` before using a "
-                    "capability that is not active."
-                )
-    except Exception:
-        logger.debug("Failed to get tool specs for prompt", exc_info=True)
-
     # Heartbeat-specific: task mode guidance
     if mode == "heartbeat" and has_backlog_tasks:
         task_mode_prompt = load_heartbeat_task_mode_prompt().strip()
         prompt += "\n\n" + task_mode_prompt
 
-    # Skill-first capability layer. Skills are the model-facing workflows;
-    # tools are exposed separately through the tool API only when a skill binds
-    # them. `list_skills` / `use_skill` handle discovery for non-obvious tasks.
-    skill_block = format_active_skills(active_skills or [])
-    if skill_block:
-        prompt += "\n\n" + skill_block
+    # Skill-first capability surface. Tool schemas ride the structured
+    # tool-calling API and full skill instructions come from `use_skill` on
+    # demand, so the prompt carries only usage guidance plus a compact skill
+    # index — never per-tool descriptions or full skill bodies.
+    tool_context = ToolContext.CHAT if mode == "chat" else ToolContext.HEARTBEAT
+    if registry is not None or active_skills:
+        available = available_skills
+        if available is None and registry is not None:
+            try:
+                available = load_available_skills(registry, tool_context)
+            except Exception:
+                available = []
+                logger.debug("Failed to load skill catalog for prompt", exc_info=True)
+        prompt += "\n\n" + format_skills_prompt(active_skills or [], available or [])
 
     # Personhood modules
     personhood_kind = "group" if (mode == "chat" and is_group) else ("conversation" if mode == "chat" else "heartbeat")
@@ -449,6 +436,7 @@ async def run_agent(
         has_backlog_tasks=has_backlog_tasks,
         is_group=is_group,
         active_skills=skill_selection.skills,
+        available_skills=skill_selection.available,
     )
 
     # 5. Build enriched user message
@@ -641,6 +629,7 @@ async def stream_agent(
         has_backlog_tasks=has_backlog_tasks,
         is_group=is_group,
         active_skills=skill_selection.skills,
+        available_skills=skill_selection.available,
     )
 
     # Build enriched user message

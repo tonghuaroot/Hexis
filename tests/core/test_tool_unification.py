@@ -130,7 +130,7 @@ class TestBuildSystemPrompt:
         assert "TestAgent" in prompt
         assert "Agent Profile" in prompt
 
-    async def test_prompt_includes_tool_descriptions(self, db_pool):
+    async def test_prompt_carries_compact_skill_index_not_bodies(self, db_pool):
         from core.tools import create_default_registry
         from services.chat import _build_system_prompt
 
@@ -138,9 +138,15 @@ class TestBuildSystemPrompt:
         prompt = await _build_system_prompt({}, registry=registry)
         # Tool schemas are sent through the structured tool API; the text prompt
         # should not duplicate every tool description.
-        assert "## Tool Use" in prompt
+        assert "## Skills" in prompt
         assert "skills first" in prompt.lower()
         assert "list_skills" in prompt
+        # The skill catalog appears as one-line index entries...
+        assert "- core-memory:" in prompt
+        assert "- research:" in prompt
+        # ...never as full skill bodies (those come from `use_skill` on demand).
+        assert "Memory is evidence, not omniscience" not in prompt
+        assert "<skill name=" not in prompt
 
     async def test_prompt_without_personhood(self):
         from services.chat import _build_system_prompt

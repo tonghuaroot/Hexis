@@ -207,6 +207,89 @@ class TestSkillRuntimeSelection:
         assert "skill-authoring" in names
         assert "author_skill" in selection.allowed_tool_names
 
+    async def test_selection_carries_full_catalog_for_prompt_index(self, db_pool):
+        from core.tools import ToolContext, create_default_registry
+        from services.skill_runtime import select_skills
+
+        registry = create_default_registry(db_pool)
+        selection = await select_skills(registry, ToolContext.CHAT, query="hello")
+
+        available_names = {s.name for s in selection.available}
+        assert {"core-memory", "research", "meeting-prep"} <= available_names
+        # Catalog is a superset of the active selection
+        assert {s.name for s in selection.skills} <= available_names
+
+
+PLUGIN_SKILL_MD = """---
+name: plugin-demo
+description: Demo workflow provided by a plugin for testing
+category: other
+requires:
+  tools: [recall]
+contexts: [chat, heartbeat]
+bound_tools: [recall]
+---
+
+# Plugin Demo
+
+When the user asks about the plugin demo workflow, recall related context
+first, then respond using the recalled evidence.
+"""
+
+
+class TestPluginSkillDirs:
+    async def test_plugin_skill_dir_is_discoverable_and_activatable(self, db_pool, tmp_path):
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import ListSkillsHandler, UseSkillHandler
+        from services.skill_runtime import get_skill_by_name, select_skills
+
+        skill_dir = tmp_path / "plugin-demo"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(PLUGIN_SKILL_MD, encoding="utf-8")
+
+        registry = create_default_registry(db_pool)
+        registry.extra_skill_dirs = [tmp_path]
+
+        # Present in the selection catalog (and thus the prompt index)
+        selection = await select_skills(registry, ToolContext.CHAT, query="hello")
+        assert "plugin-demo" in {s.name for s in selection.available}
+
+        # Discoverable through list_skills
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="plugin-skill-test",
+            registry=registry,
+        )
+        listed = await ListSkillsHandler().execute({}, ctx)
+        assert "plugin-demo" in {s["name"] for s in listed.output["skills"]}
+
+        # Activatable through use_skill, unlocking its bound tools
+        assert get_skill_by_name(registry, ToolContext.CHAT, "plugin-demo") is not None
+        activated = await UseSkillHandler().execute({"name": "plugin-demo"}, ctx)
+        assert activated.success is True
+        assert "Plugin Demo" in activated.output["instructions"]
+        assert "recall" in activated.output["bound_tools"]
+
+    async def test_create_full_registry_adopts_plugin_skill_dirs(self, db_pool, monkeypatch, tmp_path):
+        from core.tools.registry import create_full_registry
+
+        class _StubPluginRegistry:
+            def get_tool_handlers(self):
+                return []
+
+            def get_hooks(self):
+                return []
+
+            def get_skill_dirs(self):
+                return [tmp_path]
+
+        async def _fake_load_plugins(pool):
+            return _StubPluginRegistry()
+
+        monkeypatch.setattr("plugins.loader.load_plugins", _fake_load_plugins)
+        registry = await create_full_registry(db_pool)
+        assert registry.extra_skill_dirs == [tmp_path]
+
 
 class TestSkillDiscoveryTools:
     async def test_list_skills_and_use_skill_return_discoverable_capabilities(self, db_pool):
