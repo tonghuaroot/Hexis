@@ -105,6 +105,10 @@ class AgentLoopConfig:
     # Runtime permission overrides (Gap 4)
     context_overrides: "ContextOverrides | None" = None
 
+    # Skill-first routing: when set, only these tool schemas are exposed to the
+    # model. `use_skill` can expand the set mid-turn.
+    allowed_tool_names: set[str] | None = None
+
     # Continuation nudge (Gap 5)
     continuation_prompt: str | None = None
     max_continuations: int = 0
@@ -189,7 +193,7 @@ class AgentLoop:
         messages.extend(history or [])
         messages.append({"role": "user", "content": user_message})
 
-        tools = await self.config.registry.get_specs(self.config.tool_context)
+        tools = await self._load_tools_for_turn()
         # Fail loud: turn state is authoritative, so a failed start must surface
         # rather than silently degrading to a Python-only loop.
         await self._start_turn(user_message, messages)
@@ -283,6 +287,16 @@ class AgentLoop:
         if not self.config.enable_planning:
             return await self._execute_loop(tools)
         return await self._planned_loop(tools)
+
+    async def _load_tools_for_turn(self) -> list[dict[str, Any]]:
+        tools = await self.config.registry.get_specs(self.config.tool_context)
+        allowed = self.config.allowed_tool_names
+        if allowed is None:
+            return tools
+        return [
+            spec for spec in tools
+            if spec.get("function", {}).get("name") in allowed
+        ]
 
     async def _llm_call(
         self,
@@ -420,6 +434,26 @@ class AgentLoop:
                 arguments = call.get("arguments", {})
                 call_id = call.get("id") or str(uuid.uuid4())
 
+                if cfg.allowed_tool_names is not None and tool_name not in cfg.allowed_tool_names:
+                    await self._record_tool_result(call_id, {
+                        "tool_name": tool_name,
+                        "success": False,
+                        "error": "tool not available in the active skill set",
+                        "energy_spent": 0,
+                        "model_output": (
+                            f"Tool '{tool_name}' is not available. Use list_skills/use_skill "
+                            "to activate the relevant skill first."
+                        ),
+                    })
+                    self._tool_calls_made.append({
+                        "name": tool_name,
+                        "arguments": arguments,
+                        "success": False,
+                        "error": "not_available_in_active_skills",
+                        "energy_spent": 0,
+                    })
+                    continue
+
                 # Check approval via callback
                 spec = cfg.registry.get_spec(tool_name)
                 if spec and spec.requires_approval and cfg.on_approval:
@@ -493,6 +527,17 @@ class AgentLoop:
                     "energy_spent": result.energy_spent,
                     "error": result.error,
                 })
+
+                if result.success and tool_name == "use_skill" and cfg.allowed_tool_names is not None:
+                    output = result.output if isinstance(result.output, dict) else {}
+                    newly_bound = {
+                        str(name)
+                        for name in output.get("bound_tools", [])
+                        if cfg.registry.get_spec(str(name)) is not None
+                    }
+                    if newly_bound:
+                        cfg.allowed_tool_names.update(newly_bound)
+                        tools = await self._load_tools_for_turn()
 
         # Should not reach here, but safety net
         return self._make_result(await self._get_messages(), "completed")  # pragma: no cover
@@ -569,7 +614,7 @@ class AgentLoop:
         # Reset continuation counter for verify phase
         self._continuations_used = 0
 
-        return await self._execute_loop(tools)
+        return await self._execute_loop(await self._load_tools_for_turn())
 
     # ------------------------------------------------------------------
     # Helpers

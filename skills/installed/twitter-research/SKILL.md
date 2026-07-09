@@ -3,9 +3,9 @@ name: twitter-research
 description: Search and analyze Twitter/X posts for trends, sentiment, and topic research
 category: research
 requires:
-  tools: [search_twitter]
+  tools: [twitter_search]
 contexts: [heartbeat, chat]
-bound_tools: [search_twitter]
+bound_tools: [twitter_search, recall, remember]
 ---
 
 # Twitter/X Research
@@ -23,7 +23,7 @@ Search Twitter/X for posts related to a topic, person, or trend. Analyze sentime
 
 1. **Define the query**: Translate the user's intent into a focused search query. Twitter search supports keywords, hashtags, mentions (@user), and boolean operators. Be specific -- broad queries return noise.
 2. **Set scope**: Determine whether the user wants recent posts (last 24-48 hours) or a broader time window. Default to recent unless otherwise specified. Consider filtering by minimum engagement (likes, retweets) to surface signal over noise.
-3. **Execute search**: Call `search_twitter` with the crafted query. Review the returned posts for relevance before analysis.
+3. **Execute search**: Call `twitter_search` with the crafted query. Review the returned posts for relevance before analysis.
 4. **Analyze themes**: Group the results by recurring themes or talking points. Identify:
    - **Dominant sentiment**: Is the conversation positive, negative, mixed, or neutral?
    - **Key voices**: Are there notable accounts (high follower count, verified, industry figures) driving the conversation?

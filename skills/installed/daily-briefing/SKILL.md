@@ -3,9 +3,9 @@ name: daily-briefing
 description: Compile a comprehensive daily briefing from calendar, contacts, goals, and recent activity
 category: productivity
 requires:
-  tools: [recall, list_calendar_events]
+  tools: [recall, calendar_events]
 contexts: [heartbeat]
-bound_tools: [recall, list_calendar_events, search_contacts, aggregate_signals]
+bound_tools: [recall, calendar_events, search_contacts, aggregate_signals]
 ---
 
 # Daily Briefing Compilation
@@ -21,7 +21,7 @@ Assemble a structured morning briefing that gives the user a complete picture of
 ## Step-by-Step Methodology
 
 1. **Check if already delivered**: Use `recall` to see if a daily briefing was already generated today. If so, skip unless the user explicitly asks for a refresh.
-2. **Pull today's calendar**: Call `list_calendar_events` for today's date range. Extract meeting times, titles, attendees, and locations.
+2. **Pull today's calendar**: Call `calendar_events` for today's date range. Extract meeting times, titles, attendees, and locations.
 3. **Enrich meetings**: For each meeting, run a lightweight contact lookup and memory recall on attendees and meeting topics. Do not go deep -- this is a summary, not full meeting prep. Delegate to the meeting-prep skill for any meeting the user wants to dive into.
 4. **Review active goals**: Use `recall` to surface active goals and their recent progress. Identify which goals have actionable next steps for today.
 5. **Check pending items**: Recall any action items, promises, or deadlines that fall on or near today. These might come from email digests, prior conversations, or meeting notes.

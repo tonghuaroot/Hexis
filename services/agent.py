@@ -20,19 +20,24 @@ from core.llm_json import chat_json
 from core.tools.base import ToolContext
 from core.tools.config import ContextOverrides
 from services.prompt_resources import (
-    compose_personhood_prompt,
+    compose_compact_personhood_prompt,
     load_conversation_prompt,
     load_heartbeat_agentic_prompt,
     load_heartbeat_task_mode_prompt,
     load_subconscious_prompt,
 )
+from services.skill_runtime import format_active_skills, select_skills
 
 if TYPE_CHECKING:
     import asyncpg
     from core.agent_loop import AgentLoopResult
     from core.tools.registry import ToolRegistry
+    from skills.base import SkillSpec
 
 logger = logging.getLogger(__name__)
+
+_SUBCONSCIOUS_MEMORY_CONTEXT_CHARS = 4000
+_SUBCONSCIOUS_TOTAL_CONTEXT_CHARS = 7000
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +157,10 @@ async def run_subconscious_appraisal(
     if user_message:
         context_parts.append(f"User message: {user_message}")
     if memory_context:
-        context_parts.append(f"Relevant memories:\n{memory_context}")
+        clipped = memory_context[:_SUBCONSCIOUS_MEMORY_CONTEXT_CHARS]
+        if len(memory_context) > _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS:
+            clipped += "\n[truncated for subconscious appraisal; full context is provided to the main turn]"
+        context_parts.append(f"Relevant memories:\n{clipped}")
 
     # Get emotional state from DB
     try:
@@ -204,7 +212,10 @@ async def run_subconscious_appraisal(
     except Exception as e:
         logger.debug("Failed to fetch dopamine state: %s", e)
 
-    user_prompt = f"Context (JSON):\n{json.dumps({'input': chr(10).join(context_parts)})[:12000]}"
+    user_prompt = (
+        "Context (JSON):\n"
+        + json.dumps({"input": chr(10).join(context_parts)})[:_SUBCONSCIOUS_TOTAL_CONTEXT_CHARS]
+    )
 
     try:
         doc, _raw = await chat_json(
@@ -240,6 +251,7 @@ async def build_system_prompt(
     subconscious_output: SubconsciousOutput | None = None,
     has_backlog_tasks: bool = False,
     is_group: bool = False,
+    active_skills: list["SkillSpec"] | None = None,
 ) -> str:
     """Build the system prompt for either chat or heartbeat mode."""
 
@@ -252,26 +264,28 @@ async def build_system_prompt(
     else:
         prompt = load_heartbeat_agentic_prompt().strip()
 
-    # Add dynamic tool descriptions
+    # Tools are already supplied to the model through the structured tool-calling
+    # API, including names, descriptions, and JSON schemas. Repeating those
+    # descriptions in the text prompt costs thousands of tokens per call and can
+    # drift from the actual schemas, so the prompt only gives concise usage
+    # guidance here.
     tool_context = ToolContext.CHAT if mode == "chat" else ToolContext.HEARTBEAT
     try:
         specs = await registry.get_specs(tool_context) if registry else []
         if specs:
             if mode == "chat":
-                tool_lines = []
-                for spec in specs:
-                    func = spec.get("function", {})
-                    name = func.get("name", "")
-                    desc = func.get("description", "")
-                    tool_lines.append(f"- **{name}**: {desc}")
-                prompt += "\n\n## Available Tools\n\n" + "\n".join(tool_lines)
-            else:
-                tool_names = sorted(s["function"]["name"] for s in specs)
                 prompt += (
-                    "\n\n## Available Tools\n"
-                    + ", ".join(tool_names)
-                    + "\n\nUse these tools via tool_use to take actions. "
-                    "Each tool has its own parameters — the LLM API will show you the schemas."
+                    "\n\n## Tool Use\n"
+                    "Use skills first. The current tool API exposes skill discovery plus tools "
+                    "bound by active skills. If the task needs another capability, call "
+                    "`list_skills`, then `use_skill` to activate the right workflow."
+                )
+            else:
+                prompt += (
+                    "\n\n## Tool Use\n"
+                    "Use skills first. The current tool API exposes skill discovery plus tools "
+                    "bound by active skills. Call `list_skills`/`use_skill` before using a "
+                    "capability that is not active."
                 )
     except Exception:
         logger.debug("Failed to get tool specs for prompt", exc_info=True)
@@ -281,13 +295,20 @@ async def build_system_prompt(
         task_mode_prompt = load_heartbeat_task_mode_prompt().strip()
         prompt += "\n\n" + task_mode_prompt
 
+    # Skill-first capability layer. Skills are the model-facing workflows;
+    # tools are exposed separately through the tool API only when a skill binds
+    # them. `list_skills` / `use_skill` handle discovery for non-obvious tasks.
+    skill_block = format_active_skills(active_skills or [])
+    if skill_block:
+        prompt += "\n\n" + skill_block
+
     # Personhood modules
     personhood_kind = "group" if (mode == "chat" and is_group) else ("conversation" if mode == "chat" else "heartbeat")
     try:
-        personhood = compose_personhood_prompt(personhood_kind)
+        personhood = compose_compact_personhood_prompt(personhood_kind)
         if personhood:
             prompt += (
-                "\n\n----- PERSONHOOD MODULES (for grounding) -----\n\n"
+                "\n\n----- PERSONHOOD GROUNDING -----\n\n"
                 + personhood
             )
     except Exception:
@@ -409,6 +430,16 @@ async def run_agent(
         except Exception as exc:
             logger.warning("Subconscious pre-phase failed: %s", exc)
 
+    skill_query = user_message
+    if mode == "heartbeat" and heartbeat_context:
+        skill_query = json.dumps(heartbeat_context, default=str)[:4000]
+    skill_selection = await select_skills(
+        registry,
+        tool_context,
+        query=skill_query,
+        max_skills=5 if mode == "heartbeat" else 4,
+    )
+
     # 4. Build system prompt
     system_prompt = await build_system_prompt(
         mode,
@@ -417,6 +448,7 @@ async def run_agent(
         subconscious_output=subconscious_output,
         has_backlog_tasks=has_backlog_tasks,
         is_group=is_group,
+        active_skills=skill_selection.skills,
     )
 
     # 5. Build enriched user message
@@ -455,6 +487,7 @@ async def run_agent(
             temperature=0.7,
             max_tokens=effective_max_tokens,
             session_id=session_id,
+            allowed_tool_names=set(skill_selection.allowed_tool_names),
         )
     else:
         effective_timeout = timeout_seconds or (300.0 if has_backlog_tasks else 120.0)
@@ -479,6 +512,7 @@ async def run_agent(
             ),
             max_continuations=2 if has_backlog_tasks else 1,
             context_overrides=context_overrides,
+            allowed_tool_names=set(skill_selection.allowed_tool_names),
         )
 
     # 7. Run agent loop
@@ -591,6 +625,13 @@ async def stream_agent(
         except Exception as exc:
             logger.warning("Subconscious pre-phase failed: %s", exc)
 
+    skill_selection = await select_skills(
+        registry,
+        tool_context,
+        query=user_message,
+        max_skills=4,
+    )
+
     # Build system prompt
     system_prompt = await build_system_prompt(
         mode,
@@ -599,6 +640,7 @@ async def stream_agent(
         subconscious_output=subconscious_output,
         has_backlog_tasks=has_backlog_tasks,
         is_group=is_group,
+        active_skills=skill_selection.skills,
     )
 
     # Build enriched user message
@@ -635,6 +677,7 @@ async def stream_agent(
         max_tokens=effective_max_tokens,
         session_id=session_id,
         on_approval=on_approval,
+        allowed_tool_names=set(skill_selection.allowed_tool_names),
     )
 
     agent = AgentLoop(loop_config)

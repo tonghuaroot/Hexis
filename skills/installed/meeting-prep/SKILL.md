@@ -3,11 +3,11 @@ name: meeting-prep
 description: Prepare briefings for upcoming calendar events with attendee context and relevant memories
 category: productivity
 requires:
-  tools: [list_calendar_events, search_contacts, recall]
+  tools: [calendar_events, search_contacts, recall]
   config: [google_calendar]
   env: [GOOGLE_CREDENTIALS_JSON]
 contexts: [heartbeat, chat]
-bound_tools: [list_calendar_events, meeting_prep, search_contacts]
+bound_tools: [calendar_events, meeting_prep, search_contacts, recall]
 ---
 
 # Meeting Preparation Workflow
@@ -23,7 +23,7 @@ Compile a briefing for an upcoming meeting by pulling together calendar details,
 
 ## Step-by-Step Methodology
 
-1. **Identify the meeting**: Use `list_calendar_events` to find the next upcoming event (or a specific one if the user named it). Extract the title, time, location/link, and attendee list.
+1. **Identify the meeting**: Use `calendar_events` to find the next upcoming event (or a specific one if the user named it). Extract the title, time, location/link, and attendee list.
 2. **Look up attendees**: For each attendee, call `search_contacts` to pull their name, role, company, and relationship notes. If a contact is unknown, note them as a new face.
 3. **Recall prior interactions**: Use `recall` with each attendee's name or company to surface past conversations, decisions, promises, or open items. Focus on the last 30 days of episodic memories.
 4. **Recall topic context**: If the meeting title or description references a project, product, or topic, run a targeted `recall` for that subject to gather relevant semantic and strategic memories.

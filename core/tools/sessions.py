@@ -50,7 +50,7 @@ async def _run_sub_agent(
     from core.agent_loop import AgentLoop, AgentLoopConfig
     from core.llm_config import load_llm_config
     from core.tools.registry import create_default_registry
-    from services.prompt_resources import compose_personhood_prompt
+    from services.prompt_resources import compose_compact_personhood_prompt
 
     try:
         # Mark as running
@@ -67,7 +67,7 @@ async def _run_sub_agent(
         # Build a simple system prompt
         personhood = ""
         try:
-            personhood = compose_personhood_prompt("heartbeat")
+            personhood = compose_compact_personhood_prompt("heartbeat")
         except Exception:
             pass
 
@@ -79,7 +79,7 @@ async def _run_sub_agent(
         )
         if personhood:
             system_prompt += (
-                "\n\n----- PERSONHOOD MODULES (for grounding) -----\n\n"
+                "\n\n----- PERSONHOOD GROUNDING -----\n\n"
                 + personhood
             )
 

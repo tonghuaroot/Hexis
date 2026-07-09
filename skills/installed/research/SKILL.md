@@ -5,6 +5,7 @@ requires:
   tools: [web_search, web_fetch]
   config: [tavily]
 contexts: [heartbeat, chat]
+bound_tools: [web_search, web_fetch, recall, remember]
 ---
 
 # Research Methodology

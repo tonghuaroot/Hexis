@@ -154,6 +154,152 @@ class TestSkillSpecExtended:
 
 
 # ============================================================================
+# Skill-first runtime
+# ============================================================================
+
+
+class TestSkillRuntimeSelection:
+    async def test_default_chat_exposes_discovery_and_core_memory_only(self, db_pool):
+        from core.tools import ToolContext, create_default_registry
+        from services.skill_runtime import select_skills
+
+        registry = create_default_registry(db_pool)
+        selection = await select_skills(
+            registry,
+            ToolContext.CHAT,
+            query="what did we decide last time",
+        )
+
+        assert [s.name for s in selection.skills] == ["core-memory"]
+        assert {"list_skills", "use_skill", "recall", "remember"} <= selection.allowed_tool_names
+        assert "web_search" not in selection.allowed_tool_names
+        assert "shell" not in selection.allowed_tool_names
+
+    async def test_research_query_activates_research_without_unrelated_integrations(self, db_pool):
+        from core.tools import ToolContext, create_default_registry
+        from services.skill_runtime import select_skills
+
+        registry = create_default_registry(db_pool)
+        selection = await select_skills(
+            registry,
+            ToolContext.CHAT,
+            query="research current postgres age docs",
+        )
+        names = [s.name for s in selection.skills]
+
+        assert names == ["core-memory", "research"]
+        assert {"web_search", "web_fetch"} <= selection.allowed_tool_names
+        assert "twitter_search" not in selection.allowed_tool_names
+        assert "youtube_channel_stats" not in selection.allowed_tool_names
+
+    async def test_explicit_skill_request_activates_skill_authoring(self, db_pool):
+        from core.tools import ToolContext, create_default_registry
+        from services.skill_runtime import select_skills
+
+        registry = create_default_registry(db_pool)
+        selection = await select_skills(
+            registry,
+            ToolContext.CHAT,
+            query="create a reusable skill for weekly reviews",
+        )
+        names = [s.name for s in selection.skills]
+
+        assert "skill-authoring" in names
+        assert "author_skill" in selection.allowed_tool_names
+
+
+class TestSkillDiscoveryTools:
+    async def test_list_skills_and_use_skill_return_discoverable_capabilities(self, db_pool):
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import ListSkillsHandler, UseSkillHandler
+
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="skill-test",
+            registry=registry,
+        )
+
+        listed = await ListSkillsHandler().execute({}, ctx)
+        assert listed.success is True
+        names = {s["name"] for s in listed.output["skills"]}
+        assert {"core-memory", "research"} <= names
+
+        activated = await UseSkillHandler().execute({"name": "research"}, ctx)
+        assert activated.success is True
+        assert activated.output["name"] == "research"
+        assert "Research Methodology" in activated.output["instructions"]
+        assert {"web_search", "web_fetch"} <= set(activated.output["bound_tools"])
+
+    async def test_author_skill_creates_parseable_user_skill(self, db_pool, monkeypatch, tmp_path):
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import AuthorSkillHandler
+        from skills.loader import load_skills_from_dir
+
+        monkeypatch.setattr("core.tools.skills.USER_AUTHORED_SKILLS_DIR", tmp_path)
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="author-skill-test",
+            registry=registry,
+        )
+
+        result = await AuthorSkillHandler().execute({
+            "name": "weekly-review",
+            "description": "Run a reusable weekly review workflow",
+            "category": "productivity",
+            "contexts": ["chat", "heartbeat"],
+            "bound_tools": ["recall", "remember"],
+            "content": (
+                "# Weekly Review\n\n"
+                "Use this when the user asks to review the week. First recall recent "
+                "commitments and goals, then summarize progress, blockers, and next "
+                "actions. Store durable decisions with remember and avoid inventing "
+                "events that were not recalled or provided in the current turn."
+            ),
+            "rationale": "The workflow is repeated and benefits from consistency.",
+        }, ctx)
+
+        assert result.success is True
+        path = tmp_path / "weekly-review" / "SKILL.md"
+        assert path.exists()
+        parsed = load_skills_from_dir(tmp_path)
+        assert len(parsed) == 1
+        assert parsed[0].name == "weekly-review"
+        assert parsed[0].bound_tools == ["recall", "remember"]
+
+    async def test_author_skill_refuses_accidental_overwrite(self, db_pool, monkeypatch, tmp_path):
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import AuthorSkillHandler
+
+        monkeypatch.setattr("core.tools.skills.USER_AUTHORED_SKILLS_DIR", tmp_path)
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="author-skill-test",
+            registry=registry,
+        )
+        payload = {
+            "name": "repeatable-method",
+            "description": "Capture a repeatable method",
+            "bound_tools": ["recall"],
+            "content": (
+                "# Repeatable Method\n\n"
+                "Use this for a repeated procedure. Recall relevant context, follow "
+                "the established steps, verify the result, and remember only durable "
+                "lessons or decisions that will matter in future sessions."
+            ),
+        }
+
+        first = await AuthorSkillHandler().execute(payload, ctx)
+        second = await AuthorSkillHandler().execute(payload, ctx)
+
+        assert first.success is True
+        assert second.success is False
+        assert "already exists" in (second.error or "")
+
+
+# ============================================================================
 # J.1: SkillCategory Enum
 # ============================================================================
 

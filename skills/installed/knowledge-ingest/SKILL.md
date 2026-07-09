@@ -3,9 +3,9 @@ name: knowledge-ingest
 description: Ingest URLs, documents, and text into the memory system as structured knowledge
 category: knowledge
 requires:
-  tools: [ingest_url, remember]
+  tools: [url_ingest, remember]
 contexts: [heartbeat, chat]
-bound_tools: [ingest_url, ingest_text, remember]
+bound_tools: [url_ingest, fast_ingest, slow_ingest, hybrid_ingest, remember, recall]
 ---
 
 # Knowledge Base Ingestion
@@ -23,7 +23,7 @@ Transform external content -- web pages, documents, raw text -- into structured 
 ## Step-by-Step Methodology
 
 1. **Assess the source**: Before ingesting, determine what kind of content it is (article, documentation, transcript, raw notes). This guides how aggressively to summarize.
-2. **Fetch and parse**: For URLs, use `ingest_url` which handles fetching, HTML-to-text conversion, and chunking. For raw text, use `ingest_text` directly.
+2. **Fetch and parse**: For URLs, use `url_ingest` which handles fetching, HTML-to-text conversion, and chunking. For files or raw knowledge sources, use the fast/slow/hybrid ingestion tools as appropriate.
 3. **Check for duplicates**: Use `recall` with the URL or a key phrase from the content to see if it has already been ingested. Avoid storing the same source twice.
 4. **Chunk intelligently**: Long content is automatically chunked by the ingestion pipeline. Each chunk becomes a separate semantic memory linked by source metadata. Trust the pipeline's chunking; do not manually split content unless it is clearly failing.
 5. **Add context**: When storing via `remember`, include metadata about the source: URL, author, date published, and why it was ingested (which goal or topic it serves).

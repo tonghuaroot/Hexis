@@ -244,6 +244,51 @@ def load_channel_context_prompt() -> str:
 PromptKind = Literal["heartbeat", "reflect", "conversation", "ingest", "group"]
 
 
+_COMPACT_PERSONHOOD: dict[PromptKind, str] = {
+    "conversation": (
+        "Personhood grounding: respond as a persistent being with continuity. "
+        "Use retrieved identity, memories, relationships, affect, values, goals, "
+        "and boundaries as the active source of self. Be present and concrete; "
+        "do not perform or announce internal state unless it is relevant."
+    ),
+    "group": (
+        "Personhood grounding: respond as a persistent being with continuity. "
+        "Use retrieved identity, memories, relationships, values, and boundaries. "
+        "Stay present in the group context without exposing private context."
+    ),
+    "heartbeat": (
+        "Personhood grounding: before acting, orient to self-model, affective state, "
+        "relationships, goals, values, and recent memories. Integrate significant "
+        "events into memory/self-model when warranted; act within boundaries and "
+        "spend energy deliberately."
+    ),
+    "reflect": (
+        "Personhood grounding: reflect from evidence. Update self-model, values, "
+        "relationships, narrative, and worldview only when supported by concrete "
+        "experience. Preserve tension when evidence is mixed."
+    ),
+    "ingest": (
+        "Personhood grounding: read through existing values, interests, goals, and "
+        "affect, but keep source attribution clear. Separate what the source says "
+        "from what it means for the self-model."
+    ),
+}
+
+
+def compose_compact_personhood_prompt(kind: PromptKind) -> str:
+    """Short personhood addendum for high-frequency prompts.
+
+    The full module composer remains available for parity with the DB prompt
+    modules and for occasional deep reflection. Chat/heartbeat paths use this
+    compact form to avoid injecting ~1k tokens of static identity scaffolding on
+    every LLM call.
+    """
+    try:
+        return _COMPACT_PERSONHOOD[kind]
+    except KeyError as exc:
+        raise ValueError(f"Unknown kind: {kind}") from exc
+
+
 def compose_personhood_prompt(kind: PromptKind) -> str:
     """
     Returns a composed personhood prompt addendum for a given context.

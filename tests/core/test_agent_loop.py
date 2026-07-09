@@ -282,6 +282,69 @@ class TestToolCalls:
         assert len(result.tool_calls_made) == 2
 
     @patch("core.agent_loop.chat_completion")
+    async def test_use_skill_unlocks_bound_tools_for_next_iteration(self, mock_llm):
+        """Skill-first mode starts narrow, then `use_skill` expands the exposed tools."""
+        use_skill_spec = ToolSpec(
+            name="use_skill",
+            description="Activate a skill",
+            parameters={"type": "object", "properties": {"name": {"type": "string"}}},
+            category=ToolCategory.EXTERNAL,
+            energy_cost=0,
+        )
+        list_skills_spec = ToolSpec(
+            name="list_skills",
+            description="List skills",
+            parameters={"type": "object", "properties": {}},
+            category=ToolCategory.EXTERNAL,
+            energy_cost=0,
+        )
+        web_search_spec = ToolSpec(
+            name="web_search",
+            description="Search the web",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+            category=ToolCategory.EXTERNAL,
+            energy_cost=1,
+        )
+        all_specs = [
+            list_skills_spec.to_openai_function(),
+            use_skill_spec.to_openai_function(),
+            web_search_spec.to_openai_function(),
+        ]
+        registry = _mock_registry(
+            tool_specs=all_specs,
+            spec_map={"use_skill": use_skill_spec, "list_skills": list_skills_spec, "web_search": web_search_spec},
+            execute_results={
+                "use_skill": ToolResult.success_result({"name": "research", "bound_tools": ["web_search"]}),
+                "web_search": ToolResult.success_result({"results": ["found"]}),
+            },
+        )
+        seen_tool_names: list[list[str]] = []
+
+        async def _llm(**kwargs):
+            seen_tool_names.append([
+                spec["function"]["name"]
+                for spec in (kwargs.get("tools") or [])
+            ])
+            if len(seen_tool_names) == 1:
+                return _tool_response("Need research.", [_tool_call("use_skill", {"name": "research"})])
+            if len(seen_tool_names) == 2:
+                return _tool_response("Searching.", [_tool_call("web_search", {"query": "postgres age"})])
+            return _text_response("Done.")
+
+        mock_llm.side_effect = _llm
+        config = _make_config(
+            registry=registry,
+            allowed_tool_names={"list_skills", "use_skill"},
+        )
+        agent = AgentLoop(config)
+        result = await agent.run("Research postgres age")
+
+        assert result.text == "Done."
+        assert seen_tool_names[0] == ["list_skills", "use_skill"]
+        assert "web_search" in seen_tool_names[1]
+        assert [c["name"] for c in result.tool_calls_made] == ["use_skill", "web_search"]
+
+    @patch("core.agent_loop.chat_completion")
     async def test_self_correction(self, mock_llm):
         """Tool returns error, LLM sees it and adjusts approach."""
         fail_result = ToolResult.error_result("File not found", ToolErrorType.FILE_NOT_FOUND)

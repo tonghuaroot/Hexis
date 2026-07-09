@@ -10,7 +10,7 @@ from core.llm_config import load_llm_config
 from core.llm_json import chat_json
 from core.state import apply_external_call_result
 from services.prompt_resources import (
-    compose_personhood_prompt,
+    compose_compact_personhood_prompt,
     load_consent_prompt,
     load_heartbeat_prompt,
     load_termination_confirm_prompt,
@@ -164,8 +164,8 @@ class ExternalCallProcessor:
         system_prompt = (
             base_prompt
             + "\n\n"
-            + "----- PERSONHOOD MODULES (for grounding; use context fields like self_model/narrative) -----\n\n"
-            + compose_personhood_prompt("heartbeat")
+            + "----- PERSONHOOD GROUNDING -----\n\n"
+            + compose_compact_personhood_prompt("heartbeat")
         )
         fallback = {
             "reasoning": "(no decision available)",
@@ -321,8 +321,8 @@ class ExternalCallProcessor:
         system_prompt = (
             system_prompt
             + "\n\n"
-            + "----- PERSONHOOD MODULES (use these as reflection lenses; ground claims in evidence) -----\n\n"
-            + compose_personhood_prompt("reflect")
+            + "----- PERSONHOOD GROUNDING -----\n\n"
+            + compose_compact_personhood_prompt("reflect")
         )
         user_prompt = json.dumps(call_input)[:12000]
         llm_config = await load_llm_config(conn, "llm.heartbeat")

@@ -690,6 +690,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     from .council import create_council_tools
     from .backup import create_backup_tools
     from .humanizer import create_humanizer_tools
+    from .skills import create_skill_tools
     from .hooks import AuditTrailHook
 
     def _env_resolver(*names: str):
@@ -715,6 +716,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
 
     builder = ToolRegistryBuilder(pool)
     builder.add_all(create_memory_tools())
+    builder.add_all(create_skill_tools())
     builder.add_all(create_journal_tools())
     builder.add_all(create_document_tools())
     builder.add_all(create_web_tools())

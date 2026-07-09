@@ -3,10 +3,10 @@ name: youtube-analytics
 description: Retrieve and analyze YouTube channel stats, video performance, and content trends
 category: analytics
 requires:
-  tools: [get_youtube_channel_stats]
+  tools: [youtube_channel_stats]
   env: [YOUTUBE_API_KEY]
 contexts: [heartbeat, chat]
-bound_tools: [get_youtube_channel_stats, search_youtube_videos]
+bound_tools: [youtube_channel_stats, youtube_search, youtube_video_stats, recall, remember]
 ---
 
 # YouTube Analytics
@@ -23,7 +23,7 @@ Pull channel-level statistics, search for videos by topic, and analyze content p
 ## Step-by-Step Methodology
 
 1. **Identify the target**: Determine which channel or topic the user is interested in. For their own channel, use the configured channel ID. For competitor or topic research, use `search_youtube_videos` to find relevant channels.
-2. **Pull channel stats**: Use `get_youtube_channel_stats` to retrieve subscriber count, total views, video count, and recent upload frequency. These are the headline metrics.
+2. **Pull channel stats**: Use `youtube_channel_stats` to retrieve subscriber count, total views, video count, and recent upload frequency. These are the headline metrics.
 3. **Analyze recent uploads**: Look at the last 10-20 videos for performance patterns:
    - **View velocity**: How quickly do new videos accumulate views in the first 48 hours?
    - **Engagement ratio**: Likes and comments relative to views. Higher ratios suggest stronger audience connection.

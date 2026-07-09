@@ -21,7 +21,7 @@ from core.llm import chat_completion, normalize_llm_config
 from core.memory_repo import MemoryRepo
 from core.tools.repl_bridge import ReplToolBridge, call_records_to_actions_taken
 from services.prompt_resources import (
-    compose_personhood_prompt,
+    compose_compact_personhood_prompt,
     load_rlm_chat_prompt,
     load_rlm_heartbeat_prompt,
 )
@@ -344,7 +344,7 @@ async def run_heartbeat_decision(
 
     # Build system prompt
     system_prompt = load_rlm_heartbeat_prompt()
-    personhood_addendum = compose_personhood_prompt("heartbeat")
+    personhood_addendum = compose_compact_personhood_prompt("heartbeat")
     if personhood_addendum:
         system_prompt = system_prompt + "\n\n---\n\n" + personhood_addendum
 
@@ -500,7 +500,7 @@ async def run_chat_turn(
 
     # Build system prompt
     system_prompt = load_rlm_chat_prompt()
-    personhood_addendum = compose_personhood_prompt("conversation")
+    personhood_addendum = compose_compact_personhood_prompt("conversation")
     if personhood_addendum:
         system_prompt = system_prompt + "\n\n---\n\n" + personhood_addendum
 

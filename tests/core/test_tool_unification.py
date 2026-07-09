@@ -136,16 +136,51 @@ class TestBuildSystemPrompt:
 
         registry = create_default_registry(db_pool)
         prompt = await _build_system_prompt({}, registry=registry)
-        # Should mention at least the recall tool
-        assert "recall" in prompt.lower()
+        # Tool schemas are sent through the structured tool API; the text prompt
+        # should not duplicate every tool description.
+        assert "## Tool Use" in prompt
+        assert "skills first" in prompt.lower()
+        assert "list_skills" in prompt
 
     async def test_prompt_without_personhood(self):
         from services.chat import _build_system_prompt
 
         # Even if personhood compose fails, prompt should still work
-        with patch("services.agent.compose_personhood_prompt", side_effect=Exception("missing")):
+        with patch("services.agent.compose_compact_personhood_prompt", side_effect=Exception("missing")):
             prompt = await _build_system_prompt({})
             assert "Hexis in live conversation" in prompt
+
+    async def test_prompt_uses_compact_personhood(self):
+        from services.chat import _build_system_prompt
+
+        prompt = await _build_system_prompt({})
+        assert "PERSONHOOD GROUNDING" in prompt
+        assert "Module 1: Core Identity" not in prompt
+
+
+class TestSubconsciousPromptEfficiency:
+    async def test_subconscious_memory_context_is_capped(self):
+        from services.agent import run_subconscious_appraisal
+
+        class _Conn:
+            async def fetchval(self, *_args, **_kwargs):
+                return None
+
+        captured = {}
+
+        async def _fake_chat_json(**kwargs):
+            captured.update(kwargs)
+            return {}, None
+
+        huge_context = "memory line\n" * 2000
+        with patch("services.agent.load_llm_config", new_callable=AsyncMock) as load_cfg, \
+             patch("services.agent.chat_json", side_effect=_fake_chat_json):
+            load_cfg.return_value = {"provider": "fake", "model": "fake"}
+            await run_subconscious_appraisal(_Conn(), "hello", huge_context)
+
+        user_payload = captured["messages"][1]["content"]
+        assert len(user_payload) < 7500
+        assert "truncated for subconscious appraisal" in user_payload
 
 
 # ============================================================================

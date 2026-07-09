@@ -35,7 +35,7 @@ from services.ingest import (
     _hash_text,
     _word_count,
 )
-from services.prompt_resources import compose_personhood_prompt, load_rlm_slow_ingest_prompt
+from services.prompt_resources import compose_compact_personhood_prompt, load_rlm_slow_ingest_prompt
 from services.rlm_memory_env import RLMMemoryEnv, RLMWorkspace, WorkspaceBudgets
 from services.rlm_repl import HexisLocalREPL
 
@@ -149,7 +149,7 @@ async def run_slow_ingest_chunk(
     )
 
     system_prompt = load_rlm_slow_ingest_prompt()
-    personhood_addendum = compose_personhood_prompt("ingest")
+    personhood_addendum = compose_compact_personhood_prompt("ingest")
     if personhood_addendum:
         system_prompt = system_prompt + "\n\n---\n\n" + personhood_addendum
 
