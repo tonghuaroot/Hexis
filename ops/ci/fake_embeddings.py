@@ -26,14 +26,19 @@ DIM = int(os.getenv("EMBEDDING_DIMENSION", "768"))
 
 
 def _vector(text: str) -> list[float]:
-    """A deterministic pseudo-random unit-ish vector in [-1, 1], seeded by the text."""
+    """A deterministic pseudo-random positive vector in [0, 1], seeded by text.
+
+    Keeping values positive matters for DB tests that compare recall scores
+    against hand-authored ``array_fill(positive, ...)`` vectors: those tests are
+    about strength/fidelity ordering, not semantic embedding polarity.
+    """
     out: list[float] = []
     counter = 0
     while len(out) < DIM:
         digest = hashlib.sha256(f"{text}\x00{counter}".encode("utf-8")).digest()
         for i in range(0, len(digest), 4):
             (u,) = struct.unpack("<I", digest[i:i + 4])
-            out.append((u / 2**32) * 2.0 - 1.0)
+            out.append(u / 2**32)
             if len(out) >= DIM:
                 break
         counter += 1
