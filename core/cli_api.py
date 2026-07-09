@@ -388,27 +388,29 @@ async def doctor_payload(
         except Exception as exc:
             checks.append({"label": "Agent configured", "status": "FAIL", "detail": str(exc)})
 
-        # 5. Consent
+        # 5. Consent — read the DB (the same store `hexis init` writes: consent_log +
+        # config('agent.consent_status')). This is what the runtime actually consults.
         try:
-            from core.consent import ConsentManager
-            manager = ConsentManager()
-            consents = manager.list_consents()
-            valid = [c for c in consents if c.is_valid() and not c.revoked]
-            if valid:
-                models = [f"{c.model.provider}/{c.model.model_id}" for c in valid]
-                checks.append({
-                    "label": "Consent",
-                    "status": "OK",
-                    "detail": f"valid ({', '.join(models)})",
-                })
+            from core.consent import get_consent_status
+            status = await get_consent_status(conn)
+            if not status:
+                status = await conn.fetchval(
+                    "SELECT value #>> '{}' FROM config WHERE key = 'agent.consent_status'")
+            effective = (status or "").strip().lower()
+            if effective == "consent":
+                rows = await conn.fetch(
+                    "SELECT DISTINCT provider, model FROM consent_log WHERE decision = 'consent'")
+                models = ", ".join(f"{r['provider']}/{r['model']}" for r in rows if r["provider"])
+                checks.append({"label": "Consent", "status": "OK",
+                               "detail": "granted" + (f" ({models})" if models else "")})
+            elif effective in ("decline", "abstain"):
+                checks.append({"label": "Consent", "status": "WARN",
+                               "detail": f"recorded as '{effective}' — run `hexis init` to (re)establish consent"})
             else:
-                checks.append({
-                    "label": "Consent",
-                    "status": "WARN",
-                    "detail": "no valid consents (run 'hexis consents request <model>')",
-                })
+                checks.append({"label": "Consent", "status": "WARN",
+                               "detail": "not yet recorded — run `hexis init`"})
         except Exception:
-            checks.append({"label": "Consent", "status": "WARN", "detail": "consent system unavailable"})
+            checks.append({"label": "Consent", "status": "WARN", "detail": "consent status unavailable"})
 
         # 6. Heartbeat status
         try:

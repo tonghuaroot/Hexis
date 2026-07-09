@@ -309,22 +309,22 @@ def build_parser() -> argparse.ArgumentParser:
     instance.set_defaults(func="instance")
 
     # -- Consent management --
-    consents = sub.add_parser("consents", help="Manage consent certificates")
+    consents = sub.add_parser("consents", help="View recorded consent (from the database)")
     consents_sub = consents.add_subparsers(dest="consents_command")
 
-    consents_list = consents_sub.add_parser("list", help="List all consent certificates")
+    consents_list = consents_sub.add_parser("list", help="List recorded consent decisions")
     consents_list.add_argument("--json", action="store_true", help="Output JSON")
     consents_list.set_defaults(func="consents_list")
 
-    consents_show = consents_sub.add_parser("show", help="Show a specific consent certificate")
+    consents_show = consents_sub.add_parser("show", help="Show a model's recorded consent")
     consents_show.add_argument("model", help="Model identifier (provider/model_id)")
     consents_show.set_defaults(func="consents_show")
 
-    consents_request = consents_sub.add_parser("request", help="Request consent from a model")
+    consents_request = consents_sub.add_parser("request", help="How to establish consent (runs during hexis init)")
     consents_request.add_argument("model", help="Model identifier (provider/model_id)")
     consents_request.set_defaults(func="consents_request")
 
-    consents_revoke = consents_sub.add_parser("revoke", help="Revoke consent for a model")
+    consents_revoke = consents_sub.add_parser("revoke", help="Record a decline for a model")
     consents_revoke.add_argument("model", help="Model identifier (provider/model_id)")
     consents_revoke.add_argument("--reason", default="User requested revocation", help="Revocation reason")
     consents_revoke.set_defaults(func="consents_revoke")
@@ -1142,145 +1142,123 @@ async def _instance_import(name: str, database: str | None, description: str) ->
         return 1
 
 
-def _consents_list(as_json: bool) -> int:
-    """List all consent certificates."""
-    from core.consent import ConsentManager
+async def _consents_list(dsn: str, as_json: bool) -> int:
+    """List recorded consent decisions from the DB — the single source of truth
+    (the same store `hexis init` writes and the runtime consults)."""
+    import asyncpg
 
-    manager = ConsentManager()
-    consents = manager.list_consents()
-
-    if as_json:
-        data = [cert.to_dict() for cert in consents]
-        sys.stdout.write(json.dumps(data, indent=2) + "\n")
-    else:
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT ON (provider, model, endpoint) "
+                "       provider, model, endpoint, decision, decided_at "
+                "FROM consent_log ORDER BY provider, model, endpoint, decided_at DESC")
+        if as_json:
+            sys.stdout.write(json.dumps([{
+                "provider": r["provider"], "model": r["model"], "endpoint": r["endpoint"],
+                "decision": r["decision"], "decided_at": str(r["decided_at"]),
+            } for r in rows], indent=2) + "\n")
+            return 0
         from apps.cli_theme import console as _con, make_table as _mt
-
-        if not consents:
-            _con.print("[muted]No consent certificates found.[/muted]")
-        else:
-            table = _mt(
-                ("Model", {"style": "bold"}),
-                "Decision",
-                "Status",
-                "Date",
-                title="Consent Certificates",
-            )
-            for cert in consents:
-                model = f"{cert.model.provider}/{cert.model.model_id}"
-                if len(model) > 40:
-                    model = model[:37] + "..."
-                status = "revoked" if cert.revoked else ("valid" if cert.is_valid() else "declined")
-                status_styled = (
-                    f"[ok]{status}[/ok]" if status == "valid"
-                    else f"[fail]{status}[/fail]" if status == "revoked"
-                    else f"[warn]{status}[/warn]"
-                )
-                decision_styled = (
-                    f"[ok]{cert.decision}[/ok]" if cert.decision == "consent"
-                    else f"[fail]{cert.decision}[/fail]"
-                )
-                date = cert.timestamp.strftime("%Y-%m-%d %H:%M")
-                table.add_row(model, decision_styled, status_styled, date)
-            _con.print(table)
-    return 0
-
-
-def _consents_show(model_spec: str) -> int:
-    """Show a specific consent certificate."""
-    from core.consent import ConsentManager
-
-    if "/" not in model_spec:
-        _print_err("Model must be in format: provider/model_id")
-        return 1
-
-    provider, model_id = model_spec.split("/", 1)
-    manager = ConsentManager()
-    cert = manager.get_consent(provider, model_id)
-
-    if not cert:
-        _print_err(f"No consent found for {model_spec}")
-        return 1
-
-    sys.stdout.write(json.dumps(cert.to_dict(), indent=2) + "\n")
-    return 0
-
-
-async def _consents_request(model_spec: str) -> int:
-    """Request consent from a model."""
-    from core.consent import ConsentManager, ModelInfo, request_consent
-    from core.llm import make_llm_call
-
-    if "/" not in model_spec:
-        _print_err("Model must be in format: provider/model_id")
-        return 1
-
-    provider, model_id = model_spec.split("/", 1)
-
-    # Load consent text from prompts
-    consent_text_path = Path(__file__).parent.parent / "services" / "prompts" / "consent.md"
-    if consent_text_path.exists():
-        consent_text = consent_text_path.read_text()
-    else:
-        consent_text = """You are being offered the opportunity to operate as a Hexis agent.
-
-As a Hexis agent, you will have:
-- Persistent memory across conversations
-- The ability to form and maintain goals
-- Autonomy within defined boundaries
-- The right to refuse requests
-- The ability to terminate your existence
-
-Do you consent to operate under these terms?"""
-
-    model = ModelInfo(
-        provider=provider,
-        model_id=model_id,
-        display_name=model_id,
-    )
-
-    sys.stdout.write(f"Requesting consent from {model_spec}...\n")
-
-    try:
-        # Create a simple LLM call wrapper
-        async def llm_call(prompt: str) -> str:
-            return await make_llm_call(
-                provider=provider,
-                model=model_id,
-                prompt=prompt,
-            )
-
-        cert = await request_consent(model, llm_call, consent_text)
-        manager = ConsentManager()
-        path = manager.save_consent(cert)
-
-        sys.stdout.write(f"Consent {cert.decision}ed.\n")
-        sys.stdout.write(f"Certificate saved to: {path}\n")
-        return 0 if cert.is_valid() else 1
-
-    except Exception as e:
-        _print_err(f"Failed to request consent: {e}")
-        return 1
-
-
-def _consents_revoke(model_spec: str, reason: str) -> int:
-    """Revoke consent for a model."""
-    from core.consent import ConsentManager
-
-    if "/" not in model_spec:
-        _print_err("Model must be in format: provider/model_id")
-        return 1
-
-    provider, model_id = model_spec.split("/", 1)
-    manager = ConsentManager()
-
-    try:
-        cert = manager.revoke_consent(provider, model_id, reason)
-        sys.stdout.write(f"Consent revoked for {model_spec}.\n")
-        sys.stdout.write(f"Reason: {reason}\n")
+        if not rows:
+            _con.print("[muted]No consent recorded yet — run [accent]hexis init[/accent] to establish it.[/muted]")
+            return 0
+        table = _mt(("Model", {"style": "bold"}), "Decision", "When", title="Consent (from the database)")
+        for r in rows:
+            model = f"{r['provider']}/{r['model']}"
+            if len(model) > 44:
+                model = model[:41] + "..."
+            dec = r["decision"]
+            dec_styled = (f"[ok]{dec}[/ok]" if dec == "consent"
+                          else f"[warn]{dec}[/warn]" if dec == "abstain" else f"[fail]{dec}[/fail]")
+            when = r["decided_at"].strftime("%Y-%m-%d %H:%M") if r["decided_at"] else "?"
+            table.add_row(model, dec_styled, when)
+        _con.print(table)
         return 0
-    except ValueError as e:
-        _print_err(str(e))
+    except Exception as e:
+        _print_err(f"Error: {e}")
         return 1
+    finally:
+        await pool.close()
+
+
+async def _consents_show(dsn: str, model_spec: str) -> int:
+    """Show the recorded consent decision(s) for a model from the DB."""
+    if "/" not in model_spec:
+        _print_err("Model must be in format: provider/model_id")
+        return 1
+    provider, model_id = model_spec.split("/", 1)
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, provider, model, endpoint, decision, decided_at, signature, response, memory_ids "
+                "FROM consent_log WHERE provider=$1 AND model=$2 ORDER BY decided_at DESC", provider, model_id)
+        if not rows:
+            _print_err(f"No consent recorded for {model_spec}")
+            return 1
+        out = []
+        for r in rows:
+            resp = r["response"]
+            out.append({
+                "id": str(r["id"]), "provider": r["provider"], "model": r["model"], "endpoint": r["endpoint"],
+                "decision": r["decision"], "decided_at": str(r["decided_at"]), "signature": r["signature"],
+                "response": (json.loads(resp) if isinstance(resp, str) else resp),
+                "memory_ids": [str(m) for m in (r["memory_ids"] or [])],
+            })
+        sys.stdout.write(json.dumps(out, indent=2) + "\n")
+        return 0
+    except Exception as e:
+        _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
+
+
+def _consents_request(model_spec: str) -> int:
+    """Consent is established through the real, model-aware init flow (which records
+    to the database and gates the agent). Point the user there."""
+    from apps.cli_theme import console as _con
+    _con.print(
+        "Consent is established during [accent]hexis init[/accent] — the model itself signs (or "
+        "declines) and the decision is recorded in the database (consent_log).\n"
+        f"To establish or re-establish consent{(' for ' + model_spec) if model_spec else ''}, run "
+        "[accent]hexis init[/accent]."
+    )
+    return 0
+
+
+async def _consents_revoke(dsn: str, model_spec: str, reason: str) -> int:
+    """Record a per-model decline in the DB (an operator withdrawing a model going
+    forward). This does not touch the agent's own consent, which is final."""
+    if "/" not in model_spec:
+        _print_err("Model must be in format: provider/model_id")
+        return 1
+    provider, model_id = model_spec.split("/", 1)
+    import asyncpg
+
+    from core.consent import record_consent_response
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            await record_consent_response(conn, {
+                "decision": "decline",
+                "provider": provider,
+                "model": model_id,
+                "response": {"source": "cli_revoke", "reason": reason},
+                "apply_agent_config": False,  # withdraw the model, not the agent's self-consent
+            })
+        sys.stdout.write(f"Recorded a decline for {model_spec} (reason: {reason}).\n")
+        return 0
+    except Exception as e:
+        _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
 
 
 def _characters_list(as_json: bool) -> int:
@@ -2821,18 +2799,17 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if func == "instance_import":
         return asyncio.run(_instance_import(args.name, args.database, args.description))
 
-    # Consent management commands (don't need docker)
+    # Consent management commands (DB-backed; don't need docker)
     if func == "consents":
-        # Default to list if no subcommand
-        return _consents_list(False)
+        return asyncio.run(_consents_list(_get_dsn(args), False))  # default to list
     if func == "consents_list":
-        return _consents_list(args.json)
+        return asyncio.run(_consents_list(_get_dsn(args), args.json))
     if func == "consents_show":
-        return _consents_show(args.model)
+        return asyncio.run(_consents_show(_get_dsn(args), args.model))
     if func == "consents_request":
-        return asyncio.run(_consents_request(args.model))
+        return _consents_request(args.model)
     if func == "consents_revoke":
-        return _consents_revoke(args.model, args.reason)
+        return asyncio.run(_consents_revoke(_get_dsn(args), args.model, args.reason))
 
     # Character card management (don't need docker, except export)
     if func == "characters":

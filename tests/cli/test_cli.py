@@ -69,39 +69,29 @@ async def test_cli_instance_use_nonexistent():
 # Consent CLI tests
 
 async def test_cli_consents_list(temp_hexis_dir):
-    """Test listing consent certificates."""
+    """`hexis consents` (DB-backed) lists recorded consent and exits 0."""
     env = os.environ.copy()
-    consents_dir = temp_hexis_dir / "consents"
-    consents_dir.mkdir()
-
-    from core.consent import ConsentManager
-    with patch.object(ConsentManager, "CONSENTS_DIR", consents_dir):
-        p = subprocess.run(
-            [sys.executable, "-m", "apps.hexis_cli", "consents"],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(Path(__file__).resolve().parents[1]),
-        )
+    p = subprocess.run(
+        [sys.executable, "-m", "apps.hexis_cli", "consents"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
     assert p.returncode == 0
 
 
 async def test_cli_consents_show_nonexistent(temp_hexis_dir):
-    """Test showing a nonexistent consent certificate."""
+    """`hexis consents show` for an unrecorded model errors clearly."""
     env = os.environ.copy()
-    consents_dir = temp_hexis_dir / "consents"
-    consents_dir.mkdir()
-
-    from core.consent import ConsentManager
-    with patch.object(ConsentManager, "CONSENTS_DIR", consents_dir):
-        p = subprocess.run(
-            [sys.executable, "-m", "apps.hexis_cli", "consents", "show", "anthropic/nonexistent"],
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(Path(__file__).resolve().parents[1]),
-        )
-    assert p.returncode != 0 or "not found" in p.stderr.lower()
+    p = subprocess.run(
+        [sys.executable, "-m", "apps.hexis_cli", "consents", "show", "anthropic/nonexistent"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(Path(__file__).resolve().parents[1]),
+    )
+    assert p.returncode != 0 or "no consent" in p.stderr.lower()
 
 
 # Original tests
