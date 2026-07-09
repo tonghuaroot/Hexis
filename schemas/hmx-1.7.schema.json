@@ -113,7 +113,7 @@
     "provenance": {
       "type": "object",
       "properties": {
-        "acquisition_mode": {"enum": ["bootstrap", "experienced", "imported_unreviewed", "imported_and_accepted", "derived_from_import"]},
+        "acquisition_mode": {"enum": ["bootstrap", "experienced", "imported_staged", "imported_and_accepted", "imported_and_archived", "derived_from_import", "analysis_only"]},
         "origin_instance": {"type": "string"},
         "origin_id": {"type": "string"},
         "import_chain": {"type": "array", "items": {"type": "object"}},
@@ -302,7 +302,8 @@
         "satisfaction_cooldown": {"type": ["string", "null"]},
         "last_satisfied": {"$ref": "#/$defs/dateTimeOrNull"},
         "urgency_threshold": {"type": "number"},
-        "metadata": {"type": "object"}
+        "metadata": {"type": "object"},
+        "provenance": {"$ref": "#/$defs/provenance"}
       },
       "additionalProperties": true
     },
@@ -318,7 +319,8 @@
         "confidence": {"type": "number"},
         "times_activated": {"type": "integer", "minimum": 0},
         "source_memory_refs": {"$ref": "#/$defs/refList"},
-        "metadata": {"type": "object"}
+        "metadata": {"type": "object"},
+        "provenance": {"$ref": "#/$defs/provenance"}
       },
       "additionalProperties": true
     },

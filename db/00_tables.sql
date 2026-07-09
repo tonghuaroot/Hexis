@@ -599,6 +599,10 @@ CREATE TABLE drives (
     satisfaction_cooldown INTERVAL DEFAULT '1 hour',
     last_satisfied TIMESTAMPTZ,
     urgency_threshold FLOAT DEFAULT 0.8 CHECK (urgency_threshold > 0 AND urgency_threshold <= 1),
+    metadata JSONB NOT NULL DEFAULT jsonb_build_object(
+        'replaceable_during_bootstrap', true,
+        'provenance', jsonb_build_object('acquisition_mode', 'bootstrap')
+    ),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -996,6 +1000,7 @@ CREATE TABLE emotional_triggers (
     origin TEXT NOT NULL,
     source_memory_ids UUID[] DEFAULT '{}'::uuid[],
     last_activated_at TIMESTAMPTZ,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT emotional_triggers_confidence_range CHECK (confidence BETWEEN 0 AND 1)
 );

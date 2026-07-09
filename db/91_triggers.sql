@@ -46,3 +46,13 @@ CREATE TRIGGER trg_hmx_bootstrap_provenance
              OR NEW.source_attribution->>'source' = 'initialization')
     )
     EXECUTE FUNCTION hmx_tag_bootstrap_provenance();
+
+CREATE TRIGGER trg_hmx_drive_provenance
+    BEFORE UPDATE ON drives
+    FOR EACH ROW
+    EXECUTE FUNCTION hmx_mark_drive_experienced();
+
+CREATE TRIGGER trg_hmx_emotional_trigger_provenance
+    BEFORE INSERT ON emotional_triggers
+    FOR EACH ROW
+    EXECUTE FUNCTION hmx_default_emotional_trigger_provenance();

@@ -17,6 +17,7 @@ which is required for ``ALTER TYPE ... ADD VALUE`` (it cannot run inside a
 transaction block). Such migrations must be simple (``;``-separated statements,
 no ``$$`` blocks). Every other migration runs atomically inside one transaction.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -38,23 +39,40 @@ _ADVISORY_LOCK_KEY = 0x48584D31  # "HXM1"
 _NO_TX_DIRECTIVE = re.compile(r"^\s*--\s*migrate:\s*no-transaction\b", re.IGNORECASE)
 
 
-async def _ensure_table(conn: asyncpg.Connection) -> None:
-    await conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
+async def _ensure_table(conn: asyncpg.Connection) -> str:
+    """Return the qualified bookkeeping table, preserving legacy installs.
+
+    Older runners put ``ag_catalog`` first on ``search_path``, so some live
+    databases created the table there. Never create a second empty table and
+    replay migrations just because a later migration changed search_path.
+    """
+
+    if await conn.fetchval(
+        "SELECT to_regclass('public.schema_migrations') IS NOT NULL"
+    ):
+        return "public.schema_migrations"
+    if await conn.fetchval(
+        "SELECT to_regclass('ag_catalog.schema_migrations') IS NOT NULL"
+    ):
+        return "ag_catalog.schema_migrations"
+
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS public.schema_migrations (
             version      TEXT PRIMARY KEY,
             applied_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
             checksum     TEXT,
             execution_ms INTEGER
         )
-        """
-    )
+        """)
+    return "public.schema_migrations"
 
 
 def _list_migration_files(migrations_dir: Path) -> list[Path]:
     if not migrations_dir.exists():
         return []
-    return sorted((p for p in migrations_dir.glob("*.sql") if p.is_file()), key=lambda p: p.name)
+    return sorted(
+        (p for p in migrations_dir.glob("*.sql") if p.is_file()), key=lambda p: p.name
+    )
 
 
 def _is_no_transaction(sql: str) -> bool:
@@ -79,7 +97,13 @@ async def _prepare_conn(conn: asyncpg.Connection) -> None:
         await conn.execute("LOAD 'age'")
     except Exception:
         pass  # age not loadable in some contexts; non-AGE migrations don't need it
-    await conn.execute("SET search_path = ag_catalog, public")
+    await conn.execute('SET search_path = public, ag_catalog, "$user"')
+
+
+async def migrations_table_name(conn: asyncpg.Connection) -> str:
+    """Return the qualified migration table used by this database."""
+
+    return await _ensure_table(conn)
 
 
 async def apply_pending_migrations(
@@ -98,8 +122,8 @@ async def apply_pending_migrations(
     await conn.execute("SELECT pg_advisory_lock($1)", _ADVISORY_LOCK_KEY)
     applied: list[str] = []
     try:
-        await _ensure_table(conn)
-        done = {r["version"] for r in await conn.fetch("SELECT version FROM schema_migrations")}
+        table = await _ensure_table(conn)
+        done = {r["version"] for r in await conn.fetch(f"SELECT version FROM {table}")}
         for path in files:
             version = path.stem  # e.g. "0001_hmx_enum_values"
             if version in done:
@@ -113,28 +137,38 @@ async def apply_pending_migrations(
                 for stmt in _split_statements(sql):
                     await conn.execute(stmt)
                 await conn.execute(
-                    "INSERT INTO schema_migrations (version, checksum, execution_ms) VALUES ($1, $2, $3)",
-                    version, checksum, int((time.monotonic() - start) * 1000),
+                    f"INSERT INTO {table} (version, checksum, execution_ms) VALUES ($1, $2, $3)",
+                    version,
+                    checksum,
+                    int((time.monotonic() - start) * 1000),
                 )
             else:
                 async with conn.transaction():
                     await conn.execute(sql)
                     await conn.execute(
-                        "INSERT INTO schema_migrations (version, checksum, execution_ms) VALUES ($1, $2, $3)",
-                        version, checksum, int((time.monotonic() - start) * 1000),
+                        f"INSERT INTO {table} (version, checksum, execution_ms) VALUES ($1, $2, $3)",
+                        version,
+                        checksum,
+                        int((time.monotonic() - start) * 1000),
                     )
-            logger.info("applied migration %s (%dms)", version, int((time.monotonic() - start) * 1000))
+            logger.info(
+                "applied migration %s (%dms)",
+                version,
+                int((time.monotonic() - start) * 1000),
+            )
             applied.append(version)
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ADVISORY_LOCK_KEY)
     return applied
 
 
-async def migration_status(conn: asyncpg.Connection, *, migrations_dir: Path | None = None) -> dict:
+async def migration_status(
+    conn: asyncpg.Connection, *, migrations_dir: Path | None = None
+) -> dict:
     """{'applied': [...], 'pending': [...]} in filename order."""
     migrations_dir = migrations_dir or MIGRATIONS_DIR
-    await _ensure_table(conn)
-    done = {r["version"] for r in await conn.fetch("SELECT version FROM schema_migrations")}
+    table = await _ensure_table(conn)
+    done = {r["version"] for r in await conn.fetch(f"SELECT version FROM {table}")}
     versions = [p.stem for p in _list_migration_files(migrations_dir)]
     return {
         "applied": [v for v in versions if v in done],

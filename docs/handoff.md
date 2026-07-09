@@ -1,14 +1,14 @@
 # Hexis Handoff
 
-Last updated: 2026-07-09 (HMX Slice 1 complete)
+Last updated: 2026-07-09 (HMX Slice 2 additive import complete locally)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slice 1 is complete locally:
-canonical hashing, export policy/envelope construction, schema-valid JSON and
-JSONL export, all SQL section serializers, and a fail-closed pluggable trust
-anchor boundary. The next implementation boundary is Slice 2 (import, target
-state detection, and additive merge).
+The active workstream is HMX (`plans/hmx.md`). Slices 0-2 are complete locally:
+schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
+fail-closed trust-anchor boundary, target-state diagnostics, and transactional
+additive import with full reference remapping. The next implementation boundary
+is Slice 3 (`hexis export`, `hexis import --dry-run`, and operator-facing reports).
 
 The prior hosted green baseline was `c3be2f8` (`Wait for DB init completion in
 CI`), run https://github.com/QuixiAI/Hexis/actions/runs/29042281848 (all jobs
@@ -214,9 +214,48 @@ Landed so far:
   patterns declared in `privacy.excluded_secret_patterns`.
 - Focused validation: 69 HMX schema/digest/trust/export/migration tests pass.
 
-Next: Slice 2 (`import_hmx`, `hexis_instance_is_empty()`, target-state policy,
-additive merge, ID remapping, acquisition tracking). Slice 3 then adds the CLI
-(`hexis export` / `hexis import --dry-run`).
+### HMX Slice 2 additive import complete locally
+
+Key files:
+
+- `core/memory_exchange.py` — `import_hmx()` transaction/policy orchestration,
+  per-record schema validation, 1.x minor-version tolerance, intent-aware
+  acquisition modes, import-chain append, conflict/warning reporting, and
+  fresh local reference maps.
+- `db/48_functions_memory_exchange.sql` — `hexis_instance_is_empty()` plus SQL
+  import functions for memories, episodes, relationships, clusters, identity,
+  worldview/goals, drives, emotional triggers, narrative, and goal hierarchy
+  remapping.
+- Migrations `0007` and `0008` — additive import functions, provenance storage
+  for drives/triggers, protected-state diagnostics, and trigger behavior.
+- `core/migrations.py` — migration bookkeeping now explicitly reuses either
+  `public.schema_migrations` or the legacy `ag_catalog.schema_migrations` table;
+  this prevents search-path changes from replaying already-applied migrations.
+- `pyproject.toml` now packages `db/migrations/*.sql`; wheel installs previously
+  carried the baseline SQL but silently omitted every forward migration.
+- `tests/db/test_hmx_import.py` — real DB coverage for duplicate-content reuse,
+  fresh UUID remapping, episodes/clusters/edges, legacy `superseded_by`, unknown
+  edge preservation, per-record validation, lineage enforcement, target-state
+  transitions, and full protected export-import-export round trips.
+
+Important behavior:
+
+- Import preflight and mutation share an advisory-locked transaction, so the
+  empty/active decision cannot go stale before protected writes.
+- Port/duplicate preserves source acquisition mode and adopts source lineage on
+  an empty target. Cross-agent additive records become `imported_and_accepted`.
+- Protected state imports directly only for port/duplicate into an empty target.
+  Telepathy/analysis or active targets fail with `bootstrap_state_violation`.
+- Memories receive a zero-vector sentinel plus
+  `metadata.embedding_status = pending_import`; re-embedding remains Slice 6.
+- `raw_units`, `config`, `in_flight_work`, and non-empty `audit_records` report
+  `unsupported_section` rather than being silently consumed; their import paths
+  belong to later slices.
+- Focused validation: 79 HMX schema/digest/trust/export/import/migration tests pass.
+
+Next: Slice 3 CLI and side-effect-free dry-run reporting. Slice 4 adds
+deliberative/analysis-only storage and promotion/demotion; Slice 6 connects the
+pending-import embedding queue to maintenance workers.
 
 ## Current Roadmap
 
@@ -397,15 +436,15 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-Do not continue debugging the old CI failures first. Finish the current HMX
-thread by starting Slice 2 from the schema and export contract now pinned in
-tests. Read `core/memory_exchange.py`, `schemas/hmx-1.7.schema.json`,
-`core/trust_anchors.py`, and the Slice 2 plan section before editing.
+Do not continue debugging the old CI failures first. Continue the HMX thread at
+Slice 3 from the import/export contract now pinned in tests. Read
+`core/memory_exchange.py`, `schemas/hmx-1.7.schema.json`,
+`tests/db/test_hmx_import.py`, and the Slice 3 plan section before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 2: additive import, reference remapping, acquisition tracking,
-   `hexis_instance_is_empty()`, and dry-run-ready target-state diagnostics.
+1. HMX Slice 3: `hexis export`, `hexis import --dry-run`, count/conflict/privacy
+   reporting, and safe JSON/JSONL file handling.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

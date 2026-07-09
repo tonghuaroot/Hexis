@@ -33,6 +33,13 @@ DECLARE
     last_memory_time TIMESTAMPTZ;
     new_seq INT;
 BEGIN
+    -- HMX imports reconstruct their exported episode topology explicitly.
+    -- Auto-assignment here would attach each imported memory to ambient local
+    -- state before the importer's ID remap is complete.
+    IF NEW.metadata->>'embedding_status' = 'pending_import' THEN
+        RETURN NEW;
+    END IF;
+
     PERFORM pg_advisory_xact_lock(hashtext('episode_manager'));
     SELECT e.id INTO current_episode_id
     FROM episodes e

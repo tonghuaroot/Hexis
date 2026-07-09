@@ -16,6 +16,8 @@ digests, statistics, and JSON/JSONL serialization.
 
 from __future__ import annotations
 
+import copy
+import json
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -102,6 +104,21 @@ class HmxSchemaError(ValueError):
     """An HMX document does not satisfy the canonical wire schema."""
 
 
+@dataclass(frozen=True)
+class HmxImportResult:
+    """Structured outcome of one transactional additive import."""
+
+    export_id: str
+    intent: str
+    strategy: str
+    target_state: dict[str, Any]
+    inserted: dict[str, int]
+    duplicate_refs: tuple[str, ...]
+    ref_map: dict[str, str]
+    conflicts: tuple[dict[str, Any], ...]
+    warnings: tuple[dict[str, Any], ...]
+
+
 @lru_cache(maxsize=1)
 def load_hmx_schema() -> dict[str, Any]:
     """Load the packaged canonical schema for the supported HMX version."""
@@ -138,6 +155,68 @@ def validate_hmx_document(document: dict[str, Any]) -> None:
     raise HmxSchemaError(
         f"invalid HMX {HMX_VERSION} document at {path}: {error.message}"
     )
+
+
+def _coerce_json(value: Any) -> Any:
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _document_probe(
+    document: dict[str, Any], sections: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a schema probe that accepts a newer 1.x minor during import."""
+
+    probe = copy.deepcopy(document)
+    probe["hmx_version"] = HMX_VERSION
+    probe["sections"] = sections
+    return probe
+
+
+def _validate_import_header(document: dict[str, Any]) -> None:
+    version = str(document.get("hmx_version", ""))
+    try:
+        major = int(version.split(".", 1)[0])
+    except (TypeError, ValueError):
+        raise HmxSchemaError(
+            f"invalid HMX version {version!r}; expected major version 1"
+        )
+    if major != int(HMX_VERSION.split(".", 1)[0]):
+        raise HmxSchemaError(
+            f"unsupported HMX major version {version!r}; this importer supports 1.x"
+        )
+    validate_hmx_document(_document_probe(document, {}))
+
+
+def _validated_records(
+    document: dict[str, Any], section: str, records: Any
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Validate records independently so one malformed record is skippable."""
+
+    valid: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    if not isinstance(records, list):
+        return valid, [
+            {
+                "code": "schema_validation_error",
+                "section": section,
+                "error": "section must be an array",
+            }
+        ]
+    for index, record in enumerate(records):
+        try:
+            validate_hmx_document(_document_probe(document, {section: [record]}))
+        except HmxSchemaError as exc:
+            warnings.append(
+                {
+                    "code": "schema_validation_error",
+                    "section": section,
+                    "index": index,
+                    "error": str(exc),
+                }
+            )
+        else:
+            valid.append(copy.deepcopy(record))
+    return valid, warnings
 
 
 def validate_intent(intent: str) -> str:
@@ -490,6 +569,13 @@ def _postprocess_section(
                 evidence_id = facet.pop("evidence_memory_id", None)
                 if evidence_id:
                     facet["evidence_memory_ref"] = _ref(export_id, evidence_id)
+    elif section == "drives":
+        for record in data:
+            _enrich_provenance(
+                record,
+                instance_id=instance_id,
+                local_id=f"drive:{record.get('name', 'unknown')}",
+            )
     elif section == "goals":
         for record in data:
             local_id = record.pop("id")
@@ -502,12 +588,15 @@ def _postprocess_section(
             _enrich_provenance(record, instance_id=instance_id, local_id=local_id)
     elif section == "emotional_triggers":
         for record in data:
-            record.pop("id", None)
+            local_id = record.pop("id", None)
             record["content_hash_v1"] = content_hash_v1(
                 record.get("trigger_pattern") or ""
             )
             record["source_memory_refs"] = _refs(
                 export_id, record.pop("source_memory_ids", [])
+            )
+            _enrich_provenance(
+                record, instance_id=instance_id, local_id=local_id or "trigger"
             )
     elif section == "clusters":
         for record in data:
@@ -689,8 +778,11 @@ async def load_source_context(conn) -> dict[str, Any]:
             "WHERE t.typname = 'graph_edge_type' ORDER BY enumlabel"
         )
     ]
+    from core.migrations import migrations_table_name
+
+    migrations_table = await migrations_table_name(conn)
     schema_version = await conn.fetchval(
-        "SELECT COALESCE(max(version), 'baseline') FROM schema_migrations"
+        f"SELECT COALESCE(max(version), 'baseline') FROM {migrations_table}"
     )
     return {
         "instance_id": str(
@@ -702,3 +794,453 @@ async def load_source_context(conn) -> dict[str, Any]:
         "lineage_id": str(await _config("agent.lineage_id") or ""),
         "relationship_edge_types": edge_types,
     }
+
+
+# ---------------------------------------------------------------------------
+# Additive import (Slice 2)
+# ---------------------------------------------------------------------------
+
+_KNOWN_MODIFICATION_KINDS = frozenset(
+    {
+        "trivial_edit",
+        "formatting",
+        "clarification",
+        "reflection_revision",
+        "contradiction_resolution",
+        "temporal_update",
+        "correction",
+        "supersession",
+        "integration",
+    }
+)
+
+
+def _section_has_records(section: str, value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(bool(records) for records in value.values())
+    return bool(value)
+
+
+def _append_import_provenance(
+    record: dict[str, Any],
+    *,
+    origin_id: str,
+    intent: str,
+    source: dict[str, Any],
+    export_id: str,
+    local_instance_id: str,
+    imported_at: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    prepared = copy.deepcopy(record)
+    provenance = copy.deepcopy(prepared.get("provenance") or {})
+    provenance.setdefault(
+        "origin_instance", str(source.get("instance_id") or "unknown")
+    )
+    provenance.setdefault("origin_id", origin_id)
+    provenance.setdefault("modification_chain", [])
+    if intent not in ("port", "duplicate"):
+        provenance["acquisition_mode"] = "imported_and_accepted"
+    else:
+        provenance.setdefault("acquisition_mode", "experienced")
+
+    import_chain = list(provenance.get("import_chain") or [])
+    import_chain.append(
+        {
+            "instance_id": local_instance_id,
+            "imported_at": imported_at,
+            "export_id": export_id,
+        }
+    )
+    provenance["import_chain"] = import_chain
+    prepared["provenance"] = provenance
+
+    warnings: list[dict[str, Any]] = []
+    for modification in provenance.get("modification_chain") or []:
+        kind = (
+            modification.get("modification_kind")
+            if isinstance(modification, dict)
+            else None
+        )
+        if kind not in _KNOWN_MODIFICATION_KINDS:
+            warnings.append(
+                {
+                    "code": "material_change_unverifiable",
+                    "ref": record.get("ref") or origin_id,
+                    "modification_kind": kind,
+                }
+            )
+    return prepared, warnings
+
+
+def _prepare_import_memory(
+    record: dict[str, Any],
+    *,
+    intent: str,
+    source: dict[str, Any],
+    export_id: str,
+    local_instance_id: str,
+    imported_at: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    from core.digest import content_hash_v1, normalize_v1
+
+    prepared, warnings = _append_import_provenance(
+        record,
+        origin_id=record["ref"].split(":", 1)[-1],
+        intent=intent,
+        source=source,
+        export_id=export_id,
+        local_instance_id=local_instance_id,
+        imported_at=imported_at,
+    )
+    if intent not in ("port", "duplicate"):
+        prepared["access_count"] = 0
+        prepared["last_accessed"] = None
+    prepared.setdefault("content_hash_v1", content_hash_v1(prepared["content"]))
+    prepared["_transient_normalized_content"] = normalize_v1(prepared["content"])
+    return prepared, warnings
+
+
+def _protected_memory_record(section: str, record: dict[str, Any]) -> dict[str, Any]:
+    converted = copy.deepcopy(record)
+    metadata = copy.deepcopy(converted.get("metadata") or {})
+    if section == "worldview":
+        metadata.update(
+            {
+                key: converted.get(key)
+                for key in ("category", "confidence", "stability")
+                if key in converted
+            }
+        )
+        converted["type"] = "worldview"
+    elif section == "goals":
+        metadata.update(
+            {
+                key: converted.get(key)
+                for key in (
+                    "title",
+                    "description",
+                    "priority",
+                    "source",
+                    "due_at",
+                    "progress",
+                    "blocked_by",
+                    "parent_ref",
+                )
+                if key in converted
+            }
+        )
+        converted["type"] = "goal"
+        converted["content"] = converted.get("description") or converted["title"]
+    converted["metadata"] = metadata
+    return converted
+
+
+async def import_hmx(
+    conn,
+    data: dict[str, Any],
+    *,
+    strategy: str = "additive",
+) -> HmxImportResult:
+    """Import HMX with the additive Slice 2 strategy in one transaction.
+
+    Deliberative, analysis-only, and authoritative storage arrive in later
+    slices and are rejected explicitly. Protected state is admitted only for a
+    port/duplicate into a target that is empty by HMX's diagnostic predicate.
+    """
+
+    if not isinstance(data, dict):
+        raise HmxSchemaError("HMX input must be a JSON object")
+    _validate_import_header(data)
+    intent = validate_intent(str(data["export_intent"]))
+    if strategy != "additive":
+        raise HmxPolicyError(
+            f"Slice 2 supports strategy='additive'; got {strategy!r}. "
+            "Use a later deliberative/analysis import path for foreign protected state."
+        )
+
+    sections = data.get("sections") or {}
+    warnings: list[dict[str, Any]] = []
+    for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
+        if _section_has_records(deferred_section, sections.get(deferred_section)):
+            warnings.append(
+                {
+                    "code": "unsupported_section",
+                    "section": deferred_section,
+                    "error": "section import is assigned to a later HMX slice and was not applied",
+                }
+            )
+    protected_present = {
+        section
+        for section in PROTECTED_SECTIONS
+        if _section_has_records(section, sections.get(section))
+    }
+    source = data.get("source") or {}
+    export_id = str(data["export_id"])
+    imported_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    local_context = await load_source_context(conn)
+
+    memory_records, record_warnings = _validated_records(
+        data, "memories", sections.get("memories", [])
+    )
+    warnings.extend(record_warnings)
+    goal_records: list[dict[str, Any]] = []
+    for section in ("worldview", "goals"):
+        records, section_warnings = _validated_records(
+            data, section, sections.get(section, [])
+        )
+        warnings.extend(section_warnings)
+        if section == "goals":
+            goal_records = records
+        memory_records.extend(
+            _protected_memory_record(section, record) for record in records
+        )
+
+    prepared_memories: list[dict[str, Any]] = []
+    for record in memory_records:
+        prepared, provenance_warnings = _prepare_import_memory(
+            record,
+            intent=intent,
+            source=source,
+            export_id=export_id,
+            local_instance_id=local_context["instance_id"],
+            imported_at=imported_at,
+        )
+        prepared_memories.append(prepared)
+        warnings.extend(provenance_warnings)
+
+    episode_records, episode_warnings = _validated_records(
+        data, "episodes", sections.get("episodes", [])
+    )
+    cluster_records, cluster_warnings = _validated_records(
+        data, "clusters", sections.get("clusters", [])
+    )
+    relationship_records, relationship_warnings = _validated_records(
+        data, "relationships", sections.get("relationships", [])
+    )
+    for record in memory_records:
+        superseded_by = record.get("superseded_by")
+        if superseded_by:
+            relationship_records.append(
+                {
+                    "source_ref": record["ref"],
+                    "target_ref": superseded_by,
+                    "edge_type": "SUPERSEDES",
+                    "properties": {
+                        "source_type": "memory",
+                        "target_type": "memory",
+                        "reason": "legacy_superseded_by",
+                    },
+                }
+            )
+    warnings.extend(episode_warnings + cluster_warnings + relationship_warnings)
+
+    protected_records: dict[str, list[dict[str, Any]]] = {}
+    for section in ("identity", "drives", "emotional_triggers"):
+        records, section_warnings = _validated_records(
+            data, section, sections.get(section, [])
+        )
+        warnings.extend(section_warnings)
+        prepared_records: list[dict[str, Any]] = []
+        for index, record in enumerate(records):
+            origin_id = str(
+                record.get("ref")
+                or record.get("key")
+                or record.get("name")
+                or record.get("trigger_pattern")
+                or index
+            )
+            prepared, provenance_warnings = _append_import_provenance(
+                record,
+                origin_id=origin_id,
+                intent=intent,
+                source=source,
+                export_id=export_id,
+                local_instance_id=local_context["instance_id"],
+                imported_at=imported_at,
+            )
+            if section == "emotional_triggers":
+                from core.digest import normalize_v1
+
+                prepared["_transient_normalized_content"] = normalize_v1(
+                    prepared["trigger_pattern"]
+                )
+            prepared_records.append(prepared)
+            warnings.extend(provenance_warnings)
+        protected_records[section] = prepared_records
+
+    narrative = copy.deepcopy(sections.get("narrative") or {})
+    if narrative:
+        try:
+            validate_hmx_document(_document_probe(data, {"narrative": narrative}))
+        except HmxSchemaError as exc:
+            warnings.append(
+                {
+                    "code": "schema_validation_error",
+                    "section": "narrative",
+                    "error": str(exc),
+                }
+            )
+            narrative = {}
+        else:
+            for group, records in narrative.items():
+                for index, record in enumerate(records):
+                    prepared, provenance_warnings = _append_import_provenance(
+                        record,
+                        origin_id=str(record.get("ref") or f"{group}:{index}"),
+                        intent=intent,
+                        source=source,
+                        export_id=export_id,
+                        local_instance_id=local_context["instance_id"],
+                        imported_at=imported_at,
+                    )
+                    records[index] = prepared
+                    warnings.extend(provenance_warnings)
+
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('hmx_import'))")
+        target_state = _coerce_json(
+            await conn.fetchval("SELECT hexis_instance_is_empty()")
+        )
+        if protected_present and (
+            intent not in ("port", "duplicate")
+            or not target_state.get("is_empty", False)
+        ):
+            reason = (
+                "protected sections may be imported directly only into an empty target "
+                "with export_intent port or duplicate; use deliberative handling or the "
+                "Protected Section Replacement Protocol"
+            )
+            raise HmxPolicyError(f"bootstrap_state_violation: {reason}")
+
+        source_lineage = str(source.get("hexis_lineage_id") or "")
+        local_lineage = str(
+            await conn.fetchval(
+                "SELECT value #>> '{}' FROM config WHERE key='agent.lineage_id'"
+            )
+            or ""
+        )
+        if (
+            intent in ("port", "duplicate")
+            and not target_state.get("is_empty", False)
+            and source_lineage
+            and source_lineage != local_lineage
+        ):
+            raise HmxPolicyError(
+                "lineage_mismatch: port/duplicate source lineage differs from the "
+                "active target; use deliberative additive import instead"
+            )
+
+        memory_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_memories($1::jsonb)", json.dumps(prepared_memories)
+            )
+        )
+        if memory_result.get("errors"):
+            warnings.extend(
+                {
+                    "code": "schema_validation_error",
+                    "section": "memories",
+                    **error,
+                }
+                for error in memory_result["errors"]
+            )
+
+        ref_map = dict(memory_result.get("ref_map") or {})
+        goal_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_remap_goal_references($1::jsonb, $2::jsonb)",
+                json.dumps(goal_records),
+                json.dumps(ref_map),
+            )
+        )
+        identity_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_identity($1::jsonb, $2::jsonb)",
+                json.dumps(protected_records["identity"]),
+                json.dumps(ref_map),
+            )
+        )
+        drive_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_drives($1::jsonb)",
+                json.dumps(protected_records["drives"]),
+            )
+        )
+        narrative_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_narrative($1::jsonb, $2::jsonb)",
+                json.dumps(narrative),
+                json.dumps(ref_map),
+            )
+        )
+        ref_map.update(narrative_result.get("ref_map") or {})
+        trigger_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_emotional_triggers($1::jsonb, $2::jsonb)",
+                json.dumps(protected_records["emotional_triggers"]),
+                json.dumps(ref_map),
+            )
+        )
+        episode_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_episodes($1::jsonb, $2::jsonb)",
+                json.dumps(episode_records),
+                json.dumps(ref_map),
+            )
+        )
+        ref_map = dict(episode_result.get("ref_map") or ref_map)
+        cluster_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_clusters($1::jsonb, $2::jsonb)",
+                json.dumps(cluster_records),
+                json.dumps(ref_map),
+            )
+        )
+        ref_map = dict(cluster_result.get("ref_map") or ref_map)
+        relationship_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_relationships($1::jsonb, $2::jsonb)",
+                json.dumps(relationship_records),
+                json.dumps(ref_map),
+            )
+        )
+        warnings.extend(episode_result.get("warnings") or [])
+        warnings.extend(cluster_result.get("warnings") or [])
+        warnings.extend(relationship_result.get("warnings") or [])
+        warnings.extend(goal_result.get("warnings") or [])
+        warnings.extend(identity_result.get("warnings") or [])
+        warnings.extend(drive_result.get("warnings") or [])
+        warnings.extend(narrative_result.get("warnings") or [])
+        warnings.extend(trigger_result.get("warnings") or [])
+
+        if target_state.get("is_empty") and intent in ("port", "duplicate"):
+            if source_lineage:
+                await conn.execute(
+                    "SELECT set_config('agent.lineage_id', to_jsonb($1::text))",
+                    source_lineage,
+                )
+
+    duplicate_refs = tuple(memory_result.get("duplicate_refs") or [])
+    conflicts = tuple(
+        {"code": "duplicate_content", "ref": ref} for ref in duplicate_refs
+    )
+    return HmxImportResult(
+        export_id=export_id,
+        intent=intent,
+        strategy=strategy,
+        target_state=target_state,
+        inserted={
+            "memories": int(memory_result.get("inserted", 0)),
+            "episodes": int(episode_result.get("inserted", 0)),
+            "clusters": int(cluster_result.get("inserted", 0)),
+            "relationships": int(relationship_result.get("inserted", 0)),
+            "identity": int(identity_result.get("imported", 0)),
+            "drives": int(drive_result.get("imported", 0)),
+            "emotional_triggers": int(trigger_result.get("inserted", 0)),
+            "narrative": int(narrative_result.get("imported", 0)),
+        },
+        duplicate_refs=duplicate_refs,
+        ref_map=ref_map,
+        conflicts=conflicts,
+        warnings=tuple(warnings),
+    )

@@ -13,15 +13,16 @@ import pytest
 from core.memory_exchange import (
     ALL_SECTIONS,
     HMX_VERSION,
-    HmxSchemaError,
     PROTECTED_SECTIONS,
     HmxPolicyError,
+    HmxSchemaError,
     build_envelope,
     default_import_strategy,
+    import_hmx,
     new_export_id,
     resolve_export_sections,
-    validate_intent,
     validate_hmx_document,
+    validate_intent,
 )
 
 
@@ -251,3 +252,31 @@ class TestCanonicalSchema:
             ]
         }
         validate_hmx_document(env)
+
+
+class TestImportPreflight:
+    def _envelope(self):
+        plan = resolve_export_sections("telepathy")
+        return build_envelope(
+            intent="telepathy",
+            plan=plan,
+            instance_id="hexis_source",
+            schema_version="0007_hmx_additive_import",
+            embedding_model="embeddinggemma:300m",
+            embedding_dimension=768,
+            lineage_id="11111111-2222-3333-4444-555555555555",
+            relationship_edge_types=[],
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_major_rejected_before_database_access(self):
+        env = self._envelope()
+        env["hmx_version"] = "2.0"
+        with pytest.raises(HmxSchemaError, match="unsupported HMX major"):
+            await import_hmx(None, env)
+
+    @pytest.mark.asyncio
+    async def test_unimplemented_strategy_fails_explicitly(self):
+        env = self._envelope()
+        with pytest.raises(HmxPolicyError, match="supports strategy='additive'"):
+            await import_hmx(None, env, strategy="analysis_only")
