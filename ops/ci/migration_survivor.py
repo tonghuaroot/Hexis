@@ -96,6 +96,19 @@ async def main() -> None:
         if age_label is not True:
             raise AssertionError("SUPERSEDES AGE edge label is missing")
 
+        # When the provenance backfill lands in this run, it must classify the
+        # pre-existing sentinel as lived experience. (Skipped if the image
+        # already carried 0003 — its backfill ran before the sentinel existed.)
+        if "0003_hmx_bootstrap_provenance" in applied:
+            mode = await conn.fetchval(
+                "SELECT metadata->'provenance'->>'acquisition_mode' FROM memories WHERE content=$1",
+                sentinel,
+            )
+            if mode != "experienced":
+                raise AssertionError(
+                    f"provenance backfill did not classify the sentinel (got {mode!r})"
+                )
+
         print("migration survivor proof passed")
     finally:
         await conn.close()

@@ -33,3 +33,16 @@ CREATE TRIGGER memories_emotional_context_insert
 BEFORE INSERT ON memories
 FOR EACH ROW
 EXECUTE FUNCTION apply_emotional_context_to_memory();
+-- HMX Slice 0: init-created memories get bootstrap provenance at creation.
+-- The WHEN predicate inlines is_initialization_memory() — keep the three
+-- marker checks in sync with it and with reset_persona().
+CREATE TRIGGER trg_hmx_bootstrap_provenance
+    BEFORE INSERT OR UPDATE ON memories
+    FOR EACH ROW
+    WHEN (
+        NEW.metadata->'provenance' IS NULL
+        AND (NEW.metadata->>'origin' = 'initialization'
+             OR NEW.metadata->>'type' = 'initialization'
+             OR NEW.source_attribution->>'source' = 'initialization')
+    )
+    EXECUTE FUNCTION hmx_tag_bootstrap_provenance();

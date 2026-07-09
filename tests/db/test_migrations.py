@@ -65,14 +65,15 @@ async def test_migrate_existing_database_preserves_data():
                 "VALUES ('episodic','precious pre-migration data', "
                 "        array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.5, 0.9, 'active')")
 
-            # BEFORE: the new enum value does not exist yet
-            with pytest.raises(asyncpg.PostgresError):
-                await conn.fetchval("SELECT 'staged'::memory_status")
-
+            # NOTE: deltas are mirrored into the baseline (db/migrations/README.md),
+            # so a current-baseline DB may already contain them. The load-bearing
+            # invariant is that the runner applies every migration on a DB with an
+            # empty schema_migrations table, the data survives, and re-runs no-op.
             from core.migrations import apply_pending_migrations
             applied = await apply_pending_migrations(conn)
             assert "0001_hmx_enum_values" in applied
             assert "0002_hmx_supersedes_lineage" in applied
+            assert "0003_hmx_bootstrap_provenance" in applied
 
             # AFTER: the data is intact AND the schema evolved
             assert await conn.fetchval(
@@ -82,6 +83,10 @@ async def test_migrate_existing_database_preserves_data():
                 "UPDATE memories SET status='staged' WHERE content='precious pre-migration data'")
             assert await conn.fetchval("SELECT value IS NOT NULL FROM config WHERE key='agent.lineage_id'")
             assert await conn.fetchval("SELECT EXISTS(SELECT 1 FROM ag_catalog.ag_label WHERE name='SUPERSEDES')")
+            # 0003's backfill classified the pre-migration row as lived experience
+            assert await conn.fetchval(
+                "SELECT metadata->'provenance'->>'acquisition_mode' FROM memories "
+                "WHERE content='precious pre-migration data'") == "experienced"
 
             # idempotent: a second run does nothing
             assert await apply_pending_migrations(conn) == []

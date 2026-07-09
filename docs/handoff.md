@@ -140,6 +140,36 @@ Hosted CI failure history and fixes:
 - Next CI failed migration-survivor with asyncpg `ConnectionResetError`; fixed by
   waiting for full Postgres init completion.
 
+### HMX Slice 0 complete (memory export/import prerequisite)
+
+Spec: `plans/hmx.md` (HMX v1.7). Slice 0 — the schema prerequisite for all
+HMX work — is fully landed:
+
+- Migrations `0001` (enum values: `staged`, `SUPERSEDES`/`CONTAINS`/
+  `HAS_BELIEF`/`MEMBER_OF`), `0002` (AGE `SUPERSEDES` label, `agent.lineage_id`),
+  and `0003` (bootstrap provenance) — all mirrored into the baseline
+  (`db/00_tables.sql`, `db/05_functions_provenance_trust.sql`, `db/91_triggers.sql`).
+- Init-created memories are tagged `metadata.provenance.acquisition_mode =
+  "bootstrap"` + `replaceable_during_bootstrap = true` by the
+  `trg_hmx_bootstrap_provenance` trigger (single seam using `reset_persona()`'s
+  init predicate — no per-init-function edits). Rows with non-empty
+  `change_history` read as `experienced`.
+- `hmx_backfill_provenance()` classifies legacy rows; migration 0003 runs it
+  once. Both the migration-survivor CI lane and
+  `tests/db/test_migrations.py` now assert the backfill classified
+  pre-migration data.
+- Tests: `tests/db/test_hmx_slice0.py`.
+
+Note for the next slice: `tests/db/test_migrations.py` no longer asserts the
+baseline LACKS migrated values — deltas are mirrored into the baseline per
+`db/migrations/README.md`, so "old deployment" is simulated only by an empty
+`schema_migrations` table.
+
+Next HMX step: Slice 1 (`core/memory_exchange.py`, `core/digest.py`,
+`schemas/hmx-1.7.schema.json`, export functions in a new `db/48_*.sql` — the
+plan's proposed `db/35–40` filenames collide with existing files; use the next
+free numbers and keep the plan's content mapping).
+
 ## Current Roadmap
 
 This is the active quality-parity roadmap derived from reviewing Hermes and OpenClaw.

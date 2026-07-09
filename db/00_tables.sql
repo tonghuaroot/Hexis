@@ -131,6 +131,7 @@ BEGIN
     BEGIN PERFORM create_elabel('memory_graph', 'DERIVED_FROM'); EXCEPTION WHEN duplicate_object THEN NULL; END;
     BEGIN PERFORM create_elabel('memory_graph', 'TEMPORAL_NEXT'); EXCEPTION WHEN duplicate_object THEN NULL; END;
     BEGIN PERFORM create_elabel('memory_graph', 'CONTAINS'); EXCEPTION WHEN duplicate_object THEN NULL; END;
+    BEGIN PERFORM create_elabel('memory_graph', 'SUPERSEDES'); EXCEPTION WHEN duplicate_object THEN NULL; END;
     FOREACH idx_sql IN ARRAY idx_statements LOOP
         BEGIN
             EXECUTE idx_sql;
@@ -151,7 +152,7 @@ BEGIN
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
     BEGIN
-        CREATE TYPE memory_status AS ENUM ('active', 'archived', 'invalidated');
+        CREATE TYPE memory_status AS ENUM ('active', 'archived', 'invalidated', 'staged');
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
     BEGIN
@@ -177,7 +178,11 @@ BEGIN
             'CLUSTER_SIMILAR',
             'IN_EPISODE',
             'EPISODE_FOLLOWS',
-            'CONTESTED_BECAUSE'
+            'CONTESTED_BECAUSE',
+            'CONTAINS',
+            'HAS_BELIEF',
+            'MEMBER_OF',
+            'SUPERSEDES'
         );
     EXCEPTION WHEN duplicate_object THEN NULL;
     END;
@@ -457,6 +462,13 @@ INSERT INTO config (key, value, description) VALUES
     ('embedding.retry_seconds', '30'::jsonb, 'Total seconds to retry embedding requests'),
     ('embedding.retry_interval_seconds', '1.0'::jsonb, 'Seconds between retry attempts'),
     ('embedding.http_timeout_ms', '9000'::jsonb, 'Per-request HTTP timeout (ms) for embedding calls; must exceed the server cold model-load time (~8s for Ollama) so a request rides through a cold load instead of aborting it')
+ON CONFLICT (key) DO NOTHING;
+
+-- HMX: stable identity lineage id — established at birth, propagated on
+-- port/duplicate (see plans/hmx.md). Mirrors db/migrations/0002.
+INSERT INTO config (key, value, description)
+VALUES ('agent.lineage_id', to_jsonb(gen_random_uuid()::text),
+        'Stable identity lineage id (HMX): established at birth, propagated on port/duplicate')
 ON CONFLICT (key) DO NOTHING;
 -- Note: embedding_dimension runs during schema init; avoid helpers defined later.
 CREATE OR REPLACE FUNCTION embedding_dimension()
