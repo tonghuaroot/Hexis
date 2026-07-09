@@ -6,10 +6,12 @@ because source and target are the same agent or an intended clone; ``telepathy``
 and ``analysis`` must not silently graft one instance's identity, worldview,
 drives, emotional triggers, narrative, or active goals into another.
 
-This module is the policy layer: which sections an export intent includes by
-default, what explicit opt-in unlocks, and the envelope every export carries.
-Section serializers and the SQL export functions build on it (Slice 1 of the
-implementation plan); they are not here yet.
+This module is the policy layer (which sections an export intent includes by
+default, what explicit opt-in unlocks), the envelope every export carries, and
+the export pipeline: section data comes from the SQL functions in
+db/48_functions_memory_exchange.sql with local UUIDs, and this layer applies
+export-scoped refs, content hashes, provenance enrichment, protected-section
+digests, statistics, and JSON/JSONL serialization.
 """
 
 from __future__ import annotations
@@ -276,6 +278,247 @@ def build_envelope(
             "estimated_uncompressed_bytes": 0,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Export pipeline
+# ---------------------------------------------------------------------------
+
+_SECTION_FN = {
+    "memories": "hmx_export_memories($1::text[], $2::timestamptz, $3::timestamptz)",
+    "episodes": "hmx_export_episodes()",
+    "relationships": "hmx_export_relationships()",
+    "narrative": "hmx_export_narrative()",
+    "identity": "hmx_export_identity()",
+    "worldview": "hmx_export_worldview()",
+    "goals": "hmx_export_goals()",
+    "drives": "hmx_export_drives()",
+    "emotional_triggers": "hmx_export_emotional_triggers()",
+    "clusters": "hmx_export_clusters()",
+    "in_flight_work": "hmx_export_in_flight_work()",
+    "audit_records": "hmx_export_audit_records()",
+}
+
+# record_type values for JSONL streaming, per section.
+_JSONL_RECORD_TYPE = {
+    "memories": "memory",
+    "episodes": "episode",
+    "relationships": "relationship",
+    "worldview": "worldview",
+    "goals": "goal",
+    "drives": "drive",
+    "emotional_triggers": "emotional_trigger",
+    "clusters": "cluster",
+    "identity": "identity",
+}
+
+
+def _ref(export_id: str, local_id: Any) -> str:
+    return f"{export_id}:{local_id}"
+
+
+def _refs(export_id: str, local_ids: Any) -> list[str]:
+    return [_ref(export_id, i) for i in (local_ids or [])]
+
+
+def _enrich_provenance(record: dict[str, Any], *, instance_id: str, local_id: Any) -> None:
+    """Move provenance out of metadata to the wire position and fill defaults
+    (spec field-default table: acquisition_mode=experienced on export)."""
+    metadata = record.get("metadata") or {}
+    provenance = metadata.pop("provenance", None) or {}
+    provenance.setdefault("acquisition_mode", "experienced")
+    provenance.setdefault("origin_instance", instance_id)
+    provenance.setdefault("origin_id", str(local_id))
+    provenance.setdefault("import_chain", [])
+    provenance.setdefault("modification_chain", [])
+    record["metadata"] = metadata
+    record["provenance"] = provenance
+
+
+def _postprocess_section(
+    section: str,
+    data: Any,
+    *,
+    export_id: str,
+    instance_id: str,
+) -> Any:
+    """Local UUIDs -> export-scoped refs; content hashes; wire field names."""
+    from core.digest import content_hash_v1
+
+    if section in ("memories", "worldview"):
+        for record in data:
+            local_id = record.pop("id")
+            record["ref"] = _ref(export_id, local_id)
+            record["content_hash_v1"] = content_hash_v1(record.get("content") or "")
+            record.pop("superseded_by", None)  # normalized into SUPERSEDES edges
+            _enrich_provenance(record, instance_id=instance_id, local_id=local_id)
+            if section == "worldview":
+                record["supporting_refs"] = _refs(export_id, record.pop("supporting_ids", []))
+                record["contesting_refs"] = _refs(export_id, record.pop("contesting_ids", []))
+    elif section == "episodes":
+        for record in data:
+            record["ref"] = _ref(export_id, record.pop("id"))
+            record["memory_refs"] = _refs(export_id, record.pop("memory_ids", []))
+    elif section == "relationships":
+        for record in data:
+            props = record.get("properties") or {}
+            props["source_type"] = record.pop("source_type", None)
+            props["target_type"] = record.pop("target_type", None)
+            record["properties"] = props
+            record["source_ref"] = _ref(export_id, record.pop("source_id"))
+            record["target_ref"] = _ref(export_id, record.pop("target_id"))
+    elif section == "goals":
+        for record in data:
+            local_id = record.pop("id")
+            record["ref"] = _ref(export_id, local_id)
+            parent = record.pop("parent_goal_id", None)
+            record["parent_ref"] = _ref(export_id, parent) if parent else None
+            _enrich_provenance(record, instance_id=instance_id, local_id=local_id)
+    elif section == "emotional_triggers":
+        for record in data:
+            record.pop("id", None)
+            record["content_hash_v1"] = content_hash_v1(record.get("trigger_pattern") or "")
+            record["source_memory_refs"] = _refs(export_id, record.pop("source_memory_ids", []))
+    elif section == "clusters":
+        for record in data:
+            record["ref"] = _ref(export_id, record.pop("id"))
+            record["member_refs"] = _refs(export_id, record.pop("member_ids", []))
+    elif section == "in_flight_work":
+        for task in data.get("consolidation_tasks", []):
+            task["ref"] = _ref(export_id, task.pop("id"))
+            task["input_refs"] = _refs(export_id, task.pop("input_ids", []))
+            target = task.pop("target_memory_id", None)
+            task["output_refs"] = [_ref(export_id, target)] if target else []
+        for task in data.get("reconsolidation_tasks", []):
+            task["ref"] = _ref(export_id, task.pop("id"))
+            task["memory_refs"] = _refs(export_id, task.pop("memory_ids", []))
+    return data
+
+
+def _fill_statistics(envelope: dict[str, Any]) -> None:
+    import json as _json
+
+    sections = envelope["sections"]
+    stats = envelope["statistics"]
+    stats["total_memories"] = len(sections.get("memories", []))
+    stats["total_relationships"] = len(sections.get("relationships", []))
+    stats["total_episodes"] = len(sections.get("episodes", []))
+    narrative = sections.get("narrative") or {}
+    stats["total_narrative_nodes"] = sum(len(v) for v in narrative.values())
+    in_flight = sections.get("in_flight_work") or {}
+    stats["total_in_flight_tasks"] = sum(len(v) for v in in_flight.values())
+    audit = sections.get("audit_records") or {}
+    stats["total_audit_records"] = sum(len(v) for v in audit.values())
+
+    embeddable: list[str] = []
+    embeddable += [m.get("content") or "" for m in sections.get("memories", [])]
+    embeddable += [w.get("content") or "" for w in sections.get("worldview", [])]
+    embeddable += [g.get("title") or "" for g in sections.get("goals", [])]
+    embeddable += [t.get("trigger_pattern") or "" for t in sections.get("emotional_triggers", [])]
+    embeddable += [e.get("summary") or "" for e in sections.get("episodes", []) if e.get("summary")]
+    stats["estimated_embedding_items"] = len(embeddable)
+    stats["estimated_embedding_tokens"] = sum(len(t) for t in embeddable) // 4
+    stats["estimated_uncompressed_bytes"] = len(_json.dumps(envelope, default=str))
+
+
+async def export_hmx(
+    conn,
+    *,
+    intent: str,
+    include_protected: list[str] | None = None,
+    include_raw_units: bool = False,
+    include_config: bool = False,
+    include_in_flight_work: bool | None = None,
+    include_audit_records: bool | None = None,
+    sections: list[str] | None = None,
+    types: list[str] | None = None,
+    since: Any = None,
+    until: Any = None,
+    redaction_policy: str = "none",
+    consent_scope: str = "unspecified",
+) -> dict[str, Any]:
+    """Produce a complete HMX envelope from the live database.
+
+    Embeddings never leave the database; refs are export-scoped; protected
+    sections ride only where intent policy allows and, for port/duplicate,
+    carry ``protected_section_digest_v1`` under ``section_digests`` for the
+    replacement protocol's Phase 0 fast path.
+    """
+    import json as _json
+
+    from core.digest import protected_section_digest_v1
+
+    plan = resolve_export_sections(
+        intent,
+        include_protected=include_protected,
+        include_raw_units=include_raw_units,
+        include_config=include_config,
+        include_in_flight_work=include_in_flight_work,
+        include_audit_records=include_audit_records,
+        sections=sections,
+    )
+    ctx = await load_source_context(conn)
+    envelope = build_envelope(
+        intent=intent,
+        plan=plan,
+        redaction_policy=redaction_policy,
+        consent_scope=consent_scope,
+        types=types,
+        **ctx,
+    )
+    export_id = envelope["export_id"]
+
+    for section in plan.sections:
+        if section == "memories":
+            raw = await conn.fetchval(
+                f"SELECT {_SECTION_FN['memories']}", types, since, until
+            )
+        else:
+            raw = await conn.fetchval(f"SELECT {_SECTION_FN[section]}")
+        data = _json.loads(raw) if isinstance(raw, str) else raw
+        envelope["sections"][section] = _postprocess_section(
+            section, data, export_id=export_id, instance_id=ctx["instance_id"]
+        )
+
+    if intent in ("port", "duplicate"):
+        digests = {
+            section: protected_section_digest_v1(section, envelope["sections"][section])
+            for section in plan.protected
+            if section in envelope["sections"]
+        }
+        envelope["section_digests"] = digests
+
+    if plan.warnings:
+        envelope["export_warnings"] = list(plan.warnings)
+
+    _fill_statistics(envelope)
+    return envelope
+
+
+def iter_hmx_jsonl(envelope: dict[str, Any]):
+    """Yield JSONL lines for an envelope (spec: "Streaming Format"): header,
+    typed records, footer with statistics."""
+    import json as _json
+
+    header = {k: v for k, v in envelope.items() if k not in ("sections", "statistics")}
+    yield _json.dumps({"record_type": "envelope", "data": header}, default=str)
+    for section, data in envelope["sections"].items():
+        record_type = _JSONL_RECORD_TYPE.get(section)
+        if record_type:
+            for record in data:
+                yield _json.dumps({"record_type": record_type, "data": record}, default=str)
+        elif section == "narrative":
+            yield _json.dumps({"record_type": "narrative", "data": data}, default=str)
+        elif section == "in_flight_work":
+            for group in ("consolidation_tasks", "reconsolidation_tasks"):
+                for task in data.get(group, []):
+                    yield _json.dumps(
+                        {"record_type": "in_flight_task", "data": dict(task, task_group=group)},
+                        default=str,
+                    )
+        elif section == "audit_records":
+            yield _json.dumps({"record_type": "audit_record", "data": data}, default=str)
+    yield _json.dumps({"record_type": "footer", "statistics": envelope["statistics"]}, default=str)
 
 
 async def load_source_context(conn) -> dict[str, Any]:

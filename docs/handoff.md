@@ -181,10 +181,23 @@ Landed so far:
   enum, lineage from config, schema version from `schema_migrations`).
   Tests: `tests/core/test_hmx_exchange.py`.
 
-Still open in Slice 1: section serializers, `schemas/hmx-1.7.schema.json`,
-`core/trust_anchors.py`, and the SQL export functions — put those in a new
-`db/48_*.sql` (the plan's proposed `db/35–40` filenames collide with existing
-files; use the next free numbers, keep the plan's content mapping).
+- `db/48_functions_memory_exchange.sql` (mirrored as migration `0004`) —
+  per-section export functions returning raw JSONB with local UUIDs and no
+  embeddings. Relationships export from `memory_edges` (the primary flat
+  substrate) plus SUPERSEDES edges derived from `memories.superseded_by`;
+  narrative/identity export from AGE via Cypher; worldview/goal memories ride
+  only in their dedicated sections, never doubled into `memories`.
+- `export_hmx()` in `core/memory_exchange.py` — the full export pipeline:
+  export-scoped refs, content hashes, provenance enrichment (defaults to
+  `experienced`), `section_digests` for port/duplicate (Phase 0 fast path),
+  statistics, and `iter_hmx_jsonl()` streaming. Tests:
+  `tests/db/test_hmx_export.py`, incl. the invariant that two exports with
+  different export_ids produce identical protected digests.
+
+Still open in Slice 1: `schemas/hmx-1.7.schema.json` and
+`core/trust_anchors.py`. Then Slice 2 (import + `hexis_instance_is_empty()` +
+target-state policy) completes the round trip, and Slice 3 adds the CLI
+(`hexis export` / `hexis import --dry-run`).
 
 ## Current Roadmap
 
