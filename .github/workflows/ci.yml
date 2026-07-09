@@ -48,6 +48,16 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e .
+      - name: Prepare brain DB image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin || true
+          if docker pull ghcr.io/quixiai/hexis-brain:latest; then
+            echo "HEXIS_BRAIN_IMAGE=ghcr.io/quixiai/hexis-brain:latest" >> "$GITHUB_ENV"
+          else
+            echo "GHCR image unavailable; building hexis-ci-brain from ops/Dockerfile.db"
+            docker build -f ops/Dockerfile.db -t hexis-ci-brain .
+            echo "HEXIS_BRAIN_IMAGE=hexis-ci-brain" >> "$GITHUB_ENV"
+          fi
       - name: Start fake embedding server (no Ollama needed)
         run: |
           FAKE_EMBEDDINGS_PORT=11435 nohup python ops/ci/fake_embeddings.py >/tmp/fake_emb.log 2>&1 &
@@ -59,14 +69,12 @@ jobs:
           done
           cat /tmp/fake_emb.log
           exit 1
-      - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       - name: Start the brain DB (AGE + pgvector + pgsql-http)
         run: |
           docker run -d --name hexisdb -p 5432:5432 \
             --add-host=host.docker.internal:host-gateway \
             -e POSTGRES_USER=hexis_user -e POSTGRES_PASSWORD=hexis_password -e POSTGRES_DB=hexis_memory \
-            ghcr.io/quixiai/hexis-brain:latest \
+            "$HEXIS_BRAIN_IMAGE" \
             postgres -c search_path=ag_catalog,public -c jit=off \
               -c app.embedding_dimension=768 \
               -c app.embedding_service_url=http://host.docker.internal:11435/api/embed
@@ -93,8 +101,8 @@ jobs:
           docker logs hexisdb | tail -100 || true
           cat /tmp/fake_emb.log || true
 
-  # ------------------------------------------- prove the published image upgrades
-  # cleanly (schema migration applied to the image's BAKED schema, data preserved).
+  # ------------------------------------------- prove an existing baked DB upgrades
+  # cleanly (published image when accessible, local DB build as a fallback).
   migration-survivor:
     runs-on: ubuntu-latest
     steps:
@@ -104,13 +112,21 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -e .
-      - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Start the published image (its BAKED schema — do NOT re-replay db/*.sql)
+      - name: Prepare brain DB image
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin || true
+          if docker pull ghcr.io/quixiai/hexis-brain:latest; then
+            echo "HEXIS_BRAIN_IMAGE=ghcr.io/quixiai/hexis-brain:latest" >> "$GITHUB_ENV"
+          else
+            echo "GHCR image unavailable; building hexis-ci-brain from ops/Dockerfile.db"
+            docker build -f ops/Dockerfile.db -t hexis-ci-brain .
+            echo "HEXIS_BRAIN_IMAGE=hexis-ci-brain" >> "$GITHUB_ENV"
+          fi
+      - name: Start the baked DB image (do NOT re-replay db/*.sql)
         run: |
           docker run -d --name hexisdb -p 5432:5432 \
             -e POSTGRES_USER=hexis_user -e POSTGRES_PASSWORD=hexis_password -e POSTGRES_DB=hexis_memory \
-            ghcr.io/quixiai/hexis-brain:latest \
+            "$HEXIS_BRAIN_IMAGE" \
             postgres -c search_path=ag_catalog,public -c jit=off -c app.embedding_dimension=768
           for _ in $(seq 1 60); do
             if docker exec hexisdb pg_isready -U hexis_user -d hexis_memory; then
