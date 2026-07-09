@@ -17,6 +17,53 @@ def _j(v):
     return json.loads(v) if isinstance(v, str) else v
 
 
+def _onehot(k):
+    return (f"(array_fill(0.0::float, ARRAY[{k}]) || ARRAY[1.0::float] "
+            f"|| array_fill(0.0::float, ARRAY[embedding_dimension() - {k} - 1]))::vector")
+
+
+async def test_relational_evidence_is_borderline(db_pool):
+    """A mundane memory cited as evidence for a relationship is borderline -- memories
+    about the people we care about get a conscious look before fading."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            mid = await conn.fetchval(
+                f"INSERT INTO memories (type, content, embedding, importance, trust_level, status) "
+                f"VALUES ('episodic','an ordinary afternoon with a friend', {_DUMMY}, 0.3, 0.9, 'active') RETURNING id")
+            assert await conn.fetchval("SELECT is_consolidation_borderline(ARRAY[$1]::uuid[])", mid) is False
+            await conn.execute(
+                "INSERT INTO memory_edges (src_type, src_id, rel_type, dst_type, dst_id, properties) "
+                "VALUES ('self','self','ASSOCIATED','concept','Alex', "
+                "        jsonb_build_object('kind','relationship','evidence_memory_id',$1::text))", str(mid))
+            assert await conn.fetchval("SELECT is_consolidation_borderline(ARRAY[$1]::uuid[])", mid) is True
+        finally:
+            await tr.rollback()
+
+
+async def test_schema_fit_signal_is_opt_in(db_pool):
+    """Poor schema fit (nothing in the schema is close) escalates a novel memory --
+    but only when retention.borderline_schema_fit is turned on."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                f"INSERT INTO memories (type, content, embedding, importance, trust_level, status) "
+                f"VALUES ('semantic','a known fact', {_onehot(0)}, 0.5, 0.9, 'active')")
+            novel = await conn.fetchval(
+                f"INSERT INTO memories (type, content, embedding, importance, trust_level, status) "
+                f"VALUES ('episodic','a wholly novel unrelated moment', {_onehot(10)}, 0.3, 0.9, 'active') RETURNING id")
+            # off by default -> mundane novel memory is not borderline
+            assert await conn.fetchval("SELECT is_consolidation_borderline(ARRAY[$1]::uuid[])", novel) is False
+            # enable it -> nothing in the schema is close, so it escalates
+            await conn.execute("UPDATE config SET value='0.5'::jsonb WHERE key='retention.borderline_schema_fit'")
+            assert await conn.fetchval("SELECT is_consolidation_borderline(ARRAY[$1]::uuid[])", novel) is True
+        finally:
+            await tr.rollback()
+
+
 async def _enable(conn):
     await conn.execute("UPDATE config SET value='true'::jsonb WHERE key='retention.enabled'")
 

@@ -579,6 +579,25 @@ AS $$
              OR abs(COALESCE((m.metadata->>'emotional_valence')::float, 0))
                     >= COALESCE(get_config_float('retention.protect_valence_abs'), 0.7)
                        - COALESCE(get_config_float('retention.borderline_margin'), 0.15)
+             -- Relationally significant: this memory is cited as evidence for a
+             -- relationship. Memories about the people we care about deserve a
+             -- conscious look before they fade.
+             OR EXISTS (SELECT 1 FROM memory_edges e
+                        WHERE e.dst_type = 'concept'
+                          AND e.properties->>'kind' = 'relationship'
+                          AND e.properties->>'evidence_memory_id' = m.id::text)
+             -- Poor schema fit: nothing in the semantic/strategic schema is close,
+             -- so this is novel knowledge not yet captured elsewhere -- worth a look
+             -- rather than a silent merge. Opt-in (0 disables); nearest-neighbour
+             -- via the HNSW index.
+             OR (COALESCE(get_config_float('retention.borderline_schema_fit'), 0) > 0
+                 AND m.embedding IS NOT NULL
+                 AND COALESCE((SELECT 1 - (s.embedding <=> m.embedding)
+                               FROM memories s
+                               WHERE s.status = 'active' AND s.type IN ('semantic', 'strategic') AND s.id <> m.id
+                               ORDER BY s.embedding <=> m.embedding
+                               LIMIT 1), 0)
+                     < get_config_float('retention.borderline_schema_fit'))
           )
     );
 $$;

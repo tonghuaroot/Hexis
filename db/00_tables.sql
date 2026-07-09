@@ -724,6 +724,7 @@ INSERT INTO config (key, value, description) VALUES
     ('retention.borderline_margin', '0.15'::jsonb, 'A candidate whose importance/felt-intensity/valence is within this of a protection threshold is escalated for conscious review instead of consolidated'),
     ('retention.escalate_batch', '3'::jsonb, 'Max memories escalated to conscious review per rest pass (avoid flooding the conscious mind)'),
     ('retention.review_expiry_days', '7'::jsonb, 'A memory awaiting conscious review is let go (consolidated) if undecided after this window'),
+    ('retention.borderline_schema_fit', '0'::jsonb, 'If >0, escalate memories whose nearest semantic/strategic schema is below this cosine (novel knowledge); 0 disables'),
     -- Ingested documents are the USER's data: auto-fade-immune, removed only with approval.
     ('retention.doc_stale_days', '180'::jsonb, 'An ingested document older than this may be flagged as possibly stale'),
     ('retention.doc_idle_days', '90'::jsonb, 'An ingested document not drawn on within this window counts as unused'),
