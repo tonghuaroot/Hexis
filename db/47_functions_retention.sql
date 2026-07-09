@@ -800,3 +800,41 @@ AS $$
                                 FROM document_fade_requests WHERE status = 'pending'))
     );
 $$;
+
+-- Simulate ONE rest cycle and return the diff -- WITHOUT changing anything. The
+-- whole cycle (temporarily enabling retention, consolidating, pruning, queuing
+-- document asks) runs inside a subtransaction that is always rolled back before
+-- returning; the plpgsql result variable survives the rollback, so the caller
+-- gets a truthful preview using the REAL functions and a clean database after.
+-- Safe to call whether retention is on or off, and even inside another txn.
+CREATE OR REPLACE FUNCTION retention_dry_run()
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_before JSONB := retention_status();
+    v_rest JSONB;
+    v_gc JSONB;
+    v_docs JSONB;
+    v_after JSONB;
+    v_diff JSONB;
+BEGIN
+    BEGIN
+        UPDATE config SET value = 'true'::jsonb WHERE key = 'retention.enabled';
+        v_rest := run_memory_rest();
+        v_gc   := run_retention_gc();
+        v_docs := request_stale_document_fades();
+        v_after := retention_status();
+        v_diff := jsonb_build_object(
+            'dry_run', true,
+            'rest', v_rest, 'gc', v_gc, 'documents', v_docs,
+            'before', v_before, 'after', v_after);
+        RAISE EXCEPTION 'DRY_RUN_ROLLBACK' USING ERRCODE = 'P0001';
+    EXCEPTION WHEN OTHERS THEN
+        IF v_diff IS NULL THEN
+            RAISE;  -- a genuine error before we captured the diff -> surface it
+        END IF;
+    END;
+    RETURN v_diff;
+END;
+$$;

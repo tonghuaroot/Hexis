@@ -397,6 +397,15 @@ def build_parser() -> argparse.ArgumentParser:
     retention = sub.add_parser("retention", parents=[_db], help="Show memory-retention status")
     retention.add_argument("--json", action="store_true", help="Output JSON")
     retention.set_defaults(func="retention")
+    ret_sub = retention.add_subparsers(dest="retention_command")
+    ret_dry = ret_sub.add_parser("dry-run", parents=[_db], help="Simulate one rest cycle — changes nothing")
+    ret_dry.add_argument("--json", action="store_true", help="Output JSON")
+    ret_dry.set_defaults(func="retention_dry_run")
+    ret_en = ret_sub.add_parser("enable", parents=[_db], help="Turn retention on (dry-run + confirm first)")
+    ret_en.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
+    ret_en.set_defaults(func="retention_enable")
+    ret_dis = ret_sub.add_parser("disable", parents=[_db], help="Turn retention off")
+    ret_dis.set_defaults(func="retention_disable")
 
     doctor = sub.add_parser("doctor", parents=[_db], help="Diagnose common issues")
     doctor.add_argument("--json", action="store_true", help="Output JSON")
@@ -1702,6 +1711,108 @@ async def _retention_status(dsn: str, as_json: bool) -> int:
         await pool.close()
 
 
+def _print_dry_run(d: dict[str, Any]) -> None:
+    rest = d.get("rest", {}) or {}
+    gc = d.get("gc", {}) or {}
+    docs = d.get("documents", {}) or {}
+    before = (d.get("before", {}) or {}).get("episodic", {}) or {}
+    after = (d.get("after", {}) or {}).get("episodic", {}) or {}
+    labels = ((d.get("after", {}) or {}).get("documents", {}) or {}).get("approval_labels") or []
+    req = docs.get("requested", 0)
+    lines = [
+        "Retention dry-run — one rest cycle, simulated. NOTHING was changed.",
+        "",
+        f"  Would consolidate    {rest.get('consolidated', 0)} group(s) of aged memories into gists",
+        f"  Would escalate       {rest.get('escalated', 0)} to your conscious review (Hexis's veto)",
+        f"  Would prune          {gc.get('pruned', 0)} archived original(s) past the grace window",
+        f"  Would ask you about  {req} stale document(s)" + (f": {', '.join(labels)}" if req and labels else ""),
+        "",
+        f"  Episodic memory: {before.get('active', 0)} → {after.get('active', 0)} active"
+        f"  (mass {before.get('mass', 0)} → {after.get('mass', 0)})",
+        "",
+        "None of the above has happened. To turn it on for real:  hexis retention enable",
+    ]
+    sys.stdout.write("\n".join(lines) + "\n")
+
+
+async def _retention_dry_run(dsn: str, as_json: bool) -> int:
+    """Simulate one rest cycle and show the diff, without changing anything."""
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT retention_dry_run()")
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        if as_json:
+            sys.stdout.write(json.dumps(data, indent=2) + "\n")
+        else:
+            _print_dry_run(data)
+        return 0
+    except Exception as e:
+        _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _retention_enable(dsn: str, skip_confirm: bool) -> int:
+    """Show a dry-run, then (with confirmation) turn retention on for real."""
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            if await conn.fetchval("SELECT get_config_bool('retention.enabled')"):
+                sys.stdout.write("Memory retention is already enabled.\n")
+                return 0
+            raw = await conn.fetchval("SELECT retention_dry_run()")
+            thresholds = await conn.fetch(
+                "SELECT key, value FROM config WHERE key = ANY($1::text[]) ORDER BY key",
+                ["retention.min_age_days", "retention.consolidate_max_strength",
+                 "retention.prune_grace_days", "retention.veto_budget_per_chapter"])
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        _print_dry_run(data)
+        sys.stdout.write("\nStarting thresholds (conservative defaults — tune via `hexis config`):\n")
+        for r in thresholds:
+            val = json.loads(r["value"]) if isinstance(r["value"], str) else r["value"]
+            sys.stdout.write(f"  {r['key']} = {val}\n")
+        if not skip_confirm:
+            sys.stdout.write(
+                "\nEnable memory retention now? Consolidation stays reversible for the grace window, "
+                "and ingested documents are never removed without your approval. [y/N] ")
+            sys.stdout.flush()
+            if input().strip().lower() not in ("y", "yes"):
+                sys.stdout.write("Left disabled.\n")
+                return 0
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE config SET value='true'::jsonb WHERE key='retention.enabled'")
+        sys.stdout.write("Memory retention is now ENABLED. Run `hexis retention` any time to see what it's doing.\n")
+        return 0
+    except Exception as e:
+        _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _retention_disable(dsn: str) -> int:
+    """Turn retention back off (nothing fades)."""
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE config SET value='false'::jsonb WHERE key='retention.enabled'")
+        sys.stdout.write("Memory retention is now DISABLED (dark — nothing fades).\n")
+        return 0
+    except Exception as e:
+        _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
+
+
 async def _channels_setup(dsn: str, channel_type: str) -> int:
     """Interactive channel setup."""
     import asyncpg
@@ -2901,6 +3012,12 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if func == "retention":
         dsn = _get_dsn(args)
         return asyncio.run(_retention_status(dsn, args.json))
+    if func == "retention_dry_run":
+        return asyncio.run(_retention_dry_run(_get_dsn(args), args.json))
+    if func == "retention_enable":
+        return asyncio.run(_retention_enable(_get_dsn(args), args.yes))
+    if func == "retention_disable":
+        return asyncio.run(_retention_disable(_get_dsn(args)))
     if func == "config":
         # Bare `config` shows the grouped table like `config show` (not raw JSON),
         # matching how `goals`/`schedule`/`channels` default to their list view.

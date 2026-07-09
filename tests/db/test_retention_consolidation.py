@@ -106,6 +106,37 @@ async def test_run_memory_rest_noop_when_disabled(db_pool):
         assert _j(await conn.fetchval("SELECT run_retention_gc()")).get("skipped") is True
 
 
+async def test_retention_dry_run_is_truthful_but_non_mutating(db_pool):
+    """A dry-run reports what one rest cycle WOULD do, but changes nothing."""
+    async with db_pool.acquire() as conn:
+        await conn.execute("LOAD 'age'")
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            for i in range(3):
+                mid = await conn.fetchval(
+                    f"INSERT INTO memories (type, content, embedding, importance, trust_level, status, created_at, last_reinforced) "
+                    f"VALUES ('episodic', $1, {_DUMMY}, 0.3, 0.9, 'active', now()-interval '90 days', now()-interval '90 days') RETURNING id",
+                    f"dry group {i}")
+                await conn.execute(
+                    "INSERT INTO memory_edges (src_type, src_id, rel_type, dst_type, dst_id) "
+                    "VALUES ('memory', $1, 'IN_EPISODE', 'episode', 'ep-dryt')", str(mid))
+
+            diff = _j(await conn.fetchval("SELECT retention_dry_run()"))
+            assert diff["dry_run"] is True
+            assert diff["rest"]["consolidated"] >= 1            # it WOULD consolidate the group
+
+            # ...but the database is untouched:
+            assert await conn.fetchval("SELECT get_config_bool('retention.enabled')") is False
+            assert await conn.fetchval(
+                "SELECT count(*) FROM memories WHERE content LIKE 'dry group%' AND status='active'") == 3
+            assert await conn.fetchval(
+                "SELECT count(*) FROM memories WHERE metadata->'consolidation'->>'role'='merged'") == 0
+            assert await conn.fetchval("SELECT count(*) FROM memory_summarization_queue") == 0
+        finally:
+            await tr.rollback()
+
+
 async def test_retention_status_snapshot(db_pool):
     """The operator-facing snapshot summarizes every part of the system."""
     async with db_pool.acquire() as conn:
