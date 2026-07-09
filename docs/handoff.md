@@ -165,10 +165,26 @@ baseline LACKS migrated values — deltas are mirrored into the baseline per
 `db/migrations/README.md`, so "old deployment" is simulated only by an empty
 `schema_migrations` table.
 
-Next HMX step: Slice 1 (`core/memory_exchange.py`, `core/digest.py`,
-`schemas/hmx-1.7.schema.json`, export functions in a new `db/48_*.sql` — the
-plan's proposed `db/35–40` filenames collide with existing files; use the next
-free numbers and keep the plan's content mapping).
+### HMX Slice 1 foundations (in progress)
+
+Landed so far:
+
+- `core/digest.py` — all three hash families with the Slice 8 eight-property
+  fixture suite passing (`tests/core/test_hmx_digest.py`). Two documented
+  spec resolutions (module docstring): `*_ref`/`*_refs` fields and the
+  `provenance` subtree are excluded from digest input, following the
+  ref/remap-independence principle over the spec's contradictory field lists.
+- `core/memory_exchange.py` — intent policy (`resolve_export_sections`,
+  the port/duplicate vs telepathy/analysis protected-section matrix),
+  envelope construction, and `load_source_context()` which derives the
+  source block from the live DB (edge types from the `graph_edge_type`
+  enum, lineage from config, schema version from `schema_migrations`).
+  Tests: `tests/core/test_hmx_exchange.py`.
+
+Still open in Slice 1: section serializers, `schemas/hmx-1.7.schema.json`,
+`core/trust_anchors.py`, and the SQL export functions — put those in a new
+`db/48_*.sql` (the plan's proposed `db/35–40` filenames collide with existing
+files; use the next free numbers, keep the plan's content mapping).
 
 ## Current Roadmap
 
