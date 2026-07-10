@@ -1112,12 +1112,40 @@ _KNOWN_MODIFICATION_KINDS = frozenset(
         "integration",
     }
 )
+_NON_MATERIAL_MODIFICATION_KINDS = frozenset(
+    {"trivial_edit", "formatting", "clarification"}
+)
+
+
+def _modification_is_material(kind: str | None) -> bool:
+    """Treat unknown modification kinds conservatively, per the HMX contract."""
+
+    return bool(kind) and kind not in _NON_MATERIAL_MODIFICATION_KINDS
 
 
 def _section_has_records(section: str, value: Any) -> bool:
     if isinstance(value, dict):
         return any(bool(records) for records in value.values())
     return bool(value)
+
+
+def _unknown_section_warnings(
+    sections: dict[str, Any], *, isolated: bool
+) -> list[dict[str, Any]]:
+    known = set(ALL_SECTIONS) | set(FLAG_GATED_SECTIONS)
+    return [
+        {
+            "code": "unsupported_section",
+            "section": section,
+            "error": (
+                "unknown future section was retained in isolated review storage"
+                if isolated
+                else "unknown future section was not applied"
+            ),
+        }
+        for section in sorted(set(sections) - known)
+        if _section_has_records(section, sections[section])
+    ]
 
 
 def _import_sections(data: dict[str, Any]) -> dict[str, Any]:
@@ -1376,6 +1404,11 @@ async def dry_run_hmx(
     counts: dict[str, int] = {}
     invalid_records = 0
     invalid_by_section: dict[str, int] = {}
+    warnings.extend(
+        _unknown_section_warnings(
+            sections, isolated=strategy in {"deliberative", "analysis_only"}
+        )
+    )
 
     validated: dict[str, list[dict[str, Any]]] = {}
     for section in (
@@ -1614,6 +1647,10 @@ async def dry_run_hmx(
                 "code": "bootstrap_state_violation",
                 "sections": protected_present,
                 "reason": "protected state requires port/duplicate intent and an empty target",
+                "recommended_action": (
+                    "use authoritative import with explicit replacement sections to "
+                    "run the MVP-PR Protected Section Replacement Protocol"
+                ),
             }
         )
 
@@ -2124,7 +2161,7 @@ async def import_hmx(
         raise HmxPolicyError(f"unsupported import strategy {strategy!r}")
 
     sections = _import_sections(data)
-    warnings: list[dict[str, Any]] = []
+    warnings = _unknown_section_warnings(sections, isolated=False)
     for deferred_section in ("config",):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
             warnings.append(
@@ -2557,7 +2594,7 @@ async def accept_staged_import(
         provenance = copy.deepcopy(record.get("provenance") or {})
         provenance["acquisition_mode"] = (
             "derived_from_import"
-            if row["modification_kind"]
+            if _modification_is_material(row["modification_kind"])
             else "imported_and_accepted"
         )
         record["provenance"] = provenance
@@ -2676,7 +2713,16 @@ async def modify_staged_import(
             record["content_hash_v1"] = content_hash_v1(str(record["content"]))
         provenance = copy.deepcopy(record.get("provenance") or {})
         chain = list(provenance.get("modification_chain") or [])
+        local_instance_id = str(
+            await conn.fetchval(
+                "SELECT COALESCE("
+                "(SELECT value #>> '{}' FROM config WHERE key='agent.instance_id'), "
+                "(SELECT value #>> '{}' FROM config WHERE key='agent.name'), "
+                "'hexis')"
+            )
+        )
         modification = {
+            "instance_id": local_instance_id,
             "modified_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
             "modification_kind": modification_kind,
             "rationale": rationale,

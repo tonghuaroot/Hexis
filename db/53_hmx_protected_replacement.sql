@@ -305,6 +305,13 @@ BEGIN
     IF normalized_decision NOT IN ('accept', 'refuse', 'request_modification', 'defer') THEN
         RAISE EXCEPTION 'decision must be accept, refuse, request_modification, or defer';
     END IF;
+    IF normalized_decision = 'accept' AND EXISTS (
+        SELECT 1 FROM hmx_consent c
+        WHERE c.consent_id = pending.consent_id
+          AND c.trust_verification->>'status' = 'invalid'
+    ) THEN
+        RAISE EXCEPTION 'lineage_integrity_failure_requires_operator_override: configured trust anchor rejected the matching lineage claim';
+    END IF;
     IF normalized_decision IN ('refuse', 'request_modification')
        AND NULLIF(btrim(COALESCE(p_rationale, '')), '') IS NULL THEN
         RAISE EXCEPTION '% requires a rationale', normalized_decision;

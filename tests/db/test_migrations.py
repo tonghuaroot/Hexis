@@ -43,6 +43,7 @@ async def test_migrations_recorded_and_idempotent(db_pool):
         assert "0012_hmx_protected_replacement" in st["applied"]
         assert "0013_hmx_authoritative_import" in st["applied"]
         assert "0014_hmx_reversion" in st["applied"]
+        assert "0015_hmx_acceptance_diagnostics" in st["applied"]
         assert st["pending"] == []
         assert await apply_pending_migrations(conn) == []  # nothing left to do
         # the deltas are live
@@ -104,6 +105,7 @@ async def test_migrate_existing_database_preserves_data():
             assert "0012_hmx_protected_replacement" in applied
             assert "0013_hmx_authoritative_import" in applied
             assert "0014_hmx_reversion" in applied
+            assert "0015_hmx_acceptance_diagnostics" in applied
 
             # AFTER: the data is intact AND the schema evolved
             assert (

@@ -356,7 +356,6 @@ DECLARE
     blockers JSONB := '[]'::jsonb;
     details JSONB;
     row_count BIGINT;
-    table_name TEXT;
     graph_count BIGINT := 0;
 BEGIN
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
@@ -407,21 +406,31 @@ BEGIN
         ));
     END IF;
 
-    FOREACH table_name IN ARRAY ARRAY[
-        'protected_replacement_audit',
-        'protected_section_verified_audit',
-        'protected_replacement_reversion_audit',
-        'hmx_consent'
-    ] LOOP
-        IF to_regclass('public.' || table_name) IS NOT NULL THEN
-            EXECUTE format('SELECT count(*) FROM %I', table_name) INTO row_count;
-            IF row_count > 0 THEN
-                blockers := blockers || jsonb_build_array(jsonb_build_object(
-                    'kind', 'protected_audit', 'table', table_name, 'count', row_count
-                ));
-            END IF;
+    IF to_regclass('public.protected_replacement_audit') IS NOT NULL THEN
+        EXECUTE $query$
+            SELECT COALESCE(jsonb_agg(jsonb_build_object(
+                'kind', 'protected_audit',
+                'event_type', event_type,
+                'foreign_diagnostic', is_foreign_diagnostic,
+                'count', count
+            ) ORDER BY event_type, is_foreign_diagnostic), '[]'::jsonb)
+            FROM (
+                SELECT event_type, is_foreign_diagnostic, count(*) AS count
+                FROM protected_replacement_audit
+                GROUP BY event_type, is_foreign_diagnostic
+            ) audit_counts
+        $query$ INTO details;
+        blockers := blockers || details;
+    END IF;
+
+    IF to_regclass('public.hmx_consent') IS NOT NULL THEN
+        EXECUTE 'SELECT count(*) FROM hmx_consent' INTO row_count;
+        IF row_count > 0 THEN
+            blockers := blockers || jsonb_build_array(jsonb_build_object(
+                'kind', 'protected_consent', 'count', row_count
+            ));
         END IF;
-    END LOOP;
+    END IF;
 
     RETURN jsonb_build_object(
         'is_empty', jsonb_array_length(blockers) = 0,

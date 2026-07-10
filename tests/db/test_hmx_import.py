@@ -133,9 +133,10 @@ class TestDryRun:
 
             assert not result.can_import
             assert result.protected_policy["decision"] == "blocked"
-            assert any(
-                c["code"] == "bootstrap_state_violation" for c in result.conflicts
+            violation = next(
+                c for c in result.conflicts if c["code"] == "bootstrap_state_violation"
             )
+            assert "MVP-PR" in violation["recommended_action"]
             assert await conn.fetchval("SELECT count(*) FROM memories") == before
 
 
@@ -308,6 +309,38 @@ class TestAdditiveImport:
                 assert any(
                     warning["code"] == "schema_validation_error"
                     for warning in result.warnings
+                )
+            finally:
+                await tr.rollback()
+
+    async def test_unknown_minor_fields_and_sections_remain_forward_compatible(
+        self, db_pool
+    ):
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                env = _envelope()
+                source_ref = _ref(env["export_id"], str(uuid.uuid4()))
+                content = f"forward compatible {uuid.uuid4().hex}"
+                record = _memory(source_ref, content)
+                record["future_memory_hint"] = {"minor": 8}
+                env["future_envelope_hint"] = True
+                env["sections"] = {
+                    "memories": [record],
+                    "future_optional_section": {"records": [1, 2, 3]},
+                }
+
+                result = await import_hmx(conn, env)
+
+                assert result.inserted["memories"] == 1
+                assert any(
+                    warning.get("code") == "unsupported_section"
+                    and warning.get("section") == "future_optional_section"
+                    for warning in result.warnings
+                )
+                assert await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE content=$1)", content
                 )
             finally:
                 await tr.rollback()

@@ -1,10 +1,11 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (HMX Slice 13 agent protocol tools complete)
+Last updated: 2026-07-10 (HMX MVP acceptance audit complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-13 are complete:
+The HMX workstream (`plans/hmx.md`) is MVP-complete. Slices 0-13 and the final
+acceptance audit are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -31,18 +32,21 @@ reason and evidence, plus an Ed25519 signature over the complete replacement
 bundle verified against a configured public trust anchor. Overrides cannot
 bypass an agent refusal and retain the normal reversion window. The agent now
 has skill-gated list, inspect, acknowledge, audit-history, open-reversion, and
-explicit revert tools without any operator-override capability. The next
-implementation boundary is a line-by-line HMX MVP acceptance audit.
+explicit revert tools without any operator-override capability. The durable
+criterion-by-criterion completion record is `docs/hmx-acceptance.md`. The next
+implementation boundary is the broader parity roadmap, beginning with Phase 3
+OpenAI-compatible API and MCP interop unless priorities change.
 
-The prior hosted green baseline was `43f2e70` (`Complete HMX Slice 12 operator
-override`), run
-https://github.com/QuixiAI/Hexis/actions/runs/29111110600
+The prior hosted green baseline was `a31b0b8` (`Complete HMX Slice 13 agent
+protocol tools`), run
+https://github.com/QuixiAI/Hexis/actions/runs/29114104335
 (all jobs succeeded). Always verify the current head's hosted result with the
 command in "Useful Commands" below rather than assuming this historical
 baseline applies.
 
 Important recent commits:
 
+- `a31b0b8` - Complete HMX Slice 13 agent protocol tools
 - `43f2e70` - Complete HMX Slice 12 operator override
 - `8e2d524` - Complete HMX Slice 11 bounded reversion
 - `c0a2e8e` - Complete HMX Slice 10 authoritative replacement
@@ -730,9 +734,32 @@ advisory marker warnings in the heartbeat module. Full validation: 2150 tests
 pass with the existing 421 advisory marker warnings. Focused compilation,
 Black, mypy, wheel inspection, and diff hygiene pass.
 
-Next: audit every item in the MVP-Core and MVP-Protected Replacement acceptance
-criteria in `plans/hmx.md`, close any concrete discrepancy, then declare the HMX
-MVP complete before moving to the broader parity roadmap.
+### HMX MVP acceptance audit complete
+
+The final line-by-line audit is recorded in `docs/hmx-acceptance.md`. All 24
+MVP-Core and 21 MVP-Protected Replacement criteria have code ownership and
+executable evidence. The audit closed four discrepancies:
+
+- non-material edits now preserve `imported_and_accepted` while material edits
+  become `derived_from_import`, with the complete chain surviving re-export;
+- unknown future sections remain forward-compatible but now report that they
+  were not applied instead of disappearing silently;
+- `hexis_instance_is_empty()` now derives event-specific diagnostics from the
+  unified protected audit ledger, via migration `0015` for existing instances;
+- a trust-anchor-rejected matching lineage is distinct from ordinary digest
+  divergence and cannot enter the normal agent acceptance path.
+
+Acceptance-focused coverage also pins narrative staging, active-target MVP-PR
+recovery guidance, subset-scope refusal, complete consent payloads, every agent
+acknowledgement choice, and all three protected audit event types.
+
+Validation: the full repository suite passes with 2157 tests and the existing
+421 advisory marker warnings. The HMX-focused suite passed before the final
+full run, and the full run includes the additional acknowledgement test. Black,
+compilation, wheel construction/package inspection, migration-survivor coverage,
+and diff hygiene pass. The wheel includes migration `0015`; focused mypy remains
+advisory with the existing `jsonschema` stub and broad-union baseline errors in
+`core/memory_exchange.py`.
 
 ## Current Roadmap
 
@@ -913,21 +940,16 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-Continue the HMX thread with the acceptance audit now that all numbered slices
-are complete. Read the MVP-Core and MVP-Protected Replacement criteria at the
-end of `plans/hmx.md`, then trace each claim through `core/memory_exchange.py`,
-`core/protected_replacement.py`, `core/tools/protected_replacement.py`, the HMX
-schema, SQL migrations, and focused tests before editing.
+HMX is MVP-complete; use `docs/hmx-acceptance.md` as the acceptance record and
+preserve its evidence when changing exchange or protected-state behavior.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX acceptance audit: verify every MVP-Core and MVP-Protected Replacement
-   criterion, add missing journey coverage, and close only evidenced gaps.
-2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
+1. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.
-3. Finish Phase 2 hardening: plugin manifest/config-schema validation and an
+2. Finish Phase 2 hardening: plugin manifest/config-schema validation and an
    explicit agent-vs-user skill provenance guard.
-4. Phase 4 "it learns": FTS cross-session search + a background
+3. Phase 4 "it learns": FTS cross-session search + a background
    self-improvement worker that authors skills from recent experience (the
    `author_skill` provenance footer already exists to build on).

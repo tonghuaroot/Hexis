@@ -1167,6 +1167,20 @@ async def acknowledge_protected_replacement(
             f"decision must be one of {', '.join(ACKNOWLEDGEMENT_DECISIONS)}",
         )
     async with conn.transaction():
+        if decision == "accept":
+            lineage_status = await conn.fetchval(
+                "SELECT c.trust_verification->>'status' "
+                "FROM hmx_pending_replacements p "
+                "JOIN hmx_consent c ON c.consent_id=p.consent_id "
+                "WHERE p.replacement_id=$1::uuid",
+                replacement_id,
+            )
+            if lineage_status == "invalid":
+                raise ProtectedReplacementError(
+                    "lineage_integrity_failure_requires_operator_override",
+                    "a configured trust anchor rejected the matching lineage claim; "
+                    "normal agent acceptance cannot authorize this replacement",
+                )
         result = await conn.fetchval(
             "SELECT hmx_acknowledge_protected_replacement($1::uuid, $2, $3, $4::jsonb)",
             replacement_id,

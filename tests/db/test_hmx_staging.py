@@ -15,6 +15,7 @@ from core.memory_exchange import (
     accept_staged_import,
     build_envelope,
     demote_staged_to_analysis,
+    export_hmx,
     import_hmx,
     modify_staged_import,
     pending_hmx_reviews,
@@ -203,6 +204,48 @@ class TestIsolatedLoading:
             finally:
                 await tr.rollback()
 
+    async def test_narrative_is_staged_as_one_reviewable_bundle(self, db_pool):
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                env = _envelope()
+                chapter_ref = f"{env['export_id']}:{uuid.uuid4()}"
+                env["sections"] = {
+                    "narrative": {
+                        "life_chapters": [
+                            {
+                                "ref": chapter_ref,
+                                "title": "A staged chapter",
+                                "status": "active",
+                            }
+                        ],
+                        "turning_points": [],
+                        "narrative_threads": [],
+                        "value_conflicts": [],
+                    }
+                }
+
+                result = await import_hmx(conn, env, strategy="deliberative")
+
+                assert result.staged == {"narrative": 1}
+                stored = _json(
+                    await conn.fetchval(
+                        "SELECT record FROM hmx_import_staging WHERE id=$1::uuid",
+                        result.staging_ids[0],
+                    )
+                )
+                assert stored["life_chapters"][0]["ref"] == chapter_ref
+                assert (
+                    await conn.fetchval(
+                        "SELECT status FROM hmx_import_staging WHERE id=$1::uuid",
+                        result.staging_ids[0],
+                    )
+                    == "pending"
+                )
+            finally:
+                await tr.rollback()
+
 
 class TestReviewDecisions:
     async def _stage_one(self, conn, content: str):
@@ -266,7 +309,7 @@ class TestReviewDecisions:
             finally:
                 await tr.rollback()
 
-    async def test_modify_then_accept_becomes_derived(self, db_pool):
+    async def test_material_modify_then_accept_becomes_derived(self, db_pool):
         async with db_pool.acquire() as conn:
             tr = conn.transaction()
             await tr.start()
@@ -279,8 +322,8 @@ class TestReviewDecisions:
                     conn,
                     staging_id,
                     {"content": revised},
-                    modification_kind="clarification",
-                    rationale="make the claim precise",
+                    modification_kind="correction",
+                    rationale="correct the imported claim",
                 )
                 decision = await accept_staged_import(conn, staging_id)
                 row = await conn.fetchrow(
@@ -292,8 +335,49 @@ class TestReviewDecisions:
                 assert provenance["acquisition_mode"] == "derived_from_import"
                 assert (
                     provenance["modification_chain"][-1]["modification_kind"]
-                    == "clarification"
+                    == "correction"
                 )
+            finally:
+                await tr.rollback()
+
+    async def test_non_material_modify_preserves_mode_and_reexports_chain(
+        self, db_pool
+    ):
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                original = f"before clarification {uuid.uuid4().hex}"
+                staging_id = await self._stage_one(conn, original)
+                revised = original.capitalize()
+                await modify_staged_import(
+                    conn,
+                    staging_id,
+                    {"content": revised},
+                    modification_kind="clarification",
+                    rationale="improve readability without changing meaning",
+                )
+
+                decision = await accept_staged_import(conn, staging_id)
+                exported = await export_hmx(conn, intent="port")
+                record = next(
+                    item
+                    for item in exported["sections"]["memories"]
+                    if item["content"] == revised
+                )
+                provenance = record["provenance"]
+
+                assert decision.decision == "accepted"
+                assert provenance["acquisition_mode"] == "imported_and_accepted"
+                assert provenance["origin_instance"] == "hmx_slice4_source"
+                assert len(provenance["import_chain"]) == 1
+                modification = provenance["modification_chain"][-1]
+                assert modification["modification_kind"] == "clarification"
+                assert modification["instance_id"]
+                assert modification["previous_content_hash_v1"] == content_hash_v1(
+                    original
+                )
+                assert modification["new_content_hash_v1"] == content_hash_v1(revised)
             finally:
                 await tr.rollback()
 

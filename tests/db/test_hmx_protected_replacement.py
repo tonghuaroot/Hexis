@@ -8,7 +8,7 @@ import uuid
 
 import pytest
 
-from core.digest import protected_section_digest_v1
+from core.digest import audit_record_digest_v1, protected_section_digest_v1
 from core.memory_exchange import export_hmx, import_hmx
 from core.protected_replacement import (
     ProtectedReplacementError,
@@ -37,6 +37,13 @@ class VerifiedTrustAnchors:
 class UnverifiedOperatorTrustAnchors(VerifiedTrustAnchors):
     def verify_operator_signature(self, **kwargs):
         return TrustVerification.unverified("test deployment has no operator key")
+
+
+class InvalidLineageTrustAnchors(VerifiedTrustAnchors):
+    def verify_lineage(self, **kwargs):
+        return TrustVerification.invalid(
+            "configured lineage proof is invalid", anchor_id="test-lineage"
+        )
 
 
 async def _prepare(conn):
@@ -257,6 +264,68 @@ async def test_missing_protocol_capability_is_refused_before_state_creation(db_p
             await transaction.rollback()
 
 
+async def test_subset_scope_is_parseable_but_refused_with_recovery_path(db_pool):
+    async with db_pool.acquire() as conn:
+        await _prepare(conn)
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            envelope = await _envelope(conn)
+            with pytest.raises(
+                ProtectedReplacementError,
+                match="whole_section or deliberative import",
+            ):
+                await evaluate_protected_replacement(
+                    conn,
+                    envelope,
+                    section="worldview",
+                    scope_mode="subset",
+                    rationale="A subset request must not silently widen its scope",
+                    verifier=VerifiedTrustAnchors(),
+                )
+            assert await conn.fetchval("SELECT count(*) FROM hmx_consent") == 0
+        finally:
+            await transaction.rollback()
+
+
+async def test_lineage_integrity_failure_requires_operator_override(db_pool):
+    async with db_pool.acquire() as conn:
+        await _prepare(conn)
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _seed_worldview(conn)
+            envelope = await _envelope(conn)
+            result = await evaluate_protected_replacement(
+                conn,
+                envelope,
+                section="worldview",
+                rationale="Reject an invalid proof even when lineage labels match",
+                verifier=InvalidLineageTrustAnchors(),
+            )
+
+            assert {item["code"] for item in result.conflicts} == {
+                "lineage_integrity_failure"
+            }
+            with pytest.raises(
+                ProtectedReplacementError,
+                match="lineage_integrity_failure_requires_operator_override",
+            ):
+                await acknowledge_protected_replacement(
+                    conn, result.replacement_id, decision="accept"
+                )
+            assert (
+                await conn.fetchval(
+                    "SELECT status FROM hmx_pending_replacements "
+                    "WHERE replacement_id=$1::uuid",
+                    result.replacement_id,
+                )
+                == "pending"
+            )
+        finally:
+            await transaction.rollback()
+
+
 async def test_unverified_operator_signature_is_discarded_and_reported(db_pool):
     async with db_pool.acquire() as conn:
         await _prepare(conn)
@@ -328,6 +397,29 @@ async def test_divergence_queues_once_and_refusal_cannot_be_bypassed_by_retry(db
             assert second.reused
             assert second.replacement_id == first.replacement_id
             assert await conn.fetchval("SELECT count(*) FROM hmx_consent") == 1
+            consent = await conn.fetchrow(
+                "SELECT sections, source, replacement_scope, rationale "
+                "FROM hmx_consent WHERE consent_id=$1::uuid",
+                first.consent_id,
+            )
+            source = (
+                json.loads(consent["source"])
+                if isinstance(consent["source"], str)
+                else consent["source"]
+            )
+            scope = (
+                json.loads(consent["replacement_scope"])
+                if isinstance(consent["replacement_scope"], str)
+                else consent["replacement_scope"]
+            )
+            assert consent["sections"] == ["worldview"]
+            assert source["export_id"] == envelope["export_id"]
+            assert scope == {
+                "section": "worldview",
+                "mode": "whole_section",
+                "selector": None,
+            }
+            assert consent["rationale"] == "Propose a materially revised worldview"
 
             refused = await acknowledge_protected_replacement(
                 conn,
@@ -350,6 +442,44 @@ async def test_divergence_queues_once_and_refusal_cannot_be_bypassed_by_retry(db
             assert replay.reused
             assert replay.replacement_id == first.replacement_id
             assert await conn.fetchval("SELECT count(*) FROM hmx_consent") == 1
+        finally:
+            await transaction.rollback()
+
+
+async def test_acknowledgement_supports_defer_and_modification_request(db_pool):
+    async with db_pool.acquire() as conn:
+        await _prepare(conn)
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            envelope = await _envelope(conn)
+            envelope["sections"]["drives"][0]["current_level"] += 0.1
+            envelope["section_digests"]["drives"] = protected_section_digest_v1(
+                "drives", envelope["sections"]["drives"]
+            )
+            result = await evaluate_protected_replacement(
+                conn,
+                envelope,
+                section="drives",
+                rationale="Exercise the non-final acknowledgement decisions",
+                verifier=VerifiedTrustAnchors(),
+            )
+
+            deferred = await acknowledge_protected_replacement(
+                conn,
+                result.replacement_id,
+                decision="defer",
+                rationale="Review this after another heartbeat",
+            )
+            assert deferred["status"] == "deferred"
+            modified = await acknowledge_protected_replacement(
+                conn,
+                result.replacement_id,
+                decision="request_modification",
+                rationale="Keep the current baseline",
+                proposed_changes={"current_level": "unchanged"},
+            )
+            assert modified["status"] == "modification_requested"
         finally:
             await transaction.rollback()
 
@@ -538,5 +668,47 @@ async def test_audit_dedupe_round_trip_and_append_only_records(db_pool):
                 )
                 is False
             )
+        finally:
+            await transaction.rollback()
+
+
+async def test_empty_target_diagnostics_distinguish_all_protected_audit_types(
+    db_pool,
+):
+    async with db_pool.acquire() as conn:
+        await _prepare(conn)
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            expected = {
+                "protected_section_replacement",
+                "protected_section_verified",
+                "protected_section_reverted",
+            }
+            for event_type in sorted(expected):
+                audit_id = f"acceptance-{event_type}-{uuid.uuid4().hex}"
+                record = {"audit_id": audit_id, "event_type": event_type}
+                await conn.execute(
+                    "INSERT INTO protected_replacement_audit "
+                    "(audit_id, event_type, event_time, record, record_digest_v1) "
+                    "VALUES ($1, $2, CURRENT_TIMESTAMP, $3::jsonb, $4)",
+                    audit_id,
+                    event_type,
+                    json.dumps(record),
+                    audit_record_digest_v1(record),
+                )
+
+            state = await conn.fetchval("SELECT hexis_instance_is_empty()")
+            state = json.loads(state) if isinstance(state, str) else state
+            audit_blockers = [
+                blocker
+                for blocker in state["blockers"]
+                if blocker["kind"] == "protected_audit"
+                and blocker["event_type"] in expected
+            ]
+
+            assert state["is_empty"] is False
+            assert {blocker["event_type"] for blocker in audit_blockers} == expected
+            assert all(blocker["count"] >= 1 for blocker in audit_blockers)
         finally:
             await transaction.rollback()
