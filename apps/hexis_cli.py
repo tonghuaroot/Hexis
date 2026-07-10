@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from core import cli_api
 from core.agent_api import db_dsn_from_env, resolve_instance
 from core.memory_exchange import PROTECTED_SECTIONS, SUPPORTED_IMPORT_STRATEGIES
+from core.protected_replacement import OPERATOR_OVERRIDE_REASON_CODES
 
 try:
     _ver = pkg_version("hexis")
@@ -662,6 +663,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--trust-matching-lineage-label",
         action="store_true",
         help="Explicitly trust an unverified but matching local lineage label for Phase 0",
+    )
+    hmx_import.add_argument(
+        "--force-replace",
+        action="store_true",
+        help="Use a signed operator override when the agent cannot acknowledge",
+    )
+    hmx_import.add_argument(
+        "--operator-signature",
+        default=None,
+        help="Base64 Ed25519 signature over the dry-run override payload",
+    )
+    hmx_import.add_argument(
+        "--operator-identity",
+        default=None,
+        help="Operator identity claim bound into the signed override payload",
+    )
+    hmx_import.add_argument(
+        "--override-acknowledgement",
+        default=None,
+        help="Exact operator responsibility acknowledgement phrase",
+    )
+    hmx_import.add_argument(
+        "--override-reason-code",
+        choices=OPERATOR_OVERRIDE_REASON_CODES,
+        default=None,
+    )
+    hmx_import.add_argument(
+        "--override-evidence-ref",
+        default=None,
+        help="Independent scheme:value evidence reference supporting the override",
     )
     hmx_import.add_argument(
         "--dry-run", action="store_true", help="Validate and report without changing data"

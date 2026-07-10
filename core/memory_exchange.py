@@ -2082,6 +2082,10 @@ async def import_hmx(
     verifier: Any = None,
     operator_signature: str | None = None,
     operator_identity: str | None = None,
+    force_replace: bool = False,
+    override_acknowledgement: str | None = None,
+    override_reason_code: str | None = None,
+    override_evidence_ref: str | None = None,
 ) -> HmxImportResult | HmxAuthoritativeResult | HmxStagingResult | HmxAnalysisResult:
     """Import HMX using additive, authoritative, or isolated storage.
 
@@ -2107,6 +2111,10 @@ async def import_hmx(
             retry_failed_work=retry_failed_work,
             operator_signature=operator_signature,
             operator_identity=operator_identity,
+            force_replace=force_replace,
+            override_acknowledgement=override_acknowledgement,
+            override_reason_code=override_reason_code,
+            override_evidence_ref=override_evidence_ref,
         )
     if strategy == "deliberative":
         return await stage_hmx(conn, data)

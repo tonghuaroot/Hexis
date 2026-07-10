@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
+import logging
+import re
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from core.digest import audit_record_digest_v1, protected_section_digest_v1
 from core.memory_exchange import (
@@ -32,6 +35,8 @@ from core.trust_anchors import (
     UnconfiguredTrustAnchors,
 )
 
+logger = logging.getLogger(__name__)
+
 PROTECTED_REPLACEMENT_CAPABILITY = "protected_replacement_protocol_v1"
 FAST_PATH_CAPABILITY = "fast_path_verification"
 ACKNOWLEDGEMENT_DECISIONS = (
@@ -40,6 +45,20 @@ ACKNOWLEDGEMENT_DECISIONS = (
     "request_modification",
     "defer",
 )
+OPERATOR_OVERRIDE_ACKNOWLEDGEMENT = (
+    "I accept responsibility for replacing this Hexis instance's protected state "
+    "without its acknowledgement"
+)
+OPERATOR_OVERRIDE_REASON_CODES = (
+    "agent_paused",
+    "agent_terminated",
+    "agent_unresponsive",
+    "state_corruption",
+    "emergency_recovery",
+    "lineage_integrity_failure",
+)
+
+_EVIDENCE_REF_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:\S(?:.*\S)?$")
 
 _AUDIT_GROUPS = {
     "protected_replacement_audit": "protected_section_replacement",
@@ -68,6 +87,7 @@ class ProtectedReplacementResult:
     replacement_id: str | None = None
     consent_id: str | None = None
     status: str | None = None
+    replacement_executor: str | None = None
     reused: bool = False
     conflicts: tuple[dict[str, Any], ...] = ()
 
@@ -78,6 +98,17 @@ class AuditImportResult:
     duplicates: int = 0
     conflicts: tuple[dict[str, Any], ...] = ()
     warnings: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True)
+class _OperatorOverrideAuthorization:
+    acknowledgement: str
+    reason_code: str
+    evidence_ref: str
+    signature: str
+    operator_identity: str | None
+    verification: TrustVerification
+    payload_sha256: str
 
 
 def _coerce_json(value: Any) -> Any:
@@ -270,6 +301,201 @@ def _operator_signature_payload(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def operator_override_signing_payload(
+    *,
+    envelope: Mapping[str, Any],
+    operations: Sequence[Mapping[str, Any]],
+    acknowledgement: str,
+    reason_code: str,
+    evidence_ref: str,
+    rationale: str,
+    operator_identity: str | None = None,
+) -> bytes:
+    """Return the canonical bytes an operator must sign for one override bundle."""
+
+    normalized_operations = sorted(
+        (
+            {
+                "section": str(operation.get("section") or ""),
+                "local_digest_v1": str(operation.get("local_digest_v1") or ""),
+                "imported_digest_v1": str(operation.get("imported_digest_v1") or ""),
+            }
+            for operation in operations
+        ),
+        key=lambda operation: operation["section"],
+    )
+    if not normalized_operations or any(
+        operation["section"] not in PROTECTED_SECTIONS
+        or not re.fullmatch(r"[0-9a-f]{64}", operation["local_digest_v1"])
+        or not re.fullmatch(r"[0-9a-f]{64}", operation["imported_digest_v1"])
+        for operation in normalized_operations
+    ):
+        raise ProtectedReplacementError(
+            "override_signing_scope_invalid",
+            "override signing requires protected sections with valid local and imported digests",
+        )
+    return json.dumps(
+        {
+            "action": "hmx_operator_override_v1",
+            "source": _audit_source(envelope),
+            "replacement_scope": normalized_operations,
+            "acknowledgement": acknowledgement,
+            "override_reason_code": reason_code,
+            "override_evidence_ref": evidence_ref,
+            "rationale": rationale.strip(),
+            "operator_identity": (
+                operator_identity.strip() if operator_identity else None
+            ),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def operator_override_signing_material(
+    *,
+    envelope: Mapping[str, Any],
+    operations: Sequence[Mapping[str, Any]],
+    acknowledgement: str,
+    reason_code: str,
+    evidence_ref: str,
+    rationale: str,
+    operator_identity: str | None = None,
+) -> dict[str, Any]:
+    """Describe the exact payload used by external Ed25519 signing tools."""
+
+    payload = operator_override_signing_payload(
+        envelope=envelope,
+        operations=operations,
+        acknowledgement=acknowledgement,
+        reason_code=reason_code,
+        evidence_ref=evidence_ref,
+        rationale=rationale,
+        operator_identity=operator_identity,
+    )
+    return {
+        "algorithm": "ed25519",
+        "payload_encoding": "base64",
+        "payload_base64": base64.b64encode(payload).decode("ascii"),
+        "payload_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def validate_operator_override_fields(
+    *,
+    acknowledgement: str | None,
+    reason_code: str | None,
+    evidence_ref: str | None,
+    rationale: str,
+) -> tuple[str, str]:
+    if acknowledgement != OPERATOR_OVERRIDE_ACKNOWLEDGEMENT:
+        raise ProtectedReplacementError(
+            "override_acknowledgement_mismatch",
+            "operator override requires the exact responsibility acknowledgement phrase",
+        )
+    normalized_reason = str(reason_code or "").strip()
+    if normalized_reason not in OPERATOR_OVERRIDE_REASON_CODES:
+        raise ProtectedReplacementError(
+            "invalid_override_reason_code",
+            "override_reason_code must be one of "
+            + ", ".join(OPERATOR_OVERRIDE_REASON_CODES),
+        )
+    normalized_evidence = str(evidence_ref or "").strip()
+    if not _EVIDENCE_REF_PATTERN.fullmatch(normalized_evidence):
+        raise ProtectedReplacementError(
+            "invalid_override_evidence_ref",
+            "override_evidence_ref must be an independently recorded scheme:value reference",
+        )
+    if not rationale.strip():
+        raise ProtectedReplacementError(
+            "replacement_rationale_missing",
+            "operator override requires a free-text replacement rationale",
+        )
+    return normalized_reason, normalized_evidence
+
+
+async def validate_operator_override_reason_state(conn, reason_code: str) -> None:
+    paused = bool(
+        await conn.fetchval(
+            "SELECT COALESCE(is_paused, FALSE) FROM heartbeat_state WHERE id=1"
+        )
+    )
+    terminated = bool(await conn.fetchval("SELECT is_agent_terminated()"))
+    if reason_code == "agent_paused" and not paused:
+        raise ProtectedReplacementError(
+            "override_reason_not_observed",
+            "agent_paused requires the live heartbeat state to be paused",
+        )
+    if reason_code == "agent_terminated" and not terminated:
+        raise ProtectedReplacementError(
+            "override_reason_not_observed",
+            "agent_terminated requires the live agent state to be terminated",
+        )
+    if reason_code == "agent_unresponsive" and (paused or terminated):
+        observed = "terminated" if terminated else "paused"
+        raise ProtectedReplacementError(
+            "override_reason_not_observed",
+            f"agent_unresponsive requires a running, unpaused agent; live state is {observed}",
+        )
+
+
+async def _authorize_operator_override(
+    conn,
+    *,
+    envelope: Mapping[str, Any],
+    operations: Sequence[Mapping[str, Any]],
+    acknowledgement: str | None,
+    reason_code: str | None,
+    evidence_ref: str | None,
+    rationale: str,
+    operator_signature: str | None,
+    operator_identity: str | None,
+    verifier: TrustAnchorVerifier | None,
+) -> _OperatorOverrideAuthorization:
+    normalized_reason, normalized_evidence = validate_operator_override_fields(
+        acknowledgement=acknowledgement,
+        reason_code=reason_code,
+        evidence_ref=evidence_ref,
+        rationale=rationale,
+    )
+    if not operator_signature:
+        raise ProtectedReplacementError(
+            "unverified_signature",
+            "operator override requires --operator-signature verified against a configured trust anchor",
+        )
+    await validate_operator_override_reason_state(conn, normalized_reason)
+    payload = operator_override_signing_payload(
+        envelope=envelope,
+        operations=operations,
+        acknowledgement=acknowledgement or "",
+        reason_code=normalized_reason,
+        evidence_ref=normalized_evidence,
+        rationale=rationale,
+        operator_identity=operator_identity,
+    )
+    active_verifier = verifier or UnconfiguredTrustAnchors()
+    verification = active_verifier.verify_operator_signature(
+        signature=operator_signature,
+        payload=payload,
+        operator_identity=operator_identity,
+    )
+    if not verification.verified:
+        raise ProtectedReplacementError(
+            "unverified_signature",
+            "operator override signature was treated as absent: " + verification.reason,
+        )
+    return _OperatorOverrideAuthorization(
+        acknowledgement=acknowledgement or "",
+        reason_code=normalized_reason,
+        evidence_ref=normalized_evidence,
+        signature=operator_signature,
+        operator_identity=operator_identity.strip() if operator_identity else None,
+        verification=verification,
+        payload_sha256=hashlib.sha256(payload).hexdigest(),
+    )
 
 
 async def _enqueue_replacement(
@@ -618,13 +844,21 @@ async def execute_protected_replacement(
     replacement_id: str,
     *,
     executor: str = "agent_tool",
+    _operator_override: _OperatorOverrideAuthorization | None = None,
 ) -> dict[str, Any]:
     """Execute one accepted replacement with snapshot/audit/write atomicity."""
 
-    if executor not in {"user", "cli", "agent_tool", "system"}:
+    if _operator_override is not None:
+        executor = "operator_override"
+    if executor not in {"user", "cli", "agent_tool", "system", "operator_override"}:
         raise ProtectedReplacementError(
             "invalid_replacement_executor",
-            "executor must be user, cli, agent_tool, or system",
+            "executor must be user, cli, agent_tool, system, or operator_override",
+        )
+    if executor == "operator_override" and _operator_override is None:
+        raise ProtectedReplacementError(
+            "unverified_signature",
+            "operator_override execution requires a verified override authorization",
         )
 
     async with conn.transaction():
@@ -644,6 +878,11 @@ async def execute_protected_replacement(
                 f"protected replacement not found: {replacement_id}",
             )
         if row["status"] == "executed":
+            if _operator_override is not None:
+                raise ProtectedReplacementError(
+                    "operator_override_not_available",
+                    f"replacement {replacement_id} is already executed; no override was applied",
+                )
             return {
                 "replacement_id": replacement_id,
                 "section": str(row["section"]),
@@ -655,10 +894,28 @@ async def execute_protected_replacement(
                 "reused": True,
                 "warnings": [],
             }
-        if row["status"] != "accepted":
+        override_statuses = {"pending", "deferred"}
+        expected_statuses = override_statuses if _operator_override else {"accepted"}
+        if row["status"] not in expected_statuses:
+            if _operator_override and row["status"] in {
+                "refused",
+                "modification_requested",
+            }:
+                raise ProtectedReplacementError(
+                    "agent_decision_cannot_be_bypassed",
+                    f"replacement {replacement_id} is {row['status']}; operator override cannot bypass an agent decision",
+                )
             raise ProtectedReplacementError(
-                "protected_replacement_not_accepted",
-                f"replacement {replacement_id} is {row['status']}; agent acceptance is required before execution",
+                (
+                    "operator_override_not_available"
+                    if _operator_override
+                    else "protected_replacement_not_accepted"
+                ),
+                (
+                    f"replacement {replacement_id} is {row['status']}; override applies only while acknowledgement is pending"
+                    if _operator_override
+                    else f"replacement {replacement_id} is {row['status']}; agent acceptance is required before execution"
+                ),
             )
 
         section = str(row["section"])
@@ -703,17 +960,38 @@ async def execute_protected_replacement(
             )
 
         audit_id = str(uuid.uuid4())
+        event_time = _iso_now()
+        operator_identity = row["operator_identity"]
+        operator_signature = row["operator_signature"]
+        acknowledgement = "accepted"
+        acknowledgement_at = _iso_value(row["acknowledgement_at"])
+        override_reason_code = None
+        override_evidence_ref = None
+        override_verification = None
+        if _operator_override is not None:
+            acknowledgement = "bypassed"
+            acknowledgement_at = event_time
+            operator_identity = (
+                _operator_override.operator_identity
+                or _operator_override.verification.anchor_id
+            )
+            operator_signature = _operator_override.signature
+            override_reason_code = _operator_override.reason_code
+            override_evidence_ref = _operator_override.evidence_ref
+            override_verification = _trust_payload(
+                _operator_override.verification, locally_trusted_label=False
+            )
         audit_record = {
             "audit_id": audit_id,
             "event_type": "protected_section_replacement",
-            "event_time": _iso_now(),
+            "event_time": event_time,
             "consent": {
                 "consent_id": str(row["consent_id"]),
                 "consent_kind": str(row["consent_kind"]),
                 "consent_at": _iso_value(row["consent_at"]),
                 "rationale": str(row["rationale"]),
-                "operator_signature": row["operator_signature"],
-                "operator_identity": row["operator_identity"],
+                "operator_signature": operator_signature,
+                "operator_identity": operator_identity,
             },
             "replacement_scope": _coerce_json(row["replacement_scope"]),
             "sections_replaced": [section],
@@ -721,13 +999,19 @@ async def execute_protected_replacement(
             "previous_state_snapshot_ref": snapshot_id,
             "previous_state_digest_v1": current_digest,
             "new_state_digest_v1": str(row["imported_digest_v1"]),
-            "agent_acknowledgement": "accepted",
-            "agent_acknowledgement_at": _iso_value(row["acknowledgement_at"]),
+            "agent_acknowledgement": acknowledgement,
+            "agent_acknowledgement_at": acknowledgement_at,
             "replacement_executor": executor,
-            "override_reason_code": None,
-            "override_evidence_ref": None,
+            "override_reason_code": override_reason_code,
+            "override_evidence_ref": override_evidence_ref,
             "reversibility_window": window,
         }
+        if _operator_override is not None:
+            audit_record["operator_override"] = {
+                "acknowledgement": _operator_override.acknowledgement,
+                "signature_verification": override_verification,
+                "signing_payload_sha256": _operator_override.payload_sha256,
+            }
         stored = await store_audit_record(conn, audit_record)
         if stored.get("status") != "inserted":
             raise ProtectedReplacementError(
@@ -778,6 +1062,9 @@ async def execute_protected_replacement(
         merged_ref_map.update(_coerce_json(sql_result.get("ref_map")) or {})
         await conn.execute(
             "UPDATE hmx_pending_replacements SET status='executed', "
+            "acknowledgement=COALESCE($5::jsonb, acknowledgement), "
+            "acknowledgement_at=CASE WHEN $5::jsonb IS NULL THEN acknowledgement_at "
+            "ELSE CURRENT_TIMESTAMP END, "
             "reference_map=$2::jsonb, snapshot_id=$3::uuid, execution_audit_id=$4, "
             "executed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP "
             "WHERE replacement_id=$1::uuid",
@@ -785,6 +1072,20 @@ async def execute_protected_replacement(
             json.dumps(merged_ref_map),
             snapshot_id,
             audit_id,
+            (
+                json.dumps(
+                    {
+                        "decision": "bypassed",
+                        "reason_code": _operator_override.reason_code,
+                        "evidence_ref": _operator_override.evidence_ref,
+                        "operator_identity": operator_identity,
+                        "trust_anchor_id": _operator_override.verification.anchor_id,
+                        "signing_payload_sha256": _operator_override.payload_sha256,
+                    }
+                )
+                if _operator_override
+                else None
+            ),
         )
 
         warnings = list(preparation_warnings)
@@ -797,6 +1098,7 @@ async def execute_protected_replacement(
             "audit_id": audit_id,
             "resulting_digest_v1": resulting_digest,
             "reversibility_window": window,
+            "replacement_executor": executor,
             "reused": False,
             "warnings": warnings,
         }
@@ -1112,6 +1414,10 @@ async def import_authoritative_hmx(
     retry_failed_work: bool = False,
     operator_signature: str | None = None,
     operator_identity: str | None = None,
+    force_replace: bool = False,
+    override_acknowledgement: str | None = None,
+    override_reason_code: str | None = None,
+    override_evidence_ref: str | None = None,
 ) -> HmxAuthoritativeResult:
     """Import ordinary data and submit explicit protected-section operations."""
 
@@ -1131,6 +1437,19 @@ async def import_authoritative_hmx(
         raise ProtectedReplacementError(
             "replacement_rationale_missing",
             "authoritative import requires replacement_rationale (CLI: --replacement-rationale)",
+        )
+    override_fields_present = any(
+        value
+        for value in (
+            override_acknowledgement,
+            override_reason_code,
+            override_evidence_ref,
+        )
+    )
+    if override_fields_present and not force_replace:
+        raise ProtectedReplacementError(
+            "operator_override_not_requested",
+            "operator override arguments require force_replace (CLI: --force-replace)",
         )
 
     forecast = await dry_run_hmx(
@@ -1156,7 +1475,39 @@ async def import_authoritative_hmx(
         ordinary_sections.pop(protected_section, None)
 
     operation_results: list[ProtectedReplacementResult] = []
+    override_authorization: _OperatorOverrideAuthorization | None = None
     async with conn.transaction():
+        if force_replace:
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('hmx_protected_replacement'))"
+            )
+            current = await export_hmx(
+                conn,
+                intent="port",
+                include_in_flight_work=False,
+                include_audit_records=False,
+            )
+            signing_operations = [
+                {
+                    "section": section,
+                    "local_digest_v1": str(current["section_digests"][section]),
+                    "imported_digest_v1": str(envelope["section_digests"][section]),
+                }
+                for section in replace_sections
+            ]
+            override_authorization = await _authorize_operator_override(
+                conn,
+                envelope=envelope,
+                operations=signing_operations,
+                acknowledgement=override_acknowledgement,
+                reason_code=override_reason_code,
+                evidence_ref=override_evidence_ref,
+                rationale=normalized_rationale,
+                operator_signature=operator_signature,
+                operator_identity=operator_identity,
+                verifier=verifier,
+            )
+
         for section in replace_sections:
             operation_results.append(
                 await evaluate_protected_replacement(
@@ -1166,7 +1517,9 @@ async def import_authoritative_hmx(
                     rationale=normalized_rationale,
                     verifier=verifier,
                     allow_locally_trusted_lineage=allow_locally_trusted_lineage,
-                    operator_signature=operator_signature,
+                    operator_signature=(
+                        None if override_authorization else operator_signature
+                    ),
                     operator_identity=operator_identity,
                 )
             )
@@ -1193,11 +1546,59 @@ async def import_authoritative_hmx(
                     json.dumps(ordinary_result.ref_map),
                 )
 
+        if override_authorization is not None:
+            if all(
+                operation.disposition == "verified_noop"
+                for operation in operation_results
+            ):
+                raise ProtectedReplacementError(
+                    "operator_override_not_required",
+                    "all selected protected sections were verified no-ops; no acknowledgement was bypassed",
+                )
+            for index, operation in enumerate(operation_results):
+                if operation.disposition == "verified_noop":
+                    continue
+                if not operation.replacement_id:
+                    raise ProtectedReplacementError(
+                        "operator_override_not_available",
+                        f"{operation.section} did not produce an override-eligible replacement request",
+                    )
+                execution = await execute_protected_replacement(
+                    conn,
+                    operation.replacement_id,
+                    _operator_override=override_authorization,
+                )
+                operation_results[index] = replace(
+                    operation,
+                    disposition="executed",
+                    agent_acknowledgement_required=False,
+                    audit_ids=(str(execution["audit_id"]),),
+                    status="executed",
+                    replacement_executor="operator_override",
+                )
+
     operation_conflicts = [
         conflict for operation in operation_results for conflict in operation.conflicts
     ]
     warnings = list(forecast.warnings)
     warnings.extend(ordinary_result.warnings)
+    if override_authorization is not None:
+        logger.warning(
+            "HMX operator override executed: sections=%s reason=%s evidence=%s anchor=%s",
+            ",".join(operation.section for operation in operation_results),
+            override_authorization.reason_code,
+            override_authorization.evidence_ref,
+            override_authorization.verification.anchor_id,
+        )
+        warnings.append(
+            {
+                "code": "operator_override_executed",
+                "reason_code": override_authorization.reason_code,
+                "evidence_ref": override_authorization.evidence_ref,
+                "trust_anchor_id": override_authorization.verification.anchor_id,
+                "error": "protected acknowledgement was bypassed by a verified operator override",
+            }
+        )
     return HmxAuthoritativeResult(
         export_id=str(envelope["export_id"]),
         intent=intent,

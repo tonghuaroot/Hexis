@@ -1,10 +1,10 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (HMX Slice 11 bounded reversion complete)
+Last updated: 2026-07-10 (HMX Slice 12 operator override complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-11 are complete:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-12 are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -25,19 +25,23 @@ audit, target-digest verification, and collateral-section verification.
 Executed replacements now have explicit, one-shot reversion windows bounded by
 independent heartbeat and wall-clock limits; reversion restores reference
 topology, refuses newer-state overwrite, verifies the result atomically, and
-purges consumed snapshot payloads while retaining tombstones. The next
-implementation boundary is Slice 12 (operator override and trust-anchor
-enforcement).
+purges consumed snapshot payloads while retaining tombstones. Rare operator
+overrides now require an exact responsibility phrase, enumerated
+reason and evidence, plus an Ed25519 signature over the complete replacement
+bundle verified against a configured public trust anchor. Overrides cannot
+bypass an agent refusal and retain the normal reversion window. The next
+implementation boundary is Slice 13 (agent tools for the replacement protocol).
 
-The prior hosted green baseline was `c0a2e8e` (`Complete HMX Slice 10
-authoritative replacement`), run
-https://github.com/QuixiAI/Hexis/actions/runs/29103663430
+The prior hosted green baseline was `8e2d524` (`Complete HMX Slice 11 bounded
+reversion`), run
+https://github.com/QuixiAI/Hexis/actions/runs/29108506702
 (all jobs succeeded). Always verify the current head's hosted result with the
 command in "Useful Commands" below rather than assuming this historical
 baseline applies.
 
 Important recent commits:
 
+- `8e2d524` - Complete HMX Slice 11 bounded reversion
 - `c0a2e8e` - Complete HMX Slice 10 authoritative replacement
 - `73f41b4` - Complete HMX Slice 9 protected replacement core
 - `3cb8670` - Complete HMX Slice 8 canonical digests
@@ -631,8 +635,57 @@ baseline/migration equivalence, and diff hygiene also pass. The built wheel
 contains the Slice 11 baseline SQL, migration, protected-replacement module,
 HMX schema, and updated memory-exchange skill.
 
-Next: Slice 12 implements the signature-verified, verbatim-confirmed operator
+Slice 12 follows with the signature-verified, verbatim-confirmed operator
 override path without weakening ordinary protected replacement policy.
+
+### HMX Slice 12 complete (operator override and trust anchors)
+
+Key files:
+
+- `core/trust_anchors.py` - concrete Ed25519 operator verifier, strict key and
+  signature parsing, stable public-key fingerprint, and fail-closed environment
+  loading from `HEXIS_HMX_OPERATOR_ED25519_PUBLIC_KEY`.
+- `core/protected_replacement.py` - canonical multi-section signing payload,
+  override-field and live-state validation, refusal protection, and execution
+  through the existing atomic snapshot/audit/write/digest path.
+- `apps/hexis_cli.py` and `apps/cli_exchange.py` - `--force-replace` arguments,
+  side-effect-free signing material in dry-run output, signature verification,
+  and prominent override results.
+- `tests/core/test_hmx_operator_override.py`,
+  `tests/core/test_hmx_trust_anchors.py`,
+  `tests/db/test_hmx_authoritative_import.py`, and
+  `tests/cli/test_hmx_cli.py` - canonical payload, real Ed25519, fail-closed,
+  atomic multi-section, refusal, audit, and CLI journey coverage.
+
+Important behavior:
+
+- One Ed25519 signature covers the complete sorted replacement bundle, including
+  source, each current/imported protected digest pair, the exact responsibility
+  phrase, reason code, evidence reference, rationale, and operator identity.
+  State drift therefore invalidates an old signature.
+- Dry-run JSON emits the exact base64 payload and SHA-256 digest without requiring
+  a signature. Execution requires a verified signature and configured public
+  trust anchor; unconfigured, malformed, mismatched, or stale signatures fail as
+  `unverified_signature` before any import state is committed.
+- `agent_paused` and `agent_terminated` are checked against live database state.
+  `agent_unresponsive` requires the live agent to be running and unpaused. Every
+  reason requires a `scheme:value` reference to independently recorded evidence.
+- Pending and deferred requests can be overridden. Refused or
+  modification-requested operations are answered decisions and cannot be
+  bypassed. Multi-section ordinary/protected writes and audits remain one
+  transaction.
+- Override audits record `replacement_executor=operator_override`,
+  `agent_acknowledgement=bypassed`, reason, evidence, verified anchor, payload
+  digest, signature, and operator identity. The normal 7-heartbeat/30-day
+  earlier-of reversion policy remains unchanged.
+
+Validation: 184 HMX-focused tests and 2149 full-suite tests pass with the
+existing 421 advisory marker warnings. Focused formatting, compilation, mypy,
+wheel inspection, and diff hygiene pass. The wheel contains the updated trust,
+replacement, memory-exchange, and CLI modules.
+
+Next: Slice 13 adds the agent-facing replacement-protocol tools described in
+`plans/hmx.md`; operator override remains CLI/operator-only.
 
 ## Current Roadmap
 
@@ -813,16 +866,15 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-Continue the HMX thread at Slice 12 from the durable reversion state now in
-place. Read `core/protected_replacement.py`, `core/trust_anchors.py`,
-`db/55_hmx_reversion.sql`, `tests/db/test_hmx_authoritative_import.py`, and the
-Slice 12 override requirements in `plans/hmx.md` before editing.
+Continue the HMX thread at Slice 13 from the signed override state now in place.
+Read `core/protected_replacement.py`, `core/tools/memory_exchange.py`,
+`services/heartbeat_agentic.py`, `tests/core/test_hmx_tools.py`, and the Slice 13
+tool requirements in `plans/hmx.md` before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 12: implement `--force-replace` with verified operator signature,
-   exact phrase confirmation, scoped reason/evidence, dedicated executor audit,
-   and no fallback from failed verification into mutation.
+1. HMX Slice 13: add the agent tools for listing, inspecting, acknowledging, and
+   reverting protected replacement operations without exposing operator override.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import stat
@@ -11,14 +12,21 @@ import uuid
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from apps.cli_exchange import _print_import_result
-from core.digest import content_hash_v1
+from core.digest import content_hash_v1, protected_section_digest_v1
 from core.memory_exchange import (
     HmxAuthoritativeResult,
     build_envelope,
     resolve_export_sections,
 )
+from core.protected_replacement import (
+    OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+    revert_protected_replacement,
+)
+from core.trust_anchors import HMX_OPERATOR_PUBLIC_KEY_ENV
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.cli]
 
@@ -31,6 +39,20 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         env=os.environ.copy(),
+        cwd=_ROOT,
+    )
+
+
+def _run_with_env(
+    env_updates: dict[str, str], *args: str
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env.update(env_updates)
+    return subprocess.run(
+        [sys.executable, "-m", "apps.hexis_cli", *args],
+        capture_output=True,
+        text=True,
+        env=env,
         cwd=_ROOT,
     )
 
@@ -74,6 +96,8 @@ async def test_import_help_exposes_explicit_failed_work_retry():
     result = _run("import", "--help")
     assert result.returncode == 0
     assert "--retry-failed-work" in result.stdout
+    assert "--force-replace" in result.stdout
+    assert "--operator-signature" in result.stdout
 
 
 async def test_export_jsonl_and_database_aware_dry_run(db_pool, tmp_path):
@@ -168,6 +192,124 @@ async def test_authoritative_dry_run_reports_explicit_replacement_protocol(
     )
 
 
+async def test_operator_override_dry_run_payload_executes_with_matching_signature(
+    db_pool, tmp_path
+):
+    source = tmp_path / "operator-override.hmx.json"
+    rationale = "CLI recovery while the acknowledgement channel is paused"
+    private_key = Ed25519PrivateKey.generate()
+    raw_public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    env = {
+        HMX_OPERATOR_PUBLIC_KEY_ENV: base64.b64encode(raw_public_key).decode("ascii")
+    }
+    baseline_content = f"CLI override baseline {uuid.uuid4().hex}"
+    memory_id = None
+    audit_id = None
+    async with db_pool.acquire() as conn:
+        memory_id = await conn.fetchval(
+            "INSERT INTO memories "
+            "(type, content, embedding, importance, trust_level, status, metadata) "
+            "VALUES ('worldview', $1, "
+            "array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.8, 0.9, "
+            "'active', $2::jsonb) RETURNING id",
+            baseline_content,
+            json.dumps(
+                {
+                    "category": "value",
+                    "confidence": 0.9,
+                    "stability": 0.9,
+                    "provenance": {"acquisition_mode": "experienced"},
+                }
+            ),
+        )
+    try:
+        exported = _run("export", "--intent", "port", "--output", str(source))
+        assert exported.returncode == 0, exported.stderr
+        document = json.loads(source.read_text(encoding="utf-8"))
+        record = document["sections"]["worldview"][0]
+        record["content"] = f"CLI override replacement {uuid.uuid4().hex}"
+        record["content_hash_v1"] = content_hash_v1(record["content"])
+        document["section_digests"]["worldview"] = protected_section_digest_v1(
+            "worldview", document["sections"]["worldview"]
+        )
+        source.write_text(json.dumps(document), encoding="utf-8")
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE heartbeat_state SET is_paused=TRUE WHERE id=1")
+
+        override_args = (
+            "import",
+            str(source),
+            "--strategy",
+            "authoritative",
+            "--replace",
+            "worldview",
+            "--replacement-rationale",
+            rationale,
+            "--force-replace",
+            "--operator-identity",
+            "cli-test-operator",
+            "--override-acknowledgement",
+            OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+            "--override-reason-code",
+            "agent_paused",
+            "--override-evidence-ref",
+            "report:cli-override-test",
+            "--json",
+            "--wait-seconds",
+            "60",
+        )
+        dry_run = _run_with_env(env, *override_args, "--dry-run")
+        assert dry_run.returncode == 0, dry_run.stderr
+        dry_report = json.loads(dry_run.stdout)
+        override = dry_report["operator_override"]
+        assert override["signature_supplied"] is False
+        assert override["trust_anchor_id"].startswith("ed25519:sha256:")
+        payload = base64.b64decode(override["payload_base64"], validate=True)
+        signature = base64.b64encode(private_key.sign(payload)).decode("ascii")
+
+        imported = _run_with_env(
+            env,
+            *override_args,
+            "--operator-signature",
+            signature,
+            "--confirm-intent",
+            "port",
+        )
+        assert imported.returncode == 0, imported.stderr
+        report = json.loads(imported.stdout)
+        operation = report["protected_operations"][0]
+        assert operation["replacement_executor"] == "operator_override"
+        assert operation["status"] == "executed"
+        audit_id = operation["audit_ids"][0]
+        async with db_pool.acquire() as conn:
+            audit = await conn.fetchval(
+                "SELECT record FROM protected_replacement_audit WHERE audit_id=$1",
+                audit_id,
+            )
+            audit = json.loads(audit) if isinstance(audit, str) else audit
+            assert audit["agent_acknowledgement"] == "bypassed"
+            assert audit["override_evidence_ref"] == "report:cli-override-test"
+    finally:
+        async with db_pool.acquire() as conn:
+            if audit_id:
+                await revert_protected_replacement(
+                    conn,
+                    audit_id,
+                    rationale="Restore state after the CLI override journey test",
+                    actor_identity="cli",
+                )
+            await conn.execute("UPDATE heartbeat_state SET is_paused=FALSE WHERE id=1")
+            if memory_id:
+                await conn.execute(
+                    "DELETE FROM memories WHERE id=$1 OR content=$2",
+                    memory_id,
+                    baseline_content,
+                )
+
+
 async def test_authoritative_human_output_surfaces_reused_refusal(capsys):
     result = HmxAuthoritativeResult(
         export_id="hmx-refused-test",
@@ -223,6 +365,36 @@ async def test_authoritative_human_output_surfaces_reverted_request(capsys):
     output = " ".join(capsys.readouterr().out.split())
     assert "executed and later reverted" in output
     assert "resolved: 1" in output
+
+
+async def test_authoritative_human_output_prominently_surfaces_override(capsys):
+    result = HmxAuthoritativeResult(
+        export_id="hmx-override-output-test",
+        intent="port",
+        strategy="authoritative",
+        target_state={},
+        inserted={},
+        protected_operations=(
+            {
+                "disposition": "executed",
+                "status": "executed",
+                "replacement_id": "replacement-override-test",
+                "section": "worldview",
+                "agent_acknowledgement_required": False,
+                "replacement_executor": "operator_override",
+            },
+        ),
+        ref_map={},
+        conflicts=(),
+        warnings=(),
+    )
+
+    _print_import_result(result, as_json=False, skipped=[])
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert "HMX OPERATOR OVERRIDE EXECUTED" in output
+    assert "agent acknowledgement was bypassed" in output
+    assert "reversion window remains open" in output
 
 
 async def test_export_rejects_inverted_time_range_before_connecting():

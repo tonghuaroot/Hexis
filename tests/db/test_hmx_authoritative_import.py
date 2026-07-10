@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import uuid
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from core.digest import content_hash_v1, protected_section_digest_v1
 from core.memory_exchange import dry_run_hmx, export_hmx, import_hmx
 from core.protected_replacement import (
+    OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+    ProtectedReplacementError,
     acknowledge_protected_replacement,
     inspect_protected_replacement,
     open_protected_reversion_windows,
+    operator_override_signing_payload,
     revert_protected_replacement,
 )
-from core.trust_anchors import TrustVerification
+from core.trust_anchors import Ed25519TrustAnchors, TrustVerification
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
 
@@ -696,5 +701,236 @@ async def test_authoritative_dry_run_requires_explicit_sections_and_valid_intent
                 item["code"] == "invalid_authoritative_intent"
                 for item in invalid.conflicts
             )
+        finally:
+            await transaction.rollback()
+
+
+def _sign_override(
+    private_key,
+    *,
+    envelope,
+    before,
+    sections,
+    rationale,
+    reason_code="agent_paused",
+    evidence_ref="report:hmx-override-test",
+    operator_identity="test-operator",
+):
+    operations = [
+        {
+            "section": section,
+            "local_digest_v1": before["section_digests"][section],
+            "imported_digest_v1": envelope["section_digests"][section],
+        }
+        for section in sections
+    ]
+    payload = operator_override_signing_payload(
+        envelope=envelope,
+        operations=operations,
+        acknowledgement=OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+        reason_code=reason_code,
+        evidence_ref=evidence_ref,
+        rationale=rationale,
+        operator_identity=operator_identity,
+    )
+    return base64.b64encode(private_key.sign(payload)).decode("ascii")
+
+
+async def test_verified_operator_override_executes_atomically_and_is_reversible(
+    db_pool,
+):
+    async with db_pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _prepare(conn)
+            before = await export_hmx(conn, intent="port")
+            envelope = copy.deepcopy(before)
+            sections = ["worldview", "drives"]
+            for section in sections:
+                _mutate_section(envelope, section)
+            rationale = "Recover protected state while acknowledgement is paused"
+            private_key = Ed25519PrivateKey.generate()
+            signature = _sign_override(
+                private_key,
+                envelope=envelope,
+                before=before,
+                sections=sections,
+                rationale=rationale,
+            )
+            await conn.execute("UPDATE heartbeat_state SET is_paused=TRUE WHERE id=1")
+
+            result = await import_hmx(
+                conn,
+                envelope,
+                strategy="authoritative",
+                replace_sections=sections,
+                replacement_rationale=rationale,
+                verifier=Ed25519TrustAnchors(private_key.public_key()),
+                operator_signature=signature,
+                operator_identity="test-operator",
+                force_replace=True,
+                override_acknowledgement=OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+                override_reason_code="agent_paused",
+                override_evidence_ref="report:hmx-override-test",
+            )
+
+            assert [
+                operation["replacement_executor"]
+                for operation in result.protected_operations
+            ] == ["operator_override", "operator_override"]
+            after = await export_hmx(conn, intent="port")
+            for section in sections:
+                assert (
+                    after["section_digests"][section]
+                    == envelope["section_digests"][section]
+                )
+            for operation in result.protected_operations:
+                audit = await conn.fetchval(
+                    "SELECT record FROM protected_replacement_audit WHERE audit_id=$1",
+                    operation["audit_ids"][0],
+                )
+                audit = json.loads(audit) if isinstance(audit, str) else audit
+                assert audit["agent_acknowledgement"] == "bypassed"
+                assert audit["replacement_executor"] == "operator_override"
+                assert audit["override_reason_code"] == "agent_paused"
+                assert audit["override_evidence_ref"] == "report:hmx-override-test"
+                assert (
+                    audit["operator_override"]["signature_verification"]["status"]
+                    == "verified"
+                )
+                assert audit["reversibility_window"]["heartbeats"] == 7
+                assert audit["reversibility_window"]["window_open"] is True
+        finally:
+            await transaction.rollback()
+
+
+async def test_operator_override_cannot_bypass_agent_refusal(db_pool):
+    async with db_pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _prepare(conn)
+            before = await export_hmx(conn, intent="port")
+            envelope = copy.deepcopy(before)
+            _mutate_section(envelope, "worldview")
+            rationale = "Proposal the agent will explicitly refuse"
+            pending = await import_hmx(
+                conn,
+                envelope,
+                strategy="authoritative",
+                replace_sections=["worldview"],
+                replacement_rationale=rationale,
+                verifier=VerifiedTrustAnchors(),
+            )
+            replacement_id = pending.protected_operations[0]["replacement_id"]
+            await acknowledge_protected_replacement(
+                conn,
+                replacement_id,
+                decision="refuse",
+                rationale="This replacement conflicts with current values",
+            )
+            private_key = Ed25519PrivateKey.generate()
+            signature = _sign_override(
+                private_key,
+                envelope=envelope,
+                before=before,
+                sections=["worldview"],
+                rationale=rationale,
+            )
+            await conn.execute("UPDATE heartbeat_state SET is_paused=TRUE WHERE id=1")
+
+            with pytest.raises(
+                ProtectedReplacementError, match="agent_decision_cannot_be_bypassed"
+            ):
+                await import_hmx(
+                    conn,
+                    envelope,
+                    strategy="authoritative",
+                    replace_sections=["worldview"],
+                    replacement_rationale=rationale,
+                    verifier=Ed25519TrustAnchors(private_key.public_key()),
+                    operator_signature=signature,
+                    operator_identity="test-operator",
+                    force_replace=True,
+                    override_acknowledgement=OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+                    override_reason_code="agent_paused",
+                    override_evidence_ref="report:hmx-override-test",
+                )
+
+            assert (
+                await conn.fetchval(
+                    "SELECT status FROM hmx_pending_replacements WHERE replacement_id=$1::uuid",
+                    replacement_id,
+                )
+                == "refused"
+            )
+            assert (await export_hmx(conn, intent="port"))["section_digests"][
+                "worldview"
+            ] == before["section_digests"]["worldview"]
+        finally:
+            await transaction.rollback()
+
+
+async def test_operator_override_rejects_invalid_signature_and_unobserved_state(
+    db_pool,
+):
+    async with db_pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _prepare(conn)
+            before = await export_hmx(conn, intent="port")
+            envelope = copy.deepcopy(before)
+            _mutate_section(envelope, "drives")
+            rationale = "Test fail-closed override authorization"
+            private_key = Ed25519PrivateKey.generate()
+            signature = _sign_override(
+                private_key,
+                envelope=envelope,
+                before=before,
+                sections=["drives"],
+                rationale=rationale,
+            )
+            verifier = Ed25519TrustAnchors(private_key.public_key())
+
+            with pytest.raises(
+                ProtectedReplacementError, match="override_reason_not_observed"
+            ):
+                await import_hmx(
+                    conn,
+                    envelope,
+                    strategy="authoritative",
+                    replace_sections=["drives"],
+                    replacement_rationale=rationale,
+                    verifier=verifier,
+                    operator_signature=signature,
+                    operator_identity="test-operator",
+                    force_replace=True,
+                    override_acknowledgement=OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+                    override_reason_code="agent_paused",
+                    override_evidence_ref="report:hmx-override-test",
+                )
+
+            await conn.execute("UPDATE heartbeat_state SET is_paused=TRUE WHERE id=1")
+            with pytest.raises(ProtectedReplacementError, match="unverified_signature"):
+                await import_hmx(
+                    conn,
+                    envelope,
+                    strategy="authoritative",
+                    replace_sections=["drives"],
+                    replacement_rationale=rationale,
+                    verifier=verifier,
+                    operator_signature=base64.b64encode(b"x" * 64).decode("ascii"),
+                    operator_identity="test-operator",
+                    force_replace=True,
+                    override_acknowledgement=OPERATOR_OVERRIDE_ACKNOWLEDGEMENT,
+                    override_reason_code="agent_paused",
+                    override_evidence_ref="report:hmx-override-test",
+                )
+            assert await conn.fetchval("SELECT count(*) FROM hmx_consent") == 0
+            assert (await export_hmx(conn, intent="port"))["section_digests"][
+                "drives"
+            ] == before["section_digests"]["drives"]
         finally:
             await transaction.rollback()

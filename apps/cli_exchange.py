@@ -41,6 +41,16 @@ from core.memory_exchange import (
     reject_staged_import,
     modify_staged_import,
 )
+from core.protected_replacement import (
+    operator_override_signing_material,
+    operator_override_signing_payload,
+    validate_operator_override_fields,
+    validate_operator_override_reason_state,
+)
+from core.trust_anchors import (
+    HMX_OPERATOR_PUBLIC_KEY_ENV,
+    load_trust_anchor_verifier_from_env,
+)
 
 
 def _csv(value: str | None) -> list[str] | None:
@@ -115,10 +125,16 @@ def _apply_skips(document: dict[str, Any], skipped: list[str]) -> dict[str, Any]
 
 
 def _print_dry_run(
-    result: HmxDryRunResult, *, as_json: bool, skipped: list[str]
+    result: HmxDryRunResult,
+    *,
+    as_json: bool,
+    skipped: list[str],
+    operator_override: dict[str, Any] | None = None,
 ) -> None:
     payload = asdict(result)
     payload["skipped_sections"] = skipped
+    if operator_override is not None:
+        payload["operator_override"] = operator_override
     if as_json:
         sys.stdout.write(
             json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n"
@@ -164,6 +180,29 @@ def _print_dry_run(
         console.print(
             "[fail]This import cannot run with the selected intent and strategy.[/fail]"
         )
+    if operator_override is not None:
+        console.print("[fail]OPERATOR OVERRIDE SIGNING REQUEST[/fail]")
+        anchor_id = operator_override.get("trust_anchor_id")
+        if anchor_id:
+            console.print(f"Trust anchor: [accent]{anchor_id}[/accent]")
+        else:
+            console.print(
+                f"[fail]No trust anchor configured.[/fail] Set "
+                f"[accent]{HMX_OPERATOR_PUBLIC_KEY_ENV}[/accent] to the base64 raw "
+                "Ed25519 public key or PEM before execution."
+            )
+        console.print(
+            "Payload SHA-256: "
+            f"[accent]{operator_override['payload_sha256']}[/accent]"
+        )
+        console.print("Payload base64:")
+        console.print(operator_override["payload_base64"])
+        verification = operator_override["signature_verification"]
+        console.print(
+            "Signature: "
+            f"[{('ok' if verification['status'] == 'verified' else 'warn')}]"
+            f"{verification['status']}[/] - {verification['reason']}"
+        )
 
 
 def _print_import_result(
@@ -185,6 +224,11 @@ def _print_import_result(
     from apps.cli_theme import console, make_table
 
     if isinstance(result, HmxAuthoritativeResult):
+        overridden = [
+            operation
+            for operation in result.protected_operations
+            if operation.get("replacement_executor") == "operator_override"
+        ]
         pending = [
             operation
             for operation in result.protected_operations
@@ -200,10 +244,16 @@ def _print_import_result(
             for operation in result.protected_operations
             if operation not in pending and operation not in verified
         ]
-        console.print(
-            f"[ok]HMX authoritative import processed.[/ok] "
-            f"[muted]{result.export_id}[/muted]"
-        )
+        if overridden:
+            console.print(
+                f"[fail]HMX OPERATOR OVERRIDE EXECUTED.[/fail] "
+                f"[muted]{result.export_id}[/muted]"
+            )
+        else:
+            console.print(
+                f"[ok]HMX authoritative import processed.[/ok] "
+                f"[muted]{result.export_id}[/muted]"
+            )
         counts = result.inserted
         footer = (
             f"Protected requests awaiting agent decision: "
@@ -234,10 +284,15 @@ def _print_import_result(
                 detail = "the agent requested changes; submit a revised exchange and rationale"
                 style = "warn"
             elif disposition == "executed":
-                detail = (
-                    "this replacement was already executed; no duplicate write occurred"
-                )
-                style = "ok"
+                if operation.get("replacement_executor") == "operator_override":
+                    detail = (
+                        "OPERATOR OVERRIDE executed; agent acknowledgement was bypassed "
+                        "and the normal reversion window remains open"
+                    )
+                    style = "fail"
+                else:
+                    detail = "this replacement was already executed; no duplicate write occurred"
+                    style = "ok"
             elif disposition == "reverted":
                 detail = (
                     "this replacement was executed and later reverted; revise the "
@@ -350,6 +405,77 @@ async def run_export(dsn: str, args: Any) -> int:
     return 0
 
 
+async def _prepare_operator_override_report(
+    conn,
+    *,
+    document: dict[str, Any],
+    forecast: HmxDryRunResult,
+    args: Any,
+) -> tuple[dict[str, Any], Any]:
+    reason_code, evidence_ref = validate_operator_override_fields(
+        acknowledgement=args.override_acknowledgement,
+        reason_code=args.override_reason_code,
+        evidence_ref=args.override_evidence_ref,
+        rationale=str(args.replacement_rationale or ""),
+    )
+    await validate_operator_override_reason_state(conn, reason_code)
+    operations = list(forecast.protected_policy.get("operations") or [])
+    material = operator_override_signing_material(
+        envelope=document,
+        operations=operations,
+        acknowledgement=args.override_acknowledgement,
+        reason_code=reason_code,
+        evidence_ref=evidence_ref,
+        rationale=args.replacement_rationale,
+        operator_identity=args.operator_identity,
+    )
+    try:
+        verifier = load_trust_anchor_verifier_from_env()
+    except ValueError as exc:
+        raise HmxPolicyError(str(exc)) from exc
+    anchor_id = getattr(verifier, "anchor_id", None)
+    if args.operator_signature:
+        payload = operator_override_signing_payload(
+            envelope=document,
+            operations=operations,
+            acknowledgement=args.override_acknowledgement,
+            reason_code=reason_code,
+            evidence_ref=evidence_ref,
+            rationale=args.replacement_rationale,
+            operator_identity=args.operator_identity,
+        )
+        verification = verifier.verify_operator_signature(
+            signature=args.operator_signature,
+            payload=payload,
+            operator_identity=args.operator_identity,
+        )
+        verification_payload = {
+            "status": verification.status.value,
+            "reason": verification.reason,
+            "anchor_id": verification.anchor_id,
+            "metadata": dict(verification.metadata),
+        }
+    else:
+        verification_payload = {
+            "status": "unverified",
+            "reason": "no signature supplied; sign the exact payload before execution",
+            "anchor_id": anchor_id,
+            "metadata": {},
+        }
+    material.update(
+        {
+            "reason_code": reason_code,
+            "evidence_ref": evidence_ref,
+            "trust_anchor_environment": HMX_OPERATOR_PUBLIC_KEY_ENV,
+            "trust_anchor_id": anchor_id,
+            "signature_supplied": bool(args.operator_signature),
+            "signature_verification": verification_payload,
+            "ready_for_execution": verification_payload["status"] == "verified",
+        }
+    )
+    return material, verifier
+
+
 async def run_import(dsn: str, args: Any) -> int:
     document = _load_document(args.path)
     intent = str(document.get("export_intent") or "")
@@ -383,6 +509,21 @@ async def run_import(dsn: str, args: Any) -> int:
         )
     if replace_sections and strategy != "authoritative":
         raise HmxPolicyError("--replace requires --strategy authoritative")
+    override_arguments_present = any(
+        (
+            args.operator_signature,
+            args.operator_identity,
+            args.override_acknowledgement,
+            args.override_reason_code,
+            args.override_evidence_ref,
+        )
+    )
+    if override_arguments_present and not args.force_replace:
+        raise HmxPolicyError("operator override arguments require --force-replace")
+    if args.force_replace and (strategy != "authoritative" or not replace_sections):
+        raise HmxPolicyError(
+            "--force-replace requires --strategy authoritative and at least one --replace section"
+        )
 
     conn = await _connect(dsn, args.wait_seconds)
     try:
@@ -394,11 +535,35 @@ async def run_import(dsn: str, args: Any) -> int:
             replace_sections=replace_sections,
             allow_locally_trusted_lineage=args.trust_matching_lineage_label,
         )
+        operator_override = None
+        verifier = None
+        if args.force_replace and forecast.can_import:
+            operator_override, verifier = await _prepare_operator_override_report(
+                conn,
+                document=document,
+                forecast=forecast,
+                args=args,
+            )
         if args.dry_run:
-            _print_dry_run(forecast, as_json=args.json, skipped=skipped)
-            return 0 if forecast.can_import else 2
+            _print_dry_run(
+                forecast,
+                as_json=args.json,
+                skipped=skipped,
+                operator_override=operator_override,
+            )
+            invalid_supplied_signature = bool(
+                operator_override
+                and operator_override["signature_supplied"]
+                and not operator_override["ready_for_execution"]
+            )
+            return 0 if forecast.can_import and not invalid_supplied_signature else 2
         if not forecast.can_import:
-            _print_dry_run(forecast, as_json=args.json, skipped=skipped)
+            _print_dry_run(
+                forecast,
+                as_json=args.json,
+                skipped=skipped,
+                operator_override=operator_override,
+            )
             raise HmxPolicyError(
                 "import blocked by preflight; resolve the reported policy conflict or strategy before retrying"
             )
@@ -410,6 +575,13 @@ async def run_import(dsn: str, args: Any) -> int:
             replace_sections=replace_sections,
             replacement_rationale=args.replacement_rationale,
             allow_locally_trusted_lineage=args.trust_matching_lineage_label,
+            verifier=verifier,
+            operator_signature=args.operator_signature,
+            operator_identity=args.operator_identity,
+            force_replace=args.force_replace,
+            override_acknowledgement=args.override_acknowledgement,
+            override_reason_code=args.override_reason_code,
+            override_evidence_ref=args.override_evidence_ref,
         )
     finally:
         await conn.close()

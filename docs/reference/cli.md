@@ -60,6 +60,7 @@ Complete reference for the `hexis` CLI. Install via `pip install hexis`.
 | `hexis export --intent INTENT [--output FILE] [--format json\|jsonl]` | Export an HMX memory exchange |
 | `hexis import FILE --dry-run [--strategy STRATEGY] [--json]` | Validate and forecast an HMX import without mutation |
 | `hexis import FILE --strategy additive --confirm-intent INTENT` | Run a confirmed additive HMX import |
+| `hexis import FILE --strategy authoritative --replace SECTION --replacement-rationale TEXT --confirm-intent INTENT` | Submit a protected whole-section replacement for agent acknowledgement |
 | `hexis import-review list [--json]` | List records waiting for deliberative review |
 | `hexis import-review accept ID [--rationale TEXT]` | Admit a staged record when policy permits |
 | `hexis import-review reject ID --rationale TEXT` | Reject a staged record without deleting its review history |
@@ -77,11 +78,49 @@ The default strategy is derived from the file intent. Telepathy imports enter
 deliberative staging; analysis imports enter physically isolated analysis-only
 storage. Neither affects ordinary recall, embeddings, drives, emotions, or
 activation until an explicit review accepts a record. Authoritative replacement
-is not yet executable; use `--strategy additive` only when direct acceptance is
-intended.
+requires one or more explicit `--replace` choices and a rationale. Divergent
+protected state becomes a durable request that the agent can accept, refuse,
+modify, or defer. Accepted replacements retain a bounded reversion window.
 Protected sections can be omitted with `--skip-identity`, `--skip-worldview`, or
 `--skip-narrative`. Additive protected-state import remains restricted to
 port/duplicate exchanges targeting an empty instance.
+
+#### Operator override
+
+`--force-replace` is only for a non-functional acknowledgement channel. It
+cannot bypass an agent refusal or modification request. Configure the trusted
+Ed25519 public key as a base64 raw 32-byte key or PEM:
+
+```bash
+export HEXIS_HMX_OPERATOR_ED25519_PUBLIC_KEY='BASE64_PUBLIC_KEY'
+```
+
+Run the complete override command once with `--dry-run --json` and without
+`--operator-signature`. Its `operator_override.payload_base64` value is the
+exact byte payload to decode and sign outside Hexis; the report also includes
+its SHA-256 digest and trust-anchor fingerprint. Then rerun the same command
+with the base64 Ed25519 signature and `--confirm-intent`:
+
+```bash
+hexis import exchange.hmx.json \
+  --strategy authoritative --replace worldview \
+  --replacement-rationale 'Recovery rationale' \
+  --force-replace --operator-identity operator@example.com \
+  --override-reason-code agent_paused \
+  --override-evidence-ref report:incident-123 \
+  --override-acknowledgement \
+  "I accept responsibility for replacing this Hexis instance's protected state without its acknowledgement" \
+  --dry-run --json
+```
+
+Execution additionally requires `--operator-signature SIGNATURE` and
+`--confirm-intent port` (or `duplicate`, matching the file). The signature binds
+the source, selected sections, current and imported digests, phrase, reason,
+evidence, rationale, and operator identity. Any protected-state drift requires
+a new dry run and signature. Evidence references use `scheme:value`, such as a
+log, report, incident, or audit-system reference. Override audit records retain
+the normal reversion window and identify the bypass, reason, evidence, signing
+payload digest, and verified trust anchor.
 
 ### Auth
 
