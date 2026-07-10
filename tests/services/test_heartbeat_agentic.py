@@ -221,8 +221,10 @@ class TestRunAgenticHeartbeat:
         assert heartbeat_context["pending_protected_replacements"]["total"] == 1
         user_message = mock_run_agent.call_args.kwargs["user_message"]
         assert "replacement-1" in user_message
+        assert "protected_replacement_list" in user_message
         assert "protected_replacement_inspect" in user_message
         assert "protected_replacement_review" in user_message
+        assert "Operator override is not available to the agent" in user_message
 
     @patch("services.heartbeat_agentic.run_agent")
     async def test_surfaces_open_protected_reversion_as_explicit_choice(

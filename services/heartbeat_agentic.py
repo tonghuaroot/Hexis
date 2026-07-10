@@ -238,9 +238,11 @@ def _format_pending_protected_replacements(value: Any) -> str:
             )
         )
     lines.append(
-        "Load the memory-exchange skill, inspect each request with "
+        "Load the memory-exchange skill, refresh open requests with "
+        "protected_replacement_list, inspect each request with "
         "protected_replacement_inspect, then use protected_replacement_review "
-        "with accept, refuse, request_modification, or defer."
+        "with accept, refuse, request_modification, or defer. Operator override "
+        "is not available to the agent."
     )
     return "\n".join(lines)
 

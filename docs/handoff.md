@@ -1,10 +1,10 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (HMX Slice 12 operator override complete)
+Last updated: 2026-07-10 (HMX Slice 13 agent protocol tools complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-12 are complete:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-13 are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -29,18 +29,21 @@ purges consumed snapshot payloads while retaining tombstones. Rare operator
 overrides now require an exact responsibility phrase, enumerated
 reason and evidence, plus an Ed25519 signature over the complete replacement
 bundle verified against a configured public trust anchor. Overrides cannot
-bypass an agent refusal and retain the normal reversion window. The next
-implementation boundary is Slice 13 (agent tools for the replacement protocol).
+bypass an agent refusal and retain the normal reversion window. The agent now
+has skill-gated list, inspect, acknowledge, audit-history, open-reversion, and
+explicit revert tools without any operator-override capability. The next
+implementation boundary is a line-by-line HMX MVP acceptance audit.
 
-The prior hosted green baseline was `8e2d524` (`Complete HMX Slice 11 bounded
-reversion`), run
-https://github.com/QuixiAI/Hexis/actions/runs/29108506702
+The prior hosted green baseline was `43f2e70` (`Complete HMX Slice 12 operator
+override`), run
+https://github.com/QuixiAI/Hexis/actions/runs/29111110600
 (all jobs succeeded). Always verify the current head's hosted result with the
 command in "Useful Commands" below rather than assuming this historical
 baseline applies.
 
 Important recent commits:
 
+- `43f2e70` - Complete HMX Slice 12 operator override
 - `8e2d524` - Complete HMX Slice 11 bounded reversion
 - `c0a2e8e` - Complete HMX Slice 10 authoritative replacement
 - `73f41b4` - Complete HMX Slice 9 protected replacement core
@@ -684,8 +687,52 @@ existing 421 advisory marker warnings. Focused formatting, compilation, mypy,
 wheel inspection, and diff hygiene pass. The wheel contains the updated trust,
 replacement, memory-exchange, and CLI modules.
 
-Next: Slice 13 adds the agent-facing replacement-protocol tools described in
+Slice 13 follows with the agent-facing replacement-protocol tools described in
 `plans/hmx.md`; operator override remains CLI/operator-only.
+
+### HMX Slice 13 complete (agent replacement protocol tools)
+
+Key files:
+
+- `core/tools/protected_replacement.py` - dedicated skill-gated protocol
+  handlers for pending requests, inspection, acknowledgement, immutable local
+  audit history, open reversion windows, and explicit reversion.
+- `core/protected_replacement.py` - bounded `since`/`until` audit-history query
+  with total/returned/truncated metadata and foreign-diagnostic exclusion.
+- `core/tools/memory_exchange.py` and `core/tools/__init__.py` - backward-
+  compatible factory composition and public tool-factory export.
+- `skills/installed/memory-exchange/SKILL.md` and
+  `services/heartbeat_agentic.py` - discoverability, complete workflow guidance,
+  and an explicit statement that operator override is unavailable to the agent.
+- `tests/core/test_hmx_tools.py` and
+  `tests/services/test_heartbeat_agentic.py` - registry/schema boundaries and a
+  full pending -> inspect -> defer -> accept -> audit -> revert -> audit journey.
+
+Important behavior:
+
+- `protected_replacement_list` returns open pending/deferred decisions;
+  `protected_replacement_inspect` compares current and proposed state before a
+  decision; `protected_replacement_review` preserves all four agent choices.
+- `protected_replacement_audit_list` returns only immutable local replacement,
+  verification, and reversion history. Imported foreign diagnostics never read
+  as local experience. Results default to 100, accept a 1-500 limit, and report
+  truncation.
+- `protected_reversion_list` shows only still-open earlier-of windows, and
+  `protected_replacement_revert` retains the explicit rationale, drift check,
+  atomic restore/audit, and one-shot snapshot consumption rules from Slice 11.
+- All six tools are chat/heartbeat-only and skill-gated. Read operations are
+  marked read-only; acknowledgement and reversion are agent self-decisions and
+  cannot run in parallel. No HMX agent tool exposes force, operator signature,
+  operator identity, acknowledgement bypass, reason, or evidence arguments.
+
+Validation: 207 scoped HMX/tool/heartbeat tests pass with the existing five
+advisory marker warnings in the heartbeat module. Full validation: 2150 tests
+pass with the existing 421 advisory marker warnings. Focused compilation,
+Black, mypy, wheel inspection, and diff hygiene pass.
+
+Next: audit every item in the MVP-Core and MVP-Protected Replacement acceptance
+criteria in `plans/hmx.md`, close any concrete discrepancy, then declare the HMX
+MVP complete before moving to the broader parity roadmap.
 
 ## Current Roadmap
 
@@ -866,15 +913,16 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-Continue the HMX thread at Slice 13 from the signed override state now in place.
-Read `core/protected_replacement.py`, `core/tools/memory_exchange.py`,
-`services/heartbeat_agentic.py`, `tests/core/test_hmx_tools.py`, and the Slice 13
-tool requirements in `plans/hmx.md` before editing.
+Continue the HMX thread with the acceptance audit now that all numbered slices
+are complete. Read the MVP-Core and MVP-Protected Replacement criteria at the
+end of `plans/hmx.md`, then trace each claim through `core/memory_exchange.py`,
+`core/protected_replacement.py`, `core/tools/protected_replacement.py`, the HMX
+schema, SQL migrations, and focused tests before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 13: add the agent tools for listing, inspecting, acknowledging, and
-   reverting protected replacement operations without exposing operator override.
+1. HMX acceptance audit: verify every MVP-Core and MVP-Protected Replacement
+   criterion, add missing journey coverage, and close only evidenced gaps.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

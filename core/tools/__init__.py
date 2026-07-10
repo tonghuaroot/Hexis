@@ -85,6 +85,7 @@ from .registry import (
 
 from .memory import create_memory_tools
 from .memory_exchange import create_memory_exchange_tools
+from .protected_replacement import create_protected_replacement_tools
 from .web import create_web_tools, WebSearchHandler, WebFetchHandler, WebSummarizeHandler
 from .filesystem import (
     create_filesystem_tools,
@@ -220,6 +221,7 @@ __all__ = [
     # Tool factories
     "create_memory_tools",
     "create_memory_exchange_tools",
+    "create_protected_replacement_tools",
     "create_web_tools",
     # Web tools
     "WebSearchHandler",

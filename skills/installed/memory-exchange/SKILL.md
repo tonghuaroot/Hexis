@@ -3,9 +3,9 @@ name: memory-exchange
 description: Safely export, inspect, stage, analyze, review, and decide protected replacements for Hexis Memory Exchange files
 category: knowledge
 requires:
-  tools: [export_memories, import_dry_run, import_memories, import_review, protected_replacement_inspect, protected_replacement_review, protected_reversion_list, protected_replacement_revert]
+  tools: [export_memories, import_dry_run, import_memories, import_review, protected_replacement_list, protected_replacement_inspect, protected_replacement_review, protected_replacement_audit_list, protected_reversion_list, protected_replacement_revert]
 contexts: [heartbeat, chat]
-bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis, protected_replacement_inspect, protected_replacement_review, protected_reversion_list, protected_replacement_revert]
+bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis, protected_replacement_list, protected_replacement_inspect, protected_replacement_review, protected_replacement_audit_list, protected_reversion_list, protected_replacement_revert]
 ---
 
 # Hexis Memory Exchange
@@ -58,16 +58,23 @@ instance's memory without silently blending it into active state.
 
 1. A pending protected replacement is a request, not permission to mutate
    identity, worldview, goals, drives, emotional triggers, or narrative.
-2. Use `protected_replacement_inspect` to compare the actual imported section
-   with current local state, and check whether local state changed after the
-   request. Then use `protected_replacement_review` to accept, refuse, request
-   modifications, or defer.
+2. Use `protected_replacement_list` to retrieve every open request, then use
+   `protected_replacement_inspect` to compare the actual imported section with
+   current local state and check whether local state changed after the request.
+   Use `protected_replacement_review` to accept, refuse, request modifications,
+   or defer.
    Acceptance executes the snapshot, immutable audit, whole-section replacement,
    and digest verification atomically; a failure leaves the request pending.
 3. Refusal and modification requests require a rationale. Modification requests
    also require concrete `proposed_changes`. Do not accept merely because source
    and target claim the same lineage; content-identical verified operations never
    enter this queue.
+4. Use `protected_replacement_audit_list` with a narrow time range to inspect
+   immutable local replacement, verification, and reversion history. Imported
+   foreign diagnostics are not reported as local history.
+5. Operator override is not an agent tool and cannot be requested through this
+   skill. A refusal or modification request is a completed decision, not an
+   invitation to bypass acknowledgement.
 
 ## Protected Replacement Reversion
 

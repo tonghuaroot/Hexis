@@ -769,6 +769,54 @@ async def pending_protected_replacements(conn) -> dict[str, Any]:
     return result
 
 
+async def list_protected_replacement_audit(
+    conn,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """List immutable local replacement, verification, and reversion history."""
+
+    if since and until and since > until:
+        raise ProtectedReplacementError(
+            "invalid_audit_time_range",
+            "since must be earlier than or equal to until",
+        )
+    if limit < 1 or limit > 500:
+        raise ProtectedReplacementError(
+            "invalid_audit_limit", "limit must be between 1 and 500"
+        )
+    total = int(
+        await conn.fetchval(
+            "SELECT count(*) FROM protected_replacement_audit "
+            "WHERE NOT is_foreign_diagnostic "
+            "AND ($1::timestamptz IS NULL OR event_time >= $1) "
+            "AND ($2::timestamptz IS NULL OR event_time <= $2)",
+            since,
+            until,
+        )
+        or 0
+    )
+    rows = await conn.fetch(
+        "SELECT record FROM protected_replacement_audit "
+        "WHERE NOT is_foreign_diagnostic "
+        "AND ($1::timestamptz IS NULL OR event_time >= $1) "
+        "AND ($2::timestamptz IS NULL OR event_time <= $2) "
+        "ORDER BY event_time DESC, audit_id DESC LIMIT $3",
+        since,
+        until,
+        limit,
+    )
+    records = [_coerce_json(row["record"]) for row in rows]
+    return {
+        "total": total,
+        "returned": len(records),
+        "truncated": total > len(records),
+        "records": records,
+    }
+
+
 async def inspect_protected_replacement(conn, replacement_id: str) -> dict[str, Any]:
     row = await conn.fetchrow(
         "SELECT replacement_id, export_id, section, source, imported_section, "
