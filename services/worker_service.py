@@ -24,6 +24,7 @@ from core.state import (
 from services.external_calls import ExternalCallProcessor
 from services.heartbeat_agentic import finalize_heartbeat, run_agentic_heartbeat
 from services.heartbeat_runner import execute_heartbeat_decision
+from services.hmx_reembedding import run_hmx_reembed_step
 from services.recmem import (
     run_recmem_consolidation_step,
     run_recmem_embed_step,
@@ -425,6 +426,14 @@ class MaintenanceWorker:
                 except Exception:
                     logger.debug("Gateway record failed (non-fatal)", exc_info=True)
 
+    async def _run_hmx_reembedding(self) -> None:
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            result = await run_hmx_reembed_step(conn)
+            if not result.get("skipped"):
+                logger.info("HMX re-embedding step: %s", result)
+
     async def _run_subconscious_if_due(self) -> None:
         if not self.pool:
             return
@@ -500,6 +509,7 @@ class MaintenanceWorker:
                         await self.bridge.poll_inbox_messages()
                     await self._run_outbox_delivery()
                     await self._run_scheduled_tasks()
+                    await self._run_hmx_reembedding()
                     await self._run_maintenance_if_due()
                     await self._run_subconscious_if_due()
                     await self._run_reconsolidation_if_pending()

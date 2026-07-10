@@ -1207,6 +1207,13 @@ async def dry_run_hmx(
 
     for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
+            raw_units_supported = (
+                deferred_section == "raw_units"
+                and intent in ("port", "duplicate")
+                and strategy == "additive"
+            )
+            if raw_units_supported:
+                continue
             isolated = strategy in {"deliberative", "analysis_only"}
             warnings.append(
                 {
@@ -1272,6 +1279,7 @@ async def dry_run_hmx(
             "emotional_triggers",
             "clusters",
             "narrative",
+            "raw_units",
         )
     )
 
@@ -1368,7 +1376,12 @@ async def dry_run_hmx(
         },
         privacy=privacy,
         estimated_embedding_items=(
-            sum(new_by_section.values()) if strategy == "additive" else 0
+            (
+                sum(new_by_section.values())
+                + (counts.get("raw_units", 0) if intent in ("port", "duplicate") else 0)
+            )
+            if strategy == "additive"
+            else 0
         ),
     )
 
@@ -1607,11 +1620,11 @@ async def import_hmx(
     initial_ref_map: dict[str, str] | None = None,
     reviewed: bool = False,
 ) -> HmxImportResult | HmxStagingResult | HmxAnalysisResult:
-    """Import HMX with the additive Slice 2 strategy in one transaction.
+    """Import HMX using additive, deliberative, or analysis-only storage.
 
-    Deliberative, analysis-only, and authoritative storage arrive in later
-    slices and are rejected explicitly. Protected state is admitted only for a
-    port/duplicate into a target that is empty by HMX's diagnostic predicate.
+    Protected state is admitted directly only for a port/duplicate into a
+    target that is empty by HMX's diagnostic predicate. Authoritative
+    replacement remains a later protocol.
     """
 
     if not isinstance(data, dict):
@@ -1630,7 +1643,7 @@ async def import_hmx(
 
     sections = _import_sections(data)
     warnings: list[dict[str, Any]] = []
-    for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
+    for deferred_section in ("config", "in_flight_work", "audit_records"):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
             warnings.append(
                 {
@@ -1653,6 +1666,21 @@ async def import_hmx(
         data, "memories", sections.get("memories", [])
     )
     warnings.extend(record_warnings)
+    raw_records: list[dict[str, Any]] = []
+    if _section_has_records("raw_units", sections.get("raw_units")):
+        if intent in ("port", "duplicate"):
+            raw_records, raw_warnings = _validated_records(
+                data, "raw_units", sections.get("raw_units", [])
+            )
+            warnings.extend(raw_warnings)
+        else:
+            warnings.append(
+                {
+                    "code": "unsupported_section",
+                    "section": "raw_units",
+                    "error": "raw units enter active RecMem only for port or duplicate intent",
+                }
+            )
     goal_records: list[dict[str, Any]] = []
     for section in ("worldview", "goals"):
         records, section_warnings = _validated_records(
@@ -1817,6 +1845,19 @@ async def import_hmx(
                 for error in memory_result["errors"]
             )
 
+        duplicate_memory_refs = set(memory_result.get("duplicate_refs") or [])
+        memory_ref_map = dict(memory_result.get("ref_map") or {})
+        queued_memory_ids = [
+            memory_ref_map[record["ref"]]
+            for record in prepared_memories
+            if record.get("ref") in memory_ref_map
+            and record.get("ref") not in duplicate_memory_refs
+        ]
+        if queued_memory_ids:
+            await conn.fetchval(
+                "SELECT hmx_queue_reembed($1::uuid[])", queued_memory_ids
+            )
+
         ref_map = dict(initial_ref_map or {})
         ref_map.update(memory_result.get("ref_map") or {})
         goal_result = _coerce_json(
@@ -1877,6 +1918,15 @@ async def import_hmx(
                 json.dumps(ref_map),
             )
         )
+        raw_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_raw_units($1::jsonb, $2::text, $3::jsonb)",
+                json.dumps(raw_records),
+                export_id,
+                json.dumps(ref_map),
+            )
+        )
+        ref_map.update(raw_result.get("ref_map") or {})
         warnings.extend(episode_result.get("warnings") or [])
         warnings.extend(cluster_result.get("warnings") or [])
         warnings.extend(relationship_result.get("warnings") or [])
@@ -1885,6 +1935,7 @@ async def import_hmx(
         warnings.extend(drive_result.get("warnings") or [])
         warnings.extend(narrative_result.get("warnings") or [])
         warnings.extend(trigger_result.get("warnings") or [])
+        warnings.extend(raw_result.get("warnings") or [])
 
         if target_state.get("is_empty") and intent in ("port", "duplicate"):
             if source_lineage:
@@ -1897,21 +1948,25 @@ async def import_hmx(
     conflicts = tuple(
         {"code": "duplicate_content", "ref": ref} for ref in duplicate_refs
     )
+    inserted = {
+        "memories": int(memory_result.get("inserted", 0)),
+        "episodes": int(episode_result.get("inserted", 0)),
+        "clusters": int(cluster_result.get("inserted", 0)),
+        "relationships": int(relationship_result.get("inserted", 0)),
+        "identity": int(identity_result.get("imported", 0)),
+        "drives": int(drive_result.get("imported", 0)),
+        "emotional_triggers": int(trigger_result.get("inserted", 0)),
+        "narrative": int(narrative_result.get("imported", 0)),
+    }
+    if raw_records:
+        inserted["raw_units"] = int(raw_result.get("inserted", 0))
+
     return HmxImportResult(
         export_id=export_id,
         intent=intent,
         strategy=strategy,
         target_state=target_state,
-        inserted={
-            "memories": int(memory_result.get("inserted", 0)),
-            "episodes": int(episode_result.get("inserted", 0)),
-            "clusters": int(cluster_result.get("inserted", 0)),
-            "relationships": int(relationship_result.get("inserted", 0)),
-            "identity": int(identity_result.get("imported", 0)),
-            "drives": int(drive_result.get("imported", 0)),
-            "emotional_triggers": int(trigger_result.get("inserted", 0)),
-            "narrative": int(narrative_result.get("imported", 0)),
-        },
+        inserted=inserted,
         duplicate_refs=duplicate_refs,
         ref_map=ref_map,
         conflicts=conflicts,

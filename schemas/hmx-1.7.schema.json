@@ -478,7 +478,13 @@
       "required": ["ref"],
       "properties": {
         "ref": {"$ref": "#/$defs/ref"},
+        "user_text": {"type": "string"},
+        "assistant_text": {"type": "string"},
         "turn_at": {"$ref": "#/$defs/dateTime"},
+        "importance": {"type": "number", "minimum": 0, "maximum": 1},
+        "route_status": {"type": "string"},
+        "source_identity": {"type": "string"},
+        "idempotency_key": {"type": "string"},
         "derived_memory_refs": {"$ref": "#/$defs/refList"}
       },
       "additionalProperties": true

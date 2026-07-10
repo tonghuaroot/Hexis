@@ -1,25 +1,28 @@
 # Hexis Handoff
 
-Last updated: 2026-07-09 (HMX Slice 5 skill-first agent tools complete)
+Last updated: 2026-07-10 (HMX Slice 6 re-embedding pipeline complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-5 are complete:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-6 are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
 side-effect-free dry-run reporting, and isolated deliberative/analysis storage
 with explicit review transitions, plus skill-gated agent tools for the complete
-export/import/review workflow. The next implementation boundary is Slice 6
-(re-embedding accepted imports and recomputing derived memory structures).
+export/import/review workflow. Accepted imports now enter a bounded maintenance
+re-embedding pipeline, refresh derived memory structures, and can carry eligible
+raw RecMem units during port/duplicate. The next implementation boundary is
+Slice 7 (in-flight work and interrupted consolidation).
 
-The prior hosted green baseline was `3ba0bc6` (`Complete HMX Slice 4 isolated
-review`), run https://github.com/QuixiAI/Hexis/actions/runs/29053571794 (all jobs
+The prior hosted green baseline was `902c30f` (`Complete HMX Slice 5 agent
+tools`), run https://github.com/QuixiAI/Hexis/actions/runs/29068079227 (all jobs
 succeeded). Always verify the current head's hosted result with the command in
 "Useful Commands" below rather than assuming this historical baseline applies.
 
 Important recent commits:
 
+- `902c30f` - Complete HMX Slice 5 agent tools
 - `3ba0bc6` - Complete HMX Slice 4 isolated review
 - `c3be2f8` - Wait for DB init completion in CI
 - `e0fb2cf` - Stabilize CI fake embedding lane
@@ -251,10 +254,12 @@ Important behavior:
 - Protected state imports directly only for port/duplicate into an empty target.
   Telepathy/analysis or active targets fail with `bootstrap_state_violation`.
 - Memories receive a zero-vector sentinel plus
-  `metadata.embedding_status = pending_import`; re-embedding remains Slice 6.
-- `raw_units`, `config`, `in_flight_work`, and non-empty `audit_records` report
-  `unsupported_section` rather than being silently consumed; their import paths
-  belong to later slices.
+  `metadata.embedding_status = pending_import`; Slice 6 now processes that
+  state after admission.
+- At this slice boundary, `raw_units`, `config`, `in_flight_work`, and non-empty
+  `audit_records` reported `unsupported_section` rather than being silently
+  consumed. Slice 6 added the port/duplicate raw-unit path; the others remain
+  later work.
 - Focused validation: 79 HMX schema/digest/trust/export/import/migration tests pass.
 
 ### HMX Slice 3 CLI and dry-run complete locally
@@ -370,10 +375,48 @@ Important behavior:
   tests pass with the existing 421 advisory marker warnings. Wheel contents
   were inspected and include both HMX modules plus all bundled `SKILL.md` files.
 
-Next: Slice 6 connects accepted `pending_import` memories to the maintenance
-embedding queue, refreshes their vectors, and recomputes derived neighborhoods
-and clusters without embedding staged or analysis-only records into active
-recall.
+### HMX Slice 6 re-embedding pipeline complete
+
+Key files:
+
+- `db/51_hmx_reembedding.sql` and migration `0010` - imported-memory queue,
+  bounded claim/retry state, database-owned embedding, neighborhood/cluster
+  refresh, and raw-unit RecMem ingestion.
+- `services/hmx_reembedding.py` / `services/worker_service.py` - one claimed
+  batch per maintenance tick with savepoint-isolated failures and actionable
+  retry diagnostics.
+- `core/memory_exchange.py` / `schemas/hmx-1.7.schema.json` - newly admitted
+  memories are queued, port/duplicate raw units are validated and imported, and
+  dry-run embedding estimates include eligible raw units.
+- `tests/db/test_hmx_reembedding.py` /
+  `tests/services/test_hmx_reembedding.py` - live-DB success, bounded failure,
+  isolation, derivative refresh, raw-unit idempotency/routing, and worker tests.
+
+Important behavior:
+
+- Only active memories with an HMX provenance import chain can enter the queue.
+  Staged, analysis-only, archived, and ordinary local memories are excluded.
+- Claims use `FOR UPDATE SKIP LOCKED`, recover interrupted claims after a
+  configured timeout, and stop after a configured maximum attempt count with
+  the failure cause retained in memory metadata.
+- Successful work replaces the sentinel from `get_embedding(content)`, records
+  the live configured embedding model, recomputes the imported memories'
+  neighborhoods, marks affected peers stale for normal maintenance, and
+  refreshes linked cluster centroids and assignments.
+- Promotion still copies no analysis embedding. Acceptance passes through the
+  additive admission path and is freshly queued in the main index.
+- Port/duplicate raw units enter `subconscious_units` through
+  `recmem_ingest_turn` under `import:{export_id}:...`, retain source diagnostics,
+  preserve derived-memory links, deduplicate through the normal RecMem key, and
+  continue through the existing embed/route workers. Other intents do not place
+  raw text into active RecMem.
+- Focused cross-feature validation: 128 tests pass. Full validation: 2073 tests
+  pass with the existing 421 advisory marker warnings. The wheel contains the
+  service module plus both baseline and forward-migration SQL.
+
+Next: Slice 7 exports pending/in-progress consolidation and reconsolidation
+work for port/duplicate, imports it as safe pending work, and drops tasks whose
+inputs were not imported without carrying worker locks or runtime state.
 
 ## Current Roadmap
 
@@ -555,15 +598,15 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 ## Resume Recommendation
 
 Do not continue debugging the old CI failures first. Continue the HMX thread at
-Slice 6 from the accepted-import contract now pinned in tests. Read
-`core/memory_exchange.py`, `core/tools/memory_exchange.py`,
-`services/worker_service.py`, `tests/db/test_hmx_staging.py`, and the Slice 6
-plan section before editing.
+Slice 7 from the admitted-memory and raw-unit contracts now pinned in tests.
+Read `db/31_functions_recmem.sql`, `db/47_functions_retention.sql`,
+`core/memory_exchange.py`, `services/worker_service.py`,
+`tests/db/test_hmx_reembedding.py`, and the Slice 7 plan section before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 6: queue and process re-embedding for accepted imported memories,
-   then recompute neighborhoods/clusters while preserving staging isolation.
+1. HMX Slice 7: export/import pending and interrupted consolidation work, safely
+   requeue valid inputs, and preserve failed work as diagnostics.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.
