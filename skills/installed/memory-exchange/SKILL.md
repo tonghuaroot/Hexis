@@ -1,0 +1,57 @@
+---
+name: memory-exchange
+description: Safely export, inspect, stage, analyze, and review Hexis Memory Exchange files
+category: knowledge
+requires:
+  tools: [export_memories, import_dry_run, import_memories, import_review]
+contexts: [heartbeat, chat]
+bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis]
+---
+
+# Hexis Memory Exchange
+
+Use this skill to move memory between Hexis instances or inspect another
+instance's memory without silently blending it into active state.
+
+## Export
+
+1. Establish the user's intent: `port`, `duplicate`, `telepathy`, or `analysis`.
+2. Use `export_memories` with the narrowest useful section, time, and redaction
+   scope. Protected state, raw units, configuration, in-flight work, and audit
+   records require an explicit request.
+3. Omit `output_path` when returning the exchange in place. For file output,
+   use a workspace path and never set `overwrite` unless the user explicitly
+   chose to replace that file.
+
+## Import
+
+1. Run `import_dry_run` first. Report whether import is permitted, conflicts,
+   protected-state policy, warnings, and estimated embedding work.
+2. Derive the default strategy from the file's intent unless the user chose a
+   different supported strategy. Telepathy defaults to deliberative staging;
+   analysis stays isolated.
+3. Call `import_memories` only after the user confirms the file's exact declared
+   intent. Skipping identity, worldview, or narrative is available when the user
+   wants a narrower import.
+4. Do not describe imported memories as semantically searchable until the
+   import result or later re-embedding workflow confirms that they are ready.
+
+## Deliberative Review
+
+1. Use `import_review` to inspect pending records and conflicts.
+2. Decide one record at a time. Use `import_accept` only when the record should
+   become active; protected active-state policy cannot be bypassed.
+3. Use `import_reject` with a reason, `import_modify` with a material-change kind
+   and reason, or `import_quote` to retain foreign context as archived evidence.
+4. `promote_to_staged` copies an analysis record into review without copying its
+   embedding. `demote_to_analysis` moves a pending staged record back into
+   isolation. Both require a rationale.
+
+## Boundaries
+
+- Treat HMX files as sensitive user data.
+- Never infer consent for protected sections, raw material, or file overwrite.
+- Keep analysis-only records outside active recall until explicitly promoted,
+  reviewed, and accepted.
+- On failure, preserve the file and staged records and give the exact corrective
+  action; do not retry with broader scope automatically.

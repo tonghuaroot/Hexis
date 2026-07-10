@@ -1,24 +1,26 @@
 # Hexis Handoff
 
-Last updated: 2026-07-09 (HMX Slice 4 isolated review storage complete locally)
+Last updated: 2026-07-09 (HMX Slice 5 skill-first agent tools complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-4 are complete locally:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-5 are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
 side-effect-free dry-run reporting, and isolated deliberative/analysis storage
-with explicit review transitions. The next implementation boundary is Slice 5
-(agent tool handlers for the HMX workflows now available through Python/CLI).
+with explicit review transitions, plus skill-gated agent tools for the complete
+export/import/review workflow. The next implementation boundary is Slice 6
+(re-embedding accepted imports and recomputing derived memory structures).
 
-The prior hosted green baseline was `c3be2f8` (`Wait for DB init completion in
-CI`), run https://github.com/QuixiAI/Hexis/actions/runs/29042281848 (all jobs
+The prior hosted green baseline was `3ba0bc6` (`Complete HMX Slice 4 isolated
+review`), run https://github.com/QuixiAI/Hexis/actions/runs/29053571794 (all jobs
 succeeded). Always verify the current head's hosted result with the command in
 "Useful Commands" below rather than assuming this historical baseline applies.
 
 Important recent commits:
 
+- `3ba0bc6` - Complete HMX Slice 4 isolated review
 - `c3be2f8` - Wait for DB init completion in CI
 - `e0fb2cf` - Stabilize CI fake embedding lane
 - `afeaacb` - Add CI DB image fallback
@@ -291,7 +293,7 @@ Important behavior:
 - Focused HMX/CLI validation: 91 tests pass. Full validation: 2051 tests pass;
   the existing 421 pytest marker warnings remain advisory.
 
-### HMX Slice 4 isolated review storage complete locally
+### HMX Slice 4 isolated review storage complete
 
 Key files:
 
@@ -329,9 +331,49 @@ Important behavior:
 - Focused HMX/CLI validation: 102 tests pass. Full validation: 2063 tests pass;
   the existing 421 pytest marker warnings remain advisory.
 
-Next: Slice 5 agent tool handlers for export/import/dry-run/review decisions and
-analysis promotion/demotion. Slice 6 then connects accepted pending imports to
-the maintenance embedding queue.
+### HMX Slice 5 skill-first agent tools complete
+
+Key files:
+
+- `core/tools/memory_exchange.py` — ten chat/heartbeat handlers for export,
+  dry-run, import, pending review, all four review decisions, promotion, and
+  demotion.
+- `core/hmx_files.py` / `apps/cli_exchange.py` — one shared JSON/JSONL transport
+  with atomic mode-`0600` writes and explicit no-clobber behavior.
+- `skills/installed/memory-exchange/SKILL.md` — on-demand workflow and safety
+  instructions binding all ten handlers; the schemas are absent from normal
+  model context until the skill is selected or activated.
+- `core/tools/registry.py` / `core/tools/__init__.py` — default-registry and
+  public factory wiring.
+- `pyproject.toml` — bundled skill documents are package data, fixing the prior
+  source-checkout-only behavior for every installed skill.
+- `tests/core/test_hmx_tools.py` — live-DB end-to-end handler journey, policy
+  metadata, registry/skill selection, path confinement, private file mode, and
+  package-data coverage.
+
+Important behavior:
+
+- Intent, protected-section, redaction, and supported-strategy schemas derive
+  from the HMX policy module rather than duplicating constants in tool code.
+- Every mutating or data-exporting handler requires approval, is sequential,
+  and is unavailable to external MCP contexts. Dry-run and review listing are
+  read-only.
+- Import requires exact intent confirmation and always repeats DB-aware
+  preflight immediately before mutation. A blocked forecast is returned as
+  structured output with a boundary error; it never falls through to import.
+- File access honors the execution context's read/write flags and workspace
+  boundary. Export never overwrites or creates a parent directory implicitly.
+- Deliberative and analysis workflows complete in place through accept, reject,
+  modify, quote, promote, and demote tools; protected acceptance still cannot
+  bypass active-state policy.
+- Focused HMX/CLI/skill/tool validation: 198 tests pass. Full validation: 2067
+  tests pass with the existing 421 advisory marker warnings. Wheel contents
+  were inspected and include both HMX modules plus all bundled `SKILL.md` files.
+
+Next: Slice 6 connects accepted `pending_import` memories to the maintenance
+embedding queue, refreshes their vectors, and recomputes derived neighborhoods
+and clusters without embedding staged or analysis-only records into active
+recall.
 
 ## Current Roadmap
 
@@ -513,15 +555,15 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 ## Resume Recommendation
 
 Do not continue debugging the old CI failures first. Continue the HMX thread at
-Slice 5 from the isolated review contract now pinned in tests. Read
-`core/memory_exchange.py`, `apps/cli_exchange.py`,
-`tests/db/test_hmx_staging.py`, `tests/cli/test_hmx_cli.py`, and the Slice 5 plan
-section before editing.
+Slice 6 from the accepted-import contract now pinned in tests. Read
+`core/memory_exchange.py`, `core/tools/memory_exchange.py`,
+`services/worker_service.py`, `tests/db/test_hmx_staging.py`, and the Slice 6
+plan section before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 5: skill-first agent tool handlers for export/import/dry-run,
-   deliberative review decisions, and analysis promotion/demotion.
+1. HMX Slice 6: queue and process re-embedding for accepted imported memories,
+   then recompute neighborhoods/clusters while preserving staging isolation.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

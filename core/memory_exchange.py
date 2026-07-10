@@ -28,6 +28,8 @@ from typing import Any, Iterable
 HMX_VERSION = "1.7"
 
 EXPORT_INTENTS = ("port", "duplicate", "telepathy", "analysis")
+SUPPORTED_IMPORT_STRATEGIES = ("additive", "deliberative", "analysis_only")
+REDACTION_POLICIES = ("none", "basic", "strict", "custom")
 
 # Sections that affect self-constitution, motivational state, value structure,
 # or long-range narrative identity. Excluded by default for telepathy/analysis;
@@ -427,7 +429,7 @@ def build_envelope(
     """Construct the HMX envelope (spec: "Format Specification"). Sections and
     statistics start empty; the exporter fills them as it serializes."""
     validate_intent(intent)
-    if redaction_policy not in ("none", "basic", "strict", "custom"):
+    if redaction_policy not in REDACTION_POLICIES:
         raise HmxPolicyError(f"unknown redaction_policy: {redaction_policy!r}")
 
     stamp = (exported_at or datetime.now(UTC)).isoformat().replace("+00:00", "Z")

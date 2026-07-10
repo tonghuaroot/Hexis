@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import os
 import sys
-import tempfile
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -16,12 +14,18 @@ from typing import Any
 
 import asyncpg
 
+from core.hmx_files import (
+    load_hmx_file,
+    parse_hmx_text,
+    serialize_hmx_document,
+    write_private_hmx_file,
+)
+
 from core.memory_exchange import (
     HmxAnalysisResult,
     HmxDryRunResult,
     HmxImportResult,
     HmxPolicyError,
-    HmxSchemaError,
     HmxStagingResult,
     accept_staged_import,
     default_import_strategy,
@@ -29,8 +33,6 @@ from core.memory_exchange import (
     dry_run_hmx,
     export_hmx,
     import_hmx,
-    iter_hmx_jsonl,
-    parse_hmx_jsonl,
     pending_hmx_reviews,
     promote_analysis_to_staged,
     quote_staged_import,
@@ -82,73 +84,16 @@ def _timestamp(value: str | None, flag: str) -> datetime | None:
 
 def _load_document(path_value: str) -> dict[str, Any]:
     if path_value == "-":
-        text = sys.stdin.read()
-        label = "stdin"
-    else:
-        path = Path(path_value).expanduser()
-        try:
-            text = path.read_text(encoding="utf-8")
-        except FileNotFoundError as exc:
-            raise HmxSchemaError(f"HMX file not found: {path}") from exc
-        except OSError as exc:
-            raise HmxSchemaError(f"could not read HMX file {path}: {exc}") from exc
-        label = str(path)
-
-    if not text.strip():
-        raise HmxSchemaError(f"HMX input from {label} is empty")
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return parse_hmx_jsonl(text.splitlines())
-    if not isinstance(parsed, dict):
-        raise HmxSchemaError(f"HMX input from {label} must be a JSON object")
-    if parsed.get("record_type") == "envelope":
-        return parse_hmx_jsonl(text.splitlines())
-    return parsed
+        return parse_hmx_text(sys.stdin.read(), label="stdin")
+    return load_hmx_file(path_value)
 
 
 def _serialized_export(document: dict[str, Any], output_format: str) -> str:
-    if output_format == "jsonl":
-        return "\n".join(iter_hmx_jsonl(document)) + "\n"
-    return json.dumps(document, indent=2, sort_keys=True, default=str) + "\n"
+    return serialize_hmx_document(document, output_format)
 
 
 def _write_private_file(path_value: str, content: str, *, overwrite: bool) -> Path:
-    path = Path(path_value).expanduser()
-    parent = path.parent
-    if not parent.exists():
-        raise HmxPolicyError(
-            f"output directory does not exist: {parent}. Create it explicitly and retry."
-        )
-    if path.exists() and not overwrite:
-        raise HmxPolicyError(
-            f"output file already exists: {path}. Choose another path or pass --overwrite."
-        )
-
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=parent)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if overwrite:
-            os.replace(temporary, path)
-        else:
-            try:
-                os.link(temporary, path)
-            except FileExistsError as exc:
-                raise HmxPolicyError(
-                    f"output file already exists: {path}. Choose another path or pass --overwrite."
-                ) from exc
-            os.unlink(temporary)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-    return path
+    return write_private_hmx_file(path_value, content, overwrite=overwrite)
 
 
 def _apply_skips(document: dict[str, Any], skipped: list[str]) -> dict[str, Any]:
