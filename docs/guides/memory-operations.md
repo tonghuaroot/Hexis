@@ -60,6 +60,32 @@ async with CognitiveMemory.connect(DSN) as mem:
 SELECT * FROM fast_recall('UI preferences', 5);
 ```
 
+### Search History (Exact Cross-Session Retrieval)
+
+Use full-text history search for exact names, phrases, operators, or details from
+prior conversations. It searches active raw turns and consolidated memories in
+Postgres without calling an embedding provider:
+
+```python
+async with CognitiveMemory.connect(DSN) as mem:
+    results = await mem.search_history(
+        '"project lantern" deployment',
+        sources=["turn", "memory"],
+        limit=20,
+    )
+```
+
+```sql
+SELECT *
+FROM search_cross_session_history('"project lantern" deployment', 20);
+```
+
+The agent-facing `search_history` tool excludes raw turns from its current UUID
+session by default because the live conversation is already in context. Set
+`exclude_current_session` to false when the current stored turn is relevant.
+Inactive memories, expired memories, and redacted or archived raw turns are
+never returned.
+
 ### Hydrate (Context Building)
 
 Hydrate gathers a rich context package for LLM prompts -- memories, goals, identity, worldview:
@@ -102,11 +128,19 @@ The `fast_recall()` function combines three retrieval strategies:
 
 Results are scored, deduplicated, and ranked.
 
+`search_cross_session_history()` is the complementary lexical path. PostgreSQL
+web-search syntax supports quoted phrases, `OR`, and minus-prefixed exclusions;
+the partial GIN index on active raw turns keeps this path independent of vector
+generation and RecMem embedding lag.
+
 ## Working with Memories in SQL
 
 ```sql
 -- Search active memories
 SELECT * FROM fast_recall('what the user likes', 10);
+
+-- Free lexical search across prior turns and consolidated memories
+SELECT * FROM search_cross_session_history('"release checklist"', 20);
 
 -- Count memories by type
 SELECT type, count(*) FROM memories WHERE status = 'active' GROUP BY type;

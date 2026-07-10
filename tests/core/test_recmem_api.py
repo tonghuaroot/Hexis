@@ -150,6 +150,76 @@ async def test_hydrate_recmem_maps_tiers_and_dedupes_raw_sources():
     assert conn.fetch_calls[0][1][0] == "apples"
 
 
+async def test_search_history_maps_typed_results_and_sql_filters():
+    item_id = uuid4()
+    session_id = uuid4()
+    source_id = uuid4()
+    occurred_at = datetime.now(timezone.utc)
+    conn = _Conn()
+    conn.fetch_rows = [
+        {
+            "source_kind": "turn",
+            "item_id": item_id,
+            "session_id": session_id,
+            "content": "User: exact phrase\n\nAssistant: found",
+            "user_text": "exact phrase",
+            "assistant_text": "found",
+            "memory_type": None,
+            "occurred_at": occurred_at,
+            "rank": 0.5,
+            "source_unit_ids": [source_id],
+            "source_attribution": {"kind": "conversation"},
+            "metadata": {"channel": "api"},
+        }
+    ]
+    mem = CognitiveMemory(_Pool(conn))
+
+    results = await mem.search_history(
+        "exact phrase",
+        limit=500,
+        sources=["turn"],
+        exclude_session_id=session_id,
+    )
+
+    assert len(results) == 1
+    assert results[0].item_id == item_id
+    assert results[0].session_id == session_id
+    assert results[0].memory_type is None
+    assert results[0].source_unit_ids == [source_id]
+    _query, args = conn.fetch_calls[0]
+    assert args[0] == "exact phrase"
+    assert args[1] == 100
+    assert args[2] == ["turn"]
+    assert args[5] == str(session_id)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"query": ""}, "must not be empty"),
+        ({"query": "detail", "sources": ["other"]}, "invalid: other"),
+        ({"query": "detail", "sources": []}, "at least one source"),
+        (
+            {
+                "query": "detail",
+                "created_after": datetime(2026, 8, 1),
+                "created_before": datetime(2026, 7, 1),
+            },
+            "must be earlier",
+        ),
+        (
+            {"query": "detail", "exclude_session_id": "not-a-uuid"},
+            "must be a UUID",
+        ),
+    ],
+)
+async def test_search_history_rejects_invalid_api_filters(kwargs, message):
+    mem = CognitiveMemory(_Pool(_Conn()))
+
+    with pytest.raises(ValueError, match=message):
+        await mem.search_history(**kwargs)
+
+
 async def test_link_and_redact_unit_call_recmem_sql():
     conn = _Conn()
     mem = CognitiveMemory(_Pool(conn))

@@ -1,11 +1,11 @@
 ---
 name: core-memory
-description: Recall, remember, journal, goals, and document-fade approvals for normal continuity
+description: Semantic recall, exact cross-session search, remembering, and normal continuity
 category: system
 requires:
-  tools: [recall, remember]
+  tools: [recall, search_history, remember]
 contexts: [heartbeat, chat]
-bound_tools: [recall, remember, sense_memory_availability, read_journal, write_journal, search_journal, manage_goals, manage_schedule, manage_backlog, list_document_fade_requests, resolve_document_fade]
+bound_tools: [recall, search_history, remember, sense_memory_availability, read_journal, write_journal, search_journal, manage_goals, manage_schedule, manage_backlog, list_document_fade_requests, resolve_document_fade]
 ---
 
 # Core Memory and Continuity
@@ -24,10 +24,12 @@ Use this skill for ordinary continuity: recalling relevant memories, storing new
 
 1. Use `sense_memory_availability` for a cheap check when unsure whether memory is likely to help.
 2. Use `recall` for targeted retrieval. Prefer specific queries over broad ones.
-3. Use `remember` when a durable fact, event, preference, promise, or decision should persist.
-4. Use journal tools only for deliberate permanent entries, not ordinary memory.
-5. Use goal, schedule, or backlog tools when the user asks for ongoing commitments or work tracking.
-6. Use document approval tools when the user explicitly says to keep or let an ingested document fade.
+3. Use `search_history` for exact names, phrases, or details from earlier
+   sessions, especially when semantic recall is weak or embeddings are unavailable.
+4. Use `remember` when a durable fact, event, preference, promise, or decision should persist.
+5. Use journal tools only for deliberate permanent entries, not ordinary memory.
+6. Use goal, schedule, or backlog tools when the user asks for ongoing commitments or work tracking.
+7. Use document approval tools when the user explicitly says to keep or let an ingested document fade.
 
 ## Quality Guidelines
 

@@ -29,6 +29,7 @@ All creation functions generate embeddings via `get_embedding()` and create grap
 | Function | Description |
 |----------|-------------|
 | `fast_recall(query_text, limit)` | Primary hot-path retrieval (vector + neighborhoods + temporal) |
+| `search_cross_session_history(query, limit, sources, after, before, exclude_session)` | Free Postgres FTS across active raw turns and memories |
 | `search_similar_memories(query, limit, types)` | Similarity search with type filter |
 | `search_working_memory(query)` | Search working memory buffer |
 

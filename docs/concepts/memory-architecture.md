@@ -72,6 +72,11 @@ graph TD
 
 **Precomputed neighborhoods** store associative neighbor data for each memory, enabling spreading activation without real-time graph traversal.
 
+**Full-text history search** uses PostgreSQL GIN indexes across raw RecMem turns
+and consolidated memories. It provides a free lexical fallback for exact names
+and phrases even before a turn has an embedding or while an embedding provider
+is unavailable.
+
 **Memory decay** reduces importance over time with importance-weighted persistence. Permanent memories (from important ingestion) are exempt.
 
 ### Retrieval Model
@@ -80,6 +85,7 @@ Three performance tiers:
 
 | Path | Method | Speed | Use Case |
 |------|--------|-------|----------|
+| **Lexical** | `search_cross_session_history` | Fast | Exact prior-turn or memory details without embeddings |
 | **Hot** | `fast_recall` + neighborhoods + temporal | Fast | Primary retrieval |
 | **Warm** | Cluster/episode lookups | Medium | Thematic search |
 | **Cold** | Graph traversal (Apache AGE) | Slow | Multi-hop reasoning |

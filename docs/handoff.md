@@ -1,12 +1,12 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (Phase 2 extensibility hardening complete)
+Last updated: 2026-07-10 (Phase 4 cross-session FTS complete)
 
 ## Current Status
 
 The HMX workstream (`plans/hmx.md`) is MVP-complete, Phase 2 extensibility is
-hardened, and the core Phase 3 interop work is complete. Slices 0-13 and the
-final HMX acceptance audit are complete:
+hardened, the core Phase 3 interop work is complete, and Phase 4 now has free
+cross-session lexical search. Slices 0-13 and the final HMX acceptance audit are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -39,7 +39,7 @@ also serves its canonical agent through OpenAI-compatible model discovery and
 buffered/streamed chat completions, with tested MCP listing and dispatch.
 Plugin manifests and live configuration now fail closed before registration,
 and agent skill updates require explicit ownership provenance. The next
-implementation boundary is Phase 4 cross-session learning.
+implementation boundary is the Phase 4 self-improvement worker.
 
 The prior hosted green baseline was `a31b0b8` (`Complete HMX Slice 13 agent
 protocol tools`), run
@@ -844,6 +844,42 @@ with the existing 421 advisory marker warnings. Compilation and diff hygiene
 pass; focused mypy still expands into the repository's existing advisory
 baseline.
 
+### Phase 4 cross-session FTS complete
+
+Key files:
+
+- `db/migrations/0016_cross_session_fts.sql`, `db/01_indices.sql`, and
+  `db/31_functions_recmem.sql` - an idempotent partial GIN index for active raw
+  turns and the DB-authoritative `search_cross_session_history` union;
+- `core/cognitive_memory_api.py` - typed `HistorySearchResult` plus async/sync
+  `search_history` clients with source, date, limit, and session validation;
+- `core/tools/memory.py` and `skills/installed/core-memory/SKILL.md` - zero-cost
+  `search_history`, default current-session exclusion, and default core-memory
+  skill exposure;
+- `tests/db/test_cross_session_search.py`,
+  `tests/core/test_history_search_tool.py`, and
+  `tests/core/test_recmem_api.py` - database truth, typed mapping, tool framing,
+  and agent access contracts.
+
+Important behavior:
+
+- Search covers active `subconscious_units` turns and active, non-expired
+  `memories`, ranked together with PostgreSQL web-search semantics. Redacted and
+  archived turns plus invalidated/expired memories remain outside the result.
+- The path never calls `get_embedding`; new raw turns are searchable before
+  RecMem embedding/routing and search remains available during provider outage.
+- Results preserve separate user/assistant turn text, source kind, representative
+  source session, linked raw-unit IDs, attribution, metadata, timestamp, and
+  lexical rank. Callers do not parse formatted display content.
+- The agent tool excludes its current UUID session by default, surfaces the
+  applied exclusion in output, supports an explicit opt-out, and leaves
+  consolidated memories searchable.
+
+Focused validation passes 146 RecMem/memory/tool/skill tests with the existing
+57 advisory marker warnings. Migration `0016` applies without data loss and the
+live schema reports no pending migrations. Full validation passes 2198 tests
+with the existing 421 advisory marker warnings.
+
 ## Current Roadmap
 
 This is the active quality-parity roadmap derived from reviewing Hermes and OpenClaw.
@@ -909,9 +945,11 @@ Likely files:
 
 ### Phase 4 - "It learns" differentiator
 
+Status: cross-session FTS complete; self-improvement worker remains open.
+
 Goals:
 
-- Add free cross-session search over stored turns/memories using Postgres FTS.
+- Completed: free cross-session search over stored turns/memories using Postgres FTS.
 - Add a background self-improvement worker that reviews recent experience and
   authors or updates skills.
 - Tag self-authored skills with provenance, source memories, and confidence.
@@ -1021,15 +1059,17 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-HMX, Phase 2 extensibility, and the core Phase 3 interop work are complete. Preserve
-`docs/hmx-acceptance.md` evidence when changing exchange or protected-state
-behavior, and preserve the official-client journeys when changing API framing.
+HMX, Phase 2 extensibility, core Phase 3 interop, and Phase 4 cross-session FTS
+are complete. Preserve `docs/hmx-acceptance.md` evidence when changing exchange
+or protected-state behavior, preserve the official-client journeys when
+changing API framing, and preserve the no-embedding search contracts when
+building the self-improvement worker.
 
 Next highest-leverage options, in rough priority order:
 
-1. Phase 4 "it learns": FTS cross-session search + a background
-   self-improvement worker that authors skills from recent experience (the
-   structured `author_skill` provenance contract now exists to build on).
+1. Finish Phase 4 "it learns": add a background self-improvement worker that
+   reviews recent experience and proposes or authors skills using the structured
+   `author_skill` provenance and new free cross-session search contracts.
 2. Optional interop extension: streamable HTTP MCP transport, driven by a
    specific client requirement rather than added speculatively.
 3. Deferred Phase 1 hardening: formatting/type-check cleanup, action SHA

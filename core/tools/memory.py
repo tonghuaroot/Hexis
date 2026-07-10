@@ -8,6 +8,7 @@ These wrap the existing CognitiveMemory API.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -258,6 +259,186 @@ class RecallHandler(ToolHandler):
 
         except Exception as e:
             return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+
+class SearchHistoryHandler(ToolHandler):
+    """Run free lexical search across prior turns and consolidated memories."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="search_history",
+            description=(
+                "Search exact words, names, phrases, and operators across stored "
+                "conversation turns and consolidated memories using Postgres full-text "
+                "search. This is cross-session and does not require embeddings."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "Postgres web-search query. Supports quoted phrases, OR, "
+                            "and minus-prefixed exclusions."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 20,
+                    },
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["turn", "memory"]},
+                        "minItems": 1,
+                        "uniqueItems": True,
+                        "default": ["turn", "memory"],
+                    },
+                    "created_after": {
+                        "type": "string",
+                        "description": "Optional inclusive ISO-8601 lower time bound.",
+                    },
+                    "created_before": {
+                        "type": "string",
+                        "description": "Optional exclusive ISO-8601 upper time bound.",
+                    },
+                    "exclude_current_session": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": (
+                            "Exclude raw turns from the current UUID session when one "
+                            "is available. Consolidated memories remain searchable."
+                        ),
+                    },
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        pool = context.registry.pool if context.registry else None
+        if pool is None:
+            return ToolResult.error_result(
+                "History search requires a database-backed registry",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            return ToolResult.error_result(
+                "History search query must not be empty",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        try:
+            created_after = _history_search_datetime(
+                arguments.get("created_after"), "created_after"
+            )
+            created_before = _history_search_datetime(
+                arguments.get("created_before"), "created_before"
+            )
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
+        if created_after and created_before and created_after >= created_before:
+            return ToolResult.error_result(
+                "created_after must be earlier than created_before",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        exclude_session_id: str | None = None
+        if arguments.get("exclude_current_session", True) and context.session_id:
+            try:
+                exclude_session_id = str(UUID(str(context.session_id)))
+            except ValueError:
+                exclude_session_id = None
+
+        try:
+            from core.cognitive_memory_api import CognitiveMemory
+
+            raw_sources = arguments.get("sources")
+            results = await CognitiveMemory(pool).search_history(
+                query,
+                limit=min(max(int(arguments.get("limit", 20)), 1), 50),
+                sources=[
+                    str(value)
+                    for value in (
+                        raw_sources
+                        if raw_sources is not None
+                        else ["turn", "memory"]
+                    )
+                ],
+                created_after=created_after,
+                created_before=created_before,
+                exclude_session_id=exclude_session_id,
+            )
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
+        except Exception as exc:
+            return ToolResult.error_result(
+                f"History search failed: {exc}",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+
+        return ToolResult.success_result(
+            {
+                "query": query,
+                "results": [
+                    {
+                        "source_kind": result.source_kind,
+                        "item_id": str(result.item_id),
+                        "session_id": (
+                            str(result.session_id) if result.session_id else None
+                        ),
+                        "content": result.content,
+                        "user_text": result.user_text,
+                        "assistant_text": result.assistant_text,
+                        "memory_type": (
+                            result.memory_type.value if result.memory_type else None
+                        ),
+                        "occurred_at": result.occurred_at.isoformat(),
+                        "rank": result.rank,
+                        "source_unit_ids": [
+                            str(source_id) for source_id in result.source_unit_ids
+                        ],
+                        "source_attribution": result.source_attribution,
+                        "metadata": result.metadata,
+                    }
+                    for result in results
+                ],
+                "count": len(results),
+                "excluded_session_id": exclude_session_id,
+            },
+            f"Found {len(results)} history result(s)",
+        )
+
+
+def _history_search_datetime(value: Any, field_name: str) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{field_name} must be an ISO-8601 timestamp, for example "
+                "2026-07-10T12:00:00Z"
+            ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 class RememberHandler(ToolHandler):
@@ -1152,6 +1333,7 @@ def create_memory_tools() -> list[ToolHandler]:
     """
     return [
         RecallHandler(),
+        SearchHistoryHandler(),
         RememberHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),

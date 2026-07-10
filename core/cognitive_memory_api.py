@@ -14,7 +14,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncIterator, Iterable
 from uuid import UUID
@@ -101,6 +101,22 @@ class RecallResult:
     memories: list[Memory]
     partial_activations: list[PartialActivation]
     query: str
+
+
+@dataclass(frozen=True)
+class HistorySearchResult:
+    source_kind: str
+    item_id: UUID
+    session_id: UUID | None
+    content: str
+    user_text: str | None
+    assistant_text: str | None
+    memory_type: MemoryType | None
+    occurred_at: datetime
+    rank: float
+    source_unit_ids: list[UUID]
+    source_attribution: dict[str, Any]
+    metadata: dict[str, Any]
 
 
 # Default edge types for the chat reasoning subgraph: the *semantic* relations
@@ -356,6 +372,102 @@ class CognitiveMemory:
             )
             partial = await self._find_partial_activations(conn, query) if include_partial else []
             return RecallResult(memories=memories, partial_activations=partial, query=query)
+
+    async def search_history(
+        self,
+        query: str,
+        *,
+        limit: int = 20,
+        sources: list[str] | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        exclude_session_id: UUID | str | None = None,
+    ) -> list[HistorySearchResult]:
+        """Run free Postgres FTS across raw turns and consolidated memories."""
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("history search query must not be empty")
+        normalized_sources = list(
+            dict.fromkeys(
+                sources if sources is not None else ["turn", "memory"]
+            )
+        )
+        invalid_sources = sorted(set(normalized_sources) - {"turn", "memory"})
+        if invalid_sources:
+            raise ValueError(
+                "history search sources must be 'turn' and/or 'memory'; invalid: "
+                + ", ".join(invalid_sources)
+            )
+        if not normalized_sources:
+            raise ValueError("history search requires at least one source")
+        exclude_session = _uuid_text_or_none(exclude_session_id)
+        if exclude_session_id is not None and exclude_session is None:
+            raise ValueError("exclude_session_id must be a UUID")
+        normalized_after = created_after
+        normalized_before = created_before
+        if normalized_after is not None and normalized_after.tzinfo is None:
+            normalized_after = normalized_after.replace(tzinfo=timezone.utc)
+        if normalized_before is not None and normalized_before.tzinfo is None:
+            normalized_before = normalized_before.replace(tzinfo=timezone.utc)
+        if (
+            normalized_after is not None
+            and normalized_before is not None
+            and normalized_after >= normalized_before
+        ):
+            raise ValueError("created_after must be earlier than created_before")
+
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT *
+                FROM search_cross_session_history(
+                    $1::text,
+                    $2::int,
+                    $3::text[],
+                    $4::timestamptz,
+                    $5::timestamptz,
+                    $6::uuid
+                )
+                """,
+                normalized_query,
+                min(max(int(limit), 1), 100),
+                normalized_sources,
+                normalized_after,
+                normalized_before,
+                exclude_session,
+            )
+
+        results: list[HistorySearchResult] = []
+        for row in rows:
+            raw_memory_type = row["memory_type"]
+            source_attribution = _coerce_json(row["source_attribution"])
+            metadata = _coerce_json(row["metadata"])
+            results.append(
+                HistorySearchResult(
+                    source_kind=str(row["source_kind"]),
+                    item_id=row["item_id"],
+                    session_id=row["session_id"],
+                    content=str(row["content"]),
+                    user_text=row["user_text"],
+                    assistant_text=row["assistant_text"],
+                    memory_type=(
+                        MemoryType(str(raw_memory_type))
+                        if raw_memory_type is not None
+                        else None
+                    ),
+                    occurred_at=row["occurred_at"],
+                    rank=float(row["rank"]),
+                    source_unit_ids=list(row["source_unit_ids"] or []),
+                    source_attribution=(
+                        dict(source_attribution)
+                        if isinstance(source_attribution, dict)
+                        else {}
+                    ),
+                    metadata=dict(metadata) if isinstance(metadata, dict) else {},
+                )
+            )
+        return results
 
     async def recall_by_id(self, memory_id: UUID) -> Memory | None:
         async with self._pool.acquire() as conn:
@@ -1341,6 +1453,11 @@ class CognitiveMemorySync:
 
     def recall(self, query: str, **kwargs: Any) -> RecallResult:
         return self._loop.run_until_complete(self._async.recall(query, **kwargs))
+
+    def search_history(self, query: str, **kwargs: Any) -> list[HistorySearchResult]:
+        return self._loop.run_until_complete(
+            self._async.search_history(query, **kwargs)
+        )
 
     def recall_recent(self, *, limit: int = 10, memory_type: MemoryType | None = None) -> list[Memory]:
         return self._loop.run_until_complete(self._async.recall_recent(limit=limit, memory_type=memory_type))

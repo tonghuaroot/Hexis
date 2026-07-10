@@ -53,6 +53,9 @@ CREATE INDEX IF NOT EXISTS idx_subconscious_units_status_created
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_session_created
     ON subconscious_units (session_id, created_at DESC)
     WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_content_fts
+    ON subconscious_units USING GIN (to_tsvector('english', content))
+    WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_metadata
     ON subconscious_units USING GIN (metadata);
 CREATE INDEX IF NOT EXISTS idx_recmem_tasks_pending
