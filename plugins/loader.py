@@ -17,7 +17,14 @@ import sys
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from .base import HexisPlugin, HexisPluginApi, PluginManifest, _RegisteredHook, _RegisteredTool
+from .base import (
+    HexisPlugin,
+    HexisPluginApi,
+    PluginManifest,
+    PluginValidationError,
+    _RegisteredHook,
+    _RegisteredTool,
+)
 from .registry import PluginRegistry, _PluginToolEntry, _PluginHookEntry
 
 if TYPE_CHECKING:
@@ -27,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 # Default plugin directory (bundled with repo)
 _PLUGINS_DIR = Path(__file__).resolve().parent / "installed"
+
+
+class PluginConfigError(ValueError):
+    """A plugin's stored configuration does not satisfy its manifest."""
 
 
 def discover_plugins(extra_dirs: list[Path] | None = None) -> list[Path]:
@@ -118,22 +129,83 @@ def _load_plugin_module(plugin_dir: Path) -> HexisPlugin | None:
 
 async def _load_plugin_config(pool: "asyncpg.Pool", plugin_id: str) -> dict[str, Any]:
     """Load plugin-specific config from the database."""
-    try:
-        async with pool.acquire() as conn:
-            raw = await conn.fetchval(
-                "SELECT value FROM config WHERE key = $1",
-                f"plugin.{plugin_id}",
-            )
-            if raw is None:
-                return {}
-            if isinstance(raw, str):
-                return json.loads(raw)
-            if isinstance(raw, dict):
-                return raw
-            return {}
-    except Exception:
-        logger.debug("No config found for plugin %s", plugin_id)
+    async with pool.acquire() as conn:
+        raw = await conn.fetchval(
+            "SELECT value FROM config WHERE key = $1",
+            f"plugin.{plugin_id}",
+        )
+    if raw is None:
         return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PluginConfigError(
+                f"plugin.{plugin_id} must contain valid JSON: {exc.msg}"
+            ) from exc
+    if not isinstance(raw, dict):
+        raise PluginConfigError(f"plugin.{plugin_id} must be a JSON object")
+    return raw
+
+
+def _validated_plugin_manifest(
+    plugin_obj: HexisPlugin,
+    file_manifest: PluginManifest | None = None,
+) -> PluginManifest:
+    manifest = plugin_obj.manifest
+    if not isinstance(manifest, PluginManifest):
+        raise PluginValidationError("manifest property must return PluginManifest")
+    manifest.validate()
+
+    if file_manifest is not None and file_manifest.to_dict() != manifest.to_dict():
+        raise PluginValidationError(
+            "plugin.json must exactly match the PluginManifest returned by the plugin"
+        )
+    return manifest
+
+
+def _validate_plugin_config(
+    manifest: PluginManifest,
+    config: dict[str, Any],
+) -> None:
+    """Validate one live configuration object against its manifest schema."""
+
+    if not isinstance(config, dict):
+        raise PluginConfigError(f"plugin.{manifest.id} must be a JSON object")
+    if not manifest.config_schema:
+        return
+
+    from jsonschema.validators import validator_for
+
+    validator = validator_for(manifest.config_schema)(manifest.config_schema)
+    errors = sorted(
+        validator.iter_errors(config),
+        key=lambda error: tuple(str(part) for part in error.path),
+    )
+    if not errors:
+        return
+    details: list[str] = []
+    for error in errors[:3]:
+        path = ".".join(str(part) for part in error.path) or "<root>"
+        if error.validator in {"required", "additionalProperties"}:
+            message = error.message
+        elif error.validator == "type":
+            expected = error.validator_value
+            message = f"must be of type {expected}; received {type(error.instance).__name__}"
+        elif error.validator == "enum":
+            message = f"must be one of {error.validator_value!r}"
+        elif error.validator == "minLength":
+            message = f"must contain at least {error.validator_value} character(s)"
+        elif error.validator == "maxLength":
+            message = f"must contain at most {error.validator_value} character(s)"
+        elif error.validator == "pattern":
+            message = f"must match pattern {error.validator_value!r}"
+        else:
+            message = f"violates the {error.validator!r} schema constraint"
+        details.append(f"{path}: {message}")
+    if len(errors) > 3:
+        details.append(f"and {len(errors) - 3} more error(s)")
+    raise PluginConfigError("; ".join(details))
 
 
 async def load_plugins(
@@ -160,12 +232,32 @@ async def load_plugins(
     seen_ids: set[str] = set()
 
     for plugin_dir in plugin_dirs:
+        file_manifest: PluginManifest | None = None
+        manifest_path = plugin_dir / "plugin.json"
+        if manifest_path.exists():
+            try:
+                file_manifest = PluginManifest.from_json_file(manifest_path)
+            except Exception as exc:
+                logger.error(
+                    "Skipping plugin at %s: invalid plugin.json: %s",
+                    plugin_dir,
+                    exc,
+                )
+                continue
+
         # Load the plugin module
         plugin_obj = _load_plugin_module(plugin_dir)
         if plugin_obj is None:
             continue
 
-        manifest = plugin_obj.manifest
+        try:
+            manifest = _validated_plugin_manifest(
+                plugin_obj,
+                file_manifest=file_manifest,
+            )
+        except Exception as exc:
+            logger.error("Skipping plugin at %s: invalid manifest: %s", plugin_dir, exc)
+            continue
 
         # Check for ID conflicts
         if manifest.id in seen_ids:
@@ -174,7 +266,25 @@ async def load_plugins(
         seen_ids.add(manifest.id)
 
         # Load plugin config from DB
-        plugin_config = await _load_plugin_config(pool, manifest.id)
+        try:
+            plugin_config = await _load_plugin_config(pool, manifest.id)
+            _validate_plugin_config(manifest, plugin_config)
+        except PluginConfigError as exc:
+            logger.error(
+                "Skipping plugin %s: invalid config plugin.%s: %s. "
+                "Correct or remove that config value, then restart Hexis.",
+                manifest.id,
+                manifest.id,
+                exc,
+            )
+            continue
+        except Exception:
+            logger.exception(
+                "Skipping plugin %s: could not load config plugin.%s",
+                manifest.id,
+                manifest.id,
+            )
+            continue
 
         # Create API object
         api = HexisPluginApi(

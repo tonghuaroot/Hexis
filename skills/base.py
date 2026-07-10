@@ -69,6 +69,7 @@ class SkillSpec:
     )
     source: str = ""  # File path or plugin ID that provided this skill
     enabled: bool = True  # Can be disabled via config
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     def requirements_met(
         self,
@@ -202,6 +203,10 @@ class SkillSpec:
         if isinstance(raw_bound, str):
             raw_bound = [raw_bound]
 
+        raw_provenance = metadata.get("provenance", {})
+        if not isinstance(raw_provenance, dict):
+            raw_provenance = {}
+
         return cls(
             name=str(metadata.get("name", "")),
             description=str(metadata.get("description", "")),
@@ -216,4 +221,5 @@ class SkillSpec:
             bound_tools=list(raw_bound),
             contexts=contexts,
             source=source,
+            provenance=dict(raw_provenance),
         )

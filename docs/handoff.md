@@ -1,12 +1,12 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (Phase 3 API and MCP interop complete)
+Last updated: 2026-07-10 (Phase 2 extensibility hardening complete)
 
 ## Current Status
 
-The HMX workstream (`plans/hmx.md`) is MVP-complete, and the core Phase 3
-interop work is now complete. Slices 0-13 and the final HMX acceptance audit
-are complete:
+The HMX workstream (`plans/hmx.md`) is MVP-complete, Phase 2 extensibility is
+hardened, and the core Phase 3 interop work is complete. Slices 0-13 and the
+final HMX acceptance audit are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -36,9 +36,10 @@ has skill-gated list, inspect, acknowledge, audit-history, open-reversion, and
 explicit revert tools without any operator-override capability. The durable
 criterion-by-criterion completion record is `docs/hmx-acceptance.md`. Hexis now
 also serves its canonical agent through OpenAI-compatible model discovery and
-buffered/streamed chat completions, with tested MCP listing and dispatch. The
-next implementation boundary is Phase 2 plugin/provenance hardening or Phase 4
-cross-session learning.
+buffered/streamed chat completions, with tested MCP listing and dispatch.
+Plugin manifests and live configuration now fail closed before registration,
+and agent skill updates require explicit ownership provenance. The next
+implementation boundary is Phase 4 cross-session learning.
 
 The prior hosted green baseline was `a31b0b8` (`Complete HMX Slice 13 agent
 protocol tools`), run
@@ -803,6 +804,46 @@ contract tests pass; the focused API/agent regression set passes 98 tests with
 13 existing warnings. Full validation passes 2171 tests with the existing 421
 advisory marker warnings. Compilation and diff hygiene pass.
 
+### Phase 2 extensibility hardening complete
+
+Key files:
+
+- `plugins/base.py` - strict manifest identifiers, names, semantic versions,
+  object-root configuration schemas, and JSON Schema meta-validation;
+- `plugins/loader.py` - pre-import `plugin.json` validation, runtime-manifest
+  matching, live `plugin.<id>` configuration validation, and isolated plugin
+  failure with actionable logging;
+- `skills/base.py` and `core/tools/skills.py` - parsed structured provenance,
+  a fixed agent-authored root, ownership checks before updates, legacy-footer
+  migration, and symlink refusal;
+- `tests/core/test_plugin_validation.py` and
+  `tests/core/test_skills_marketplace.py` - invalid manifest/config preflight,
+  import ordering, ownership, no-overwrite, legacy migration, and path-boundary
+  contracts.
+
+Important behavior:
+
+- A present `plugin.json` is validated before plugin code imports and must
+  exactly match the runtime `PluginManifest`. Runtime-only manifests remain
+  supported and are validated before registration.
+- Live configuration must be a JSON object and satisfy the manifest schema.
+  Invalid configuration never silently becomes `{}` and the plugin registers
+  no partial capabilities; other plugins continue loading.
+- Configuration errors identify paths and constraints without logging rejected
+  values, which may contain secrets.
+- `author_skill` creates only under `~/.hexis/skills/agent-authored/` and writes
+  `provenance.authored_by`, `managed_by`, `created_at`, and `updated_at`.
+- Updates require structured Hexis ownership. The exact historical
+  `author_skill` footer is accepted only as a compatibility signal and is
+  upgraded to structured provenance during that approved update. Unmarked user
+  files and symlinked targets are left unchanged with an actionable error.
+
+Validation: the focused plugin/skill/tool/agent/heartbeat regression set passes
+235 tests with 104 existing marker warnings. Full validation passes 2185 tests
+with the existing 421 advisory marker warnings. Compilation and diff hygiene
+pass; focused mypy still expands into the repository's existing advisory
+baseline.
+
 ## Current Roadmap
 
 This is the active quality-parity roadmap derived from reviewing Hermes and OpenClaw.
@@ -830,7 +871,7 @@ Still worth considering later:
 
 ### Phase 2 - Extensibility: make plugins and skills real
 
-Status: core loop done (see "Skill surface: compact index + plugin dirs").
+Status: complete.
 
 Completed:
 
@@ -839,15 +880,10 @@ Completed:
 - Skill discovery is explicit and cheap: a compact always-present index plus
   `list_skills`/`use_skill` on-demand detail.
 - Plugin-provided skill dirs load into selection, discovery, and activation.
-- Hexis authors skills via `author_skill` with provenance footers, writing only
-  to `~/.hexis/skills/agent-authored/`.
-
-Still open in Phase 2:
-
-- Validate plugin manifests and config schemas at load time.
-- Enforce (not just convention) that Hexis may modify only agent-authored
-  skills, never user-authored ones — `author_skill` writes only to its own dir
-  today, which protects user files, but there is no explicit provenance check.
+- Plugin manifests, optional `plugin.json`, and live configuration schemas are
+  validated before capability registration.
+- Hexis authors skills only under `~/.hexis/skills/agent-authored/`, records
+  structured ownership provenance, and proves that ownership before updates.
 
 ### Phase 3 - Interop and reach
 
@@ -985,16 +1021,16 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-HMX and the core Phase 3 interop work are complete. Preserve
+HMX, Phase 2 extensibility, and the core Phase 3 interop work are complete. Preserve
 `docs/hmx-acceptance.md` evidence when changing exchange or protected-state
 behavior, and preserve the official-client journeys when changing API framing.
 
 Next highest-leverage options, in rough priority order:
 
-1. Finish Phase 2 hardening: plugin manifest/config-schema validation and an
-   explicit agent-vs-user skill provenance guard.
-2. Phase 4 "it learns": FTS cross-session search + a background
+1. Phase 4 "it learns": FTS cross-session search + a background
    self-improvement worker that authors skills from recent experience (the
-   `author_skill` provenance footer already exists to build on).
-3. Optional interop extension: streamable HTTP MCP transport, driven by a
+   structured `author_skill` provenance contract now exists to build on).
+2. Optional interop extension: streamable HTTP MCP transport, driven by a
    specific client requirement rather than added speculatively.
+3. Deferred Phase 1 hardening: formatting/type-check cleanup, action SHA
+   pinning, and dependency lockfile policy when the team chooses those costs.

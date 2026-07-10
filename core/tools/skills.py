@@ -30,8 +30,11 @@ from .base import (
 )
 
 
-USER_AUTHORED_SKILLS_DIR = Path.home() / ".hexis" / "skills" / "agent-authored"
+AGENT_AUTHORED_SKILLS_DIR = Path.home() / ".hexis" / "skills" / "agent-authored"
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
+_AGENT_SKILL_AUTHOR = "hexis"
+_AGENT_SKILL_MANAGER = "author_skill"
+_LEGACY_AGENT_PROVENANCE = "- Authored by Hexis via `author_skill`."
 
 
 class ListSkillsHandler(ToolHandler):
@@ -112,7 +115,7 @@ class UseSkillHandler(ToolHandler):
 
 
 class AuthorSkillHandler(ToolHandler):
-    """Create or update a user-scope Hexis skill document."""
+    """Create or update an explicitly agent-authored skill document."""
 
     @property
     def spec(self) -> ToolSpec:
@@ -120,8 +123,9 @@ class AuthorSkillHandler(ToolHandler):
             name="author_skill",
             description=(
                 "Create or update a Hexis skill. Use this when a useful workflow "
-                "should become reusable future behavior. Writes only to the user "
-                "skill directory and validates the resulting SKILL.md before saving."
+                "should become reusable future behavior. Writes only to the "
+                "agent-authored skill directory, verifies ownership before updates, "
+                "and validates the resulting SKILL.md before saving."
             ),
             parameters={
                 "type": "object",
@@ -227,8 +231,10 @@ class AuthorSkillHandler(ToolHandler):
             )
 
         mode = str(arguments.get("mode") or "create")
-        skill_dir = USER_AUTHORED_SKILLS_DIR / name
-        path = skill_dir / "SKILL.md"
+        try:
+            skill_dir, path = _agent_skill_path(name)
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.PATH_NOT_ALLOWED)
         if mode == "create" and path.exists():
             return ToolResult.error_result(
                 f"Skill '{name}' already exists; use mode='update' to replace it.",
@@ -240,6 +246,12 @@ class AuthorSkillHandler(ToolHandler):
                 ToolErrorType.FILE_NOT_FOUND,
             )
 
+        created_at: str | None = None
+        if mode == "update":
+            managed, detail, created_at = _agent_skill_ownership(path)
+            if not managed:
+                return ToolResult.error_result(detail, ToolErrorType.PERMISSION_DENIED)
+
         skill_text = _render_skill_markdown(
             name=name,
             description=description,
@@ -249,6 +261,7 @@ class AuthorSkillHandler(ToolHandler):
             requires_tools=requires_tools,
             content=content,
             rationale=str(arguments.get("rationale") or "").strip(),
+            created_at=created_at,
         )
         valid, detail = _validate_skill_text(name, skill_text)
         if not valid:
@@ -264,6 +277,10 @@ class AuthorSkillHandler(ToolHandler):
                 "contexts": contexts,
                 "bound_tools": bound_tools,
                 "requires_tools": requires_tools,
+                "provenance": {
+                    "authored_by": _AGENT_SKILL_AUTHOR,
+                    "managed_by": _AGENT_SKILL_MANAGER,
+                },
                 "discoverable_next_turn": True,
             },
             f"{mode.title()}d skill '{name}'",
@@ -280,6 +297,55 @@ def _string_list(value: Any) -> list[str]:
     return [str(v).strip() for v in value if str(v).strip()]
 
 
+def _agent_skill_path(name: str) -> tuple[Path, Path]:
+    root = AGENT_AUTHORED_SKILLS_DIR.expanduser()
+    skill_dir = root / name
+    path = skill_dir / "SKILL.md"
+    if skill_dir.is_symlink() or path.is_symlink():
+        raise ValueError(
+            f"Refusing skill '{name}': agent-authored skill paths may not be symlinks. "
+            "Use a regular directory under the configured agent-authored skill root."
+        )
+    resolved_root = root.resolve(strict=False)
+    resolved_skill_dir = skill_dir.resolve(strict=False)
+    if not resolved_skill_dir.is_relative_to(resolved_root):
+        raise ValueError(
+            f"Refusing skill '{name}': target escapes the agent-authored skill root."
+        )
+    return skill_dir, path
+
+
+def _agent_skill_ownership(path: Path) -> tuple[bool, str, str | None]:
+    parsed = [
+        skill
+        for skill in load_skills_from_dir(path.parent)
+        if Path(skill.source).resolve(strict=False) == path.resolve(strict=False)
+    ]
+    if len(parsed) == 1:
+        provenance = parsed[0].provenance
+        if (
+            provenance.get("authored_by") == _AGENT_SKILL_AUTHOR
+            and provenance.get("managed_by") == _AGENT_SKILL_MANAGER
+        ):
+            created_at = provenance.get("created_at")
+            return True, "structured agent ownership verified", (
+                created_at if isinstance(created_at, str) and created_at else None
+            )
+
+    try:
+        existing_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, f"Could not verify ownership of {path}: {exc}", None
+    if _LEGACY_AGENT_PROVENANCE in existing_text:
+        return True, "legacy agent ownership verified", None
+    return (
+        False,
+        f"Refusing to replace '{path}': it is not marked as managed by Hexis "
+        "author_skill. Choose a new skill name or edit the user-authored file manually.",
+        None,
+    )
+
+
 def _render_skill_markdown(
     *,
     name: str,
@@ -290,7 +356,9 @@ def _render_skill_markdown(
     requires_tools: list[str],
     content: str,
     rationale: str,
+    created_at: str | None = None,
 ) -> str:
+    now = datetime.now(UTC).isoformat()
     metadata = [
         "---",
         f"name: {json.dumps(name)}",
@@ -300,6 +368,11 @@ def _render_skill_markdown(
         f"  tools: {json.dumps(requires_tools)}",
         f"contexts: {json.dumps(contexts)}",
         f"bound_tools: {json.dumps(bound_tools)}",
+        "provenance:",
+        f"  authored_by: {json.dumps(_AGENT_SKILL_AUTHOR)}",
+        f"  managed_by: {json.dumps(_AGENT_SKILL_MANAGER)}",
+        f"  created_at: {json.dumps(created_at or now)}",
+        f"  updated_at: {json.dumps(now)}",
         "---",
         "",
     ]
@@ -309,7 +382,7 @@ def _render_skill_markdown(
         "## Provenance",
         "",
         "- Authored by Hexis via `author_skill`.",
-        f"- Updated at: {datetime.now(UTC).isoformat()}",
+        f"- Updated at: {now}",
     ]
     if rationale:
         footer.append(f"- Rationale: {rationale}")

@@ -314,12 +314,15 @@ class TestSkillDiscoveryTools:
         assert "Research Methodology" in activated.output["instructions"]
         assert {"web_search", "web_fetch"} <= set(activated.output["bound_tools"])
 
-    async def test_author_skill_creates_parseable_user_skill(self, db_pool, monkeypatch, tmp_path):
+    async def test_author_skill_creates_parseable_agent_skill(
+        self, db_pool, monkeypatch, tmp_path
+    ):
         from core.tools import ToolContext, ToolExecutionContext, create_default_registry
         from core.tools.skills import AuthorSkillHandler
         from skills.loader import load_skills_from_dir
 
-        monkeypatch.setattr("core.tools.skills.USER_AUTHORED_SKILLS_DIR", tmp_path)
+        agent_root = tmp_path / "agent-authored"
+        monkeypatch.setattr("core.tools.skills.AGENT_AUTHORED_SKILLS_DIR", agent_root)
         registry = create_default_registry(db_pool)
         ctx = ToolExecutionContext(
             tool_context=ToolContext.CHAT,
@@ -344,18 +347,23 @@ class TestSkillDiscoveryTools:
         }, ctx)
 
         assert result.success is True
-        path = tmp_path / "weekly-review" / "SKILL.md"
+        path = agent_root / "weekly-review" / "SKILL.md"
         assert path.exists()
-        parsed = load_skills_from_dir(tmp_path)
+        parsed = load_skills_from_dir(agent_root)
         assert len(parsed) == 1
         assert parsed[0].name == "weekly-review"
         assert parsed[0].bound_tools == ["recall", "remember"]
+        assert parsed[0].provenance["authored_by"] == "hexis"
+        assert parsed[0].provenance["managed_by"] == "author_skill"
 
     async def test_author_skill_refuses_accidental_overwrite(self, db_pool, monkeypatch, tmp_path):
         from core.tools import ToolContext, ToolExecutionContext, create_default_registry
         from core.tools.skills import AuthorSkillHandler
 
-        monkeypatch.setattr("core.tools.skills.USER_AUTHORED_SKILLS_DIR", tmp_path)
+        monkeypatch.setattr(
+            "core.tools.skills.AGENT_AUTHORED_SKILLS_DIR",
+            tmp_path / "agent-authored",
+        )
         registry = create_default_registry(db_pool)
         ctx = ToolExecutionContext(
             tool_context=ToolContext.CHAT,
@@ -380,6 +388,185 @@ class TestSkillDiscoveryTools:
         assert first.success is True
         assert second.success is False
         assert "already exists" in (second.error or "")
+
+    async def test_author_skill_updates_only_structured_agent_owned_skill(
+        self, db_pool, monkeypatch, tmp_path
+    ):
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import AuthorSkillHandler
+        from skills.loader import load_skills_from_dir
+
+        agent_root = tmp_path / "agent-authored"
+        monkeypatch.setattr("core.tools.skills.AGENT_AUTHORED_SKILLS_DIR", agent_root)
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="author-skill-update-test",
+            registry=registry,
+        )
+        payload = {
+            "name": "durable-review",
+            "description": "Capture a durable review process",
+            "content": (
+                "# Durable Review\n\nRecall relevant evidence, separate observations from "
+                "inferences, identify unresolved questions, and record only decisions "
+                "that will remain useful across future sessions and changing context."
+            ),
+        }
+
+        created = await AuthorSkillHandler().execute(payload, ctx)
+        original = load_skills_from_dir(agent_root)[0]
+        updated = await AuthorSkillHandler().execute(
+            {
+                **payload,
+                "mode": "update",
+                "description": "Run an evidence-based durable review process",
+            },
+            ctx,
+        )
+        revised = load_skills_from_dir(agent_root)[0]
+
+        assert created.success is True
+        assert updated.success is True
+        assert revised.description == "Run an evidence-based durable review process"
+        assert revised.provenance["created_at"] == original.provenance["created_at"]
+        assert revised.provenance["managed_by"] == "author_skill"
+
+    async def test_author_skill_refuses_unmarked_user_file_without_modifying_it(
+        self, db_pool, monkeypatch, tmp_path
+    ):
+        from core.tools import (
+            ToolContext,
+            ToolErrorType,
+            ToolExecutionContext,
+            create_default_registry,
+        )
+        from core.tools.skills import AuthorSkillHandler
+
+        agent_root = tmp_path / "agent-authored"
+        monkeypatch.setattr("core.tools.skills.AGENT_AUTHORED_SKILLS_DIR", agent_root)
+        path = agent_root / "personal-method" / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        original = (
+            "---\nname: personal-method\ndescription: A user-authored method\n---\n\n"
+            "# Personal Method\n\nThis file belongs to the user and intentionally has no "
+            "Hexis management marker. Its exact content must survive any attempted "
+            "agent update, regardless of the requested replacement instructions.\n"
+        )
+        path.write_text(original, encoding="utf-8")
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="author-skill-ownership-test",
+            registry=registry,
+        )
+
+        result = await AuthorSkillHandler().execute(
+            {
+                "name": "personal-method",
+                "description": "Attempted replacement",
+                "mode": "update",
+                "content": (
+                    "# Replacement\n\nThis replacement is long enough to satisfy content "
+                    "validation, but it must never overwrite a file whose ownership "
+                    "cannot be proven as agent-authored and managed by author_skill."
+                ),
+            },
+            ctx,
+        )
+
+        assert result.success is False
+        assert result.error_type is ToolErrorType.PERMISSION_DENIED
+        assert "not marked as managed by Hexis" in (result.error or "")
+        assert path.read_text(encoding="utf-8") == original
+
+    async def test_author_skill_upgrades_legacy_agent_provenance_on_update(
+        self, db_pool, monkeypatch, tmp_path
+    ):
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import AuthorSkillHandler
+        from skills.loader import load_skills_from_dir
+
+        agent_root = tmp_path / "agent-authored"
+        monkeypatch.setattr("core.tools.skills.AGENT_AUTHORED_SKILLS_DIR", agent_root)
+        path = agent_root / "legacy-method" / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "---\nname: legacy-method\ndescription: A legacy agent method\n---\n\n"
+            "# Legacy Method\n\nKeep this established workflow usable while migrating "
+            "its ownership metadata to the structured format. The historical footer "
+            "is the only ownership evidence available for files from earlier Hexis versions.\n\n"
+            "## Provenance\n\n- Authored by Hexis via `author_skill`.\n",
+            encoding="utf-8",
+        )
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="author-skill-legacy-test",
+            registry=registry,
+        )
+
+        result = await AuthorSkillHandler().execute(
+            {
+                "name": "legacy-method",
+                "description": "An upgraded legacy agent method",
+                "mode": "update",
+                "content": (
+                    "# Legacy Method\n\nContinue the established workflow, verify each step "
+                    "against current evidence, and preserve durable lessons. This approved "
+                    "update also migrates ownership into structured frontmatter."
+                ),
+            },
+            ctx,
+        )
+        parsed = load_skills_from_dir(agent_root)[0]
+
+        assert result.success is True
+        assert parsed.provenance["authored_by"] == "hexis"
+        assert parsed.provenance["managed_by"] == "author_skill"
+
+    async def test_author_skill_refuses_symlinked_target(
+        self, db_pool, monkeypatch, tmp_path
+    ):
+        from core.tools import (
+            ToolContext,
+            ToolErrorType,
+            ToolExecutionContext,
+            create_default_registry,
+        )
+        from core.tools.skills import AuthorSkillHandler
+
+        agent_root = tmp_path / "agent-authored"
+        outside = tmp_path / "user-owned"
+        outside.mkdir()
+        agent_root.mkdir()
+        (agent_root / "linked-method").symlink_to(outside, target_is_directory=True)
+        monkeypatch.setattr("core.tools.skills.AGENT_AUTHORED_SKILLS_DIR", agent_root)
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="author-skill-symlink-test",
+            registry=registry,
+        )
+
+        result = await AuthorSkillHandler().execute(
+            {
+                "name": "linked-method",
+                "description": "Attempt a symlinked write",
+                "content": (
+                    "# Linked Method\n\nThis content is deliberately long enough for "
+                    "validation, "
+                    "but the target directory is a symlink outside the managed root and "
+                    "must never receive an agent-authored skill document."
+                ),
+            },
+            ctx,
+        )
+
+        assert result.success is False
+        assert result.error_type is ToolErrorType.PATH_NOT_ALLOWED
+        assert "may not be symlinks" in (result.error or "")
+        assert not (outside / "SKILL.md").exists()
 
 
 # ============================================================================

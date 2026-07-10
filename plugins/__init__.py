@@ -19,7 +19,7 @@ Example usage:
         tool_registry.hooks.register(event, hook, source=...)
 """
 
-from .base import HexisPlugin, HexisPluginApi, PluginManifest
+from .base import HexisPlugin, HexisPluginApi, PluginManifest, PluginValidationError
 from .registry import PluginRegistry
 from .loader import load_plugins, discover_plugins
 
@@ -27,6 +27,7 @@ __all__ = [
     "HexisPlugin",
     "HexisPluginApi",
     "PluginManifest",
+    "PluginValidationError",
     "PluginRegistry",
     "load_plugins",
     "discover_plugins",

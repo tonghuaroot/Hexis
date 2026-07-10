@@ -73,10 +73,20 @@ Markdown instructions the agent follows when executing this skill.
 | `contexts` | Yes | Where it can run: `chat`, `heartbeat`, or both |
 | `requires_tools` | No | Tools the skill needs |
 | `requires_config` | No | Config keys required |
+| `provenance` | No | Ownership metadata reserved for managed agent-authored skills |
 
 ## Custom Skills
 
 Custom skills go in `~/.hexis/skills/` or `skills/installed/` (for bundled skills).
+
+User-authored skills under `~/.hexis/skills/` remain user-owned. The
+`author_skill` agent tool writes only beneath
+`~/.hexis/skills/agent-authored/` and adds structured `provenance` frontmatter.
+An update is allowed only when the existing file proves it is managed by
+`author_skill`; unmarked files and symlinked targets are refused without being
+modified. Skills created by older Hexis versions with the exact legacy
+provenance footer are upgraded to structured provenance on their next approved
+update.
 
 ### Creating a Custom Skill
 

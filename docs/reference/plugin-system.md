@@ -23,12 +23,18 @@ Plugins are Python packages that implement the `HexisPlugin` ABC. They are:
 
 ```
 plugins/installed/my_plugin/
+├── plugin.json          # optional pre-import manifest
 ├── __init__.py          # exports HexisPlugin subclass
 ├── tools.py             # custom ToolHandler implementations
 └── skills/
     └── my-skill/
         └── SKILL.md     # skill definition
 ```
+
+When `plugin.json` is present, Hexis validates it before importing plugin code.
+It must exactly match the `PluginManifest` returned at runtime. Plugins without
+`plugin.json` are supported, but their runtime manifest is still validated
+before registration.
 
 ## Core Classes
 
@@ -135,6 +141,17 @@ class MyPlugin(HexisPlugin):
 ## Plugin Configuration
 
 Plugin config is stored in the `config` table under `plugin.<plugin_id>` and validated against the manifest's `config_schema`.
+
+Manifest IDs use lowercase letters, digits, hyphens, or underscores; versions
+use semantic versioning; and non-empty configuration schemas must be valid JSON
+Schema with an object root. Hexis validates the live configuration before the
+plugin can register tools, hooks, or skill directories. A bad manifest or
+configuration skips only that plugin and logs the exact cause and next step.
+Configuration errors do not silently fall back to `{}`.
+
+Store secret environment-variable names in plugin configuration rather than
+secret values. Validation errors report field paths and constraints without
+logging rejected values.
 
 ## Related
 

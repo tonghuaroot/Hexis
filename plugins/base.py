@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,18 @@ from core.tools.hooks import HookEvent, HookHandler
 
 if TYPE_CHECKING:
     import asyncpg
+
+
+_PLUGIN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+
+
+class PluginValidationError(ValueError):
+    """A plugin manifest cannot be trusted as a load-time contract."""
 
 
 @dataclass
@@ -32,13 +45,32 @@ class PluginManifest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PluginManifest":
-        return cls(
-            id=str(data.get("id", "")),
-            name=str(data.get("name", "")),
-            version=str(data.get("version", "0.0.0")),
-            description=str(data.get("description", "")),
-            config_schema=dict(data.get("config_schema", {})),
+        if not isinstance(data, dict):
+            raise PluginValidationError("manifest must be a JSON object")
+        raw_id = data.get("id", "")
+        raw_name = data.get("name", "")
+        raw_version = data.get("version", "0.0.0")
+        raw_description = data.get("description", "")
+        for field_name, value in (
+            ("id", raw_id),
+            ("name", raw_name),
+            ("version", raw_version),
+            ("description", raw_description),
+        ):
+            if not isinstance(value, str):
+                raise PluginValidationError(f"{field_name} must be a string")
+        raw_schema = data.get("config_schema", {})
+        if not isinstance(raw_schema, dict):
+            raise PluginValidationError("config_schema must be a JSON object")
+        manifest = cls(
+            id=raw_id,
+            name=raw_name,
+            version=raw_version,
+            description=raw_description,
+            config_schema=dict(raw_schema),
         )
+        manifest.validate()
+        return manifest
 
     @classmethod
     def from_json_file(cls, path: Path) -> "PluginManifest":
@@ -46,6 +78,34 @@ class PluginManifest:
         text = path.read_text(encoding="utf-8")
         data = json.loads(text)
         return cls.from_dict(data)
+
+    def validate(self) -> None:
+        """Validate metadata and the declared configuration JSON Schema."""
+
+        errors: list[str] = []
+        if not isinstance(self.id, str) or not _PLUGIN_ID_RE.fullmatch(self.id):
+            errors.append(
+                "id must be 1-64 lowercase letters, digits, hyphens, or underscores"
+            )
+        if not isinstance(self.name, str) or not self.name.strip():
+            errors.append("name must be a non-empty string")
+        if not isinstance(self.version, str) or not _SEMVER_RE.fullmatch(self.version):
+            errors.append("version must be semantic versioning (for example, 1.2.3)")
+        if not isinstance(self.description, str):
+            errors.append("description must be a string")
+        if not isinstance(self.config_schema, dict):
+            errors.append("config_schema must be a JSON object")
+        elif self.config_schema:
+            if self.config_schema.get("type") != "object":
+                errors.append("config_schema root type must be 'object'")
+            try:
+                from jsonschema.validators import validator_for
+
+                validator_for(self.config_schema).check_schema(self.config_schema)
+            except Exception as exc:
+                errors.append(f"config_schema is not valid JSON Schema: {exc}")
+        if errors:
+            raise PluginValidationError("; ".join(errors))
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -30,6 +30,9 @@ Use this skill when a repeated workflow, hard-won lesson, or stable procedure sh
    - which tools it should unlock.
 4. Bind only the tools the skill genuinely needs. Do not add broad filesystem, shell, or browser access unless the procedure requires it.
 5. Use `author_skill` with `mode: "create"` for a new skill and `mode: "update"` only when replacing an existing one deliberately.
+6. Never try to replace a user-authored skill. `author_skill` updates only files
+   carrying Hexis ownership provenance; if ownership cannot be verified, choose
+   a new name or leave the exact manual-edit step to the user.
 
 ## Quality Guidelines
 
