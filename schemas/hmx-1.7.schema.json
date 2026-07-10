@@ -337,23 +337,52 @@
     },
     "consolidationTask": {
       "type": "object",
-      "required": ["ref", "task_type", "status"],
+      "required": ["ref", "task_type", "status", "input_refs"],
       "properties": {
         "ref": {"$ref": "#/$defs/ref"},
-        "task_type": {"type": "string"},
+        "task_type": {"enum": ["episode_merge", "episode_create", "semantic_refine"]},
         "status": {"enum": ["pending", "in_progress", "failed"]},
-        "input_refs": {"$ref": "#/$defs/refList"},
-        "output_refs": {"$ref": "#/$defs/refList"}
+        "created_at": {"$ref": "#/$defs/dateTime"},
+        "updated_at": {"$ref": "#/$defs/dateTime"},
+        "input_refs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/ref"}},
+        "trigger_ref": {"$ref": "#/$defs/ref"},
+        "output_refs": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/ref"}},
+        "attempt_count": {"type": "integer", "minimum": 0},
+        "recurrence_count": {"type": "integer", "minimum": 0},
+        "max_similarity": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "error": {"type": ["string", "null"]},
+        "properties": {"type": "object"}
       },
+      "allOf": [
+        {
+          "if": {"properties": {"task_type": {"const": "episode_merge"}}},
+          "then": {
+            "required": ["output_refs"],
+            "properties": {"output_refs": {"minItems": 1}}
+          }
+        }
+      ],
       "additionalProperties": true
     },
     "reconsolidationTask": {
       "type": "object",
-      "required": ["ref", "status"],
+      "required": ["ref", "status", "memory_refs", "properties"],
       "properties": {
         "ref": {"$ref": "#/$defs/ref"},
         "status": {"enum": ["pending", "in_progress", "failed"]},
-        "memory_refs": {"$ref": "#/$defs/refList"}
+        "memory_refs": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/ref"}},
+        "reason": {"type": "string"},
+        "created_at": {"$ref": "#/$defs/dateTime"},
+        "properties": {
+          "type": "object",
+          "required": ["old_content", "new_content"],
+          "properties": {
+            "old_content": {"type": "string"},
+            "new_content": {"type": "string"},
+            "error": {"type": ["string", "null"]}
+          },
+          "additionalProperties": true
+        }
       },
       "additionalProperties": true
     },

@@ -75,6 +75,9 @@ async def test_tool_specs_are_complete_and_conservative():
     assert set(handlers) == _TOOL_NAMES
     assert handlers["import_dry_run"].spec.is_read_only
     assert handlers["import_review"].spec.is_read_only
+    for name in ("import_dry_run", "import_memories"):
+        retry_schema = handlers[name].spec.parameters["properties"]["retry_failed_work"]
+        assert retry_schema == {"type": "boolean", "default": False}
     for name in _TOOL_NAMES - {"import_dry_run", "import_review"}:
         assert handlers[name].spec.requires_approval
         assert not handlers[name].spec.is_read_only

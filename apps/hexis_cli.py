@@ -652,6 +652,11 @@ def build_parser() -> argparse.ArgumentParser:
     hmx_import.add_argument("--skip-identity", action="store_true")
     hmx_import.add_argument("--skip-worldview", action="store_true")
     hmx_import.add_argument("--skip-narrative", action="store_true")
+    hmx_import.add_argument(
+        "--retry-failed-work",
+        action="store_true",
+        help="Reset imported failed consolidation work to pending",
+    )
     hmx_import.add_argument("--json", action="store_true", help="Print a machine-readable report")
     hmx_import.set_defaults(func="hmx_import")
 

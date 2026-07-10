@@ -228,6 +228,7 @@ class ExportMemoriesHandler(ToolHandler):
                         "format": output_format,
                         "statistics": document["statistics"],
                         "privacy": document["privacy"],
+                        "warnings": document.get("export_warnings", []),
                     },
                     f"Exported HMX to {written}",
                 )
@@ -237,6 +238,7 @@ class ExportMemoriesHandler(ToolHandler):
                         "format": "jsonl",
                         "export_id": document["export_id"],
                         "content": serialize_hmx_document(document, "jsonl"),
+                        "warnings": document.get("export_warnings", []),
                     },
                     f"Exported HMX {document['export_id']} as JSONL",
                 )
@@ -275,6 +277,7 @@ class ImportDryRunHandler(_ImportFileHandler):
                     "skip_identity": {"type": "boolean", "default": False},
                     "skip_worldview": {"type": "boolean", "default": False},
                     "skip_narrative": {"type": "boolean", "default": False},
+                    "retry_failed_work": {"type": "boolean", "default": False},
                 },
                 "required": ["path"],
             },
@@ -297,7 +300,12 @@ class ImportDryRunHandler(_ImportFileHandler):
             intent = str(document.get("export_intent") or "")
             strategy = str(arguments.get("strategy") or default_import_strategy(intent))
             async with pool.acquire() as conn:
-                result = await dry_run_hmx(conn, document, strategy=strategy)
+                result = await dry_run_hmx(
+                    conn,
+                    document,
+                    strategy=strategy,
+                    retry_failed_work=bool(arguments.get("retry_failed_work", False)),
+                )
             return ToolResult.success_result(
                 asdict(result),
                 f"HMX dry run: {'permitted' if result.can_import else 'blocked'}",
@@ -330,6 +338,7 @@ class ImportMemoriesHandler(_ImportFileHandler):
                     "skip_identity": {"type": "boolean", "default": False},
                     "skip_worldview": {"type": "boolean", "default": False},
                     "skip_narrative": {"type": "boolean", "default": False},
+                    "retry_failed_work": {"type": "boolean", "default": False},
                 },
                 "required": ["path", "confirm_intent"],
             },
@@ -359,7 +368,13 @@ class ImportMemoriesHandler(_ImportFileHandler):
         try:
             strategy = str(arguments.get("strategy") or default_import_strategy(intent))
             async with pool.acquire() as conn:
-                forecast = await dry_run_hmx(conn, document, strategy=strategy)
+                retry_failed_work = bool(arguments.get("retry_failed_work", False))
+                forecast = await dry_run_hmx(
+                    conn,
+                    document,
+                    strategy=strategy,
+                    retry_failed_work=retry_failed_work,
+                )
                 if not forecast.can_import:
                     return ToolResult(
                         success=False,
@@ -371,7 +386,12 @@ class ImportMemoriesHandler(_ImportFileHandler):
                         ),
                         error_type=ToolErrorType.BOUNDARY_VIOLATION,
                     )
-                result = await import_hmx(conn, document, strategy=strategy)
+                result = await import_hmx(
+                    conn,
+                    document,
+                    strategy=strategy,
+                    retry_failed_work=retry_failed_work,
+                )
             return ToolResult.success_result(
                 asdict(result), f"HMX import completed with {strategy}"
             )

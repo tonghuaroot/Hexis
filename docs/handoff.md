@@ -1,10 +1,10 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (HMX Slice 6 re-embedding pipeline complete)
+Last updated: 2026-07-10 (HMX Slice 7 in-flight work complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-6 are complete:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-7 are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -12,16 +12,19 @@ side-effect-free dry-run reporting, and isolated deliberative/analysis storage
 with explicit review transitions, plus skill-gated agent tools for the complete
 export/import/review workflow. Accepted imports now enter a bounded maintenance
 re-embedding pipeline, refresh derived memory structures, and can carry eligible
-raw RecMem units during port/duplicate. The next implementation boundary is
-Slice 7 (in-flight work and interrupted consolidation).
+raw RecMem units during port/duplicate. Pending and interrupted consolidation
+work now travels as portable intent and resumes through the existing workers
+without carrying runtime claim state. The next implementation boundary is
+Slice 8 (canonical protected-section digest fixtures).
 
-The prior hosted green baseline was `902c30f` (`Complete HMX Slice 5 agent
-tools`), run https://github.com/QuixiAI/Hexis/actions/runs/29068079227 (all jobs
+The prior hosted green baseline was `99f544d` (`Complete HMX Slice 6
+re-embedding`), run https://github.com/QuixiAI/Hexis/actions/runs/29072692485 (all jobs
 succeeded). Always verify the current head's hosted result with the command in
 "Useful Commands" below rather than assuming this historical baseline applies.
 
 Important recent commits:
 
+- `99f544d` - Complete HMX Slice 6 re-embedding
 - `902c30f` - Complete HMX Slice 5 agent tools
 - `3ba0bc6` - Complete HMX Slice 4 isolated review
 - `c3be2f8` - Wait for DB init completion in CI
@@ -414,9 +417,46 @@ Important behavior:
   pass with the existing 421 advisory marker warnings. The wheel contains the
   service module plus both baseline and forward-migration SQL.
 
-Next: Slice 7 exports pending/in-progress consolidation and reconsolidation
-work for port/duplicate, imports it as safe pending work, and drops tasks whose
-inputs were not imported without carrying worker locks or runtime state.
+### HMX Slice 7 in-flight work complete
+
+Key files:
+
+- `db/52_hmx_in_flight_work.sql` and migration `0011` - portable task export,
+  import reference ledger, task remapping, safe raw-unit route restoration, and
+  failed-work diagnostics.
+- `core/memory_exchange.py` / `schemas/hmx-1.7.schema.json` - independent task
+  validation, dry-run drop prediction, safe import orchestration, JSONL
+  transport, and structured work summaries.
+- `apps/cli_exchange.py` / `apps/hexis_cli.py` /
+  `core/tools/memory_exchange.py` - explicit `retry_failed_work` choice and
+  export/import warnings that include the exact recovery action.
+- `tests/db/test_hmx_in_flight_work.py` - live-DB coverage for portable export,
+  remapping, idempotency, worker claims, isolation, missing inputs, diagnostics,
+  and explicit retries across both task families.
+
+Important behavior:
+
+- Port/duplicate exports carry pending, in-progress, and failed RecMem and
+  reconsolidation task intent. Local IDs are export-scoped; claim timestamps,
+  completion state, results, progress counters, and worker locks never travel.
+- In-progress tasks become fresh local pending work with remapped source units,
+  target memories, and beliefs. The existing RecMem and reconsolidation workers
+  claim them through their normal queues; no parallel HMX worker exists.
+- Imported source-unit route states are restored before commit, preventing the
+  normal raw router from creating duplicate consolidation work.
+- Tasks missing any required imported input are dropped with both preflight and
+  mutation warnings. Port/duplicate export warns when consolidation work is
+  present without raw units and names `--include-raw` as the corrective action.
+- Failed tasks remain non-runnable diagnostics by default. Retry requires the
+  explicit CLI `--retry-failed-work` or tool `retry_failed_work=true`; the import
+  ledger retains the source failure after retry and makes re-import idempotent.
+- Focused cross-feature validation: 120 tests pass. Full validation: 2079 tests
+  pass with the existing 421 advisory marker warnings. The wheel contains the
+  baseline and migration SQL plus the updated schema and memory-exchange skill.
+
+Next: Slice 8 completes `protected_section_digest_v1` and
+`audit_record_digest_v1` as a cross-implementation compatibility layer with the
+required canonical fixture suite before any protected replacement machinery.
 
 ## Current Roadmap
 
@@ -598,15 +638,16 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 ## Resume Recommendation
 
 Do not continue debugging the old CI failures first. Continue the HMX thread at
-Slice 7 from the admitted-memory and raw-unit contracts now pinned in tests.
-Read `db/31_functions_recmem.sql`, `db/47_functions_retention.sql`,
-`core/memory_exchange.py`, `services/worker_service.py`,
-`tests/db/test_hmx_reembedding.py`, and the Slice 7 plan section before editing.
+Slice 8 from the protected digest placeholders and export contracts already in
+use. Read `core/digest.py`, `core/memory_exchange.py`,
+`tests/core/test_hmx_digest.py`, `tests/db/test_hmx_export.py`, and the Slice 8
+fixture requirements in `plans/hmx.md` before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 7: export/import pending and interrupted consolidation work, safely
-   requeue valid inputs, and preserve failed work as diagnostics.
+1. HMX Slice 8: finish the canonical protected/audit digest algorithms and the
+   cross-implementation fixture suite for ordering, ref, transport, float, and
+   true semantic-change behavior.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

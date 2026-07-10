@@ -35,6 +35,9 @@ instance's memory without silently blending it into active state.
    wants a narrower import.
 4. Do not describe imported memories as semantically searchable until the
    import result or later re-embedding workflow confirms that they are ready.
+5. Preserve failed in-flight work as diagnostics by default. Set
+   `retry_failed_work` only when the user explicitly chooses to rerun those
+   failed consolidation or reconsolidation tasks.
 
 ## Deliberative Review
 

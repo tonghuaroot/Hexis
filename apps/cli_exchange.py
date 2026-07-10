@@ -196,6 +196,17 @@ def _print_import_result(
             f"Duplicates reused: [warn]{len(result.duplicate_refs)}[/warn]  "
             f"Warnings: [warn]{len(result.warnings)}[/warn]"
         )
+        if result.work_summary:
+            footer += (
+                "  Work requeued: "
+                f"[accent]{result.work_summary.get('requeued', 0)}[/accent]  "
+                "failed preserved: "
+                f"[warn]{result.work_summary.get('failed_preserved', 0)}[/warn]  "
+                "retried: "
+                f"[accent]{result.work_summary.get('retried', 0)}[/accent]  "
+                "dropped: "
+                f"[warn]{result.work_summary.get('dropped', 0)}[/warn]"
+            )
     table = make_table("Section", ("Imported", {"justify": "right"}))
     for section, count in counts.items():
         table.add_row(section, str(count))
@@ -240,6 +251,12 @@ async def run_export(dsn: str, args: Any) -> int:
     finally:
         await conn.close()
 
+    if document.get("export_warnings"):
+        from apps.cli_theme import err_console
+
+        for warning in document["export_warnings"]:
+            err_console.print(f"[warn]warning:[/warn] {warning}")
+
     content = _serialized_export(document, args.format)
     if args.output in (None, "-"):
         sys.stdout.write(content)
@@ -281,7 +298,12 @@ async def run_import(dsn: str, args: Any) -> int:
 
     conn = await _connect(dsn, args.wait_seconds)
     try:
-        forecast = await dry_run_hmx(conn, document, strategy=strategy)
+        forecast = await dry_run_hmx(
+            conn,
+            document,
+            strategy=strategy,
+            retry_failed_work=args.retry_failed_work,
+        )
         if args.dry_run:
             _print_dry_run(forecast, as_json=args.json, skipped=skipped)
             return 0 if forecast.can_import else 2
@@ -290,7 +312,12 @@ async def run_import(dsn: str, args: Any) -> int:
             raise HmxPolicyError(
                 "import blocked by preflight; resolve the reported policy conflict or strategy before retrying"
             )
-        result = await import_hmx(conn, document, strategy=strategy)
+        result = await import_hmx(
+            conn,
+            document,
+            strategy=strategy,
+            retry_failed_work=args.retry_failed_work,
+        )
     finally:
         await conn.close()
 

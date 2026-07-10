@@ -119,6 +119,7 @@ class HmxImportResult:
     ref_map: dict[str, str]
     conflicts: tuple[dict[str, Any], ...]
     warnings: tuple[dict[str, Any], ...]
+    work_summary: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -269,6 +270,59 @@ def _validated_records(
         else:
             valid.append(copy.deepcopy(record))
     return valid, warnings
+
+
+def _validated_in_flight_work(
+    document: dict[str, Any], work: Any
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """Validate task records independently while preserving group identity."""
+
+    groups = {
+        "consolidation_tasks": [],
+        "reconsolidation_tasks": [],
+    }
+    warnings: list[dict[str, Any]] = []
+    if not isinstance(work, dict):
+        return groups, [
+            {
+                "code": "schema_validation_error",
+                "section": "in_flight_work",
+                "error": "section must be an object",
+            }
+        ]
+    for group in groups:
+        records = work.get(group, [])
+        if not isinstance(records, list):
+            warnings.append(
+                {
+                    "code": "schema_validation_error",
+                    "section": "in_flight_work",
+                    "task_group": group,
+                    "error": "task group must be an array",
+                }
+            )
+            continue
+        for index, record in enumerate(records):
+            try:
+                validate_hmx_document(
+                    _document_probe(
+                        document,
+                        {"in_flight_work": {group: [record]}},
+                    )
+                )
+            except HmxSchemaError as exc:
+                warnings.append(
+                    {
+                        "code": "schema_validation_error",
+                        "section": "in_flight_work",
+                        "task_group": group,
+                        "index": index,
+                        "error": str(exc),
+                    }
+                )
+            else:
+                groups[group].append(copy.deepcopy(record))
+    return groups, warnings
 
 
 def validate_intent(intent: str) -> str:
@@ -668,6 +722,9 @@ def _postprocess_section(
         for task in data.get("consolidation_tasks", []):
             task["ref"] = _ref(export_id, task.pop("id"))
             task["input_refs"] = _refs(export_id, task.pop("input_ids", []))
+            trigger = task.pop("trigger_unit_id", None)
+            if trigger:
+                task["trigger_ref"] = _ref(export_id, trigger)
             target = task.pop("target_memory_id", None)
             task["output_refs"] = [_ref(export_id, target)] if target else []
         for task in data.get("reconsolidation_tasks", []):
@@ -779,8 +836,16 @@ async def export_hmx(
         }
         envelope["section_digests"] = digests
 
-    if plan.warnings:
-        envelope["export_warnings"] = list(plan.warnings)
+    export_warnings = list(plan.warnings)
+    in_flight = envelope["sections"].get("in_flight_work") or {}
+    if in_flight.get("consolidation_tasks") and "raw_units" not in envelope["sections"]:
+        export_warnings.append(
+            "consolidation tasks reference raw units that are excluded from this "
+            "exchange and will be dropped on import; re-export with "
+            "include_raw_units=true (CLI: --include-raw) to carry their inputs"
+        )
+    if export_warnings:
+        envelope["export_warnings"] = export_warnings
 
     _fill_statistics(envelope)
     validate_hmx_document(envelope)
@@ -1149,6 +1214,7 @@ async def dry_run_hmx(
     data: dict[str, Any],
     *,
     strategy: str = "additive",
+    retry_failed_work: bool = False,
 ) -> HmxDryRunResult:
     """Validate and forecast an HMX import without opening a write transaction."""
 
@@ -1205,14 +1271,85 @@ async def dry_run_hmx(
     else:
         counts["narrative"] = 0
 
+    in_flight, in_flight_warnings = _validated_in_flight_work(
+        data, sections.get("in_flight_work", {})
+    )
+    if _section_has_records("in_flight_work", sections.get("in_flight_work")):
+        invalid_records += len(in_flight_warnings)
+        warnings.extend(in_flight_warnings)
+
+    available_refs = {
+        str(record.get("ref"))
+        for section in ("memories", "worldview", "goals", "raw_units")
+        for record in validated[section]
+        if record.get("ref")
+    }
+    eligible_in_flight = 0
+    failed_in_flight = 0
+    if intent in ("port", "duplicate") and strategy == "additive":
+        for group, records in in_flight.items():
+            for record in records:
+                required_refs = (
+                    list(record.get("input_refs") or [])
+                    + list(record.get("output_refs") or [])
+                    if group == "consolidation_tasks"
+                    else list(record.get("memory_refs") or [])
+                )
+                if group == "consolidation_tasks" and record.get("trigger_ref"):
+                    required_refs.append(str(record["trigger_ref"]))
+                if (
+                    group == "consolidation_tasks"
+                    and record.get("task_type") == "episode_merge"
+                    and not record.get("output_refs")
+                ):
+                    required_refs.append("<target_memory_ref>")
+                missing_refs = sorted(set(required_refs) - available_refs)
+                if missing_refs:
+                    warnings.append(
+                        {
+                            "code": "dropped_in_flight_task",
+                            "section": "in_flight_work",
+                            "task_group": group,
+                            "ref": record.get("ref"),
+                            "missing_refs": missing_refs,
+                            "error": "required inputs are absent from this exchange",
+                        }
+                    )
+                    continue
+                eligible_in_flight += 1
+                if record.get("status") == "failed":
+                    failed_in_flight += 1
+        counts["in_flight_work"] = eligible_in_flight
+        if failed_in_flight:
+            warnings.append(
+                {
+                    "code": (
+                        "failed_in_flight_retry_requested"
+                        if retry_failed_work
+                        else "failed_in_flight_preserved"
+                    ),
+                    "section": "in_flight_work",
+                    "count": failed_in_flight,
+                    "error": (
+                        "failed tasks will be reset to pending by explicit request"
+                        if retry_failed_work
+                        else (
+                            "failed tasks will remain non-runnable diagnostics; "
+                            "set retry_failed_work=true (CLI: --retry-failed-work) "
+                            "only to rerun them"
+                        )
+                    ),
+                }
+            )
+
     for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
-            raw_units_supported = (
-                deferred_section == "raw_units"
+            supported_additive = (
+                deferred_section in {"raw_units", "in_flight_work"}
                 and intent in ("port", "duplicate")
                 and strategy == "additive"
             )
-            if raw_units_supported:
+            if supported_additive:
                 continue
             isolated = strategy in {"deliberative", "analysis_only"}
             warnings.append(
@@ -1619,6 +1756,7 @@ async def import_hmx(
     strategy: str = "additive",
     initial_ref_map: dict[str, str] | None = None,
     reviewed: bool = False,
+    retry_failed_work: bool = False,
 ) -> HmxImportResult | HmxStagingResult | HmxAnalysisResult:
     """Import HMX using additive, deliberative, or analysis-only storage.
 
@@ -1643,7 +1781,7 @@ async def import_hmx(
 
     sections = _import_sections(data)
     warnings: list[dict[str, Any]] = []
-    for deferred_section in ("config", "in_flight_work", "audit_records"):
+    for deferred_section in ("config", "audit_records"):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
             warnings.append(
                 {
@@ -1679,6 +1817,24 @@ async def import_hmx(
                     "code": "unsupported_section",
                     "section": "raw_units",
                     "error": "raw units enter active RecMem only for port or duplicate intent",
+                }
+            )
+    in_flight_work: dict[str, list[dict[str, Any]]] = {
+        "consolidation_tasks": [],
+        "reconsolidation_tasks": [],
+    }
+    if _section_has_records("in_flight_work", sections.get("in_flight_work")):
+        if intent in ("port", "duplicate"):
+            in_flight_work, in_flight_warnings = _validated_in_flight_work(
+                data, sections.get("in_flight_work")
+            )
+            warnings.extend(in_flight_warnings)
+        else:
+            warnings.append(
+                {
+                    "code": "unsupported_section",
+                    "section": "in_flight_work",
+                    "error": "in-flight work enters active queues only for port or duplicate intent",
                 }
             )
     goal_records: list[dict[str, Any]] = []
@@ -1927,6 +2083,17 @@ async def import_hmx(
             )
         )
         ref_map.update(raw_result.get("ref_map") or {})
+        in_flight_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_in_flight_work($1::jsonb, $2::text, "
+                "$3::jsonb, $4::boolean)",
+                json.dumps(in_flight_work),
+                export_id,
+                json.dumps(ref_map),
+                retry_failed_work,
+            )
+        )
+        ref_map.update(in_flight_result.get("ref_map") or {})
         warnings.extend(episode_result.get("warnings") or [])
         warnings.extend(cluster_result.get("warnings") or [])
         warnings.extend(relationship_result.get("warnings") or [])
@@ -1936,6 +2103,7 @@ async def import_hmx(
         warnings.extend(narrative_result.get("warnings") or [])
         warnings.extend(trigger_result.get("warnings") or [])
         warnings.extend(raw_result.get("warnings") or [])
+        warnings.extend(in_flight_result.get("warnings") or [])
 
         if target_state.get("is_empty") and intent in ("port", "duplicate"):
             if source_lineage:
@@ -1960,6 +2128,8 @@ async def import_hmx(
     }
     if raw_records:
         inserted["raw_units"] = int(raw_result.get("inserted", 0))
+    if _section_has_records("in_flight_work", in_flight_work):
+        inserted["in_flight_work"] = int(in_flight_result.get("inserted", 0))
 
     return HmxImportResult(
         export_id=export_id,
@@ -1971,6 +2141,21 @@ async def import_hmx(
         ref_map=ref_map,
         conflicts=conflicts,
         warnings=tuple(warnings),
+        work_summary=(
+            {
+                key: int(in_flight_result.get(key, 0))
+                for key in (
+                    "inserted",
+                    "duplicates",
+                    "dropped",
+                    "failed_preserved",
+                    "requeued",
+                    "retried",
+                )
+            }
+            if _section_has_records("in_flight_work", in_flight_work)
+            else {}
+        ),
     )
 
 

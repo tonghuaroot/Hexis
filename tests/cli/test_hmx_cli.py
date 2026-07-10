@@ -65,6 +65,12 @@ def _single_memory_document(intent: str, content: str) -> dict:
     return document
 
 
+async def test_import_help_exposes_explicit_failed_work_retry():
+    result = _run("import", "--help")
+    assert result.returncode == 0
+    assert "--retry-failed-work" in result.stdout
+
+
 async def test_export_jsonl_and_database_aware_dry_run(db_pool, tmp_path):
     output = tmp_path / "memory.hmx.jsonl"
     async with db_pool.acquire() as conn:
