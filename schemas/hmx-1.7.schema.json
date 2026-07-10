@@ -439,8 +439,8 @@
         "replacement_scope": {"$ref": "#/$defs/replacementScope"},
         "sections_replaced": {"type": "array", "items": {"type": "string"}, "minItems": 1},
         "source": {"$ref": "#/$defs/auditSource"},
-        "agent_acknowledgement": {"enum": ["accepted", "refused", "bypassed"]},
-        "replacement_executor": {"enum": ["agent_tool", "operator_override"]}
+        "agent_acknowledgement": {"enum": ["accepted", "automatic", "refused", "timed_out", "bypassed"]},
+        "replacement_executor": {"enum": ["user", "cli", "agent_tool", "system", "operator_override"]}
       },
       "additionalProperties": true
     },

@@ -419,7 +419,20 @@ async def run_agent(
 
     skill_query = user_message
     if mode == "heartbeat" and heartbeat_context:
-        skill_query = json.dumps(heartbeat_context, default=str)[:4000]
+        priority_context = {
+            key: heartbeat_context[key]
+            for key in (
+                "pending_protected_replacements",
+                "pending_import_review",
+                "backlog",
+            )
+            if key in heartbeat_context
+        }
+        skill_query = (
+            json.dumps(priority_context, default=str)
+            + "\n"
+            + json.dumps(heartbeat_context, default=str)
+        )[:4000]
     skill_selection = await select_skills(
         registry,
         tool_context,

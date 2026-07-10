@@ -131,6 +131,20 @@ async def run_agentic_heartbeat(
     except Exception as exc:
         logger.warning("Could not load pending HMX review summary: %s", exc)
 
+    try:
+        pending_replacements = await conn.fetchval("SELECT hmx_pending_replacements()")
+        if isinstance(pending_replacements, str):
+            pending_replacements = json.loads(pending_replacements)
+        if not isinstance(pending_replacements, dict):
+            raise TypeError("pending protected replacements were not an object")
+        context = dict(context)
+        context["pending_protected_replacements"] = pending_replacements or {
+            "total": 0,
+            "records": [],
+        }
+    except Exception as exc:
+        logger.warning("Could not load pending protected replacements: %s", exc)
+
     # Check if backlog has actionable tasks (gates resources + permissions)
     has_tasks = _has_backlog_tasks(context)
     if has_tasks:
@@ -138,6 +152,11 @@ async def run_agentic_heartbeat(
 
     # Build the user message (heartbeat context snapshot) — rendered in the DB.
     user_message = await render_heartbeat_decision_prompt_db(conn, context)
+    pending_prompt = _format_pending_protected_replacements(
+        context.get("pending_protected_replacements")
+    )
+    if pending_prompt:
+        user_message += "\n\n" + pending_prompt
 
     # Append checkpoint resume context if there are in-progress items with checkpoints
     if has_tasks:
@@ -181,6 +200,29 @@ async def run_agentic_heartbeat(
         "timed_out": result.timed_out,
         "has_backlog_tasks": has_tasks,
     }
+
+
+def _format_pending_protected_replacements(value: Any) -> str:
+    if not isinstance(value, dict) or not value.get("total"):
+        return ""
+    records = value.get("records") or []
+    lines = [
+        "## Protected Replacement Decisions",
+        "These requests cannot change protected state until you explicitly decide.",
+    ]
+    for record in records[:5]:
+        lines.append(
+            "- [{replacement_id}] {section}: {rationale}".format(
+                replacement_id=record.get("replacement_id", "?"),
+                section=record.get("section", "unknown section"),
+                rationale=record.get("rationale", "(no rationale)"),
+            )
+        )
+    lines.append(
+        "Load the memory-exchange skill, then use protected_replacement_review "
+        "with accept, refuse, request_modification, or defer for each request."
+    )
+    return "\n".join(lines)
 
 
 async def finalize_heartbeat(

@@ -159,6 +159,7 @@ class TestRunAgenticHeartbeat:
         conn = AsyncMock()
         conn.fetchval.side_effect = [
             '{"count": 2, "by_section": {"memories": 2}}',
+            '{"total": 0, "records": []}',
             "rendered heartbeat prompt",
         ]
 
@@ -175,6 +176,50 @@ class TestRunAgenticHeartbeat:
             "count": 2,
             "by_section": {"memories": 2},
         }
+
+    @patch("services.heartbeat_agentic.run_agent")
+    async def test_surfaces_pending_protected_replacement_with_action(
+        self, mock_run_agent
+    ):
+        mock_run_agent.return_value = MagicMock(
+            text="Deferred.",
+            tool_calls_made=[],
+            iterations=1,
+            energy_spent=0,
+            timed_out=False,
+            stopped_reason="completed",
+        )
+        conn = AsyncMock()
+        conn.fetchval.side_effect = [
+            '{"count": 0, "by_section": {}}',
+            json.dumps(
+                {
+                    "total": 1,
+                    "records": [
+                        {
+                            "replacement_id": "replacement-1",
+                            "section": "worldview",
+                            "rationale": "Restore a migrated instance",
+                        }
+                    ],
+                }
+            ),
+            "rendered heartbeat prompt",
+        ]
+
+        await run_agentic_heartbeat(
+            conn,
+            pool=MagicMock(),
+            registry=_mock_registry(),
+            heartbeat_id="hb-hmx-protected",
+            context=_mock_context(),
+        )
+
+        heartbeat_context = mock_run_agent.call_args.kwargs["heartbeat_context"]
+        assert heartbeat_context["pending_protected_replacements"]["total"] == 1
+        user_message = mock_run_agent.call_args.kwargs["user_message"]
+        assert "replacement-1" in user_message
+        assert "protected_replacement_review" in user_message
 
     @patch("services.heartbeat_agentic.run_agent")
     async def test_runs_agent_loop(self, mock_run_agent):

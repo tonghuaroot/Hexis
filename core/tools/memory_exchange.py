@@ -32,6 +32,10 @@ from core.memory_exchange import (
     quote_staged_import,
     reject_staged_import,
 )
+from core.protected_replacement import (
+    ACKNOWLEDGEMENT_DECISIONS,
+    acknowledge_protected_replacement,
+)
 
 from .base import (
     ToolCategory,
@@ -649,6 +653,59 @@ class DemoteToAnalysisHandler(ToolHandler):
             return _error_result(exc)
 
 
+class ProtectedReplacementReviewHandler(ToolHandler):
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="protected_replacement_review",
+            description=(
+                "Decide one pending protected-state replacement. This records the "
+                "agent's acknowledgement but does not itself replace protected state."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "replacement_id": {"type": "string"},
+                    "decision": {
+                        "type": "string",
+                        "enum": list(ACKNOWLEDGEMENT_DECISIONS),
+                    },
+                    "rationale": {"type": "string"},
+                    "proposed_changes": {"type": "object"},
+                },
+                "required": ["replacement_id", "decision"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            requires_approval=False,
+            is_read_only=False,
+            supports_parallel=False,
+            allowed_contexts=_AGENT_CONTEXTS,
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
+        pool = _pool(context)
+        if not pool:
+            return _missing_pool()
+        try:
+            async with pool.acquire() as conn:
+                result = await acknowledge_protected_replacement(
+                    conn,
+                    str(arguments["replacement_id"]),
+                    decision=str(arguments["decision"]),
+                    rationale=arguments.get("rationale"),
+                    proposed_changes=arguments.get("proposed_changes"),
+                )
+            return ToolResult.success_result(
+                result,
+                f"Protected replacement {result['status']}",
+            )
+        except Exception as exc:
+            return _error_result(exc)
+
+
 def create_memory_exchange_tools() -> list[ToolHandler]:
     return [
         ExportMemoriesHandler(),
@@ -661,4 +718,5 @@ def create_memory_exchange_tools() -> list[ToolHandler]:
         ImportQuoteHandler(),
         PromoteToStagedHandler(),
         DemoteToAnalysisHandler(),
+        ProtectedReplacementReviewHandler(),
     ]

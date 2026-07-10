@@ -95,6 +95,8 @@ OPTIONAL_FEATURES = (
     "raw_units",
     "config",
     "jsonl_streaming",
+    "protected_replacement_protocol_v1",
+    "fast_path_verification",
 )
 
 
@@ -1342,7 +1344,15 @@ async def dry_run_hmx(
                 }
             )
 
-    for deferred_section in ("raw_units", "config", "in_flight_work", "audit_records"):
+    if _section_has_records("audit_records", sections.get("audit_records")):
+        from core.protected_replacement import forecast_audit_records
+
+        audit_forecast = await forecast_audit_records(conn, data)
+        counts["audit_records"] = audit_forecast.inserted
+        warnings.extend(audit_forecast.warnings)
+        conflicts.extend(audit_forecast.conflicts)
+
+    for deferred_section in ("raw_units", "config", "in_flight_work"):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
             supported_additive = (
                 deferred_section in {"raw_units", "in_flight_work"}
@@ -1417,6 +1427,7 @@ async def dry_run_hmx(
             "clusters",
             "narrative",
             "raw_units",
+            "audit_records",
         )
     )
 
@@ -1781,7 +1792,7 @@ async def import_hmx(
 
     sections = _import_sections(data)
     warnings: list[dict[str, Any]] = []
-    for deferred_section in ("config", "audit_records"):
+    for deferred_section in ("config",):
         if _section_has_records(deferred_section, sections.get(deferred_section)):
             warnings.append(
                 {
@@ -2094,6 +2105,9 @@ async def import_hmx(
             )
         )
         ref_map.update(in_flight_result.get("ref_map") or {})
+        from core.protected_replacement import import_audit_records
+
+        audit_result = await import_audit_records(conn, data)
         warnings.extend(episode_result.get("warnings") or [])
         warnings.extend(cluster_result.get("warnings") or [])
         warnings.extend(relationship_result.get("warnings") or [])
@@ -2104,6 +2118,7 @@ async def import_hmx(
         warnings.extend(trigger_result.get("warnings") or [])
         warnings.extend(raw_result.get("warnings") or [])
         warnings.extend(in_flight_result.get("warnings") or [])
+        warnings.extend(audit_result.warnings)
 
         if target_state.get("is_empty") and intent in ("port", "duplicate"):
             if source_lineage:
@@ -2114,7 +2129,8 @@ async def import_hmx(
 
     duplicate_refs = tuple(memory_result.get("duplicate_refs") or [])
     conflicts = tuple(
-        {"code": "duplicate_content", "ref": ref} for ref in duplicate_refs
+        [{"code": "duplicate_content", "ref": ref} for ref in duplicate_refs]
+        + list(audit_result.conflicts)
     )
     inserted = {
         "memories": int(memory_result.get("inserted", 0)),
@@ -2130,6 +2146,8 @@ async def import_hmx(
         inserted["raw_units"] = int(raw_result.get("inserted", 0))
     if _section_has_records("in_flight_work", in_flight_work):
         inserted["in_flight_work"] = int(in_flight_result.get("inserted", 0))
+    if _section_has_records("audit_records", sections.get("audit_records")):
+        inserted["audit_records"] = int(audit_result.inserted)
 
     return HmxImportResult(
         export_id=export_id,

@@ -29,6 +29,7 @@ _TOOL_NAMES = {
     "import_quote",
     "promote_to_staged",
     "demote_to_analysis",
+    "protected_replacement_review",
 }
 
 
@@ -78,10 +79,16 @@ async def test_tool_specs_are_complete_and_conservative():
     for name in ("import_dry_run", "import_memories"):
         retry_schema = handlers[name].spec.parameters["properties"]["retry_failed_work"]
         assert retry_schema == {"type": "boolean", "default": False}
-    for name in _TOOL_NAMES - {"import_dry_run", "import_review"}:
+    for name in _TOOL_NAMES - {
+        "import_dry_run",
+        "import_review",
+        "protected_replacement_review",
+    }:
         assert handlers[name].spec.requires_approval
         assert not handlers[name].spec.is_read_only
         assert not handlers[name].spec.supports_parallel
+    assert not handlers["protected_replacement_review"].spec.requires_approval
+    assert not handlers["protected_replacement_review"].spec.is_read_only
     assert all(
         handler.spec.allowed_contexts == {ToolContext.CHAT, ToolContext.HEARTBEAT}
         for handler in handlers.values()
@@ -120,6 +127,14 @@ async def test_registry_and_memory_exchange_skill_bind_all_tools(db_pool):
     )
     assert "memory-exchange" in {item.name for item in selected.skills}
     assert _TOOL_NAMES <= selected.allowed_tool_names
+
+    protected = await select_skills(
+        registry,
+        ToolContext.HEARTBEAT,
+        query="pending protected replacement decision for worldview",
+    )
+    assert "memory-exchange" in {item.name for item in protected.skills}
+    assert "protected_replacement_review" in protected.allowed_tool_names
 
 
 async def test_agent_tool_journey_keeps_files_private_and_reviews_in_place(

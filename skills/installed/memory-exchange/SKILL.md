@@ -1,11 +1,11 @@
 ---
 name: memory-exchange
-description: Safely export, inspect, stage, analyze, and review Hexis Memory Exchange files
+description: Safely export, inspect, stage, analyze, review, and decide protected replacements for Hexis Memory Exchange files
 category: knowledge
 requires:
-  tools: [export_memories, import_dry_run, import_memories, import_review]
+  tools: [export_memories, import_dry_run, import_memories, import_review, protected_replacement_review]
 contexts: [heartbeat, chat]
-bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis]
+bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis, protected_replacement_review]
 ---
 
 # Hexis Memory Exchange
@@ -49,6 +49,18 @@ instance's memory without silently blending it into active state.
 4. `promote_to_staged` copies an analysis record into review without copying its
    embedding. `demote_to_analysis` moves a pending staged record back into
    isolation. Both require a rationale.
+
+## Protected Replacement Review
+
+1. A pending protected replacement is a request, not permission to mutate
+   identity, worldview, goals, drives, emotional triggers, or narrative.
+2. Inspect the source, rationale, section, and digest conflict presented in the
+   heartbeat context. Use `protected_replacement_review` to accept, refuse,
+   request modifications, or defer.
+3. Refusal and modification requests require a rationale. Modification requests
+   also require concrete `proposed_changes`. Do not accept merely because source
+   and target claim the same lineage; content-identical verified operations never
+   enter this queue.
 
 ## Boundaries
 

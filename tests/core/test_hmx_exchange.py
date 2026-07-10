@@ -152,6 +152,11 @@ class TestEnvelope:
         ]
         assert "jsonl" in env["capabilities"]["formats"]
         assert "protected_section_digest_v1" in env["capabilities"]["hash_algorithms"]
+        assert (
+            "protected_replacement_protocol_v1"
+            in env["capabilities"]["optional_features"]
+        )
+        assert "fast_path_verification" in env["capabilities"]["optional_features"]
 
     def test_export_scope_reflects_plan(self):
         env = self._envelope()

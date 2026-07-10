@@ -1,10 +1,10 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (HMX Slice 8 canonical digests complete)
+Last updated: 2026-07-10 (HMX Slice 9 protected replacement core complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-8 are complete:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-9 are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -14,18 +14,22 @@ export/import/review workflow. Accepted imports now enter a bounded maintenance
 re-embedding pipeline, refresh derived memory structures, and can carry eligible
 raw RecMem units during port/duplicate. Pending and interrupted consolidation
 work now travels as portable intent and resumes through the existing workers
-without carrying runtime claim state. Protected and audit digests now have an
+without carrying runtime claim state. Protected and audit digests have an
 explicit canonical byte contract and fixed cross-implementation vectors,
-including ordered narrative chronology. The next implementation boundary is
-Slice 9 (replacement protocol core machinery and Phase 0 fast path).
+including ordered narrative chronology. Durable replacement consent,
+acknowledgement, audit, snapshot, timeout, and Phase 0 verified-no-op machinery
+now exists and is visible through heartbeat. The next implementation boundary
+is Slice 10 (authoritative strategy, replacement flags, and execution of
+accepted protected-section replacements).
 
-The prior hosted green baseline was `7c3d0af` (`Stabilize HNSW planner
-assertion`), run https://github.com/QuixiAI/Hexis/actions/runs/29074962532 (all jobs
+The prior hosted green baseline was `3cb8670` (`Complete HMX Slice 8 canonical
+digests`), run https://github.com/QuixiAI/Hexis/actions/runs/29096717434 (all jobs
 succeeded). Always verify the current head's hosted result with the command in
 "Useful Commands" below rather than assuming this historical baseline applies.
 
 Important recent commits:
 
+- `3cb8670` - Complete HMX Slice 8 canonical digests
 - `7c3d0af` - Stabilize HNSW planner assertion
 - `2787a60` - Complete HMX Slice 7 in-flight work
 - `99f544d` - Complete HMX Slice 6 re-embedding
@@ -489,9 +493,50 @@ Important behavior:
 - Focused HMX validation: 143 tests pass. Full validation: 2104 tests pass with
   the existing 421 advisory marker warnings.
 
-Next: Slice 9 implements replacement consent/audit/snapshot storage and the
-Phase 0 digest-identical verification fast path. Audit records are still only
-export-shaped placeholders; durable import/dedupe belongs to that machinery.
+### HMX Slice 9 protected replacement core complete
+
+Key files:
+
+- `db/53_hmx_protected_replacement.sql` and migration `0012` - dedicated HMX
+  consent, pending replacement attempts, immutable portable audit history, and
+  bounded rollback snapshots.
+- `core/protected_replacement.py` - trust-aware Phase 0 evaluation, pending
+  acknowledgement state machine, audit import/forecast/dedupe, and snapshot API.
+- `services/heartbeat_agentic.py`, `services/agent.py`, and
+  `core/tools/memory_exchange.py` - actionable heartbeat visibility and the
+  skill-gated `protected_replacement_review` acknowledgement tool.
+- `tests/db/test_hmx_protected_replacement.py` - live-DB protocol coverage.
+
+Important behavior:
+
+- A content-identical section is a verified no-op only when lineage labels
+  match and configured trust verifies them (or the caller explicitly opts into
+  local label trust). The required immutable audit write fails closed; no
+  consent, snapshot, pending record, or protected-state write occurs on Phase 0.
+- Invalid declared digests and missing protocol capability fail before protocol
+  state is created. Unverified operator signatures are discarded and surfaced.
+- Every non-fast-path request creates dedicated immutable consent and waits for
+  agent acknowledgement. Accept, refuse, request-modification, and defer are
+  supported; refusal cannot be bypassed by retry. Timeout occurs only after both
+  24 wall-clock hours and 10 heartbeats, and a timed-out request may be
+  resubmitted as a new durable attempt.
+- Protected audit records now export and import transactionally. Stable
+  `audit_id` plus `audit_record_digest_v1` provides idempotent dedupe and loud
+  divergence conflicts; non-port history remains a non-exported foreign
+  diagnostic.
+- Snapshot storage closes on the earlier heartbeat or wall-clock bound and
+  retains a historical tombstone after payload purge.
+- An accepted pending request is permission, not execution. Slice 10 must create
+  the snapshot and self-contained replacement audit before atomically replacing
+  protected state. Reversion execution remains Slice 11.
+
+Validation: 12 protocol/migration tests and 151 HMX-focused tests pass. Full
+validation: 2115 tests pass with the existing 421 advisory marker warnings. The
+wheel contains the new module, baseline SQL, migration, schema, and updated
+memory-exchange skill.
+
+Next: Slice 10 wires `--strategy authoritative` and `--replace` through the
+pending decision into the actual whole-section replacement transaction.
 
 ## Current Roadmap
 
@@ -673,15 +718,16 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 ## Resume Recommendation
 
 Do not continue debugging the old CI failures first. Continue the HMX thread at
-Slice 9 from the canonical digest contract and fixed vectors now in place. Read
-`core/digest.py`, `core/memory_exchange.py`, `core/trust_anchors.py`,
-`tests/fixtures/digest/`, and the Slice 9 protocol/state-machine requirements in
-`plans/hmx.md` before editing.
+Slice 10 from the durable protocol state now in place. Read
+`core/protected_replacement.py`, `db/53_hmx_protected_replacement.sql`,
+`core/memory_exchange.py`, `tests/db/test_hmx_protected_replacement.py`, and the
+Slice 10 authoritative-import requirements in `plans/hmx.md` before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 9: implement consent/audit/snapshot persistence and the Phase 0
-   content-identical verification fast path without destructive writes.
+1. HMX Slice 10: implement authoritative whole-section replacement and CLI
+   `--replace` flags, consuming accepted pending decisions while snapshotting
+   and auditing before any protected write.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

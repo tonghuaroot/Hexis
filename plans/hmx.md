@@ -1544,10 +1544,10 @@ This section documents how HMX sections map to the actual Hexis database schema.
 | `raw_units` | `subconscious_units` table | `embedding` is nullable. |
 | `in_flight_work` | `recmem_consolidation_tasks`, `reconsolidation_tasks` | Task types: `episode_merge`, `episode_create`, `semantic_refine`. |
 | `config` | `config` table (key-value) | Secret keys filtered by pattern. |
-| `audit_records` | `protected_replacement_audit` (new, created in Slice 9) | Does not exist yet; part of MVP-PR. |
+| `audit_records` | `protected_replacement_audit` | Immutable replacement, verification, and reversion history created in Slice 9. |
 | `provenance` | `metadata->'provenance'` JSONB on `memories` | No dedicated column. Backfilled in Slice 0. |
 | `lineage` | `config` table, key `agent.lineage_id` | New concept. Generated during `hexis init`. |
-| `consent (HMX)` | `hmx_consent` table (new, created in Slice 9) | Separate from existing `consent_log` (which is LLM-usage consent). |
+| `consent (HMX)` | `hmx_consent` table | Separate from existing `consent_log` (which is LLM-usage consent). |
 
 ### NOT NULL embedding constraints
 
@@ -1822,7 +1822,7 @@ This slice is foundational. The digest is the linchpin of the entire safety mode
 
 **Files:**
 
-* `db/39_protected_replacement.sql` — `hmx_consent` table, `protected_replacement_audit` table, snapshot management, pending replacement queue
+* `db/53_hmx_protected_replacement.sql` — `hmx_consent` table, `protected_replacement_audit` table, snapshot management, pending replacement queue
 * `core/protected_replacement.py` — protocol state machine including Phase 0 fast path
 
 **Behavior:**
@@ -1857,7 +1857,7 @@ This slice is foundational. The digest is the linchpin of the entire safety mode
 
 **Files:**
 
-* `db/39_protected_replacement.sql` — snapshot storage and purge job
+* `db/53_hmx_protected_replacement.sql` — snapshot storage and purge job
 * `core/protected_replacement.py` — `revert_protected_replacement` implementation
 
 **Behavior:**
