@@ -37,6 +37,8 @@ from core.protected_replacement import (
     ACKNOWLEDGEMENT_DECISIONS,
     acknowledge_protected_replacement,
     inspect_protected_replacement,
+    open_protected_reversion_windows,
+    revert_protected_replacement,
 )
 
 from .base import (
@@ -707,8 +709,8 @@ class ProtectedReplacementInspectHandler(ToolHandler):
         return ToolSpec(
             name="protected_replacement_inspect",
             description=(
-                "Inspect the current and imported protected section for one pending "
-                "replacement before deciding."
+                "Inspect current/imported protected state, execution audit, and any "
+                "open reversion window for one replacement."
             ),
             parameters={
                 "type": "object",
@@ -795,6 +797,87 @@ class ProtectedReplacementReviewHandler(ToolHandler):
             return _error_result(exc)
 
 
+class ProtectedReversionListHandler(ToolHandler):
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="protected_reversion_list",
+            description=(
+                "List executed protected replacements whose bounded, one-shot "
+                "reversion windows are still open."
+            ),
+            parameters={"type": "object", "properties": {}},
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+            allowed_contexts=_AGENT_CONTEXTS,
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
+        pool = _pool(context)
+        if not pool:
+            return _missing_pool()
+        try:
+            async with pool.acquire() as conn:
+                result = await open_protected_reversion_windows(conn)
+            return ToolResult.success_result(
+                result,
+                f"Found {result.get('total', 0)} open protected reversion windows",
+            )
+        except Exception as exc:
+            return _error_result(exc)
+
+
+class ProtectedReplacementRevertHandler(ToolHandler):
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="protected_replacement_revert",
+            description=(
+                "Revert one executed protected replacement within its open window. "
+                "Requires the replacement audit ID and an explicit rationale; refuses "
+                "to overwrite protected state changed after the replacement."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "audit_id": {"type": "string"},
+                    "rationale": {"type": "string", "minLength": 1},
+                },
+                "required": ["audit_id", "rationale"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            requires_approval=False,
+            is_read_only=False,
+            supports_parallel=False,
+            allowed_contexts=_AGENT_CONTEXTS,
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
+        pool = _pool(context)
+        if not pool:
+            return _missing_pool()
+        try:
+            async with pool.acquire() as conn:
+                result = await revert_protected_replacement(
+                    conn,
+                    str(arguments["audit_id"]),
+                    rationale=str(arguments["rationale"]),
+                    actor_identity="agent_tool",
+                )
+            return ToolResult.success_result(
+                result,
+                f"Protected replacement {result['status']}",
+            )
+        except Exception as exc:
+            return _error_result(exc)
+
+
 def create_memory_exchange_tools() -> list[ToolHandler]:
     return [
         ExportMemoriesHandler(),
@@ -809,4 +892,6 @@ def create_memory_exchange_tools() -> list[ToolHandler]:
         DemoteToAnalysisHandler(),
         ProtectedReplacementInspectHandler(),
         ProtectedReplacementReviewHandler(),
+        ProtectedReversionListHandler(),
+        ProtectedReplacementRevertHandler(),
     ]

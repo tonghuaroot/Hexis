@@ -238,6 +238,12 @@ def _print_import_result(
                     "this replacement was already executed; no duplicate write occurred"
                 )
                 style = "ok"
+            elif disposition == "reverted":
+                detail = (
+                    "this replacement was executed and later reverted; revise the "
+                    "proposal or rationale before submitting a distinct request"
+                )
+                style = "warn"
             else:
                 detail = (
                     "no protected write occurred; inspect the JSON result for details"

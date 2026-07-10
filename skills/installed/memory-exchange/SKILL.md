@@ -3,9 +3,9 @@ name: memory-exchange
 description: Safely export, inspect, stage, analyze, review, and decide protected replacements for Hexis Memory Exchange files
 category: knowledge
 requires:
-  tools: [export_memories, import_dry_run, import_memories, import_review, protected_replacement_inspect, protected_replacement_review]
+  tools: [export_memories, import_dry_run, import_memories, import_review, protected_replacement_inspect, protected_replacement_review, protected_reversion_list, protected_replacement_revert]
 contexts: [heartbeat, chat]
-bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis, protected_replacement_inspect, protected_replacement_review]
+bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis, protected_replacement_inspect, protected_replacement_review, protected_reversion_list, protected_replacement_revert]
 ---
 
 # Hexis Memory Exchange
@@ -68,6 +68,18 @@ instance's memory without silently blending it into active state.
    also require concrete `proposed_changes`. Do not accept merely because source
    and target claim the same lineage; content-identical verified operations never
    enter this queue.
+
+## Protected Replacement Reversion
+
+1. Use `protected_reversion_list` to find executed replacements whose earlier-of
+   heartbeat and wall-clock windows remain open. Reversion never runs on a timer.
+2. Inspect the replacement before reverting. Use
+   `protected_replacement_revert` with the replacement audit ID and a concrete
+   rationale only when restoring the snapshot is the intended choice.
+3. Reversion refuses to overwrite protected state that changed after the
+   replacement. It atomically restores and verifies the snapshot, writes an
+   immutable reversion audit, then purges the consumed payload while retaining
+   its tombstone. A failed restore leaves the window and current state intact.
 
 ## Boundaries
 

@@ -22,6 +22,7 @@ from core.memory_exchange import (
     import_hmx,
     load_source_context,
     prepare_protected_section_import,
+    prepare_protected_section_restore,
     validate_hmx_document,
 )
 from core.trust_anchors import (
@@ -517,6 +518,7 @@ async def evaluate_protected_replacement(
         "refused": "refused",
         "modification_requested": "modification_requested",
         "executed": "executed",
+        "reverted": "reverted",
         "cancelled": "cancelled",
     }.get(status, status)
     return ProtectedReplacementResult(
@@ -545,7 +547,8 @@ async def inspect_protected_replacement(conn, replacement_id: str) -> dict[str, 
     row = await conn.fetchrow(
         "SELECT replacement_id, export_id, section, source, imported_section, "
         "imported_digest_v1, local_digest_v1, replacement_scope, rationale, "
-        "status, acknowledgement, created_at, timeout_at "
+        "status, acknowledgement, snapshot_id, execution_audit_id, "
+        "reversion_audit_id, reverted_at, created_at, timeout_at "
         "FROM hmx_pending_replacements WHERE replacement_id=$1::uuid",
         replacement_id,
     )
@@ -562,6 +565,15 @@ async def inspect_protected_replacement(conn, replacement_id: str) -> dict[str, 
         include_audit_records=False,
     )
     current_digest = str(local["section_digests"][section])
+    reversion_window = None
+    if row["snapshot_id"]:
+        reversion_window = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_snapshot_window($1::uuid)", str(row["snapshot_id"])
+            )
+        )
+    status = str(row["status"])
+    current_matches_executed_state = current_digest == str(row["imported_digest_v1"])
     return {
         "replacement_id": replacement_id,
         "export_id": str(row["export_id"]),
@@ -569,8 +581,13 @@ async def inspect_protected_replacement(conn, replacement_id: str) -> dict[str, 
         "source": _coerce_json(row["source"]),
         "replacement_scope": _coerce_json(row["replacement_scope"]),
         "rationale": str(row["rationale"]),
-        "status": str(row["status"]),
+        "status": status,
         "acknowledgement": _coerce_json(row["acknowledgement"]),
+        "snapshot_id": str(row["snapshot_id"]) if row["snapshot_id"] else None,
+        "execution_audit_id": row["execution_audit_id"],
+        "reversion_audit_id": row["reversion_audit_id"],
+        "reverted_at": _iso_value(row["reverted_at"]),
+        "reversion_window": reversion_window,
         "created_at": _iso_value(row["created_at"]),
         "timeout_at": _iso_value(row["timeout_at"]),
         "local_digest_v1_at_request": str(row["local_digest_v1"]),
@@ -578,6 +595,11 @@ async def inspect_protected_replacement(conn, replacement_id: str) -> dict[str, 
         "imported_digest_v1": str(row["imported_digest_v1"]),
         "local_state_changed_since_request": current_digest
         != str(row["local_digest_v1"]),
+        "current_matches_executed_state": current_matches_executed_state,
+        "reversion_state_eligible": status == "executed"
+        and current_matches_executed_state
+        and isinstance(reversion_window, dict)
+        and bool(reversion_window.get("window_open")),
         "current_local_section": local["sections"][section],
         "imported_section": _coerce_json(row["imported_section"]),
     }
@@ -817,6 +839,268 @@ async def acknowledge_protected_replacement(
         return parsed
 
 
+async def open_protected_reversion_windows(conn) -> dict[str, Any]:
+    result = _coerce_json(await conn.fetchval("SELECT hmx_open_reversion_windows()"))
+    if not isinstance(result, dict):
+        raise RuntimeError("hmx_open_reversion_windows returned a non-object result")
+    return result
+
+
+async def revert_protected_replacement(
+    conn,
+    audit_id: str,
+    *,
+    rationale: str,
+    actor_identity: str = "agent_tool",
+) -> dict[str, Any]:
+    """Restore one replacement snapshot within its bounded reversion window."""
+
+    normalized_rationale = str(rationale or "").strip()
+    if not normalized_rationale:
+        raise ProtectedReplacementError(
+            "reversion_rationale_missing",
+            "protected replacement reversion requires a rationale",
+        )
+    if actor_identity not in {"user", "cli", "agent_tool", "system"}:
+        raise ProtectedReplacementError(
+            "invalid_reversion_actor",
+            "actor_identity must be user, cli, agent_tool, or system",
+        )
+
+    # Expiry cleanup must survive the expected reversion-window rejection.
+    await conn.execute("SELECT hmx_purge_expired_protected_snapshots()")
+    async with conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('hmx_protected_replacement'))"
+        )
+
+        audit_row = await conn.fetchrow(
+            "SELECT event_type, record, is_foreign_diagnostic "
+            "FROM protected_replacement_audit WHERE audit_id=$1",
+            audit_id,
+        )
+        if audit_row is None:
+            raise ProtectedReplacementError(
+                "replacement_audit_not_found",
+                f"protected replacement audit not found: {audit_id}",
+            )
+        if audit_row["event_type"] != "protected_section_replacement":
+            raise ProtectedReplacementError(
+                "replacement_audit_not_revertible",
+                f"audit {audit_id} records {audit_row['event_type']}, not a replacement",
+            )
+        if audit_row["is_foreign_diagnostic"]:
+            raise ProtectedReplacementError(
+                "foreign_replacement_not_revertible",
+                "imported diagnostic audit history has no local snapshot to restore",
+            )
+
+        pending = await conn.fetchrow(
+            "SELECT replacement_id, section, status, snapshot_id, "
+            "execution_audit_id, reversion_audit_id, reverted_at "
+            "FROM hmx_pending_replacements WHERE execution_audit_id=$1 FOR UPDATE",
+            audit_id,
+        )
+        if pending is None or pending["snapshot_id"] is None:
+            raise ProtectedReplacementError(
+                "reversion_snapshot_unavailable",
+                "this replacement audit has no local snapshot; imported audit history cannot be executed",
+            )
+        if pending["reversion_audit_id"]:
+            return {
+                "status": "already_reverted",
+                "replacement_id": str(pending["replacement_id"]),
+                "reverts_audit_id": audit_id,
+                "audit_id": str(pending["reversion_audit_id"]),
+                "snapshot_id": str(pending["snapshot_id"]),
+                "reverted_at": _iso_value(pending["reverted_at"]),
+                "reused": True,
+                "warnings": [],
+            }
+        if pending["status"] != "executed":
+            raise ProtectedReplacementError(
+                "replacement_not_revertible",
+                f"replacement {pending['replacement_id']} is {pending['status']}, not executed",
+            )
+
+        snapshot = await conn.fetchrow(
+            "SELECT sections, snapshot_state, section_digests, reference_map, "
+            "consumed_at, consumed_by_audit_id, purged_at, purge_reason "
+            "FROM protected_replacement_snapshots WHERE snapshot_id=$1::uuid "
+            "FOR UPDATE",
+            str(pending["snapshot_id"]),
+        )
+        if snapshot is None:
+            raise ProtectedReplacementError(
+                "reversion_snapshot_unavailable",
+                "the local replacement snapshot no longer exists",
+            )
+        window = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_snapshot_window($1::uuid)", str(pending["snapshot_id"])
+            )
+        )
+        if not isinstance(window, dict) or not window.get("window_open"):
+            reason = snapshot["purge_reason"] or "reversion_window_closed"
+            raise ProtectedReplacementError(
+                "reversion_window_closed",
+                f"the replacement can no longer be reverted ({reason}); submit a new authoritative request if a state change is still needed",
+            )
+
+        sections = [str(section) for section in snapshot["sections"]]
+        section = str(pending["section"])
+        if sections != [section]:
+            raise ProtectedReplacementError(
+                "reversion_snapshot_scope_invalid",
+                "the replacement snapshot does not match its single-section audit scope",
+            )
+        snapshot_state = _coerce_json(snapshot["snapshot_state"])
+        snapshot_digests = _coerce_json(snapshot["section_digests"])
+        if not isinstance(snapshot_state, dict) or not isinstance(
+            snapshot_digests, dict
+        ):
+            raise ProtectedReplacementError(
+                "reversion_snapshot_integrity_failure",
+                "the replacement snapshot payload or digest map is invalid",
+            )
+        restored_section = snapshot_state.get(section)
+        restored_digest = str(snapshot_digests.get(section) or "")
+        if (
+            not restored_digest
+            or protected_section_digest_v1(section, restored_section) != restored_digest
+        ):
+            raise ProtectedReplacementError(
+                "reversion_snapshot_integrity_failure",
+                "the stored snapshot content does not match its protected digest",
+            )
+
+        replacement_record = _coerce_json(audit_row["record"])
+        if not isinstance(replacement_record, dict):
+            raise ProtectedReplacementError(
+                "replacement_audit_integrity_failure",
+                "the replacement audit record is not a JSON object",
+            )
+        if replacement_record.get("previous_state_digest_v1") != restored_digest:
+            raise ProtectedReplacementError(
+                "reversion_snapshot_integrity_failure",
+                "the snapshot digest does not match the replacement audit's previous state",
+            )
+        expected_current_digest = str(
+            replacement_record.get("new_state_digest_v1") or ""
+        )
+        if not expected_current_digest:
+            raise ProtectedReplacementError(
+                "replacement_audit_integrity_failure",
+                "the replacement audit does not declare its new protected-state digest",
+            )
+
+        before = await export_hmx(
+            conn,
+            intent="port",
+            include_in_flight_work=False,
+            include_audit_records=False,
+        )
+        current_digest = str(before["section_digests"][section])
+        if current_digest != expected_current_digest:
+            raise ProtectedReplacementError(
+                "protected_state_changed_since_replacement",
+                f"{section} changed after replacement {audit_id}; reversion will not overwrite newer state. Inspect the current section and submit a new authoritative request if needed",
+            )
+
+        reversion_audit_id = str(uuid.uuid4())
+        reversion_record = {
+            "audit_id": reversion_audit_id,
+            "event_type": "protected_section_reverted",
+            "event_time": _iso_now(),
+            "reverts_audit_id": audit_id,
+            "rationale": normalized_rationale,
+            "sections_reverted": [section],
+            "restored_state_digest_v1": restored_digest,
+            "post_reversion_digest_v1": restored_digest,
+            "pre_reversion_digest_v1": current_digest,
+            "replacement_snapshot_ref": str(pending["snapshot_id"]),
+            "actor_identity": actor_identity,
+            "agent_initiated": actor_identity == "agent_tool",
+        }
+        stored = await store_audit_record(conn, reversion_record)
+        if stored.get("status") != "inserted":
+            raise ProtectedReplacementError(
+                "reversion_audit_write_failure",
+                f"required reversion audit returned {stored.get('status')}",
+            )
+
+        sql_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_authoritative($1::jsonb, $2::text[], $3::jsonb)",
+                json.dumps(
+                    {
+                        section: prepare_protected_section_restore(
+                            section, restored_section
+                        )
+                    }
+                ),
+                sections,
+                json.dumps(_coerce_json(snapshot["reference_map"]) or {}),
+            )
+        )
+        if not isinstance(sql_result, dict):
+            raise RuntimeError("hmx_import_authoritative returned a non-object result")
+
+        after = await export_hmx(
+            conn,
+            intent="port",
+            include_in_flight_work=False,
+            include_audit_records=True,
+        )
+        resulting_digest = str(after["section_digests"][section])
+        if resulting_digest != restored_digest:
+            raise ProtectedReplacementError(
+                "reversion_digest_verification_failure",
+                f"reverting {section} produced {resulting_digest}, expected {restored_digest}; all changes were rolled back",
+            )
+        collateral_changes = sorted(
+            protected_section
+            for protected_section, previous_digest in before["section_digests"].items()
+            if protected_section != section
+            and after["section_digests"].get(protected_section) != previous_digest
+        )
+        if collateral_changes:
+            raise ProtectedReplacementError(
+                "reversion_scope_violation",
+                "reversion also changed protected section(s) "
+                + ", ".join(collateral_changes)
+                + "; all changes were rolled back",
+            )
+
+        await conn.execute(
+            "UPDATE protected_replacement_snapshots SET snapshot_state=NULL, "
+            "consumed_at=CURRENT_TIMESTAMP, consumed_by_audit_id=$2, "
+            "purged_at=CURRENT_TIMESTAMP, purge_reason='consumed_by_reversion' "
+            "WHERE snapshot_id=$1::uuid",
+            str(pending["snapshot_id"]),
+            reversion_audit_id,
+        )
+        await conn.execute(
+            "UPDATE hmx_pending_replacements SET status='reverted', "
+            "reversion_audit_id=$2, reverted_at=CURRENT_TIMESTAMP, "
+            "updated_at=CURRENT_TIMESTAMP WHERE replacement_id=$1::uuid",
+            str(pending["replacement_id"]),
+            reversion_audit_id,
+        )
+
+        return {
+            "status": "reverted",
+            "replacement_id": str(pending["replacement_id"]),
+            "reverts_audit_id": audit_id,
+            "audit_id": reversion_audit_id,
+            "snapshot_id": str(pending["snapshot_id"]),
+            "section": section,
+            "resulting_digest_v1": resulting_digest,
+            "reused": False,
+            "warnings": list(sql_result.get("warnings") or []),
+        }
+
+
 async def import_authoritative_hmx(
     conn,
     envelope: dict[str, Any],
@@ -930,6 +1214,28 @@ async def import_authoritative_hmx(
     )
 
 
+def _snapshot_reference_map(envelope: Mapping[str, Any]) -> dict[str, str]:
+    """Map refs from a fresh local export back to their current local IDs."""
+
+    prefix = f"{envelope.get('export_id')}:"
+    result: dict[str, str] = {}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, str) and value.startswith(prefix):
+            local_id = value[len(prefix) :]
+            if local_id:
+                result[value] = local_id
+
+    visit(envelope.get("sections") or {})
+    return result
+
+
 async def create_protected_snapshot(
     conn,
     sections: list[str],
@@ -953,24 +1259,28 @@ async def create_protected_snapshot(
     )
     state = {section: local["sections"][section] for section in selected}
     digests = {section: local["section_digests"][section] for section in selected}
+    reference_map = _snapshot_reference_map(local)
     if wall_clock_expires_at is None:
         snapshot_id = await conn.fetchval(
             "SELECT hmx_create_protected_snapshot($1::text[], $2::jsonb, "
-            "$3::jsonb, $4::integer)",
+            "$3::jsonb, p_heartbeat_window => $4::integer, "
+            "p_reference_map => $5::jsonb)",
             selected,
             json.dumps(state),
             json.dumps(digests),
             heartbeat_window,
+            json.dumps(reference_map),
         )
     else:
         snapshot_id = await conn.fetchval(
             "SELECT hmx_create_protected_snapshot($1::text[], $2::jsonb, "
-            "$3::jsonb, $4::integer, $5::timestamptz)",
+            "$3::jsonb, $4::integer, $5::timestamptz, $6::jsonb)",
             selected,
             json.dumps(state),
             json.dumps(digests),
             heartbeat_window,
             wall_clock_expires_at,
+            json.dumps(reference_map),
         )
     return str(snapshot_id)
 

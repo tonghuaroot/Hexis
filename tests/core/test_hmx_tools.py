@@ -31,6 +31,8 @@ _TOOL_NAMES = {
     "demote_to_analysis",
     "protected_replacement_inspect",
     "protected_replacement_review",
+    "protected_reversion_list",
+    "protected_replacement_revert",
 }
 
 
@@ -91,14 +93,23 @@ async def test_tool_specs_are_complete_and_conservative():
         "import_dry_run",
         "import_review",
         "protected_replacement_inspect",
+        "protected_replacement_revert",
+        "protected_reversion_list",
         "protected_replacement_review",
     }:
         assert handlers[name].spec.requires_approval
         assert not handlers[name].spec.is_read_only
         assert not handlers[name].spec.supports_parallel
     assert not handlers["protected_replacement_review"].spec.requires_approval
+    assert not handlers["protected_replacement_revert"].spec.requires_approval
     assert not handlers["protected_replacement_review"].spec.is_read_only
     assert handlers["protected_replacement_inspect"].spec.is_read_only
+    assert handlers["protected_reversion_list"].spec.is_read_only
+    assert not handlers["protected_replacement_revert"].spec.is_read_only
+    assert handlers["protected_replacement_revert"].spec.parameters["required"] == [
+        "audit_id",
+        "rationale",
+    ]
     assert all(
         handler.spec.allowed_contexts == {ToolContext.CHAT, ToolContext.HEARTBEAT}
         for handler in handlers.values()

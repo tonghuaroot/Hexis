@@ -42,6 +42,7 @@ async def test_migrations_recorded_and_idempotent(db_pool):
         assert "0011_hmx_in_flight_work" in st["applied"]
         assert "0012_hmx_protected_replacement" in st["applied"]
         assert "0013_hmx_authoritative_import" in st["applied"]
+        assert "0014_hmx_reversion" in st["applied"]
         assert st["pending"] == []
         assert await apply_pending_migrations(conn) == []  # nothing left to do
         # the deltas are live
@@ -102,6 +103,7 @@ async def test_migrate_existing_database_preserves_data():
             assert "0011_hmx_in_flight_work" in applied
             assert "0012_hmx_protected_replacement" in applied
             assert "0013_hmx_authoritative_import" in applied
+            assert "0014_hmx_reversion" in applied
 
             # AFTER: the data is intact AND the schema evolved
             assert (
@@ -144,6 +146,16 @@ async def test_migrate_existing_database_preserves_data():
                 "WHERE table_schema='public' "
                 "AND table_name='hmx_pending_replacements' "
                 "AND column_name='reference_map')"
+            )
+            assert await conn.fetchval(
+                "SELECT to_regprocedure("
+                "'public.hmx_open_reversion_windows()') IS NOT NULL"
+            )
+            assert await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema='public' "
+                "AND table_name='protected_replacement_snapshots' "
+                "AND column_name='consumed_by_audit_id')"
             )
             # 0003's backfill classified the pre-migration row as lived experience
             assert (

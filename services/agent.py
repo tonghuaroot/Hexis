@@ -423,6 +423,7 @@ async def run_agent(
             key: heartbeat_context[key]
             for key in (
                 "pending_protected_replacements",
+                "open_protected_reversions",
                 "pending_import_review",
                 "backlog",
             )

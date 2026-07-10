@@ -197,6 +197,34 @@ async def test_authoritative_human_output_surfaces_reused_refusal(capsys):
     assert "resolved: 1" in output
 
 
+async def test_authoritative_human_output_surfaces_reverted_request(capsys):
+    result = HmxAuthoritativeResult(
+        export_id="hmx-reverted-test",
+        intent="port",
+        strategy="authoritative",
+        target_state={},
+        inserted={},
+        protected_operations=(
+            {
+                "disposition": "reverted",
+                "status": "reverted",
+                "replacement_id": "replacement-reverted-test",
+                "section": "identity",
+                "agent_acknowledgement_required": False,
+            },
+        ),
+        ref_map={},
+        conflicts=(),
+        warnings=(),
+    )
+
+    _print_import_result(result, as_json=False, skipped=[])
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert "executed and later reverted" in output
+    assert "resolved: 1" in output
+
+
 async def test_export_rejects_inverted_time_range_before_connecting():
     result = _run(
         "export",

@@ -160,6 +160,7 @@ class TestRunAgenticHeartbeat:
         conn.fetchval.side_effect = [
             '{"count": 2, "by_section": {"memories": 2}}',
             '{"total": 0, "records": []}',
+            '{"total": 0, "records": []}',
             "rendered heartbeat prompt",
         ]
 
@@ -204,6 +205,7 @@ class TestRunAgenticHeartbeat:
                     ],
                 }
             ),
+            '{"total": 0, "records": []}',
             "rendered heartbeat prompt",
         ]
 
@@ -221,6 +223,55 @@ class TestRunAgenticHeartbeat:
         assert "replacement-1" in user_message
         assert "protected_replacement_inspect" in user_message
         assert "protected_replacement_review" in user_message
+
+    @patch("services.heartbeat_agentic.run_agent")
+    async def test_surfaces_open_protected_reversion_as_explicit_choice(
+        self, mock_run_agent
+    ):
+        mock_run_agent.return_value = MagicMock(
+            text="Kept the replacement.",
+            tool_calls_made=[],
+            iterations=1,
+            energy_spent=0,
+            timed_out=False,
+            stopped_reason="completed",
+        )
+        conn = AsyncMock()
+        conn.fetchval.side_effect = [
+            '{"count": 0, "by_section": {}}',
+            '{"total": 0, "records": []}',
+            json.dumps(
+                {
+                    "total": 1,
+                    "records": [
+                        {
+                            "replacement_id": "replacement-revert-1",
+                            "audit_id": "audit-revert-1",
+                            "section": "identity",
+                            "heartbeats_remaining": 5,
+                            "wall_clock_expires_at": "2026-08-01T00:00:00Z",
+                        }
+                    ],
+                }
+            ),
+            "rendered heartbeat prompt",
+        ]
+
+        await run_agentic_heartbeat(
+            conn,
+            pool=MagicMock(),
+            registry=_mock_registry(),
+            heartbeat_id="hb-hmx-reversion",
+            context=_mock_context(),
+        )
+
+        heartbeat_context = mock_run_agent.call_args.kwargs["heartbeat_context"]
+        assert heartbeat_context["open_protected_reversions"]["total"] == 1
+        user_message = mock_run_agent.call_args.kwargs["user_message"]
+        assert "replacement-revert-1" in user_message
+        assert "audit-revert-1" in user_message
+        assert "never automatic" in user_message
+        assert "protected_replacement_revert" in user_message
 
     @patch("services.heartbeat_agentic.run_agent")
     async def test_runs_agent_loop(self, mock_run_agent):

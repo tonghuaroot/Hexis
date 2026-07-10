@@ -1859,8 +1859,9 @@ This slice is foundational. The digest is the linchpin of the entire safety mode
 
 **Files:**
 
-* `db/53_hmx_protected_replacement.sql` — snapshot storage and purge job
+* `db/55_hmx_reversion.sql` — snapshot reference maps, open-window query, and consumed-snapshot lifecycle
 * `core/protected_replacement.py` — `revert_protected_replacement` implementation
+* `core/tools/memory_exchange.py` — skill-gated list and explicit reversion tools
 
 **Behavior:**
 
@@ -1868,7 +1869,10 @@ This slice is foundational. The digest is the linchpin of the entire safety mode
 * Window measured as `min(heartbeats_remaining, wall_clock_expires_at)` (earlier-of)
 * Default: 7 heartbeats, 30-day wall-clock cap
 * `revert_protected_replacement(audit_id, rationale)` restores prior state and creates a reversion audit record
-* After window closes, snapshot is purged
+* Reversion refuses if the protected section changed after the replacement; it never overwrites newer state
+* Snapshot reference maps restore protected reference topology to surviving local records
+* Restore, immutable audit, target/collateral digest verification, and snapshot consumption are atomic
+* After either limit closes, the snapshot payload is purged; successful reversion purges the consumed payload immediately and retains its tombstone
 * Both windows operate independently; either closing closes the rollback
 
 #### Slice 12: Operator override and trust anchor enforcement

@@ -452,6 +452,41 @@ async def test_snapshot_window_closes_on_earlier_heartbeat_limit(db_pool):
             await transaction.rollback()
 
 
+async def test_snapshot_window_closes_independently_on_wall_clock_limit(db_pool):
+    async with db_pool.acquire() as conn:
+        await _prepare(conn)
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _seed_worldview(conn)
+            snapshot_id = await create_protected_snapshot(
+                conn, ["worldview"], heartbeat_window=100
+            )
+            await conn.execute(
+                "UPDATE protected_replacement_snapshots SET "
+                "created_at=CURRENT_TIMESTAMP-INTERVAL '2 days', "
+                "wall_clock_expires_at=CURRENT_TIMESTAMP-INTERVAL '1 day' "
+                "WHERE snapshot_id=$1::uuid",
+                snapshot_id,
+            )
+
+            assert (
+                await conn.fetchval("SELECT hmx_purge_expired_protected_snapshots()")
+                == 1
+            )
+            row = await conn.fetchrow(
+                "SELECT snapshot_state, consumed_at, purged_at, purge_reason "
+                "FROM protected_replacement_snapshots WHERE snapshot_id=$1::uuid",
+                snapshot_id,
+            )
+            assert row["snapshot_state"] is None
+            assert row["consumed_at"] is None
+            assert row["purged_at"] is not None
+            assert row["purge_reason"] == "wall_clock_expired"
+        finally:
+            await transaction.rollback()
+
+
 async def test_audit_dedupe_round_trip_and_append_only_records(db_pool):
     async with db_pool.acquire() as conn:
         await _prepare(conn)

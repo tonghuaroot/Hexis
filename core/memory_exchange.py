@@ -1321,6 +1321,34 @@ def prepare_protected_section_import(
     return prepared_records, warnings
 
 
+def prepare_protected_section_restore(section: str, section_data: Any) -> Any:
+    """Convert a local HMX snapshot back to storage input without new provenance."""
+
+    from core.digest import content_hash_v1, normalize_v1
+
+    if section == "narrative":
+        return copy.deepcopy(section_data or {})
+
+    prepared_records: list[dict[str, Any]] = []
+    for record in copy.deepcopy(section_data or []):
+        prepared = (
+            _protected_memory_record(section, record)
+            if section in {"worldview", "goals"}
+            else record
+        )
+        if section in {"worldview", "goals"}:
+            prepared.setdefault("content_hash_v1", content_hash_v1(prepared["content"]))
+            prepared["_transient_normalized_content"] = normalize_v1(
+                prepared["content"]
+            )
+        elif section == "emotional_triggers":
+            prepared["_transient_normalized_content"] = normalize_v1(
+                prepared["trigger_pattern"]
+            )
+        prepared_records.append(prepared)
+    return prepared_records
+
+
 async def dry_run_hmx(
     conn,
     data: dict[str, Any],

@@ -145,6 +145,20 @@ async def run_agentic_heartbeat(
     except Exception as exc:
         logger.warning("Could not load pending protected replacements: %s", exc)
 
+    try:
+        open_reversions = await conn.fetchval("SELECT hmx_open_reversion_windows()")
+        if isinstance(open_reversions, str):
+            open_reversions = json.loads(open_reversions)
+        if not isinstance(open_reversions, dict):
+            raise TypeError("open protected reversion windows were not an object")
+        context = dict(context)
+        context["open_protected_reversions"] = open_reversions or {
+            "total": 0,
+            "records": [],
+        }
+    except Exception as exc:
+        logger.warning("Could not load protected reversion windows: %s", exc)
+
     # Check if backlog has actionable tasks (gates resources + permissions)
     has_tasks = _has_backlog_tasks(context)
     if has_tasks:
@@ -157,6 +171,11 @@ async def run_agentic_heartbeat(
     )
     if pending_prompt:
         user_message += "\n\n" + pending_prompt
+    reversion_prompt = _format_open_protected_reversions(
+        context.get("open_protected_reversions")
+    )
+    if reversion_prompt:
+        user_message += "\n\n" + reversion_prompt
 
     # Append checkpoint resume context if there are in-progress items with checkpoints
     if has_tasks:
@@ -222,6 +241,33 @@ def _format_pending_protected_replacements(value: Any) -> str:
         "Load the memory-exchange skill, inspect each request with "
         "protected_replacement_inspect, then use protected_replacement_review "
         "with accept, refuse, request_modification, or defer."
+    )
+    return "\n".join(lines)
+
+
+def _format_open_protected_reversions(value: Any) -> str:
+    if not isinstance(value, dict) or not value.get("total"):
+        return ""
+    records = value.get("records") or []
+    lines = [
+        "## Protected Replacement Reversion Windows",
+        "Reversion is optional and never automatic. Each window closes when either limit expires.",
+    ]
+    for record in records[:5]:
+        lines.append(
+            "- replacement [{replacement_id}] audit [{audit_id}] {section}: "
+            "{heartbeats} heartbeats remain; wall-clock deadline {deadline}".format(
+                replacement_id=record.get("replacement_id", "?"),
+                audit_id=record.get("audit_id", "?"),
+                section=record.get("section", "unknown section"),
+                heartbeats=record.get("heartbeats_remaining", "?"),
+                deadline=record.get("wall_clock_expires_at", "unknown"),
+            )
+        )
+    lines.append(
+        "Load the memory-exchange skill and inspect the replacement first. Use "
+        "protected_replacement_revert with its audit ID and an explicit rationale "
+        "only if restoring the snapshot is your chosen action."
     )
     return "\n".join(lines)
 

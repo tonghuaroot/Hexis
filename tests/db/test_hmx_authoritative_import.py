@@ -1,4 +1,4 @@
-"""HMX Slice 10 authoritative protected-section replacement journeys."""
+"""HMX Slice 10-11 authoritative replacement and reversion journeys."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from core.memory_exchange import dry_run_hmx, export_hmx, import_hmx
 from core.protected_replacement import (
     acknowledge_protected_replacement,
     inspect_protected_replacement,
+    open_protected_reversion_windows,
+    revert_protected_replacement,
 )
 from core.trust_anchors import TrustVerification
 
@@ -143,6 +145,28 @@ def _mutate_section(envelope: dict, section: str) -> None:
     )
 
 
+async def _execute_changed_section(conn, section: str, rationale: str):
+    envelope = await export_hmx(conn, intent="port")
+    before = copy.deepcopy(envelope)
+    _mutate_section(envelope, section)
+    requested = await import_hmx(
+        conn,
+        envelope,
+        strategy="authoritative",
+        replace_sections=[section],
+        replacement_rationale=rationale,
+        verifier=VerifiedTrustAnchors(),
+    )
+    replacement_id = requested.protected_operations[0]["replacement_id"]
+    executed = await acknowledge_protected_replacement(
+        conn,
+        replacement_id,
+        decision="accept",
+        executor="agent_tool",
+    )
+    return envelope, before, executed
+
+
 @pytest.mark.parametrize(
     "section",
     [
@@ -154,7 +178,7 @@ def _mutate_section(envelope: dict, section: str) -> None:
         "narrative",
     ],
 )
-async def test_authoritative_acceptance_replaces_and_verifies_each_section(
+async def test_authoritative_acceptance_and_reversion_verify_each_section(
     db_pool, section
 ):
     async with db_pool.acquire() as conn:
@@ -201,6 +225,13 @@ async def test_authoritative_acceptance_replaces_and_verifies_each_section(
             assert executed["status"] == "executed"
             assert executed["snapshot_id"]
             assert executed["audit_id"]
+            executed_inspection = await inspect_protected_replacement(
+                conn, operation["replacement_id"]
+            )
+            assert executed_inspection["current_matches_executed_state"] is True
+            assert executed_inspection["reversion_state_eligible"] is True
+            assert executed_inspection["reversion_window"]["window_open"] is True
+            assert executed_inspection["execution_audit_id"] == executed["audit_id"]
             after = await export_hmx(conn, intent="port")
             assert after["section_digests"][section] == imported_digest
             for untouched_section, untouched_digest in before_digests.items():
@@ -236,6 +267,271 @@ async def test_authoritative_acceptance_replaces_and_verifies_each_section(
             assert audit["new_state_digest_v1"] == imported_digest
             assert audit["previous_state_snapshot_ref"] == executed["snapshot_id"]
             assert audit["agent_acknowledgement"] == "accepted"
+
+            windows = await open_protected_reversion_windows(conn)
+            assert any(
+                record["audit_id"] == executed["audit_id"]
+                for record in windows["records"]
+            )
+            reverted = await revert_protected_replacement(
+                conn,
+                executed["audit_id"],
+                rationale=f"Exercise bounded {section} reversion",
+            )
+            assert reverted["status"] == "reverted"
+            restored = await export_hmx(conn, intent="port")
+            assert restored["section_digests"] == before_digests
+            if section == "narrative":
+                previous_chapter = next(
+                    record
+                    for record in before_export["sections"]["narrative"][
+                        "life_chapters"
+                    ]
+                    if record.get("key") == "current"
+                )
+                assert (
+                    await conn.fetchval(
+                        "SELECT get_narrative_context()->'current_chapter'->>'name'"
+                    )
+                    == previous_chapter["name"]
+                )
+            if section == "identity":
+                assert await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM "
+                    "jsonb_array_elements(get_self_model_context(200)) facet "
+                    "WHERE facet->>'kind' = 'life_chapter_current')"
+                )
+
+            reversion_audit = await conn.fetchval(
+                "SELECT record FROM protected_replacement_audit WHERE audit_id=$1",
+                reverted["audit_id"],
+            )
+            reversion_audit = (
+                json.loads(reversion_audit)
+                if isinstance(reversion_audit, str)
+                else reversion_audit
+            )
+            assert reversion_audit["reverts_audit_id"] == executed["audit_id"]
+            assert reversion_audit["restored_state_digest_v1"] == before_digest
+            assert reversion_audit["post_reversion_digest_v1"] == before_digest
+            snapshot = await conn.fetchrow(
+                "SELECT snapshot_state, consumed_at, consumed_by_audit_id, "
+                "purged_at, purge_reason FROM protected_replacement_snapshots "
+                "WHERE snapshot_id=$1::uuid",
+                executed["snapshot_id"],
+            )
+            assert snapshot["snapshot_state"] is None
+            assert snapshot["consumed_at"] is not None
+            assert snapshot["consumed_by_audit_id"] == reverted["audit_id"]
+            assert snapshot["purged_at"] is not None
+            assert snapshot["purge_reason"] == "consumed_by_reversion"
+            reverted_inspection = await inspect_protected_replacement(
+                conn, operation["replacement_id"]
+            )
+            assert reverted_inspection["status"] == "reverted"
+            assert reverted_inspection["reversion_state_eligible"] is False
+            assert reverted_inspection["reversion_window"]["window_open"] is False
+            assert reverted_inspection["reversion_audit_id"] == reverted["audit_id"]
+            assert not any(
+                record["audit_id"] == executed["audit_id"]
+                for record in (await open_protected_reversion_windows(conn))["records"]
+            )
+
+            replay = await revert_protected_replacement(
+                conn,
+                executed["audit_id"],
+                rationale="Idempotent retry after a lost tool response",
+            )
+            assert replay["status"] == "already_reverted"
+            assert replay["audit_id"] == reverted["audit_id"]
+            assert replay["reused"] is True
+        finally:
+            await transaction.rollback()
+
+
+async def test_reversion_refuses_to_overwrite_state_changed_after_replacement(db_pool):
+    async with db_pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _prepare(conn)
+            envelope, _, executed = await _execute_changed_section(
+                conn, "drives", "Exercise post-replacement drift protection"
+            )
+            drive_name = envelope["sections"]["drives"][0]["name"]
+            await conn.execute(
+                "UPDATE drives SET current_level=LEAST(0.99, current_level+0.023) "
+                "WHERE name=$1",
+                drive_name,
+            )
+            changed_digest = (await export_hmx(conn, intent="port"))["section_digests"][
+                "drives"
+            ]
+
+            with pytest.raises(
+                Exception, match="protected_state_changed_since_replacement"
+            ):
+                await revert_protected_replacement(
+                    conn,
+                    executed["audit_id"],
+                    rationale="Do not overwrite later drive reflection",
+                )
+
+            assert (await export_hmx(conn, intent="port"))["section_digests"][
+                "drives"
+            ] == changed_digest
+            row = await conn.fetchrow(
+                "SELECT p.status, p.reversion_audit_id, s.snapshot_state, "
+                "s.consumed_at FROM hmx_pending_replacements p "
+                "JOIN protected_replacement_snapshots s ON s.snapshot_id=p.snapshot_id "
+                "WHERE p.execution_audit_id=$1",
+                executed["audit_id"],
+            )
+            assert row["status"] == "executed"
+            assert row["reversion_audit_id"] is None
+            assert row["snapshot_state"] is not None
+            assert row["consumed_at"] is None
+        finally:
+            await transaction.rollback()
+
+
+async def test_reversion_window_expiry_purges_payload_and_blocks_restore(db_pool):
+    async with db_pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _prepare(conn)
+            envelope, _, executed = await _execute_changed_section(
+                conn, "drives", "Exercise bounded reversion expiry"
+            )
+            await conn.execute(
+                "UPDATE heartbeat_state SET heartbeat_count=heartbeat_count+7 WHERE id=1"
+            )
+
+            with pytest.raises(Exception, match="reversion_window_closed"):
+                await revert_protected_replacement(
+                    conn,
+                    executed["audit_id"],
+                    rationale="This request arrived after the bounded window",
+                )
+
+            assert (await export_hmx(conn, intent="port"))["section_digests"][
+                "drives"
+            ] == envelope["section_digests"]["drives"]
+            snapshot = await conn.fetchrow(
+                "SELECT snapshot_state, consumed_at, purged_at, purge_reason "
+                "FROM protected_replacement_snapshots WHERE snapshot_id=$1::uuid",
+                executed["snapshot_id"],
+            )
+            assert snapshot["snapshot_state"] is None
+            assert snapshot["consumed_at"] is None
+            assert snapshot["purged_at"] is not None
+            assert snapshot["purge_reason"] == "heartbeat_window_expired"
+        finally:
+            await transaction.rollback()
+
+
+async def test_failed_reversion_rolls_back_audit_snapshot_and_state(db_pool):
+    async with db_pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _prepare(conn)
+            envelope, _, executed = await _execute_changed_section(
+                conn, "drives", "Force atomic reversion rollback"
+            )
+            audit_count = await conn.fetchval(
+                "SELECT count(*) FROM protected_replacement_audit"
+            )
+            await conn.execute(
+                "CREATE FUNCTION pg_temp.reject_reversion_drive_delete() "
+                "RETURNS trigger AS $$ BEGIN RAISE EXCEPTION "
+                "'forced reversion delete failure'; END; $$ LANGUAGE plpgsql"
+            )
+            await conn.execute(
+                "CREATE TRIGGER reject_reversion_drive_delete BEFORE DELETE ON drives "
+                "FOR EACH STATEMENT EXECUTE FUNCTION "
+                "pg_temp.reject_reversion_drive_delete()"
+            )
+
+            with pytest.raises(Exception, match="forced reversion delete failure"):
+                await revert_protected_replacement(
+                    conn,
+                    executed["audit_id"],
+                    rationale="Exercise all-or-nothing restore",
+                )
+
+            assert (
+                await conn.fetchval("SELECT count(*) FROM protected_replacement_audit")
+                == audit_count
+            )
+            assert (await export_hmx(conn, intent="port"))["section_digests"][
+                "drives"
+            ] == envelope["section_digests"]["drives"]
+            row = await conn.fetchrow(
+                "SELECT p.status, p.reversion_audit_id, s.snapshot_state, "
+                "s.consumed_at FROM hmx_pending_replacements p "
+                "JOIN protected_replacement_snapshots s ON s.snapshot_id=p.snapshot_id "
+                "WHERE p.execution_audit_id=$1",
+                executed["audit_id"],
+            )
+            assert row["status"] == "executed"
+            assert row["reversion_audit_id"] is None
+            assert row["snapshot_state"] is not None
+            assert row["consumed_at"] is None
+        finally:
+            await transaction.rollback()
+
+
+async def test_reversion_restores_worldview_evidence_reference(db_pool):
+    async with db_pool.acquire() as conn:
+        transaction = conn.transaction()
+        await transaction.start()
+        try:
+            await _prepare(conn)
+            evidence_id = await conn.fetchval(
+                "INSERT INTO memories (type, content, embedding) VALUES "
+                "('semantic', $1, array_fill(0.1, "
+                "ARRAY[embedding_dimension()])::vector) RETURNING id",
+                f"Reversion evidence {uuid.uuid4().hex}",
+            )
+            worldview = await conn.fetchrow(
+                "SELECT id, content FROM memories WHERE type='worldview' "
+                "ORDER BY created_at DESC, id DESC LIMIT 1"
+            )
+            await conn.execute(
+                "SELECT create_memory_relationship($1, $2, 'SUPPORTS', '{}'::jsonb)",
+                evidence_id,
+                worldview["id"],
+            )
+            assert await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM memory_edges WHERE "
+                "src_id=$1::text AND rel_type='SUPPORTS' AND dst_id=$2::text)",
+                str(evidence_id),
+                str(worldview["id"]),
+            )
+
+            _, _, executed = await _execute_changed_section(
+                conn, "worldview", "Preserve evidence topology across reversion"
+            )
+            await revert_protected_replacement(
+                conn,
+                executed["audit_id"],
+                rationale="Restore worldview and its supporting evidence",
+            )
+
+            restored_worldview_id = await conn.fetchval(
+                "SELECT id FROM memories WHERE type='worldview' AND content=$1",
+                worldview["content"],
+            )
+            assert restored_worldview_id is not None
+            assert await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM memory_edges WHERE "
+                "src_type='memory' AND src_id=$1::text AND rel_type='SUPPORTS' "
+                "AND dst_type='memory' AND dst_id=$2::text)",
+                str(evidence_id),
+                str(restored_worldview_id),
+            )
         finally:
             await transaction.rollback()
 
