@@ -587,8 +587,10 @@ Digests are computed over **semantic protected state**, not transport metadata. 
 * `access_count`
 * `last_accessed`
 * `created_at` and `updated_at` (timestamps reflect transport/storage, not semantic state)
+* `hmx_id`, `blocked_by`, and `parent_goal_id` (local/remapped storage identifiers and reference topology)
 * The `provenance` subtree; `provenance.origin_id` may be read from the original record only as a stable sort-key fallback
-* `metadata.unrecognized_hmx_fields` (preserved-but-not-understood fields)
+* `metadata.hmx`, `metadata.unrecognized_hmx_fields`, and metadata keys beginning with `embedding_` (import bookkeeping and derived embedding state)
+* Identity facets whose `kind` or `type` is `life_chapter_current`; this is a derived projection of the narrative section's current chapter, not independently owned identity state
 * Any field whose key begins with `_transient_` (convention for transient implementation state)
 
 Fields INCLUDED are the actual semantic content that is stable across a remapping operation: content text, facet concepts and strengths, drive parameters and current state, and narrative summaries and statuses. Reference topology is intentionally outside `protected_section_digest_v1`; a future digest version may include it only after defining semantic reference normalization.
@@ -1841,7 +1843,7 @@ This slice is foundational. The digest is the linchpin of the entire safety mode
 
 **Files:**
 
-* `db/36_functions_memory_exchange.sql` — `hmx_import_authoritative(jsonb, replace_sections text[])`
+* `db/54_hmx_authoritative_import.sql` — `hmx_import_authoritative(jsonb, replace_sections text[], ref_map jsonb)`
 * `apps/cli_exchange.py` — `--strategy authoritative` and `--replace` flag handling
 
 **Behavior:**

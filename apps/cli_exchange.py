@@ -23,6 +23,7 @@ from core.hmx_files import (
 
 from core.memory_exchange import (
     HmxAnalysisResult,
+    HmxAuthoritativeResult,
     HmxDryRunResult,
     HmxImportResult,
     HmxPolicyError,
@@ -33,6 +34,7 @@ from core.memory_exchange import (
     dry_run_hmx,
     export_hmx,
     import_hmx,
+    normalize_replace_sections,
     pending_hmx_reviews,
     promote_analysis_to_staged,
     quote_staged_import,
@@ -57,10 +59,16 @@ async def _connect(dsn: str, wait_seconds: int) -> asyncpg.Connection:
     deadline = time.monotonic() + max(wait_seconds, 1)
     last_error: Exception | None = None
     while time.monotonic() < deadline:
+        conn: asyncpg.Connection | None = None
         try:
-            return await asyncpg.connect(dsn, ssl=False, command_timeout=60.0)
+            conn = await asyncpg.connect(dsn, ssl=False, command_timeout=60.0)
+            await conn.execute("LOAD 'age'")
+            await conn.execute('SET search_path = ag_catalog, public, "$user"')
+            return conn
         except Exception as exc:  # pragma: no cover - exact driver errors vary
             last_error = exc
+            if conn is not None:
+                await conn.close()
             await asyncio.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
     raise TimeoutError(
         f"failed to connect to Postgres after {wait_seconds}s: {last_error}"
@@ -159,7 +167,9 @@ def _print_dry_run(
 
 
 def _print_import_result(
-    result: HmxImportResult | HmxStagingResult | HmxAnalysisResult,
+    result: (
+        HmxImportResult | HmxAuthoritativeResult | HmxStagingResult | HmxAnalysisResult
+    ),
     *,
     as_json: bool,
     skipped: list[str],
@@ -174,7 +184,70 @@ def _print_import_result(
 
     from apps.cli_theme import console, make_table
 
-    if isinstance(result, HmxStagingResult):
+    if isinstance(result, HmxAuthoritativeResult):
+        pending = [
+            operation
+            for operation in result.protected_operations
+            if operation.get("agent_acknowledgement_required")
+        ]
+        verified = [
+            operation
+            for operation in result.protected_operations
+            if operation.get("disposition") == "verified_noop"
+        ]
+        resolved = [
+            operation
+            for operation in result.protected_operations
+            if operation not in pending and operation not in verified
+        ]
+        console.print(
+            f"[ok]HMX authoritative import processed.[/ok] "
+            f"[muted]{result.export_id}[/muted]"
+        )
+        counts = result.inserted
+        footer = (
+            f"Protected requests awaiting agent decision: "
+            f"[accent]{len(pending)}[/accent]  "
+            f"verified no-ops: [accent]{len(verified)}[/accent]  "
+            f"resolved: [accent]{len(resolved)}[/accent]"
+        )
+        for operation in result.protected_operations:
+            disposition = str(operation.get("disposition") or "unknown")
+            replacement_id = operation.get("replacement_id") or "no request id"
+            section = operation.get("section") or "unknown section"
+            if operation in pending:
+                detail = (
+                    "the next heartbeat will present accept, refuse, modify, "
+                    "and defer choices"
+                )
+                style = "warn"
+            elif operation in verified:
+                detail = "content and trusted lineage already match; no write occurred"
+                style = "ok"
+            elif disposition == "refused":
+                detail = (
+                    "the prior agent refusal remains in force; revise the proposed "
+                    "content or rationale before submitting a distinct request"
+                )
+                style = "fail"
+            elif disposition == "modification_requested":
+                detail = "the agent requested changes; submit a revised exchange and rationale"
+                style = "warn"
+            elif disposition == "executed":
+                detail = (
+                    "this replacement was already executed; no duplicate write occurred"
+                )
+                style = "ok"
+            else:
+                detail = (
+                    "no protected write occurred; inspect the JSON result for details"
+                )
+                style = "warn"
+            console.print(
+                f"[{style}]{disposition}:[/{style}] "
+                f"{replacement_id} {section} - {detail}"
+            )
+    elif isinstance(result, HmxStagingResult):
         console.print(
             f"[ok]HMX import staged for review.[/ok] [muted]{result.export_id}[/muted]"
         )
@@ -295,6 +368,15 @@ async def run_import(dsn: str, args: Any) -> int:
     ]
     document = _apply_skips(document, skipped)
     strategy = (args.strategy or default_import_strategy(intent)).replace("-", "_")
+    replace_sections = normalize_replace_sections(args.replace)
+    skipped_replacements = sorted(set(skipped) & set(replace_sections))
+    if skipped_replacements:
+        raise HmxPolicyError(
+            "a protected section cannot be both skipped and replaced: "
+            + ", ".join(skipped_replacements)
+        )
+    if replace_sections and strategy != "authoritative":
+        raise HmxPolicyError("--replace requires --strategy authoritative")
 
     conn = await _connect(dsn, args.wait_seconds)
     try:
@@ -303,6 +385,8 @@ async def run_import(dsn: str, args: Any) -> int:
             document,
             strategy=strategy,
             retry_failed_work=args.retry_failed_work,
+            replace_sections=replace_sections,
+            allow_locally_trusted_lineage=args.trust_matching_lineage_label,
         )
         if args.dry_run:
             _print_dry_run(forecast, as_json=args.json, skipped=skipped)
@@ -317,6 +401,9 @@ async def run_import(dsn: str, args: Any) -> int:
             document,
             strategy=strategy,
             retry_failed_work=args.retry_failed_work,
+            replace_sections=replace_sections,
+            replacement_rationale=args.replacement_rationale,
+            allow_locally_trusted_lineage=args.trust_matching_lineage_label,
         )
     finally:
         await conn.close()

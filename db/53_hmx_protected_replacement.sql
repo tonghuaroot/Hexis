@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS hmx_pending_replacements (
     ),
     source JSONB NOT NULL,
     imported_section JSONB NOT NULL,
+    reference_map JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (
+        jsonb_typeof(reference_map) = 'object'
+    ),
     imported_digest_v1 TEXT NOT NULL CHECK (imported_digest_v1 ~ '^[0-9a-f]{64}$'),
     local_digest_v1 TEXT NOT NULL CHECK (local_digest_v1 ~ '^[0-9a-f]{64}$'),
     replacement_scope JSONB NOT NULL CHECK (
@@ -105,6 +108,9 @@ CREATE TABLE IF NOT EXISTS hmx_pending_replacements (
     ),
     acknowledgement JSONB,
     acknowledgement_at TIMESTAMPTZ,
+    snapshot_id UUID REFERENCES protected_replacement_snapshots(snapshot_id),
+    execution_audit_id TEXT REFERENCES protected_replacement_audit(audit_id),
+    executed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_heartbeat_count BIGINT NOT NULL,
     timeout_at TIMESTAMPTZ NOT NULL DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours'),

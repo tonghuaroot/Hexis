@@ -28,7 +28,12 @@ from typing import Any, Iterable
 HMX_VERSION = "1.7"
 
 EXPORT_INTENTS = ("port", "duplicate", "telepathy", "analysis")
-SUPPORTED_IMPORT_STRATEGIES = ("additive", "deliberative", "analysis_only")
+SUPPORTED_IMPORT_STRATEGIES = (
+    "additive",
+    "authoritative",
+    "deliberative",
+    "analysis_only",
+)
 REDACTION_POLICIES = ("none", "basic", "strict", "custom")
 
 # Sections that affect self-constitution, motivational state, value structure,
@@ -118,6 +123,26 @@ class HmxImportResult:
     target_state: dict[str, Any]
     inserted: dict[str, int]
     duplicate_refs: tuple[str, ...]
+    ref_map: dict[str, str]
+    conflicts: tuple[dict[str, Any], ...]
+    warnings: tuple[dict[str, Any], ...]
+    work_summary: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HmxAuthoritativeResult:
+    """Outcome of an authoritative import request.
+
+    Ordinary sections may commit immediately. Protected operations report
+    verified no-ops, durable requests, or a reused terminal decision.
+    """
+
+    export_id: str
+    intent: str
+    strategy: str
+    target_state: dict[str, Any]
+    inserted: dict[str, int]
+    protected_operations: tuple[dict[str, Any], ...]
     ref_map: dict[str, str]
     conflicts: tuple[dict[str, Any], ...]
     warnings: tuple[dict[str, Any], ...]
@@ -450,6 +475,22 @@ def resolve_export_sections(
 def default_import_strategy(intent: str) -> str:
     validate_intent(intent)
     return DEFAULT_IMPORT_STRATEGY[intent]
+
+
+def normalize_replace_sections(sections: Iterable[str] | None) -> tuple[str, ...]:
+    normalized = tuple(
+        dict.fromkeys(
+            str(section).strip().replace("-", "_")
+            for section in (sections or ())
+            if str(section).strip()
+        )
+    )
+    invalid = sorted(set(normalized) - PROTECTED_SECTIONS)
+    if invalid:
+        raise HmxPolicyError(
+            "--replace accepts protected sections only; invalid: " + ", ".join(invalid)
+        )
+    return normalized
 
 
 def build_capabilities(relationship_edge_types: list[str]) -> dict[str, Any]:
@@ -1211,12 +1252,83 @@ def _protected_memory_record(section: str, record: dict[str, Any]) -> dict[str, 
     return converted
 
 
+def prepare_protected_section_import(
+    section: str,
+    section_data: Any,
+    *,
+    intent: str,
+    source: dict[str, Any],
+    export_id: str,
+    local_instance_id: str,
+    imported_at: str,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Prepare one validated protected section for DB-owned replacement."""
+
+    warnings: list[dict[str, Any]] = []
+    if section == "narrative":
+        prepared_narrative = copy.deepcopy(section_data or {})
+        for group, records in prepared_narrative.items():
+            for index, record in enumerate(records):
+                prepared, record_warnings = _append_import_provenance(
+                    record,
+                    origin_id=str(record.get("ref") or f"{group}:{index}"),
+                    intent=intent,
+                    source=source,
+                    export_id=export_id,
+                    local_instance_id=local_instance_id,
+                    imported_at=imported_at,
+                )
+                records[index] = prepared
+                warnings.extend(record_warnings)
+        return prepared_narrative, warnings
+
+    prepared_records: list[dict[str, Any]] = []
+    for index, record in enumerate(copy.deepcopy(section_data or [])):
+        if section in {"worldview", "goals"}:
+            prepared, record_warnings = _prepare_import_memory(
+                _protected_memory_record(section, record),
+                intent=intent,
+                source=source,
+                export_id=export_id,
+                local_instance_id=local_instance_id,
+                imported_at=imported_at,
+            )
+        else:
+            origin_id = str(
+                record.get("ref")
+                or record.get("key")
+                or record.get("name")
+                or record.get("trigger_pattern")
+                or index
+            )
+            prepared, record_warnings = _append_import_provenance(
+                record,
+                origin_id=origin_id,
+                intent=intent,
+                source=source,
+                export_id=export_id,
+                local_instance_id=local_instance_id,
+                imported_at=imported_at,
+            )
+            if section == "emotional_triggers":
+                from core.digest import normalize_v1
+
+                prepared["_transient_normalized_content"] = normalize_v1(
+                    prepared["trigger_pattern"]
+                )
+        prepared_records.append(prepared)
+        warnings.extend(record_warnings)
+    return prepared_records, warnings
+
+
 async def dry_run_hmx(
     conn,
     data: dict[str, Any],
     *,
     strategy: str = "additive",
     retry_failed_work: bool = False,
+    replace_sections: Iterable[str] | None = None,
+    allow_locally_trusted_lineage: bool = False,
 ) -> HmxDryRunResult:
     """Validate and forecast an HMX import without opening a write transaction."""
 
@@ -1226,12 +1338,16 @@ async def dry_run_hmx(
         raise HmxSchemaError("HMX input must be a JSON object")
     _validate_import_header(data)
     intent = validate_intent(str(data["export_intent"]))
+    requested_replacements = normalize_replace_sections(replace_sections)
+    if requested_replacements and strategy != "authoritative":
+        raise HmxPolicyError("replace_sections requires strategy='authoritative'")
     sections = _import_sections(data)
     export_id = str(data["export_id"])
     warnings: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
     counts: dict[str, int] = {}
     invalid_records = 0
+    invalid_by_section: dict[str, int] = {}
 
     validated: dict[str, list[dict[str, Any]]] = {}
     for section in (
@@ -1251,6 +1367,7 @@ async def dry_run_hmx(
         )
         validated[section] = records
         counts[section] = len(records)
+        invalid_by_section[section] = len(section_warnings)
         invalid_records += len(section_warnings)
         warnings.extend(section_warnings)
 
@@ -1260,6 +1377,7 @@ async def dry_run_hmx(
             validate_hmx_document(_document_probe(data, {"narrative": narrative}))
         except HmxSchemaError as exc:
             invalid_records += 1
+            invalid_by_section["narrative"] = 1
             counts["narrative"] = 0
             warnings.append(
                 {
@@ -1272,6 +1390,7 @@ async def dry_run_hmx(
             counts["narrative"] = sum(len(records) for records in narrative.values())
     else:
         counts["narrative"] = 0
+        invalid_by_section["narrative"] = 0
 
     in_flight, in_flight_warnings = _validated_in_flight_work(
         data, sections.get("in_flight_work", {})
@@ -1288,7 +1407,10 @@ async def dry_run_hmx(
     }
     eligible_in_flight = 0
     failed_in_flight = 0
-    if intent in ("port", "duplicate") and strategy == "additive":
+    if intent in ("port", "duplicate") and strategy in {
+        "additive",
+        "authoritative",
+    }:
         for group, records in in_flight.items():
             for record in records:
                 required_refs = (
@@ -1357,7 +1479,7 @@ async def dry_run_hmx(
             supported_additive = (
                 deferred_section in {"raw_units", "in_flight_work"}
                 and intent in ("port", "duplicate")
-                and strategy == "additive"
+                and strategy in {"additive", "authoritative"}
             )
             if supported_additive:
                 continue
@@ -1379,7 +1501,12 @@ async def dry_run_hmx(
                 counts[deferred_section] = 1
 
     memory_candidates: list[tuple[str, str, str]] = []
-    for section in ("memories", "worldview", "goals"):
+    candidate_sections = (
+        ("memories",)
+        if strategy == "authoritative"
+        else ("memories", "worldview", "goals")
+    )
+    for section in candidate_sections:
         for record in validated[section]:
             content = record.get("content")
             if section == "goals":
@@ -1409,8 +1536,18 @@ async def dry_run_hmx(
         else:
             seen.add(normalized)
             new_by_section[section] += 1
-    if strategy == "additive":
+    if strategy in {"additive", "authoritative"}:
         counts.update(new_by_section)
+    if strategy == "authoritative":
+        counts["worldview"] = (
+            len(validated["worldview"]) if "worldview" in requested_replacements else 0
+        )
+        counts["goals"] = (
+            len(validated["goals"]) if "goals" in requested_replacements else 0
+        )
+        for section in PROTECTED_SECTIONS:
+            if section not in requested_replacements:
+                counts[section] = 0
     counts["duplicate_memories"] = len(duplicate_refs)
     counts["invalid_records"] = invalid_records
     counts["total_records"] = sum(
@@ -1436,6 +1573,9 @@ async def dry_run_hmx(
         section
         for section in PROTECTED_SECTIONS
         if _section_has_records(section, sections.get(section))
+    )
+    protected_available = sorted(
+        section for section in PROTECTED_SECTIONS if section in sections
     )
     direct_protected_allowed = not protected_present or (
         intent in ("port", "duplicate") and bool(target_state.get("is_empty"))
@@ -1472,17 +1612,149 @@ async def dry_run_hmx(
             }
         )
 
-    strategy_available = strategy in {"additive", "deliberative", "analysis_only"}
+    authoritative_allowed = True
+    authoritative_operations: list[dict[str, Any]] = []
+    if strategy == "authoritative":
+        if intent not in {"port", "duplicate"}:
+            authoritative_allowed = False
+            conflicts.append(
+                {
+                    "code": "invalid_authoritative_intent",
+                    "intent": intent,
+                    "error": "authoritative replacement requires export_intent port or duplicate",
+                }
+            )
+        if not requested_replacements:
+            authoritative_allowed = False
+            conflicts.append(
+                {
+                    "code": "replacement_sections_missing",
+                    "error": "authoritative import requires at least one explicit --replace section",
+                }
+            )
+        features = set((data.get("capabilities") or {}).get("optional_features") or [])
+        if "protected_replacement_protocol_v1" not in features:
+            authoritative_allowed = False
+            conflicts.append(
+                {
+                    "code": "protected_replacement_capability_missing",
+                    "error": "the HMX exchange does not advertise protected_replacement_protocol_v1",
+                }
+            )
+
+        for section in sorted(set(protected_available) - set(requested_replacements)):
+            warnings.append(
+                {
+                    "code": "protected_section_not_selected",
+                    "section": section,
+                    "error": "section will remain unchanged; add --replace to request whole-section replacement",
+                }
+            )
+
+        local_envelope = None
+        if requested_replacements:
+            local_envelope = await export_hmx(
+                conn,
+                intent="port",
+                include_in_flight_work=False,
+                include_audit_records=False,
+            )
+        from core.digest import protected_section_digest_v1
+
+        for section in requested_replacements:
+            if section not in sections:
+                authoritative_allowed = False
+                conflicts.append(
+                    {
+                        "code": "protected_section_missing",
+                        "section": section,
+                        "error": "the HMX exchange does not contain the requested section",
+                    }
+                )
+                continue
+            if invalid_by_section.get(section, 0):
+                authoritative_allowed = False
+                conflicts.append(
+                    {
+                        "code": "schema_validation_error",
+                        "section": section,
+                        "invalid_records": invalid_by_section[section],
+                        "error": "authoritative replacement cannot skip invalid protected records",
+                    }
+                )
+                continue
+            assert local_envelope is not None
+            declared_digest = str(
+                (data.get("section_digests") or {}).get(section) or ""
+            )
+            actual_digest = protected_section_digest_v1(section, sections[section])
+            if not declared_digest or actual_digest != declared_digest:
+                authoritative_allowed = False
+                conflicts.append(
+                    {
+                        "code": (
+                            "protected_section_digest_missing"
+                            if not declared_digest
+                            else "protected_section_digest_invalid"
+                        ),
+                        "section": section,
+                        "declared_digest_v1": declared_digest or None,
+                        "actual_digest_v1": actual_digest,
+                    }
+                )
+                continue
+            local_digest = str(local_envelope["section_digests"][section])
+            labels_equal = bool(source_lineage) and source_lineage == local_lineage
+            content_identical = local_digest == declared_digest
+            fast_path_candidate = (
+                content_identical and labels_equal and allow_locally_trusted_lineage
+            )
+            operation = {
+                "section": section,
+                "local_digest_v1": local_digest,
+                "imported_digest_v1": declared_digest,
+                "disposition": (
+                    "verified_noop_candidate"
+                    if fast_path_candidate
+                    else "pending_acknowledgement"
+                ),
+                "agent_acknowledgement_required": not fast_path_candidate,
+            }
+            authoritative_operations.append(operation)
+            if not content_identical:
+                conflicts.append(
+                    {
+                        "code": "protected_section_digest_mismatch",
+                        "section": section,
+                        "local_digest_v1": local_digest,
+                        "imported_digest_v1": declared_digest,
+                    }
+                )
+            if not labels_equal:
+                conflicts.append(
+                    {
+                        "code": "lineage_mismatch",
+                        "section": section,
+                        "source_lineage": source_lineage,
+                        "target_lineage": local_lineage,
+                    }
+                )
+            elif content_identical and not allow_locally_trusted_lineage:
+                conflicts.append(
+                    {
+                        "code": "unverified_lineage",
+                        "section": section,
+                        "error": "matching lineage labels are not trusted automatically; acknowledgement will be required",
+                    }
+                )
+
+    strategy_available = strategy in set(SUPPORTED_IMPORT_STRATEGIES)
     if not strategy_available:
-        if strategy == "authoritative":
-            strategy_error = "authoritative replacement arrives with the Protected Replacement Protocol"
-        else:
-            strategy_error = "unknown HMX import strategy"
         warnings.append(
             {
                 "code": "strategy_not_available",
                 "strategy": strategy,
-                "error": strategy_error,
+                "error": "unknown HMX import strategy",
             }
         )
 
@@ -1502,6 +1774,9 @@ async def dry_run_hmx(
     elif strategy == "analysis_only":
         protected_decision = "analysis_only"
         policy_allowed = True
+    elif strategy == "authoritative":
+        protected_decision = "protected_replacement_protocol"
+        policy_allowed = authoritative_allowed
     else:
         protected_decision = "direct_import" if direct_protected_allowed else "blocked"
         policy_allowed = direct_protected_allowed and direct_lineage_allowed
@@ -1517,10 +1792,15 @@ async def dry_run_hmx(
         conflicts=tuple(conflicts),
         warnings=tuple(warnings),
         protected_policy={
-            "sections": protected_present,
+            "sections": (
+                list(requested_replacements)
+                if strategy == "authoritative"
+                else protected_present
+            ),
             "allowed": policy_allowed,
             "decision": protected_decision,
             "requires_empty_target": strategy == "additive" and bool(protected_present),
+            "operations": authoritative_operations,
         },
         privacy=privacy,
         estimated_embedding_items=(
@@ -1528,7 +1808,7 @@ async def dry_run_hmx(
                 sum(new_by_section.values())
                 + (counts.get("raw_units", 0) if intent in ("port", "duplicate") else 0)
             )
-            if strategy == "additive"
+            if strategy in {"additive", "authoritative"}
             else 0
         ),
     )
@@ -1768,27 +2048,44 @@ async def import_hmx(
     initial_ref_map: dict[str, str] | None = None,
     reviewed: bool = False,
     retry_failed_work: bool = False,
-) -> HmxImportResult | HmxStagingResult | HmxAnalysisResult:
-    """Import HMX using additive, deliberative, or analysis-only storage.
+    replace_sections: Iterable[str] | None = None,
+    replacement_rationale: str | None = None,
+    allow_locally_trusted_lineage: bool = False,
+    verifier: Any = None,
+    operator_signature: str | None = None,
+    operator_identity: str | None = None,
+) -> HmxImportResult | HmxAuthoritativeResult | HmxStagingResult | HmxAnalysisResult:
+    """Import HMX using additive, authoritative, or isolated storage.
 
     Protected state is admitted directly only for a port/duplicate into a
-    target that is empty by HMX's diagnostic predicate. Authoritative
-    replacement remains a later protocol.
+    target that is empty by HMX's diagnostic predicate. Authoritative requests
+    use the durable Protected Section Replacement Protocol.
     """
 
     if not isinstance(data, dict):
         raise HmxSchemaError("HMX input must be a JSON object")
     _validate_import_header(data)
     intent = validate_intent(str(data["export_intent"]))
+    if strategy == "authoritative":
+        from core.protected_replacement import import_authoritative_hmx
+
+        return await import_authoritative_hmx(
+            conn,
+            data,
+            replace_sections=normalize_replace_sections(replace_sections),
+            rationale=replacement_rationale,
+            verifier=verifier,
+            allow_locally_trusted_lineage=allow_locally_trusted_lineage,
+            retry_failed_work=retry_failed_work,
+            operator_signature=operator_signature,
+            operator_identity=operator_identity,
+        )
     if strategy == "deliberative":
         return await stage_hmx(conn, data)
     if strategy == "analysis_only":
         return await load_analysis_hmx(conn, data)
     if strategy != "additive":
-        raise HmxPolicyError(
-            f"unsupported import strategy {strategy!r}; authoritative replacement "
-            "arrives with the Protected Replacement Protocol"
-        )
+        raise HmxPolicyError(f"unsupported import strategy {strategy!r}")
 
     sections = _import_sections(data)
     warnings: list[dict[str, Any]] = []

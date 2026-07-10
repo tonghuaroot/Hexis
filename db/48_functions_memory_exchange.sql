@@ -306,8 +306,8 @@ CREATE OR REPLACE FUNCTION hmx_export_in_flight_work() RETURNS JSONB AS $$
     );
 $$ LANGUAGE sql STABLE;
 
--- Audit records: the protected-replacement audit tables arrive with MVP-PR
--- (plan Slice 9). Until then a port carries empty immutable history.
+-- Baseline placeholder. db/53_hmx_protected_replacement.sql replaces this
+-- function after creating the immutable protected-replacement audit tables.
 CREATE OR REPLACE FUNCTION hmx_export_audit_records() RETURNS JSONB AS $$
     SELECT jsonb_build_object(
         'protected_replacement_audit', '[]'::jsonb,
@@ -909,6 +909,7 @@ CREATE OR REPLACE FUNCTION hmx_import_identity(
 DECLARE
     item JSONB;
     facet JSONB;
+    facet_kind TEXT;
     evidence_id UUID;
     imported_count INT := 0;
 BEGIN
@@ -926,17 +927,35 @@ BEGIN
         PERFORM ensure_self_node();
         FOR facet IN SELECT value FROM jsonb_array_elements(COALESCE(item->'facets', '[]'::jsonb))
         LOOP
+            facet_kind := COALESCE(
+                NULLIF(facet->>'kind', ''),
+                NULLIF(facet->>'type', ''),
+                'identity'
+            );
             BEGIN
                 evidence_id := (p_ref_map->>(facet->>'evidence_memory_ref'))::uuid;
             EXCEPTION WHEN OTHERS THEN
                 evidence_id := NULL;
             END;
-            PERFORM upsert_self_concept_edge(
-                COALESCE(NULLIF(facet->>'type', ''), 'identity'),
-                facet->>'concept',
-                COALESCE((facet->>'strength')::float, 0.8),
-                evidence_id
-            );
+            IF facet_kind = 'life_chapter_current' THEN
+                IF NOT hmx_link_current_chapter_identity(
+                    COALESCE((facet->>'strength')::float, 0.8)
+                ) THEN
+                    PERFORM upsert_self_concept_edge(
+                        facet_kind,
+                        facet->>'concept',
+                        COALESCE((facet->>'strength')::float, 0.8),
+                        evidence_id
+                    );
+                END IF;
+            ELSE
+                PERFORM upsert_self_concept_edge(
+                    facet_kind,
+                    facet->>'concept',
+                    COALESCE((facet->>'strength')::float, 0.8),
+                    evidence_id
+                );
+            END IF;
         END LOOP;
         imported_count := imported_count + 1;
     END LOOP;

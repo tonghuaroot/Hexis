@@ -32,6 +32,7 @@ EXECUTE FUNCTION maintenance_state_update_trigger();
 CREATE TRIGGER memories_emotional_context_insert
 BEFORE INSERT ON memories
 FOR EACH ROW
+WHEN (current_setting('hexis.hmx_import', true) IS DISTINCT FROM 'on')
 EXECUTE FUNCTION apply_emotional_context_to_memory();
 -- HMX Slice 0: init-created memories get bootstrap provenance at creation.
 -- The WHEN predicate inlines is_initialization_memory() — keep the three

@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 
 from core import cli_api
 from core.agent_api import db_dsn_from_env, resolve_instance
+from core.memory_exchange import PROTECTED_SECTIONS, SUPPORTED_IMPORT_STRATEGIES
 
 try:
     _ver = pkg_version("hexis")
@@ -638,8 +639,29 @@ def build_parser() -> argparse.ArgumentParser:
     hmx_import.add_argument("path", help="HMX JSON/JSONL file, or - for stdin")
     hmx_import.add_argument(
         "--strategy",
-        choices=("additive", "deliberative", "analysis-only"),
+        choices=tuple(
+            strategy.replace("_", "-") for strategy in SUPPORTED_IMPORT_STRATEGIES
+        ),
         default=None,
+    )
+    hmx_import.add_argument(
+        "--replace",
+        action="append",
+        choices=tuple(
+            section.replace("_", "-") for section in sorted(PROTECTED_SECTIONS)
+        ),
+        default=None,
+        help="Request whole-section replacement; repeat for multiple sections",
+    )
+    hmx_import.add_argument(
+        "--replacement-rationale",
+        default=None,
+        help="Why the protected-state replacement is being requested",
+    )
+    hmx_import.add_argument(
+        "--trust-matching-lineage-label",
+        action="store_true",
+        help="Explicitly trust an unverified but matching local lineage label for Phase 0",
     )
     hmx_import.add_argument(
         "--dry-run", action="store_true", help="Validate and report without changing data"

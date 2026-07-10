@@ -3,9 +3,9 @@ name: memory-exchange
 description: Safely export, inspect, stage, analyze, review, and decide protected replacements for Hexis Memory Exchange files
 category: knowledge
 requires:
-  tools: [export_memories, import_dry_run, import_memories, import_review, protected_replacement_review]
+  tools: [export_memories, import_dry_run, import_memories, import_review, protected_replacement_inspect, protected_replacement_review]
 contexts: [heartbeat, chat]
-bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis, protected_replacement_review]
+bound_tools: [export_memories, import_dry_run, import_memories, import_review, import_accept, import_reject, import_modify, import_quote, promote_to_staged, demote_to_analysis, protected_replacement_inspect, protected_replacement_review]
 ---
 
 # Hexis Memory Exchange
@@ -33,9 +33,13 @@ instance's memory without silently blending it into active state.
 3. Call `import_memories` only after the user confirms the file's exact declared
    intent. Skipping identity, worldview, or narrative is available when the user
    wants a narrower import.
-4. Do not describe imported memories as semantically searchable until the
+4. For `port` or `duplicate` into an active target, authoritative import requires
+   explicit `replace_sections` and `replacement_rationale`. Unselected protected
+   sections remain unchanged. A successful request may still await the agent's
+   acknowledgement; report its replacement IDs instead of claiming completion.
+5. Do not describe imported memories as semantically searchable until the
    import result or later re-embedding workflow confirms that they are ready.
-5. Preserve failed in-flight work as diagnostics by default. Set
+6. Preserve failed in-flight work as diagnostics by default. Set
    `retry_failed_work` only when the user explicitly chooses to rerun those
    failed consolidation or reconsolidation tasks.
 
@@ -54,9 +58,12 @@ instance's memory without silently blending it into active state.
 
 1. A pending protected replacement is a request, not permission to mutate
    identity, worldview, goals, drives, emotional triggers, or narrative.
-2. Inspect the source, rationale, section, and digest conflict presented in the
-   heartbeat context. Use `protected_replacement_review` to accept, refuse,
-   request modifications, or defer.
+2. Use `protected_replacement_inspect` to compare the actual imported section
+   with current local state, and check whether local state changed after the
+   request. Then use `protected_replacement_review` to accept, refuse, request
+   modifications, or defer.
+   Acceptance executes the snapshot, immutable audit, whole-section replacement,
+   and digest verification atomically; a failure leaves the request pending.
 3. Refusal and modification requests require a rationale. Modification requests
    also require concrete `proposed_changes`. Do not accept merely because source
    and target claim the same lineage; content-identical verified operations never

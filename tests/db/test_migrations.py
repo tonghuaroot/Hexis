@@ -41,6 +41,7 @@ async def test_migrations_recorded_and_idempotent(db_pool):
         assert "0010_hmx_reembedding" in st["applied"]
         assert "0011_hmx_in_flight_work" in st["applied"]
         assert "0012_hmx_protected_replacement" in st["applied"]
+        assert "0013_hmx_authoritative_import" in st["applied"]
         assert st["pending"] == []
         assert await apply_pending_migrations(conn) == []  # nothing left to do
         # the deltas are live
@@ -100,6 +101,7 @@ async def test_migrate_existing_database_preserves_data():
             assert "0010_hmx_reembedding" in applied
             assert "0011_hmx_in_flight_work" in applied
             assert "0012_hmx_protected_replacement" in applied
+            assert "0013_hmx_authoritative_import" in applied
 
             # AFTER: the data is intact AND the schema evolved
             assert (
@@ -132,6 +134,16 @@ async def test_migrate_existing_database_preserves_data():
                 "SELECT to_regclass('public.hmx_consent') IS NOT NULL "
                 "AND to_regclass('public.protected_replacement_audit') IS NOT NULL "
                 "AND to_regclass('public.hmx_pending_replacements') IS NOT NULL"
+            )
+            assert await conn.fetchval(
+                "SELECT to_regprocedure("
+                "'public.hmx_import_authoritative(jsonb,text[],jsonb)') IS NOT NULL"
+            )
+            assert await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema='public' "
+                "AND table_name='hmx_pending_replacements' "
+                "AND column_name='reference_map')"
             )
             # 0003's backfill classified the pre-migration row as lived experience
             assert (

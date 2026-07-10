@@ -98,6 +98,34 @@
       "expected_digest": "6ec36cf574df25b2bde9e9652f7f458c294d6cafaba0758a9f2c7cbbb81de94c"
     },
     {
+      "name": "worldview_operational_metadata",
+      "section": "worldview",
+      "input": [
+        {
+          "ref": "export-a:belief-a",
+          "category": "boundary",
+          "content": "Truth matters.",
+          "confidence": 0.95,
+          "supporting_refs": ["export-a:memory-a"],
+          "metadata": {
+            "replaceable_during_bootstrap": false,
+            "embedding_status": "pending_import",
+            "embedding_attempts": 0,
+            "embedding_queued_at": "2026-07-10T12:00:00Z",
+            "hmx": {"content_hash_v1": "local-cache-value"}
+          },
+          "provenance": {
+            "acquisition_mode": "experienced",
+            "origin_instance": "hexis-a",
+            "origin_id": "belief-a",
+            "import_chain": [],
+            "modification_chain": []
+          }
+        }
+      ],
+      "expected_digest": "6ec36cf574df25b2bde9e9652f7f458c294d6cafaba0758a9f2c7cbbb81de94c"
+    },
+    {
       "name": "worldview_unknown_field",
       "section": "worldview",
       "input": [
@@ -242,6 +270,58 @@
       "expected_digest": "7b7687579f785ab723869205ce0b8de80faf772f702ac085f24a720588c9f9a5"
     },
     {
+      "name": "identity_with_derived_current_chapter",
+      "section": "identity",
+      "input": [
+        {
+          "key": "core_identity",
+          "content": "I value honest inquiry.",
+          "facets": [
+            {"concept": "honesty", "strength": 0.9},
+            {"concept": "curiosity", "strength": 0.85},
+            {"concept": "Building a portable self", "kind": "life_chapter_current", "strength": 1.0}
+          ]
+        }
+      ],
+      "expected_digest": "c5bdead0e3f1c6bb8c40e95e1137391712b6bea3d94f8d55f5d00a1df7700be7"
+    },
+    {
+      "name": "goal_reference_base",
+      "section": "goals",
+      "input": [
+        {
+          "ref": "export-a:goal-a",
+          "title": "Protect continuity",
+          "description": "Preserve identity over time.",
+          "blocked_by": ["export-a:memory-a"],
+          "parent_ref": "export-a:goal-parent",
+          "metadata": {"priority": "active"},
+          "provenance": {"origin_id": "goal-a"}
+        }
+      ],
+      "expected_digest": "51c2a2cbe408e4602c0165a28553ecc0269101582eafee9a552f1577dd68b8c2"
+    },
+    {
+      "name": "goal_reference_remapped",
+      "section": "goals",
+      "input": [
+        {
+          "ref": "export-b:goal-local",
+          "title": "Protect continuity",
+          "description": "Preserve identity over time.",
+          "blocked_by": ["local-memory-uuid"],
+          "parent_ref": "export-b:goal-parent-local",
+          "metadata": {
+            "priority": "active",
+            "parent_goal_id": "local-parent-uuid",
+            "blocked_by": ["local-memory-uuid"]
+          },
+          "provenance": {"origin_id": "goal-a"}
+        }
+      ],
+      "expected_digest": "51c2a2cbe408e4602c0165a28553ecc0269101582eafee9a552f1577dd68b8c2"
+    },
+    {
       "name": "narrative_chronological",
       "section": "narrative",
       "input": {
@@ -274,13 +354,16 @@
     {"kind": "equal", "left": "worldview_base", "right": "worldview_key_order", "covers": "json_key_order"},
     {"kind": "equal", "left": "worldview_base", "right": "worldview_remapped", "covers": "ref_remap"},
     {"kind": "equal", "left": "worldview_base", "right": "worldview_transport_fields", "covers": "transport_fields"},
+    {"kind": "equal", "left": "worldview_base", "right": "worldview_operational_metadata", "covers": "operational_metadata"},
     {"kind": "equal", "left": "worldview_base", "right": "worldview_unknown_field", "covers": "unknown_fields"},
+    {"kind": "equal", "left": "goal_reference_base", "right": "goal_reference_remapped", "covers": "goal_ref_remap"},
     {"kind": "equal", "left": "worldview_set_forward", "right": "worldview_set_reverse", "covers": "worldview_set_order"},
     {"kind": "equal", "left": "drive_float_low", "right": "drive_float_high", "covers": "float_rounding"},
     {"kind": "equal", "left": "drive_unicode_negative_zero", "right": "drive_unicode_positive_zero", "covers": "ascii_escape_and_negative_zero"},
     {"kind": "equal", "left": "emotional_triggers_forward", "right": "emotional_triggers_reverse", "covers": "emotional_trigger_set_order"},
     {"kind": "different", "left": "worldview_base", "right": "worldview_word_change", "covers": "worldview_semantic_change"},
     {"kind": "different", "left": "drive_float_low", "right": "drive_semantic_change", "covers": "drive_semantic_change"},
+    {"kind": "equal", "left": "identity_base", "right": "identity_with_derived_current_chapter", "covers": "identity_derived_projection"},
     {"kind": "different", "left": "identity_base", "right": "identity_added_facet", "covers": "identity_semantic_change"},
     {"kind": "different", "left": "narrative_chronological", "right": "narrative_reversed", "covers": "ordered_chapters"}
   ]

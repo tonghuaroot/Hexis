@@ -219,8 +219,9 @@ def _format_pending_protected_replacements(value: Any) -> str:
             )
         )
     lines.append(
-        "Load the memory-exchange skill, then use protected_replacement_review "
-        "with accept, refuse, request_modification, or defer for each request."
+        "Load the memory-exchange skill, inspect each request with "
+        "protected_replacement_inspect, then use protected_replacement_review "
+        "with accept, refuse, request_modification, or defer."
     )
     return "\n".join(lines)
 

@@ -12,8 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from apps.cli_exchange import _print_import_result
 from core.digest import content_hash_v1
-from core.memory_exchange import build_envelope, resolve_export_sections
+from core.memory_exchange import (
+    HmxAuthoritativeResult,
+    build_envelope,
+    resolve_export_sections,
+)
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.cli]
 
@@ -131,6 +136,65 @@ async def test_export_refuses_silent_overwrite(db_pool, tmp_path):
     assert second.returncode != 0
     assert "--overwrite" in second.stderr
     assert output.read_bytes() == original
+
+
+async def test_authoritative_dry_run_reports_explicit_replacement_protocol(
+    db_pool, tmp_path
+):
+    output = tmp_path / "authoritative.hmx.json"
+    exported = _run("export", "--intent", "port", "--output", str(output))
+    assert exported.returncode == 0, exported.stderr
+
+    dry_run = _run(
+        "import",
+        str(output),
+        "--strategy",
+        "authoritative",
+        "--replace",
+        "worldview",
+        "--trust-matching-lineage-label",
+        "--dry-run",
+        "--json",
+        "--wait-seconds",
+        "60",
+    )
+    assert dry_run.returncode == 0, dry_run.stderr
+    report = json.loads(dry_run.stdout)
+    assert report["can_import"] is True
+    assert report["strategy"] == "authoritative"
+    assert report["protected_policy"]["sections"] == ["worldview"]
+    assert report["protected_policy"]["operations"][0]["disposition"] == (
+        "verified_noop_candidate"
+    )
+
+
+async def test_authoritative_human_output_surfaces_reused_refusal(capsys):
+    result = HmxAuthoritativeResult(
+        export_id="hmx-refused-test",
+        intent="port",
+        strategy="authoritative",
+        target_state={},
+        inserted={},
+        protected_operations=(
+            {
+                "disposition": "refused",
+                "status": "refused",
+                "replacement_id": "replacement-refused-test",
+                "section": "worldview",
+                "agent_acknowledgement_required": False,
+            },
+        ),
+        ref_map={},
+        conflicts=(),
+        warnings=(),
+    )
+
+    _print_import_result(result, as_json=False, skipped=[])
+
+    output = " ".join(capsys.readouterr().out.split())
+    assert "refused" in output
+    assert "prior agent refusal remains in force" in output
+    assert "resolved: 1" in output
 
 
 async def test_export_rejects_inverted_time_range_before_connecting():

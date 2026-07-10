@@ -26,6 +26,7 @@ from core.memory_exchange import (
     dry_run_hmx,
     export_hmx,
     import_hmx,
+    normalize_replace_sections,
     modify_staged_import,
     pending_hmx_reviews,
     promote_analysis_to_staged,
@@ -35,6 +36,7 @@ from core.memory_exchange import (
 from core.protected_replacement import (
     ACKNOWLEDGEMENT_DECISIONS,
     acknowledge_protected_replacement,
+    inspect_protected_replacement,
 )
 
 from .base import (
@@ -282,6 +284,18 @@ class ImportDryRunHandler(_ImportFileHandler):
                     "skip_worldview": {"type": "boolean", "default": False},
                     "skip_narrative": {"type": "boolean", "default": False},
                     "retry_failed_work": {"type": "boolean", "default": False},
+                    "replace_sections": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": sorted(PROTECTED_SECTIONS),
+                        },
+                        "uniqueItems": True,
+                    },
+                    "trust_matching_lineage_label": {
+                        "type": "boolean",
+                        "default": False,
+                    },
                 },
                 "required": ["path"],
             },
@@ -309,6 +323,12 @@ class ImportDryRunHandler(_ImportFileHandler):
                     document,
                     strategy=strategy,
                     retry_failed_work=bool(arguments.get("retry_failed_work", False)),
+                    replace_sections=normalize_replace_sections(
+                        arguments.get("replace_sections")
+                    ),
+                    allow_locally_trusted_lineage=bool(
+                        arguments.get("trust_matching_lineage_label", False)
+                    ),
                 )
             return ToolResult.success_result(
                 asdict(result),
@@ -324,8 +344,10 @@ class ImportMemoriesHandler(_ImportFileHandler):
         return ToolSpec(
             name="import_memories",
             description=(
-                "Import an HMX file using additive, deliberative, or analysis-only storage. "
-                "confirm_intent must exactly match the file. Run import_dry_run first."
+                "Import an HMX file using additive, authoritative, deliberative, or "
+                "analysis-only storage. confirm_intent must exactly match the file. "
+                "Authoritative import requires explicit replace_sections and a rationale. "
+                "Run import_dry_run first."
             ),
             parameters={
                 "type": "object",
@@ -343,6 +365,19 @@ class ImportMemoriesHandler(_ImportFileHandler):
                     "skip_worldview": {"type": "boolean", "default": False},
                     "skip_narrative": {"type": "boolean", "default": False},
                     "retry_failed_work": {"type": "boolean", "default": False},
+                    "replace_sections": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": sorted(PROTECTED_SECTIONS),
+                        },
+                        "uniqueItems": True,
+                    },
+                    "replacement_rationale": {"type": "string"},
+                    "trust_matching_lineage_label": {
+                        "type": "boolean",
+                        "default": False,
+                    },
                 },
                 "required": ["path", "confirm_intent"],
             },
@@ -378,6 +413,12 @@ class ImportMemoriesHandler(_ImportFileHandler):
                     document,
                     strategy=strategy,
                     retry_failed_work=retry_failed_work,
+                    replace_sections=normalize_replace_sections(
+                        arguments.get("replace_sections")
+                    ),
+                    allow_locally_trusted_lineage=bool(
+                        arguments.get("trust_matching_lineage_label", False)
+                    ),
                 )
                 if not forecast.can_import:
                     return ToolResult(
@@ -395,6 +436,13 @@ class ImportMemoriesHandler(_ImportFileHandler):
                     document,
                     strategy=strategy,
                     retry_failed_work=retry_failed_work,
+                    replace_sections=normalize_replace_sections(
+                        arguments.get("replace_sections")
+                    ),
+                    replacement_rationale=arguments.get("replacement_rationale"),
+                    allow_locally_trusted_lineage=bool(
+                        arguments.get("trust_matching_lineage_label", False)
+                    ),
                 )
             return ToolResult.success_result(
                 asdict(result), f"HMX import completed with {strategy}"
@@ -653,14 +701,54 @@ class DemoteToAnalysisHandler(ToolHandler):
             return _error_result(exc)
 
 
+class ProtectedReplacementInspectHandler(ToolHandler):
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="protected_replacement_inspect",
+            description=(
+                "Inspect the current and imported protected section for one pending "
+                "replacement before deciding."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"replacement_id": {"type": "string"}},
+                "required": ["replacement_id"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+            allowed_contexts=_AGENT_CONTEXTS,
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
+        pool = _pool(context)
+        if not pool:
+            return _missing_pool()
+        try:
+            async with pool.acquire() as conn:
+                result = await inspect_protected_replacement(
+                    conn, str(arguments["replacement_id"])
+                )
+            return ToolResult.success_result(
+                result,
+                f"Protected replacement {result['replacement_id']} inspected",
+            )
+        except Exception as exc:
+            return _error_result(exc)
+
+
 class ProtectedReplacementReviewHandler(ToolHandler):
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="protected_replacement_review",
             description=(
-                "Decide one pending protected-state replacement. This records the "
-                "agent's acknowledgement but does not itself replace protected state."
+                "Decide one pending protected-state replacement. Accept atomically "
+                "snapshots, audits, replaces, and verifies the section; other choices "
+                "leave protected state unchanged."
             ),
             parameters={
                 "type": "object",
@@ -697,6 +785,7 @@ class ProtectedReplacementReviewHandler(ToolHandler):
                     decision=str(arguments["decision"]),
                     rationale=arguments.get("rationale"),
                     proposed_changes=arguments.get("proposed_changes"),
+                    executor="agent_tool",
                 )
             return ToolResult.success_result(
                 result,
@@ -718,5 +807,6 @@ def create_memory_exchange_tools() -> list[ToolHandler]:
         ImportQuoteHandler(),
         PromoteToStagedHandler(),
         DemoteToAnalysisHandler(),
+        ProtectedReplacementInspectHandler(),
         ProtectedReplacementReviewHandler(),
     ]

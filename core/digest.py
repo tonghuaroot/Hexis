@@ -27,6 +27,10 @@ lists conflict with it:
    whole ``provenance`` subtree is excluded from digest input; per spec,
    ``provenance.origin_id`` still serves as the sort-key fallback (read from
    the original record before pruning).
+3. Current life chapter: ``life_chapter_current`` is a projection of narrative
+   state into the self-model, not independently owned identity state. It is
+   excluded from the identity digest so replacing a chapter cannot appear to
+   mutate two protected sections.
 """
 
 from __future__ import annotations
@@ -54,6 +58,9 @@ PROTECTED_DIGEST_EXCLUDED_FIELDS = frozenset(
         "last_accessed",
         "created_at",
         "updated_at",
+        "hmx_id",
+        "blocked_by",
+        "parent_goal_id",
         "provenance",  # history/transport metadata; see module docstring note 2
     }
 )
@@ -146,7 +153,12 @@ def strip_excluded_fields(value: Any) -> Any:
             if _is_excluded_key(key):
                 continue
             if key == "metadata" and isinstance(item, dict):
-                item = {k: v for k, v in item.items() if k != "unrecognized_hmx_fields"}
+                item = {
+                    k: v
+                    for k, v in item.items()
+                    if k not in {"hmx", "unrecognized_hmx_fields"}
+                    and not k.startswith("embedding_")
+                }
             out[key] = strip_excluded_fields(item)
         return out
     if isinstance(value, list):
@@ -234,6 +246,15 @@ def _prepare_record(section_name: str, record: Any) -> Any:
     if section_name == "identity" and isinstance(pruned, dict):
         facets = pruned.get("facets")
         if isinstance(facets, list):
+            facets = [
+                facet
+                for facet in facets
+                if not (
+                    isinstance(facet, dict)
+                    and (facet.get("kind") or facet.get("type"))
+                    == "life_chapter_current"
+                )
+            ]
             pruned["facets"] = sorted(
                 facets,
                 key=lambda f: (

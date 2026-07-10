@@ -1,25 +1,27 @@
-"""HMX Protected Section Replacement Protocol core machinery.
-
-Slice 9 implements durable protocol state and the Phase 0 verified no-op path.
-Destructive authoritative replacement is intentionally absent until Slice 10.
-"""
+"""HMX Protected Section Replacement Protocol and authoritative execution."""
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
 from core.digest import audit_record_digest_v1, protected_section_digest_v1
 from core.memory_exchange import (
     PROTECTED_SECTIONS,
+    HmxAuthoritativeResult,
+    HmxImportResult,
     HmxPolicyError,
     HmxSchemaError,
+    dry_run_hmx,
     export_hmx,
+    import_hmx,
     load_source_context,
+    prepare_protected_section_import,
     validate_hmx_document,
 )
 from core.trust_anchors import (
@@ -64,6 +66,7 @@ class ProtectedReplacementResult:
     audit_ids: tuple[str, ...] = ()
     replacement_id: str | None = None
     consent_id: str | None = None
+    status: str | None = None
     reused: bool = False
     conflicts: tuple[dict[str, Any], ...] = ()
 
@@ -280,7 +283,7 @@ async def _enqueue_replacement(
     trust_payload: dict[str, Any],
     operator_signature: str | None,
     operator_identity: str | None,
-) -> tuple[str, str, bool]:
+) -> tuple[str, str, str, bool]:
     request_fingerprint = _request_key(
         envelope=envelope,
         section=section,
@@ -302,7 +305,12 @@ async def _enqueue_replacement(
             request_fingerprint,
         )
         if existing and existing["status"] != "timed_out":
-            return str(existing["replacement_id"]), str(existing["consent_id"]), True
+            return (
+                str(existing["replacement_id"]),
+                str(existing["consent_id"]),
+                str(existing["status"]),
+                True,
+            )
 
         request_attempt = int(existing["request_attempt"]) + 1 if existing else 1
         request_key = _attempt_request_key(request_fingerprint, request_attempt)
@@ -350,7 +358,7 @@ async def _enqueue_replacement(
             heartbeat_count,
             heartbeat_count + 10,
         )
-    return str(replacement_id), str(consent_id), False
+    return str(replacement_id), str(consent_id), "pending", False
 
 
 async def evaluate_protected_replacement(
@@ -434,6 +442,7 @@ async def evaluate_protected_replacement(
             lineage_verification=trust_payload,
             agent_acknowledgement_required=False,
             audit_ids=(audit_id,),
+            status="verified",
         )
 
     conflicts: list[dict[str, Any]] = []
@@ -489,7 +498,7 @@ async def evaluate_protected_replacement(
                 }
             )
 
-    replacement_id, consent_id, reused = await _enqueue_replacement(
+    replacement_id, consent_id, status, reused = await _enqueue_replacement(
         conn,
         envelope=envelope,
         section=section,
@@ -501,15 +510,25 @@ async def evaluate_protected_replacement(
         operator_signature=effective_operator_signature,
         operator_identity=operator_identity,
     )
+    disposition = {
+        "pending": "pending_acknowledgement",
+        "deferred": "pending_acknowledgement",
+        "accepted": "accepted_awaiting_execution",
+        "refused": "refused",
+        "modification_requested": "modification_requested",
+        "executed": "executed",
+        "cancelled": "cancelled",
+    }.get(status, status)
     return ProtectedReplacementResult(
-        disposition="pending_acknowledgement",
+        disposition=disposition,
         section=section,
         local_digest_v1=local_digest,
         imported_digest_v1=imported_digest,
         lineage_verification=trust_payload,
-        agent_acknowledgement_required=True,
+        agent_acknowledgement_required=status in {"pending", "deferred"},
         replacement_id=replacement_id,
         consent_id=consent_id,
+        status=status,
         reused=reused,
         conflicts=tuple(conflicts),
     )
@@ -522,6 +541,245 @@ async def pending_protected_replacements(conn) -> dict[str, Any]:
     return result
 
 
+async def inspect_protected_replacement(conn, replacement_id: str) -> dict[str, Any]:
+    row = await conn.fetchrow(
+        "SELECT replacement_id, export_id, section, source, imported_section, "
+        "imported_digest_v1, local_digest_v1, replacement_scope, rationale, "
+        "status, acknowledgement, created_at, timeout_at "
+        "FROM hmx_pending_replacements WHERE replacement_id=$1::uuid",
+        replacement_id,
+    )
+    if row is None:
+        raise ProtectedReplacementError(
+            "protected_replacement_not_found",
+            f"protected replacement not found: {replacement_id}",
+        )
+    section = str(row["section"])
+    local = await export_hmx(
+        conn,
+        intent="port",
+        include_in_flight_work=False,
+        include_audit_records=False,
+    )
+    current_digest = str(local["section_digests"][section])
+    return {
+        "replacement_id": replacement_id,
+        "export_id": str(row["export_id"]),
+        "section": section,
+        "source": _coerce_json(row["source"]),
+        "replacement_scope": _coerce_json(row["replacement_scope"]),
+        "rationale": str(row["rationale"]),
+        "status": str(row["status"]),
+        "acknowledgement": _coerce_json(row["acknowledgement"]),
+        "created_at": _iso_value(row["created_at"]),
+        "timeout_at": _iso_value(row["timeout_at"]),
+        "local_digest_v1_at_request": str(row["local_digest_v1"]),
+        "current_local_digest_v1": current_digest,
+        "imported_digest_v1": str(row["imported_digest_v1"]),
+        "local_state_changed_since_request": current_digest
+        != str(row["local_digest_v1"]),
+        "current_local_section": local["sections"][section],
+        "imported_section": _coerce_json(row["imported_section"]),
+    }
+
+
+def _iso_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return str(value)
+
+
+async def execute_protected_replacement(
+    conn,
+    replacement_id: str,
+    *,
+    executor: str = "agent_tool",
+) -> dict[str, Any]:
+    """Execute one accepted replacement with snapshot/audit/write atomicity."""
+
+    if executor not in {"user", "cli", "agent_tool", "system"}:
+        raise ProtectedReplacementError(
+            "invalid_replacement_executor",
+            "executor must be user, cli, agent_tool, or system",
+        )
+
+    async with conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('hmx_protected_replacement'))"
+        )
+        row = await conn.fetchrow(
+            "SELECT p.*, c.consent_kind, c.consent_at, c.operator_signature, "
+            "c.operator_identity FROM hmx_pending_replacements p "
+            "JOIN hmx_consent c ON c.consent_id=p.consent_id "
+            "WHERE p.replacement_id=$1::uuid FOR UPDATE OF p",
+            replacement_id,
+        )
+        if row is None:
+            raise ProtectedReplacementError(
+                "protected_replacement_not_found",
+                f"protected replacement not found: {replacement_id}",
+            )
+        if row["status"] == "executed":
+            return {
+                "replacement_id": replacement_id,
+                "section": str(row["section"]),
+                "status": "executed",
+                "snapshot_id": (
+                    str(row["snapshot_id"]) if row["snapshot_id"] else None
+                ),
+                "audit_id": row["execution_audit_id"],
+                "reused": True,
+                "warnings": [],
+            }
+        if row["status"] != "accepted":
+            raise ProtectedReplacementError(
+                "protected_replacement_not_accepted",
+                f"replacement {replacement_id} is {row['status']}; agent acceptance is required before execution",
+            )
+
+        section = str(row["section"])
+        before = await export_hmx(
+            conn,
+            intent="port",
+            include_in_flight_work=False,
+            include_audit_records=False,
+        )
+        current_digest = str(before["section_digests"][section])
+        expected_digest = str(row["local_digest_v1"])
+        if current_digest != expected_digest:
+            raise ProtectedReplacementError(
+                "protected_state_changed_while_pending",
+                f"{section} changed after this request was created; refuse this request and submit a fresh authoritative import",
+            )
+
+        local_context = await load_source_context(conn)
+        source = _coerce_json(row["source"]) or {}
+        import_source = {
+            "instance_id": source.get("origin_instance"),
+            "hexis_lineage_id": source.get("hexis_lineage_id"),
+        }
+        imported_at = _iso_now()
+        prepared_section, preparation_warnings = prepare_protected_section_import(
+            section,
+            _coerce_json(row["imported_section"]),
+            intent=str(source.get("export_intent") or "port"),
+            source=import_source,
+            export_id=str(row["export_id"]),
+            local_instance_id=str(local_context["instance_id"]),
+            imported_at=imported_at,
+        )
+        snapshot_id = await create_protected_snapshot(conn, [section])
+        window = _coerce_json(
+            await conn.fetchval("SELECT hmx_snapshot_window($1::uuid)", snapshot_id)
+        )
+        if not isinstance(window, dict) or not window.get("window_open"):
+            raise ProtectedReplacementError(
+                "snapshot_window_unavailable",
+                "the protected-state snapshot was created without an open rollback window",
+            )
+
+        audit_id = str(uuid.uuid4())
+        audit_record = {
+            "audit_id": audit_id,
+            "event_type": "protected_section_replacement",
+            "event_time": _iso_now(),
+            "consent": {
+                "consent_id": str(row["consent_id"]),
+                "consent_kind": str(row["consent_kind"]),
+                "consent_at": _iso_value(row["consent_at"]),
+                "rationale": str(row["rationale"]),
+                "operator_signature": row["operator_signature"],
+                "operator_identity": row["operator_identity"],
+            },
+            "replacement_scope": _coerce_json(row["replacement_scope"]),
+            "sections_replaced": [section],
+            "source": source,
+            "previous_state_snapshot_ref": snapshot_id,
+            "previous_state_digest_v1": current_digest,
+            "new_state_digest_v1": str(row["imported_digest_v1"]),
+            "agent_acknowledgement": "accepted",
+            "agent_acknowledgement_at": _iso_value(row["acknowledgement_at"]),
+            "replacement_executor": executor,
+            "override_reason_code": None,
+            "override_evidence_ref": None,
+            "reversibility_window": window,
+        }
+        stored = await store_audit_record(conn, audit_record)
+        if stored.get("status") != "inserted":
+            raise ProtectedReplacementError(
+                "replacement_audit_write_failure",
+                f"required replacement audit returned {stored.get('status')}",
+            )
+
+        reference_map = _coerce_json(row["reference_map"]) or {}
+        sql_result = _coerce_json(
+            await conn.fetchval(
+                "SELECT hmx_import_authoritative($1::jsonb, $2::text[], $3::jsonb)",
+                json.dumps({section: prepared_section}),
+                [section],
+                json.dumps(reference_map),
+            )
+        )
+        if not isinstance(sql_result, dict):
+            raise RuntimeError("hmx_import_authoritative returned a non-object result")
+
+        after = await export_hmx(
+            conn,
+            intent="port",
+            include_in_flight_work=False,
+            include_audit_records=True,
+        )
+        resulting_digest = str(after["section_digests"][section])
+        imported_digest = str(row["imported_digest_v1"])
+        if resulting_digest != imported_digest:
+            raise ProtectedReplacementError(
+                "replacement_digest_verification_failure",
+                f"authoritative {section} write produced {resulting_digest}, expected {imported_digest}; all changes were rolled back",
+            )
+        collateral_changes = sorted(
+            protected_section
+            for protected_section, previous_digest in before["section_digests"].items()
+            if protected_section != section
+            and after["section_digests"].get(protected_section) != previous_digest
+        )
+        if collateral_changes:
+            raise ProtectedReplacementError(
+                "replacement_scope_violation",
+                "whole-section replacement also changed protected section(s) "
+                + ", ".join(collateral_changes)
+                + "; all changes were rolled back",
+            )
+
+        merged_ref_map = dict(reference_map)
+        merged_ref_map.update(_coerce_json(sql_result.get("ref_map")) or {})
+        await conn.execute(
+            "UPDATE hmx_pending_replacements SET status='executed', "
+            "reference_map=$2::jsonb, snapshot_id=$3::uuid, execution_audit_id=$4, "
+            "executed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP "
+            "WHERE replacement_id=$1::uuid",
+            replacement_id,
+            json.dumps(merged_ref_map),
+            snapshot_id,
+            audit_id,
+        )
+
+        warnings = list(preparation_warnings)
+        warnings.extend(sql_result.get("warnings") or [])
+        return {
+            "replacement_id": replacement_id,
+            "section": section,
+            "status": "executed",
+            "snapshot_id": snapshot_id,
+            "audit_id": audit_id,
+            "resulting_digest_v1": resulting_digest,
+            "reversibility_window": window,
+            "reused": False,
+            "warnings": warnings,
+        }
+
+
 async def acknowledge_protected_replacement(
     conn,
     replacement_id: str,
@@ -529,6 +787,7 @@ async def acknowledge_protected_replacement(
     decision: str,
     rationale: str | None = None,
     proposed_changes: dict[str, Any] | None = None,
+    executor: str = "agent_tool",
 ) -> dict[str, Any]:
     if decision not in ACKNOWLEDGEMENT_DECISIONS:
         raise ProtectedReplacementError(
@@ -543,12 +802,132 @@ async def acknowledge_protected_replacement(
             rationale,
             json.dumps(proposed_changes) if proposed_changes is not None else None,
         )
-    parsed = _coerce_json(result)
-    if not isinstance(parsed, dict):
-        raise RuntimeError(
-            "hmx_acknowledge_protected_replacement returned a non-object result"
+        parsed = _coerce_json(result)
+        if not isinstance(parsed, dict):
+            raise RuntimeError(
+                "hmx_acknowledge_protected_replacement returned a non-object result"
+            )
+        if decision == "accept":
+            execution = await execute_protected_replacement(
+                conn,
+                replacement_id,
+                executor=executor,
+            )
+            parsed.update(execution)
+        return parsed
+
+
+async def import_authoritative_hmx(
+    conn,
+    envelope: dict[str, Any],
+    *,
+    replace_sections: tuple[str, ...],
+    rationale: str | None,
+    verifier: TrustAnchorVerifier | None = None,
+    allow_locally_trusted_lineage: bool = False,
+    retry_failed_work: bool = False,
+    operator_signature: str | None = None,
+    operator_identity: str | None = None,
+) -> HmxAuthoritativeResult:
+    """Import ordinary data and submit explicit protected-section operations."""
+
+    intent = str(envelope.get("export_intent") or "")
+    if intent not in {"port", "duplicate"}:
+        raise ProtectedReplacementError(
+            "invalid_authoritative_intent",
+            "authoritative replacement requires export_intent port or duplicate",
         )
-    return parsed
+    if not replace_sections:
+        raise ProtectedReplacementError(
+            "replacement_sections_missing",
+            "authoritative import requires at least one explicit protected section",
+        )
+    normalized_rationale = str(rationale or "").strip()
+    if not normalized_rationale:
+        raise ProtectedReplacementError(
+            "replacement_rationale_missing",
+            "authoritative import requires replacement_rationale (CLI: --replacement-rationale)",
+        )
+
+    forecast = await dry_run_hmx(
+        conn,
+        envelope,
+        strategy="authoritative",
+        retry_failed_work=retry_failed_work,
+        replace_sections=replace_sections,
+        allow_locally_trusted_lineage=allow_locally_trusted_lineage,
+    )
+    if not forecast.can_import:
+        blocking_codes = ", ".join(
+            sorted({str(item.get("code")) for item in forecast.conflicts})
+        )
+        raise ProtectedReplacementError(
+            "authoritative_preflight_blocked",
+            f"resolve these preflight conflicts before retrying: {blocking_codes}",
+        )
+
+    ordinary_document = copy.deepcopy(envelope)
+    ordinary_sections = ordinary_document.get("sections") or {}
+    for protected_section in PROTECTED_SECTIONS:
+        ordinary_sections.pop(protected_section, None)
+
+    operation_results: list[ProtectedReplacementResult] = []
+    async with conn.transaction():
+        for section in replace_sections:
+            operation_results.append(
+                await evaluate_protected_replacement(
+                    conn,
+                    envelope,
+                    section=section,
+                    rationale=normalized_rationale,
+                    verifier=verifier,
+                    allow_locally_trusted_lineage=allow_locally_trusted_lineage,
+                    operator_signature=operator_signature,
+                    operator_identity=operator_identity,
+                )
+            )
+
+        ordinary_result = await import_hmx(
+            conn,
+            ordinary_document,
+            strategy="additive",
+            reviewed=True,
+            retry_failed_work=retry_failed_work,
+        )
+        if not isinstance(ordinary_result, HmxImportResult):
+            raise RuntimeError(
+                "authoritative ordinary import returned wrong result type"
+            )
+
+        for operation in operation_results:
+            if operation.replacement_id and operation.status in {"pending", "deferred"}:
+                await conn.execute(
+                    "UPDATE hmx_pending_replacements SET "
+                    "reference_map=reference_map || $2::jsonb, "
+                    "updated_at=CURRENT_TIMESTAMP WHERE replacement_id=$1::uuid",
+                    operation.replacement_id,
+                    json.dumps(ordinary_result.ref_map),
+                )
+
+    operation_conflicts = [
+        conflict for operation in operation_results for conflict in operation.conflicts
+    ]
+    warnings = list(forecast.warnings)
+    warnings.extend(ordinary_result.warnings)
+    return HmxAuthoritativeResult(
+        export_id=str(envelope["export_id"]),
+        intent=intent,
+        strategy="authoritative",
+        target_state=forecast.target_state,
+        inserted=dict(ordinary_result.inserted),
+        protected_operations=tuple(
+            asdict(operation) for operation in operation_results
+        ),
+        ref_map=dict(ordinary_result.ref_map),
+        conflicts=tuple(list(ordinary_result.conflicts) + operation_conflicts),
+        warnings=tuple(warnings),
+        work_summary=dict(ordinary_result.work_summary),
+    )
 
 
 async def create_protected_snapshot(
