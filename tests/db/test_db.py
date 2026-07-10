@@ -6852,24 +6852,25 @@ async def test_cluster_insights_view_ordering(db_pool):
 async def test_hnsw_index_usage_memories(db_pool):
     """Test HNSW index on memories.embedding is used for vector search"""
     async with db_pool.acquire() as conn:
-        # Create test data
-        for i in range(20):
-            await conn.execute("""
-                INSERT INTO memories (type, content, embedding)
-                VALUES ('semantic'::memory_type, $1, array_fill(0.5::float, ARRAY[embedding_dimension()])::vector)
-            """, f'HNSW test memory {i}')
+        async with conn.transaction():
+            # Index availability is the invariant. Planner cost estimates on
+            # this deliberately small fixture vary across CI architectures.
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            for i in range(20):
+                await conn.execute("""
+                    INSERT INTO memories (type, content, embedding)
+                    VALUES ('semantic'::memory_type, $1, array_fill(0.5::float, ARRAY[embedding_dimension()])::vector)
+                """, f'HNSW test memory {i}')
 
-        # Check query plan uses index
-        plan = await conn.fetch("""
-            EXPLAIN (FORMAT JSON)
-            SELECT id FROM memories
-            ORDER BY embedding <=> array_fill(0.5::float, ARRAY[embedding_dimension()])::vector
-            LIMIT 5
-        """)
+            plan = await conn.fetch("""
+                EXPLAIN (FORMAT JSON)
+                SELECT id FROM memories
+                ORDER BY embedding <=> array_fill(0.5::float, ARRAY[embedding_dimension()])::vector
+                LIMIT 5
+            """)
 
-        plan_text = str(plan)
-        # HNSW index should be mentioned in plan
-        assert 'idx_memories_embedding' in plan_text or 'Index' in plan_text
+            plan_text = str(plan)
+            assert 'idx_memories_embedding' in plan_text or 'Index' in plan_text
 
 
 async def test_gin_index_content_search(db_pool):
