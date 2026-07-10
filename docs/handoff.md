@@ -1,10 +1,10 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (HMX Slice 7 in-flight work complete)
+Last updated: 2026-07-10 (HMX Slice 8 canonical digests complete)
 
 ## Current Status
 
-The active workstream is HMX (`plans/hmx.md`). Slices 0-7 are complete:
+The active workstream is HMX (`plans/hmx.md`). Slices 0-8 are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -14,16 +14,20 @@ export/import/review workflow. Accepted imports now enter a bounded maintenance
 re-embedding pipeline, refresh derived memory structures, and can carry eligible
 raw RecMem units during port/duplicate. Pending and interrupted consolidation
 work now travels as portable intent and resumes through the existing workers
-without carrying runtime claim state. The next implementation boundary is
-Slice 8 (canonical protected-section digest fixtures).
+without carrying runtime claim state. Protected and audit digests now have an
+explicit canonical byte contract and fixed cross-implementation vectors,
+including ordered narrative chronology. The next implementation boundary is
+Slice 9 (replacement protocol core machinery and Phase 0 fast path).
 
-The prior hosted green baseline was `99f544d` (`Complete HMX Slice 6
-re-embedding`), run https://github.com/QuixiAI/Hexis/actions/runs/29072692485 (all jobs
+The prior hosted green baseline was `7c3d0af` (`Stabilize HNSW planner
+assertion`), run https://github.com/QuixiAI/Hexis/actions/runs/29074962532 (all jobs
 succeeded). Always verify the current head's hosted result with the command in
 "Useful Commands" below rather than assuming this historical baseline applies.
 
 Important recent commits:
 
+- `7c3d0af` - Stabilize HNSW planner assertion
+- `2787a60` - Complete HMX Slice 7 in-flight work
 - `99f544d` - Complete HMX Slice 6 re-embedding
 - `902c30f` - Complete HMX Slice 5 agent tools
 - `3ba0bc6` - Complete HMX Slice 4 isolated review
@@ -183,8 +187,8 @@ baseline LACKS migrated values — deltas are mirrored into the baseline per
 
 Landed so far:
 
-- `core/digest.py` — all three hash families with the Slice 8 eight-property
-  fixture suite passing (`tests/core/test_hmx_digest.py`). Two documented
+- `core/digest.py` — all three hash families with initial inline property tests
+  (`tests/core/test_hmx_digest.py`). Two documented
   spec resolutions (module docstring): `*_ref`/`*_refs` fields and the
   `provenance` subtree are excluded from digest input, following the
   ref/remap-independence principle over the spec's contradictory field lists.
@@ -454,9 +458,40 @@ Important behavior:
   pass with the existing 421 advisory marker warnings. The wheel contains the
   baseline and migration SQL plus the updated schema and memory-exchange skill.
 
-Next: Slice 8 completes `protected_section_digest_v1` and
-`audit_record_digest_v1` as a cross-implementation compatibility layer with the
-required canonical fixture suite before any protected replacement machinery.
+### HMX Slice 8 canonical digests complete
+
+Key files:
+
+- `core/digest.py` - canonical protected-section and audit-record byte
+  serialization, fixed six-decimal float handling, non-finite rejection, and
+  public pre-hash byte helpers for compatibility diagnosis.
+- `tests/fixtures/digest/` - fixed protected and audit SHA-256 vectors plus
+  named equality/divergence relations covering every Slice 8 acceptance gate.
+- `tests/core/test_hmx_digest_fixtures.py` - vector runner and an explicit guard
+  that the required compatibility properties remain represented.
+- `plans/hmx.md` - reconciled canonical rules for narrative order,
+  reference/provenance exclusions, record sorting, and serialization bytes.
+
+Important behavior:
+
+- `life_chapters` is an ordered authored chronology: reversing only the chapter
+  array changes the protected digest. Turning points, narrative threads, and
+  value conflicts remain set-like and sort by canonical record hash.
+- Worldview, emotional-trigger, identity-facet, goal, and drive ordering remains
+  semantic and independent of export IDs or remapped local UUIDs.
+- The v1 byte contract uses compact recursively key-sorted JSON, ASCII string
+  escaping, UTF-8 encoding, six-decimal floats, normalized negative zero, and
+  loud rejection of NaN/Infinity.
+- Fixed fixtures cover key order, ref remapping, every transport exclusion,
+  unknown fields, floating-point noise, set order, ordered chapters, and true
+  worldview/drive/identity changes. Audit fixtures cover transport-local dedupe
+  and semantic divergence.
+- Focused HMX validation: 143 tests pass. Full validation: 2104 tests pass with
+  the existing 421 advisory marker warnings.
+
+Next: Slice 9 implements replacement consent/audit/snapshot storage and the
+Phase 0 digest-identical verification fast path. Audit records are still only
+export-shaped placeholders; durable import/dedupe belongs to that machinery.
 
 ## Current Roadmap
 
@@ -638,16 +673,15 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 ## Resume Recommendation
 
 Do not continue debugging the old CI failures first. Continue the HMX thread at
-Slice 8 from the protected digest placeholders and export contracts already in
-use. Read `core/digest.py`, `core/memory_exchange.py`,
-`tests/core/test_hmx_digest.py`, `tests/db/test_hmx_export.py`, and the Slice 8
-fixture requirements in `plans/hmx.md` before editing.
+Slice 9 from the canonical digest contract and fixed vectors now in place. Read
+`core/digest.py`, `core/memory_exchange.py`, `core/trust_anchors.py`,
+`tests/fixtures/digest/`, and the Slice 9 protocol/state-machine requirements in
+`plans/hmx.md` before editing.
 
 Next highest-leverage options, in rough priority order:
 
-1. HMX Slice 8: finish the canonical protected/audit digest algorithms and the
-   cross-implementation fixture suite for ordering, ref, transport, float, and
-   true semantic-change behavior.
+1. HMX Slice 9: implement consent/audit/snapshot persistence and the Phase 0
+   content-identical verification fast path without destructive writes.
 2. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
    `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
    server tests for tool listing/dispatch.

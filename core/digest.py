@@ -8,7 +8,8 @@ Three versioned hash families:
   fast path and conflict detection. The same semantic state MUST produce the
   same digest regardless of which instance computes it, so canonicalization
   excludes transport metadata, sorts records by content-derived keys (never by
-  local UUIDs), and rounds floats to a fixed precision.
+  local UUIDs), preserves ordered sequences, and rounds floats to a fixed
+  precision.
 - ``audit_record_digest_v1``: audit-record dedupe comparison with ``audit_id``
   and transport-local fields excluded.
 
@@ -37,27 +38,35 @@ from typing import Any
 
 FLOAT_PRECISION = 6
 
+# A chapter array is an authored chronology, so its order is semantic. Other
+# narrative collections are independent records and canonicalize as sets.
+ORDERED_NARRATIVE_SUBSECTIONS = frozenset({"life_chapters"})
+
 # Fields excluded from protected-section digests regardless of section
 # (transport/storage metadata, never semantic state).
-PROTECTED_DIGEST_EXCLUDED_FIELDS = frozenset({
-    "ref",
-    "export_id",
-    "import_chain",
-    "modification_chain",
-    "access_count",
-    "last_accessed",
-    "created_at",
-    "updated_at",
-    "provenance",  # history/transport metadata; see module docstring note 2
-})
+PROTECTED_DIGEST_EXCLUDED_FIELDS = frozenset(
+    {
+        "ref",
+        "export_id",
+        "import_chain",
+        "modification_chain",
+        "access_count",
+        "last_accessed",
+        "created_at",
+        "updated_at",
+        "provenance",  # history/transport metadata; see module docstring note 2
+    }
+)
 
 # Dotted paths excluded from audit-record digests, per spec.
-AUDIT_DIGEST_EXCLUDED_FIELDS = frozenset({
-    "audit_id",
-    "imported_at",
-    "local_record_id",
-    "metadata.unrecognized_hmx_fields",
-})
+AUDIT_DIGEST_EXCLUDED_FIELDS = frozenset(
+    {
+        "audit_id",
+        "imported_at",
+        "local_record_id",
+        "metadata.unrecognized_hmx_fields",
+    }
+)
 
 _TRANSIENT_PREFIX = "_transient_"
 _REF_SUFFIXES = ("_ref", "_refs")
@@ -99,7 +108,18 @@ def canonicalize_json(obj: Any) -> Any:
 
 
 def _canonical_bytes(obj: Any) -> bytes:
-    return json.dumps(canonicalize_json(obj), separators=(",", ":")).encode("utf-8")
+    """Serialize canonical JSON using the byte contract pinned by the fixtures.
+
+    ``ensure_ascii=True`` is intentional: JSON strings use ASCII escapes before
+    UTF-8 encoding, matching the original v1 algorithm's ``json.dumps``
+    pseudocode. Non-finite floats are not JSON and fail loudly.
+    """
+    return json.dumps(
+        canonicalize_json(obj),
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -134,7 +154,9 @@ def strip_excluded_fields(value: Any) -> Any:
     return value
 
 
-def strip_paths(record: dict[str, Any], paths: frozenset[str] | set[str]) -> dict[str, Any]:
+def strip_paths(
+    record: dict[str, Any], paths: frozenset[str] | set[str]
+) -> dict[str, Any]:
     """Remove top-level keys and single-level dotted paths (``a.b``) from a record.
 
     A parent dict emptied by stripping is dropped too: its only content was
@@ -199,7 +221,9 @@ def _sort_key(section_name: str, original: Any, pruned_record: Any) -> tuple[str
             return (semantic, record_hash)
     if isinstance(original, dict):
         provenance = original.get("provenance")
-        origin_id = provenance.get("origin_id") if isinstance(provenance, dict) else None
+        origin_id = (
+            provenance.get("origin_id") if isinstance(provenance, dict) else None
+        )
         if origin_id:
             return (str(origin_id), record_hash)
     return (record_hash, record_hash)
@@ -211,7 +235,10 @@ def _prepare_record(section_name: str, record: Any) -> Any:
         facets = pruned.get("facets")
         if isinstance(facets, list):
             pruned["facets"] = sorted(
-                facets, key=lambda f: str(f.get("concept", "")) if isinstance(f, dict) else str(f)
+                facets,
+                key=lambda f: (
+                    str(f.get("concept", "")) if isinstance(f, dict) else str(f)
+                ),
             )
     return pruned
 
@@ -227,18 +254,8 @@ def sort_records(section_name: str, records: list[Any]) -> list[Any]:
     return [pruned for _, pruned in prepared]
 
 
-def protected_section_digest_v1(section_name: str, section_data: Any) -> str:
-    """Digest of a protected section's semantic state.
-
-    ``section_data`` shapes:
-    - list of records (identity, worldview, goals, drives, emotional_triggers)
-    - single record dict (treated as a one-record list)
-    - narrative: dict of subsection lists (life_chapters, turning_points,
-      narrative_threads, value_conflicts). Chronologically ordered subsections
-      preserve their order semantics by sorting on canonical content, which is
-      identical for identical sequences and differs when order-bearing content
-      differs.
-    """
+def _prepare_protected_section(section_name: str, section_data: Any) -> Any:
+    """Return a protected section in its digest-ready semantic order."""
     if section_name == "narrative":
         if not isinstance(section_data, dict):
             raise TypeError("narrative section_data must be a dict of subsection lists")
@@ -247,16 +264,39 @@ def protected_section_digest_v1(section_name: str, section_data: Any) -> str:
             entries = section_data[subsection]
             if not isinstance(entries, list):
                 entries = [entries]
-            pruned = [_prepare_record("narrative", e) for e in entries]
-            canonical_narrative[subsection] = sorted(pruned, key=_record_hash)
-        return _sha256_hex(_canonical_bytes(canonical_narrative))
+            pruned = [_prepare_record("narrative", entry) for entry in entries]
+            if subsection not in ORDERED_NARRATIVE_SUBSECTIONS:
+                pruned.sort(key=_record_hash)
+            canonical_narrative[subsection] = pruned
+        return canonical_narrative
 
     if isinstance(section_data, dict):
         section_data = [section_data]
     if not isinstance(section_data, list):
         raise TypeError(f"section_data for {section_name!r} must be a list or dict")
+    return sort_records(section_name, section_data)
 
-    return _sha256_hex(_canonical_bytes(sort_records(section_name, section_data)))
+
+def protected_section_canonical_bytes_v1(section_name: str, section_data: Any) -> bytes:
+    """Canonical bytes hashed by :func:`protected_section_digest_v1`.
+
+    This is public so other HMX implementations can diagnose compatibility
+    failures against ``tests/fixtures/digest`` before comparing hashes.
+    """
+    return _canonical_bytes(_prepare_protected_section(section_name, section_data))
+
+
+def protected_section_digest_v1(section_name: str, section_data: Any) -> str:
+    """Digest of a protected section's semantic state.
+
+    ``section_data`` shapes:
+    - list of records (identity, worldview, goals, drives, emotional_triggers)
+    - single record dict (treated as a one-record list)
+    - narrative: dict of subsection lists (life_chapters, turning_points,
+      narrative_threads, value_conflicts). ``life_chapters`` preserves authored
+      chronological order; the other subsections canonicalize as sets.
+    """
+    return _sha256_hex(protected_section_canonical_bytes_v1(section_name, section_data))
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +304,11 @@ def protected_section_digest_v1(section_name: str, section_data: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def audit_record_digest_v1(record: dict[str, Any]) -> str:
+def audit_record_canonical_bytes_v1(record: dict[str, Any]) -> bytes:
+    """Canonical bytes hashed by :func:`audit_record_digest_v1`."""
     record_for_digest = strip_paths(record, AUDIT_DIGEST_EXCLUDED_FIELDS)
-    return _sha256_hex(_canonical_bytes(record_for_digest))
+    return _canonical_bytes(record_for_digest)
+
+
+def audit_record_digest_v1(record: dict[str, Any]) -> str:
+    return _sha256_hex(audit_record_canonical_bytes_v1(record))

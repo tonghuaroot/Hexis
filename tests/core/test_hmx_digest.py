@@ -216,10 +216,10 @@ class TestSetLikeReordering:
 
 
 class TestOrderedSequencePreservation:
-    def test_array_permutation_alone_is_transport(self):
+    def test_chapter_array_permutation_changes_digest(self):
         permuted = json.loads(json.dumps(NARRATIVE))
         permuted["life_chapters"] = list(reversed(permuted["life_chapters"]))
-        assert protected_section_digest_v1("narrative", NARRATIVE) == \
+        assert protected_section_digest_v1("narrative", NARRATIVE) != \
             protected_section_digest_v1("narrative", permuted)
 
     def test_changed_chronology_changes_digest(self):

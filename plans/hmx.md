@@ -538,6 +538,13 @@ def protected_section_digest_v1(section_name, section_data):
     return sha256(json.dumps(canonical, separators=(',', ':')).encode()).hexdigest()
 ```
 
+The v1 serialization byte contract is the compact JSON emitted above with
+recursively sorted keys, ASCII string escaping (`ensure_ascii=True`), and UTF-8
+encoding. Floats are rounded to six decimal places before serialization;
+negative zero normalizes to `0.0`, and non-finite values are rejected. These
+details are compatibility requirements, not implementation choices. The fixed
+vectors in `tests/fixtures/digest/` pin the resulting SHA-256 output.
+
 #### Sort key principle
 
 For digest equality to hold across `port` and `duplicate` operations, sort keys MUST be independent of:
@@ -558,12 +565,12 @@ The principle: the same semantic protected state MUST produce the same digest re
 
 | Section              | Sort key                                                                                                  |
 | -------------------- | --------------------------------------------------------------------------------------------------------- |
-| `identity`           | `concept` name within each facet; facets sorted by `concept` before serialization                         |
+| `identity`           | Identity records sorted by stable `key`; facets sorted by `concept` before serialization                  |
 | `worldview`          | `content_hash_v1` of `content`; ties broken by canonical record hash                                       |
-| `goals`              | `content_hash_v1` of `title` concatenated with `description`; children sorted recursively by same rule    |
+| `goals`              | `content_hash_v1` of `title` concatenated with `description`; ties broken by canonical record hash         |
 | `drives`             | `name`                                                                                                    |
 | `emotional_triggers` | `content_hash_v1` of `trigger_pattern`                                                                    |
-| `narrative`          | Each subsection (chapters, turning_points, threads, conflicts) sorted by `content_hash_v1` of its canonical serialized content with excluded fields removed |
+| `narrative`          | `life_chapters` preserves authored chronological array order; turning points, threads, and conflicts are sorted by canonical record hash after excluded fields are removed |
 
 For records whose content can legitimately be identical across multiple entries (rare but possible), the final tiebreak is the canonical-JSON hash of the full pruned record. In practice, true duplicates within a protected section indicate an error condition and should be surfaced for operator review.
 
@@ -573,17 +580,18 @@ Floating-point fields in protected sections (drive levels, confidence values, et
 
 Digests are computed over **semantic protected state**, not transport metadata. The following fields are EXCLUDED from digest computation regardless of section:
 
-* `ref` when used as an export-scoped reference (`{export_id}:{local_uuid}`); local UUID portions are never used in digest input
+* `ref` and any key ending in `_ref` or `_refs`; v1 does not hash export-scoped reference topology because local UUID portions are remapped on import
 * `export_id`
 * `import_chain`
 * `modification_chain`
 * `access_count`
 * `last_accessed`
 * `created_at` and `updated_at` (timestamps reflect transport/storage, not semantic state)
+* The `provenance` subtree; `provenance.origin_id` may be read from the original record only as a stable sort-key fallback
 * `metadata.unrecognized_hmx_fields` (preserved-but-not-understood fields)
 * Any field whose key begins with `_transient_` (convention for transient implementation state)
 
-Fields INCLUDED are the actual semantic content of the protected state: content text, facet concepts and strengths, drive parameters and current state, narrative summaries and statuses, edge connections within the section, etc.
+Fields INCLUDED are the actual semantic content that is stable across a remapping operation: content text, facet concepts and strengths, drive parameters and current state, and narrative summaries and statuses. Reference topology is intentionally outside `protected_section_digest_v1`; a future digest version may include it only after defining semantic reference normalization.
 
 Exporters and importers MUST agree on the exclusion set, or they will produce spurious `protected_section_digest_mismatch` errors. The exclusion set is part of the `protected_section_digest_v1` specification; implementations that need additional local exclusions SHOULD use a different digest name (`protected_section_digest_v1_local` or similar) to avoid versioning ambiguity.
 
