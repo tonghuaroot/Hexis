@@ -6,6 +6,8 @@ streaming in the same event format the Next.js frontend already consumes.
 
 Endpoints:
     POST /api/chat  — SSE streaming chat via AgentLoop.stream()
+    GET  /v1/models — Active chat model in OpenAI-compatible form
+    POST /v1/chat/completions — OpenAI-compatible buffered/streaming chat
     GET  /api/status — Rich agent status
     GET  /health     — Simple health check
 """
@@ -16,6 +18,7 @@ import argparse
 import json
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
@@ -24,7 +27,7 @@ import asyncpg
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from core.agent_api import db_dsn_from_env, get_agent_profile_context, pool_sizes_from_env
@@ -111,6 +114,34 @@ class ChatRequest(BaseModel):
     prompt_addenda: list[str] | None = None
 
 
+class OpenAIChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    role: str
+    content: Any = None
+    name: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+
+class OpenAIChatCompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    messages: list[OpenAIChatMessage] = Field(min_length=1)
+    stream: bool = False
+    max_tokens: int | None = Field(default=None, ge=1)
+    max_completion_tokens: int | None = Field(default=None, ge=1)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float = Field(default=1.0, gt=0.0, le=1.0)
+    n: int = Field(default=1, ge=1)
+    stop: Any = None
+    presence_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+    frequency_penalty: float = Field(default=0.0, ge=-2.0, le=2.0)
+    stream_options: dict[str, Any] | None = None
+    user: str | None = None
+
+
 class ConsentLlmConfig(BaseModel):
     provider: str | None = None
     model: str | None = None
@@ -129,6 +160,204 @@ class InitConsentRequest(BaseModel):
 
 def _sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+def _openai_sse_data(payload: dict[str, Any] | str) -> str:
+    encoded = payload if isinstance(payload, str) else json.dumps(payload, separators=(",", ":"))
+    return f"data: {encoded}\n\n"
+
+
+def _openai_error(
+    message: str,
+    *,
+    status_code: int,
+    param: str | None = None,
+    code: str | None = None,
+    error_type: str = "invalid_request_error",
+) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": param,
+                "code": code,
+            }
+        },
+        status_code=status_code,
+    )
+
+
+async def _active_openai_model() -> dict[str, Any]:
+    """Describe the live chat model without resolving or consuming credentials."""
+
+    pool = _pool
+    if pool is None:
+        raise RuntimeError("Server not ready (no DB pool)")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT key, value, updated_at FROM config "
+            "WHERE key IN ('llm.chat', 'llm') "
+            "ORDER BY CASE key WHEN 'llm.chat' THEN 0 ELSE 1 END LIMIT 1"
+        )
+
+    from core.llm_config import configured_llm_identity
+
+    raw = row["value"] if row else {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = {}
+    config = raw if isinstance(raw, dict) else {}
+    identity = configured_llm_identity(config)
+    created = int(row["updated_at"].timestamp()) if row and row["updated_at"] else None
+    return {
+        "id": identity["model"],
+        "provider": identity["provider"],
+        "created": created,
+        "config_key": str(row["key"]) if row else "environment_default",
+    }
+
+
+def _openai_model_object(model: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "id": model["id"],
+        "object": "model",
+        "owned_by": model["provider"],
+        "x_hexis_config_key": model["config_key"],
+    }
+    if model.get("created") is not None:
+        payload["created"] = model["created"]
+    return payload
+
+
+def _openai_message_text(message: OpenAIChatMessage, index: int) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    if content is None:
+        if message.role == "assistant" and not message.tool_calls:
+            return ""
+        raise ValueError(f"messages[{index}].content must be text")
+    if not isinstance(content, list):
+        raise ValueError(f"messages[{index}].content must be text or text parts")
+
+    parts: list[str] = []
+    for part_index, part in enumerate(content):
+        if not isinstance(part, dict) or part.get("type") not in {"text", "input_text"}:
+            raise ValueError(
+                f"messages[{index}].content[{part_index}] uses an unsupported non-text part"
+            )
+        text = part.get("text")
+        if not isinstance(text, str):
+            raise ValueError(
+                f"messages[{index}].content[{part_index}].text must be a string"
+            )
+        parts.append(text)
+    return "".join(parts)
+
+
+def _prepare_openai_chat(
+    req: OpenAIChatCompletionRequest,
+) -> tuple[str, list[dict[str, Any]], int | None]:
+    extras = sorted((req.model_extra or {}).keys())
+    if extras:
+        raise ValueError(f"unsupported request parameter: {extras[0]}")
+    if req.n != 1:
+        raise ValueError("n values other than 1 are not supported")
+    if req.top_p != 1.0:
+        raise ValueError("top_p is not supported; omit it or use 1")
+    if req.stop is not None:
+        raise ValueError("stop is not supported by the agentic chat endpoint")
+    if req.presence_penalty != 0.0 or req.frequency_penalty != 0.0:
+        raise ValueError("presence_penalty and frequency_penalty are not supported")
+    if req.max_tokens is not None and req.max_completion_tokens is not None:
+        raise ValueError("set only one of max_tokens or max_completion_tokens")
+    if req.stream_options and req.stream_options.get("include_usage"):
+        raise ValueError(
+            "stream_options.include_usage is unavailable because Hexis cannot "
+            "attribute multi-step agent token usage to one completion"
+        )
+
+    allowed_roles = {"system", "developer", "user", "assistant"}
+    history: list[dict[str, Any]] = []
+    for index, message in enumerate(req.messages):
+        if message.role not in allowed_roles:
+            raise ValueError(f"messages[{index}].role {message.role!r} is not supported")
+        if message.tool_calls or message.tool_call_id:
+            raise ValueError("client-supplied tool call history is not supported")
+        if message.model_extra:
+            field = sorted(message.model_extra.keys())[0]
+            raise ValueError(f"unsupported messages[{index}] parameter: {field}")
+        text = _openai_message_text(message, index)
+        role = "system" if message.role == "developer" else message.role
+        prepared: dict[str, Any] = {"role": role, "content": text}
+        if message.name:
+            prepared["name"] = message.name
+        history.append(prepared)
+
+    if history[-1]["role"] != "user":
+        raise ValueError("the final message must have role 'user'")
+    user_message = str(history.pop()["content"])
+    if not user_message.strip():
+        raise ValueError("the final user message must not be empty")
+    max_tokens = req.max_completion_tokens or req.max_tokens
+    return user_message, history, max_tokens
+
+
+async def _openai_agent_events(
+    *,
+    user_message: str,
+    history: list[dict[str, Any]],
+    session_id: str,
+    client_user: str | None,
+    max_tokens: int | None,
+    temperature: float | None,
+) -> AsyncIterator[AgentEventData]:
+    pool = _pool
+    if pool is None:
+        raise RuntimeError("Server not ready (no DB pool)")
+
+    try:
+        await Gateway(pool).record(
+            EventSource.CHAT,
+            f"chat:openai:{session_id}",
+            {"message": user_message[:500], "client_user": client_user},
+        )
+    except Exception:
+        logger.debug("Gateway record failed (non-fatal)", exc_info=True)
+
+    registry = create_default_registry(pool)
+    agent_profile = await get_agent_profile_context(pool=pool)
+    async for event in stream_agent(
+        pool,
+        registry,
+        user_message=user_message,
+        mode="chat",
+        history=history,
+        session_id=session_id,
+        agent_profile=agent_profile,
+        dsn=_dsn(),
+        max_tokens=max_tokens,
+        temperature=temperature,
+    ):
+        yield event
+
+
+async def _remember_openai_chat(user_message: str, assistant_message: str) -> None:
+    pool = _pool
+    if pool is None or not assistant_message:
+        return
+    try:
+        await _remember_conversation(
+            CognitiveMemory(pool),
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
+    except Exception:
+        logger.exception("OpenAI-compatible chat memory formation failed")
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +504,217 @@ async def chat(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/v1/models")
+async def openai_models():
+    try:
+        model = await _active_openai_model()
+    except Exception as exc:
+        logger.exception("OpenAI-compatible model discovery failed")
+        return _openai_error(
+            str(exc), status_code=503, code="server_not_ready", error_type="server_error"
+        )
+    return JSONResponse({"object": "list", "data": [_openai_model_object(model)]})
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return _openai_error(
+            "request body must be valid JSON", status_code=400, code="invalid_json"
+        )
+    try:
+        req = OpenAIChatCompletionRequest.model_validate(payload)
+    except ValidationError as exc:
+        issue = exc.errors(include_url=False)[0]
+        location = ".".join(str(part) for part in issue.get("loc", ())) or None
+        return _openai_error(
+            issue["msg"], status_code=400, param=location, code="invalid_request"
+        )
+
+    try:
+        model = await _active_openai_model()
+    except Exception as exc:
+        return _openai_error(
+            str(exc), status_code=503, code="server_not_ready", error_type="server_error"
+        )
+    if req.model != model["id"]:
+        return _openai_error(
+            f"The model {req.model!r} does not exist or is not active in Hexis.",
+            status_code=404,
+            param="model",
+            code="model_not_found",
+        )
+
+    try:
+        user_message, history, max_tokens = _prepare_openai_chat(req)
+    except ValueError as exc:
+        return _openai_error(
+            str(exc), status_code=400, code="unsupported_parameter"
+        )
+
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    session_id = str(uuid.uuid4())
+    if req.stream:
+        return StreamingResponse(
+            _stream_openai_chat_completion(
+                req=req,
+                model=model,
+                user_message=user_message,
+                history=history,
+                max_tokens=max_tokens,
+                completion_id=completion_id,
+                created=created,
+                session_id=session_id,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    text, error, finish_reason = await _collect_openai_chat_completion(
+        req=req,
+        user_message=user_message,
+        history=history,
+        max_tokens=max_tokens,
+        session_id=session_id,
+    )
+    if error:
+        return _openai_error(
+            error,
+            status_code=502,
+            code="upstream_agent_error",
+            error_type="server_error",
+        )
+    return JSONResponse(
+        {
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model["id"],
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": finish_reason,
+                }
+            ],
+        }
+    )
+
+
+async def _collect_openai_chat_completion(
+    *,
+    req: OpenAIChatCompletionRequest,
+    user_message: str,
+    history: list[dict[str, Any]],
+    max_tokens: int | None,
+    session_id: str,
+) -> tuple[str, str | None, str]:
+    parts: list[str] = []
+    error: str | None = None
+    finish_reason = "stop"
+    try:
+        async for event in _openai_agent_events(
+            user_message=user_message,
+            history=history,
+            session_id=session_id,
+            client_user=req.user,
+            max_tokens=max_tokens,
+            temperature=req.temperature,
+        ):
+            if event.event == AgentEvent.TEXT_DELTA:
+                text = str(event.data.get("text") or "")
+                if text:
+                    parts.append(text)
+            elif event.event == AgentEvent.ERROR:
+                error = str(event.data.get("error") or "Unknown agent error")
+            elif event.event == AgentEvent.LOOP_END:
+                stopped = str(event.data.get("stopped_reason") or "completed")
+                if stopped == "timeout" or bool(event.data.get("timed_out")):
+                    finish_reason = "length"
+    except Exception as exc:
+        logger.exception("OpenAI-compatible chat completion failed")
+        error = str(exc)
+
+    full_text = "".join(parts)
+    if not error:
+        await _remember_openai_chat(user_message, full_text)
+    return full_text, error, finish_reason
+
+
+async def _stream_openai_chat_completion(
+    *,
+    req: OpenAIChatCompletionRequest,
+    model: dict[str, Any],
+    user_message: str,
+    history: list[dict[str, Any]],
+    max_tokens: int | None,
+    completion_id: str,
+    created: int,
+    session_id: str,
+) -> AsyncIterator[str]:
+    def _chunk(delta: dict[str, Any], finish_reason: str | None) -> dict[str, Any]:
+        return {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model["id"],
+            "choices": [
+                {"index": 0, "delta": delta, "finish_reason": finish_reason}
+            ],
+        }
+
+    yield _openai_sse_data(_chunk({"role": "assistant", "content": ""}, None))
+    parts: list[str] = []
+    error: str | None = None
+    finish_reason = "stop"
+    try:
+        async for event in _openai_agent_events(
+            user_message=user_message,
+            history=history,
+            session_id=session_id,
+            client_user=req.user,
+            max_tokens=max_tokens,
+            temperature=req.temperature,
+        ):
+            if event.event == AgentEvent.TEXT_DELTA:
+                text = str(event.data.get("text") or "")
+                if text:
+                    parts.append(text)
+                    yield _openai_sse_data(_chunk({"content": text}, None))
+            elif event.event == AgentEvent.ERROR:
+                error = str(event.data.get("error") or "Unknown agent error")
+            elif event.event == AgentEvent.LOOP_END:
+                stopped = str(event.data.get("stopped_reason") or "completed")
+                if stopped == "timeout" or bool(event.data.get("timed_out")):
+                    finish_reason = "length"
+    except Exception as exc:
+        logger.exception("OpenAI-compatible chat stream failed")
+        error = str(exc)
+
+    if error:
+        yield _openai_sse_data(
+            {
+                "error": {
+                    "message": error,
+                    "type": "server_error",
+                    "param": None,
+                    "code": "upstream_agent_error",
+                }
+            }
+        )
+    else:
+        await _remember_openai_chat(user_message, "".join(parts))
+        yield _openai_sse_data(_chunk({}, finish_reason))
+    yield _openai_sse_data("[DONE]")
 
 
 async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:

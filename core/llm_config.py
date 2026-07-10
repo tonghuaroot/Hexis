@@ -104,6 +104,23 @@ _PROVIDER_CONFIG_LOADERS: dict[
 # Public API
 # ---------------------------------------------------------------------------
 
+def configured_llm_identity(
+    config: dict[str, Any] | None,
+    *,
+    default_provider: str = DEFAULT_LLM_PROVIDER,
+    default_model: str = DEFAULT_LLM_MODEL,
+) -> dict[str, str]:
+    """Resolve public provider/model identity without loading credentials."""
+
+    config = config if isinstance(config, dict) else {}
+    provider = normalize_provider(str(config.get("provider") or default_provider))
+    model = str(
+        config.get("model")
+        or ("gpt-5.2" if provider == "openai-codex" else default_model)
+    )
+    return {"provider": provider, "model": model}
+
+
 async def load_llm_config(
     conn,
     key: str,
@@ -125,13 +142,13 @@ async def load_llm_config(
     if not isinstance(cfg, dict):
         cfg = {}
 
-    if "provider" not in cfg:
-        cfg["provider"] = default_provider
-    provider = normalize_provider(str(cfg.get("provider") or ""))
-    cfg["provider"] = provider
-
-    if "model" not in cfg:
-        cfg["model"] = "gpt-5.2" if provider == "openai-codex" else default_model
+    identity = configured_llm_identity(
+        cfg,
+        default_provider=default_provider,
+        default_model=default_model,
+    )
+    provider = identity["provider"]
+    cfg.update(identity)
 
     # Run the provider-specific config loader (inject api_key, endpoint, auth_mode).
     loader = _PROVIDER_CONFIG_LOADERS.get(provider)

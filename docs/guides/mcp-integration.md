@@ -31,6 +31,10 @@ The MCP server exposes batch-style memory tools:
 | `hydrate_batch` | Build context from memories |
 | `batch` | Sequential tool calls |
 
+It also exposes enabled Hexis registry tools whose policy allows MCP context.
+Legacy memory names win on collisions, so each advertised tool name is unique.
+Tool failures use MCP's `isError` flag and retain an actionable text message.
+
 ### Usage with LLM Runtimes
 
 Any MCP-capable runtime can connect to Hexis. Typical flow:

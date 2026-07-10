@@ -22,7 +22,7 @@ from datetime import date, datetime
 from enum import Enum
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from dotenv import load_dotenv
 
@@ -621,12 +621,77 @@ def _tools() -> list[Any]:
     ]
 
 
+async def _list_server_tools(registry) -> tuple[list[Any], set[str]]:
+    """Compose legacy and registry MCP tools from the live policy surface."""
+
+    tools = _tools()
+    legacy_names = {tool.name for tool in tools}
+    registry_names: set[str] = set()
+    from core.tools import ToolContext
+
+    for spec in await registry.get_mcp_tools(ToolContext.MCP):
+        name = spec["name"]
+        if name in legacy_names:
+            continue
+        tools.append(
+            _tool(
+                name,
+                spec.get("description") or f"Hexis tool: {name}",
+                spec.get("inputSchema") or {"type": "object"},
+            )
+        )
+        registry_names.add(name)
+    return tools, registry_names
+
+
+async def _dispatch_server_tool(
+    client: CognitiveMemory,
+    registry,
+    registry_tool_names: set[str],
+    name: str,
+    arguments: dict[str, Any] | None,
+):
+    """Dispatch one MCP call and return a protocol-level success/error result."""
+
+    from mcp.types import CallToolResult, TextContent
+
+    try:
+        legacy_names = {tool.name for tool in _tools()}
+        if name not in legacy_names and name not in registry_tool_names:
+            _, current_registry_names = await _list_server_tools(registry)
+            registry_tool_names.clear()
+            registry_tool_names.update(current_registry_names)
+        if name in registry_tool_names:
+            from core.tools import ToolContext, ToolExecutionContext
+
+            context = ToolExecutionContext(
+                tool_context=ToolContext.MCP,
+                call_id=str(uuid4()),
+            )
+            result = await registry.execute(name, arguments or {}, context)
+            text = result.to_model_output()
+            is_error = not result.success
+        else:
+            result = await _dispatch_tool(client, name, arguments or {})
+            text = json.dumps(_jsonable(result), indent=2, sort_keys=True)
+            is_error = False
+        return CallToolResult(
+            content=[TextContent(type="text", text=text)],
+            isError=is_error,
+        )
+    except Exception as exc:
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"Error: {exc}")],
+            isError=True,
+        )
+
+
 async def _run_server(dsn: str) -> None:
     try:
         from mcp.server import Server
         from mcp.server.models import InitializationOptions
         from mcp.server.stdio import stdio_server
-        from mcp.types import ServerCapabilities, TextContent, ToolsCapability
+        from mcp.types import ServerCapabilities, ToolsCapability
     except Exception as e:
         raise RuntimeError(
             "MCP dependencies not installed. Install with: pip install -e ."
@@ -634,7 +699,6 @@ async def _run_server(dsn: str) -> None:
 
     import asyncpg
 
-    from core.tools import ToolContext, ToolExecutionContext
     from core.tools.registry import create_full_registry
 
     server = Server("hexis-mcp")
@@ -649,41 +713,18 @@ async def _run_server(dsn: str) -> None:
     @server.list_tools()
     async def list_tools():
         nonlocal _registry_tool_names
-
-        # Start with legacy memory tools
-        tools = _tools()
-        legacy_names = {t.name for t in tools}
-
-        # Add registry tools available in MCP context (skip duplicates)
-        mcp_specs = await registry.get_mcp_tools(ToolContext.MCP)
-        for spec in mcp_specs:
-            name = spec["name"]
-            if name not in legacy_names:
-                tools.append(_tool(name, spec["description"], spec["inputSchema"]))
-                _registry_tool_names.add(name)
-
+        tools, _registry_tool_names = await _list_server_tools(registry)
         return tools
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]):
-        try:
-            # Route to registry if it's a registry-provided tool
-            if name in _registry_tool_names:
-                import uuid
-
-                ctx = ToolExecutionContext(
-                    tool_context=ToolContext.MCP,
-                    call_id=str(uuid.uuid4()),
-                )
-                result = await registry.execute(name, arguments or {}, ctx)
-                text = result.to_model_output()
-            else:
-                # Legacy dispatch for memory tools
-                result = await _dispatch_tool(client, name, arguments or {})
-                text = json.dumps(_jsonable(result), indent=2, sort_keys=True)
-        except Exception as exc:
-            text = f"Error: {exc}"
-        return [TextContent(type="text", text=text)]
+        return await _dispatch_server_tool(
+            client,
+            registry,
+            _registry_tool_names,
+            name,
+            arguments,
+        )
 
     try:
         try:

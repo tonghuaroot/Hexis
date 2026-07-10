@@ -1,11 +1,12 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (HMX MVP acceptance audit complete)
+Last updated: 2026-07-10 (Phase 3 API and MCP interop complete)
 
 ## Current Status
 
-The HMX workstream (`plans/hmx.md`) is MVP-complete. Slices 0-13 and the final
-acceptance audit are complete:
+The HMX workstream (`plans/hmx.md`) is MVP-complete, and the core Phase 3
+interop work is now complete. Slices 0-13 and the final HMX acceptance audit
+are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -33,9 +34,11 @@ bundle verified against a configured public trust anchor. Overrides cannot
 bypass an agent refusal and retain the normal reversion window. The agent now
 has skill-gated list, inspect, acknowledge, audit-history, open-reversion, and
 explicit revert tools without any operator-override capability. The durable
-criterion-by-criterion completion record is `docs/hmx-acceptance.md`. The next
-implementation boundary is the broader parity roadmap, beginning with Phase 3
-OpenAI-compatible API and MCP interop unless priorities change.
+criterion-by-criterion completion record is `docs/hmx-acceptance.md`. Hexis now
+also serves its canonical agent through OpenAI-compatible model discovery and
+buffered/streamed chat completions, with tested MCP listing and dispatch. The
+next implementation boundary is Phase 2 plugin/provenance hardening or Phase 4
+cross-session learning.
 
 The prior hosted green baseline was `a31b0b8` (`Complete HMX Slice 13 agent
 protocol tools`), run
@@ -761,6 +764,45 @@ and diff hygiene pass. The wheel includes migration `0015`; focused mypy remains
 advisory with the existing `jsonschema` stub and broad-union baseline errors in
 `core/memory_exchange.py`.
 
+### Phase 3 API and MCP interop complete
+
+Key files:
+
+- `apps/hexis_api.py` - live `GET /v1/models`, strict
+  `POST /v1/chat/completions`, buffered responses, and standard streaming
+  `chat.completion.chunk` SSE terminated by `[DONE]`;
+- `services/agent.py` - caller-provided temperature reaches the canonical agent
+  loop while configured temperature remains the default;
+- `apps/hexis_mcp_server.py` - composable live tool listing and protocol-level
+  dispatch with duplicate suppression, pre-list refresh, MCP execution context,
+  and `isError` results;
+- `tests/web/test_openai_compat.py` and
+  `tests/core/test_hexis_mcp_server.py` - official OpenAI Python client journeys
+  plus MCP listing, legacy dispatch, registry dispatch, and failure coverage;
+- `docs/reference/api.md` and `docs/guides/mcp-integration.md` - supported
+  controls, compatibility limits, examples, and MCP behavior.
+
+Important behavior:
+
+- Model discovery derives from live `llm.chat` configuration without resolving
+  or consuming provider credentials. Completion requests must use that model.
+- OpenAI messages pass through the same memory hydration, skills, internal
+  tools, gateway audit, and conversation-memory journey as `/api/chat`.
+- System/developer/user/assistant text history, `temperature`, and one max-token
+  control are supported. Unsupported controls, non-text parts, external tool
+  histories, and usage requests fail explicitly rather than being ignored.
+- Per-completion token usage is omitted honestly: one Hexis completion may span
+  several provider/tool iterations and current usage records are not correlated
+  tightly enough to report one exact aggregate.
+- MCP discovery combines legacy cognitive-memory tools with enabled registry
+  tools allowed in MCP context. Legacy names win collisions; registry execution
+  still passes through central policy.
+
+Validation: official OpenAI-client buffered and streaming journeys and MCP
+contract tests pass; the focused API/agent regression set passes 98 tests with
+13 existing warnings. Full validation passes 2171 tests with the existing 421
+advisory marker warnings. Compilation and diff hygiene pass.
+
 ## Current Roadmap
 
 This is the active quality-parity roadmap derived from reviewing Hermes and OpenClaw.
@@ -809,6 +851,8 @@ Still open in Phase 2:
 
 ### Phase 3 - Interop and reach
 
+Status: core goals complete.
+
 Goals:
 
 - Add an OpenAI-compatible API surface:
@@ -816,7 +860,8 @@ Goals:
   - `POST /v1/chat/completions`
   - streaming chat completion chunks
 - Add MCP server tests for tool listing and dispatch.
-- Consider streamable HTTP MCP transport after stdio is tested.
+- Optional follow-up: add streamable HTTP MCP transport if a concrete client
+  requires it; stdio listing and dispatch are now tested.
 
 Likely files:
 
@@ -940,16 +985,16 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-HMX is MVP-complete; use `docs/hmx-acceptance.md` as the acceptance record and
-preserve its evidence when changing exchange or protected-state behavior.
+HMX and the core Phase 3 interop work are complete. Preserve
+`docs/hmx-acceptance.md` evidence when changing exchange or protected-state
+behavior, and preserve the official-client journeys when changing API framing.
 
 Next highest-leverage options, in rough priority order:
 
-1. Phase 3 interop: OpenAI-compatible `GET /v1/models` +
-   `POST /v1/chat/completions` (with streaming) on `apps/hexis_api.py`, and MCP
-   server tests for tool listing/dispatch.
-2. Finish Phase 2 hardening: plugin manifest/config-schema validation and an
+1. Finish Phase 2 hardening: plugin manifest/config-schema validation and an
    explicit agent-vs-user skill provenance guard.
-3. Phase 4 "it learns": FTS cross-session search + a background
+2. Phase 4 "it learns": FTS cross-session search + a background
    self-improvement worker that authors skills from recent experience (the
    `author_skill` provenance footer already exists to build on).
+3. Optional interop extension: streamable HTTP MCP transport, driven by a
+   specific client requirement rather than added speculatively.

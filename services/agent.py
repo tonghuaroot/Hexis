@@ -548,6 +548,7 @@ async def stream_agent(
     has_backlog_tasks: bool = False,
     timeout_seconds: float | None = None,
     max_tokens: int | None = None,
+    temperature: float | None = None,
     on_approval: "Callable[[str, dict[str, Any]], Awaitable[bool]] | None" = None,
 ) -> AsyncIterator[AgentEventData]:
     """
@@ -667,6 +668,9 @@ async def stream_agent(
 
     effective_timeout = timeout_seconds or _cfg_num("timeout_seconds", 120.0)
     effective_max_tokens = int(max_tokens or _cfg_num("max_tokens", 4096))
+    effective_temperature = (
+        temperature if temperature is not None else _cfg_num("temperature", 0.7)
+    )
     loop_config = AgentLoopConfig(
         tool_context=tool_context,
         system_prompt=system_prompt,
@@ -676,7 +680,7 @@ async def stream_agent(
         energy_budget=energy_budget,
         max_iterations=None,
         timeout_seconds=effective_timeout,
-        temperature=0.7,
+        temperature=effective_temperature,
         max_tokens=effective_max_tokens,
         session_id=session_id,
         on_approval=on_approval,

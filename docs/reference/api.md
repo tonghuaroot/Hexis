@@ -67,6 +67,57 @@ Streaming chat via SSE. The primary conversation endpoint.
 
 **Log kinds**: `tool_call`, `tool_result`, `memory_recall`, `memory_write`
 
+### GET /v1/models
+
+OpenAI-compatible model discovery. Hexis exposes the active `llm.chat` model
+from the live database configuration rather than maintaining a separate model
+list.
+
+```bash
+curl http://localhost:43817/v1/models
+```
+
+The response uses the OpenAI model-list shape and includes
+`x_hexis_config_key` to show which configuration selected the model.
+
+### POST /v1/chat/completions
+
+OpenAI-compatible access to the same canonical agent, memory, skills, and tool
+loop used by `/api/chat`.
+
+```bash
+curl http://localhost:43817/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "<id from /v1/models>",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+Set `"stream": true` for standard `chat.completion.chunk` SSE records followed
+by `data: [DONE]`. `system`, `developer`, `user`, and `assistant` text messages
+are supported; the final message must be a non-empty user message.
+
+Supported generation controls are `temperature` and either `max_tokens` or
+`max_completion_tokens`. Hexis rejects unsupported controls and client-supplied
+tool-call history explicitly instead of silently ignoring them. Per-completion
+token usage is omitted because one Hexis turn may contain several model/tool
+iterations and the runtime does not yet attribute those tokens to one response.
+
+OpenAI Python client example:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="unused", base_url="http://localhost:43817/v1")
+model = client.models.list().data[0].id
+answer = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "What are you working on?"}],
+)
+print(answer.choices[0].message.content)
+```
+
 ### POST /api/webhook/{source}
 
 Accept external webhook events (e.g., from channels or external services).
