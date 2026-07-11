@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from channels.presentation import presentation_from_text
 from core.agent_api import db_dsn_from_env, get_agent_profile_context, pool_sizes_from_env
 from core.agent_loop import AgentEvent
 from core.cli_api import status_payload_rich
@@ -728,7 +729,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         AgentEvent.TEXT_DELTA    → token        {phase: "conscious_final", text}
         AgentEvent.TOOL_START    → log          {id, kind: "tool_call", title, detail}
         AgentEvent.TOOL_RESULT   → log          {id, kind: "tool_result", title, detail}
-        AgentEvent.LOOP_END      → done         {assistant: full_text}
+        AgentEvent.LOOP_END      → done         {assistant, presentation}
         AgentEvent.ERROR         → error        {message}
     """
     pool = _pool
@@ -852,7 +853,10 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
             except Exception as e:
                 logger.error("Memory formation failed: %s", e)
 
-        yield _sse_event("done", {"assistant": full_text})
+        done_payload: dict[str, Any] = {"assistant": full_text}
+        if full_text:
+            done_payload["presentation"] = presentation_from_text(full_text).to_dict()
+        yield _sse_event("done", done_payload)
 
     except Exception as e:
         logger.exception("Chat stream error")

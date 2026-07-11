@@ -1,6 +1,6 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (Phase 5 demo and maturity scorecard complete)
+Last updated: 2026-07-10 (Phase 5 portable presentation complete)
 
 ## Current Status
 
@@ -40,8 +40,10 @@ also serves its canonical agent through OpenAI-compatible model discovery and
 buffered/streamed chat completions, with tested MCP listing and dispatch.
 Plugin manifests and live configuration now fail closed before registration,
 and agent skill updates require explicit ownership provenance. Phase 5 now has
-a rollback-only end-to-end proof and a live evidence-based maturity scorecard;
-the next implementation boundary is typed portable channel presentation.
+a rollback-only end-to-end proof, a live evidence-based maturity scorecard, and
+typed portable presentation across proactive channels and web chat. The next
+boundary should be chosen from concrete interop demand or deferred engineering
+hardening rather than adding speculative surface area.
 
 The latest hosted green implementation baseline is `d850805` (`Add rollback
 capability demo and maturity scorecard`), run
@@ -1025,7 +1027,7 @@ Likely files:
 
 ### Phase 5 - Demo, DX, and measurement
 
-Status: demo and capability measurement complete; channel presentation remains.
+Status: complete.
 
 Goals:
 
@@ -1034,7 +1036,9 @@ Goals:
   DB-owned paths under one outer rollback transaction.
 - Completed: `hexis maturity` scores live implementation, configuration,
   operational readiness, and observed evidence across five scenarios.
-- Improve channel presentation with typed portable message blocks.
+- Completed: typed portable `text`, `context`, and `divider` message blocks,
+  capability-derived Markdown/plain degradation, outbox delivery, and typed web
+  completion rendering.
 - Continue docs coherence work.
 
 Key files:
@@ -1048,6 +1052,13 @@ Key files:
   `doctor --llm` provider verification;
 - `tests/core/test_capability_maturity.py` and `tests/cli/test_cli.py` - real
   heartbeat/recall/policy/energy execution plus before/after state equality.
+- `channels/presentation.py`, `channels/base.py`, `channels/manager.py`, and
+  `channels/outbox.py` - portable block schema, dialect-aware degradation,
+  chunking, and proactive delivery;
+- `apps/hexis_api.py` and `hexis-ui/app/chat/message-presentation.tsx` - typed
+  final SSE envelope and safe browser rendering;
+- `tests/core/test_channel_presentation.py`, `tests/web/test_web.py`, and the UI
+  presentation tests - wire, adapter, outbox, API, and renderer coverage.
 
 Important behavior:
 
@@ -1065,11 +1076,21 @@ Important behavior:
   opt-in skill review remains configured rather than being scored operational.
 - The current uninitialized live development database scores 40% (8/20): the
   scorecard derives this from its actual empty/uninitialized state.
+- Presentation is delivery-only. Canonical conversation history remains plain
+  assistant text, while channel audit logs retain a stable plain-text mirror.
+- Adapters declare their real dialect (Discord Markdown, Telegram legacy
+  Markdown, Slack mrkdwn, or plain) and live message-length capability; the
+  shared renderer derives formatting and chunking from those declarations.
+- Unsupported or malformed blocks fail with their exact JSON path. Hexis does
+  not partially render an envelope or advertise inert button/select controls.
+- `/api/chat` keeps token streaming backward-compatible and adds the portable
+  envelope to the final `done` event. The web client validates the envelope and
+  falls back to canonical streamed text if a newer block is unknown.
 
-Validation: focused proof/CLI coverage passes 17 tests. Full validation passes
-2207 tests with the existing 421 advisory marker warnings. Import smoke,
-formatting of new modules, CLI help discovery, JSON serialization, and diff
-hygiene pass.
+Validation: focused presentation/channel/API coverage passes 123 tests. Full
+Python validation passes 2217 tests with the existing 421 advisory marker
+warnings. All 6 UI tests, TypeScript, targeted ESLint, the production Next.js
+build, import smoke, desktop/mobile browser rendering, and diff hygiene pass.
 
 ## Generic Identity Adaptation Notes
 
@@ -1165,9 +1186,8 @@ proposal/approval boundary when changing self-improvement.
 
 Next highest-leverage options, in rough priority order:
 
-1. Continue Phase 5 with typed portable channel message blocks and end-to-end
-   rendering checks across terminal, web, and configured messaging adapters.
-2. Optional interop extension: streamable HTTP MCP transport, driven by a
+1. Optional interop extension: streamable HTTP MCP transport, driven by a
    specific client requirement rather than added speculatively.
-3. Deferred Phase 1 hardening: formatting/type-check cleanup, action SHA
+2. Deferred Phase 1 hardening: formatting/type-check cleanup, action SHA
    pinning, and dependency lockfile policy when the team chooses those costs.
+3. Continue docs coherence work where live behavior and reference pages differ.

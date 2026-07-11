@@ -13,6 +13,16 @@ from .base import (
 from .conversation import process_channel_message
 from .manager import ChannelManager
 from .media import Attachment
+from .presentation import (
+    ContextBlock,
+    DividerBlock,
+    MarkdownDialect,
+    MessagePresentation,
+    TextBlock,
+    normalize_message_presentation,
+    presentation_from_text,
+    render_presentation,
+)
 
 __all__ = [
     "Attachment",
@@ -20,5 +30,13 @@ __all__ = [
     "ChannelCapabilities",
     "ChannelMessage",
     "ChannelManager",
+    "ContextBlock",
+    "DividerBlock",
+    "MarkdownDialect",
+    "MessagePresentation",
+    "TextBlock",
+    "normalize_message_presentation",
+    "presentation_from_text",
     "process_channel_message",
+    "render_presentation",
 ]

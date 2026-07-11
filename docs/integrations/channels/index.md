@@ -57,9 +57,46 @@ Each adapter implements the `ChannelAdapter` ABC from `channels/base.py`, provid
 - `start(on_message)` -- connect and listen for inbound messages
 - `stop()` -- disconnect gracefully
 - `send(channel_id, text, reply_to, thread_id)` -- send a message
+- `send_presentation(channel_id, presentation, ...)` -- render portable blocks
 - `capabilities` -- declares supported features via `ChannelCapabilities` dataclass
 
 Adapters run in the channel worker container, maintaining persistent connections to platform APIs and routing messages through RabbitMQ to the agent's conversation loop.
+
+## Portable Presentation
+
+Proactive outbox messages can carry an optional presentation envelope. The
+portable contract supports ordered `text`, `context`, and `divider` blocks, an
+optional title, and a semantic tone. Adapters render those blocks using their
+declared text dialect: Discord Markdown, Telegram legacy Markdown, Slack
+mrkdwn, or plain text for channels without a compatible rich-text send path.
+Long output still uses the adapter's live `max_message_length` capability.
+
+```json
+{
+  "kind": "channel_message",
+  "payload": {
+    "content": "Deployment ready. Derived from the live health check.",
+    "presentation": {
+      "title": "Deployment",
+      "tone": "success",
+      "blocks": [
+        {"type": "text", "text": "**Ready** for review."},
+        {"type": "divider"},
+        {"type": "context", "text": "Derived from the live health check."}
+      ]
+    },
+    "delivery_mode": "direct",
+    "target_channel": "discord",
+    "target_id": "123456789"
+  }
+}
+```
+
+`content` remains the canonical plain-text audit mirror. If it is omitted, the
+outbox derives a plain mirror from the blocks. Invalid or unknown block types
+fail with the exact block path instead of delivering a partial message. The web
+chat receives the same envelope on its final SSE event; conversation history
+continues to store only the canonical assistant text.
 
 ## Choosing a Channel
 

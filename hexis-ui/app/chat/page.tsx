@@ -5,11 +5,15 @@ import { Card } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
 import { PageHeader } from "../components/ui/page-header";
 import { Spinner } from "../components/ui/spinner";
+import { normalizeMessagePresentation } from "../../lib/message-presentation";
+import type { MessagePresentation } from "../../lib/message-presentation";
+import { MessagePresentationView } from "./message-presentation";
 
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  presentation?: MessagePresentation;
 };
 
 type LogEvent = {
@@ -47,63 +51,6 @@ function saveSession(messages: ChatMessage[]) {
   } catch {
     // ignore quota errors
   }
-}
-
-// Escape HTML so model output is shown as text, never parsed/executed.
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-// Simple markdown-ish rendering: bold, italic, code, line breaks
-function renderMarkdown(text: string) {
-  if (!text) return null;
-
-  const parts: React.ReactNode[] = [];
-  const lines = text.split("\n");
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // Code block detection (simple)
-    if (line.startsWith("```")) {
-      // Find closing fence
-      const codeLines: string[] = [];
-      let j = i + 1;
-      while (j < lines.length && !lines[j].startsWith("```")) {
-        codeLines.push(lines[j]);
-        j++;
-      }
-      parts.push(
-        <pre
-          key={`code-${i}`}
-          className="my-2 overflow-x-auto rounded-xl bg-[var(--surface-strong)] p-3 text-xs"
-        >
-          <code>{codeLines.join("\n")}</code>
-        </pre>
-      );
-      i = j; // skip past closing fence
-      continue;
-    }
-
-    // Inline formatting — escape HTML first so raw markup can never be parsed.
-    const formatted = escapeHtml(line)
-      .replace(/`([^`]+)`/g, '<code class="rounded bg-[var(--surface-strong)] px-1.5 py-0.5 text-xs">$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*([^*]+)\*/g, "<em>$1</em>");
-
-    parts.push(
-      <span key={`line-${i}`}>
-        <span dangerouslySetInnerHTML={{ __html: formatted }} />
-        {i < lines.length - 1 && <br />}
-      </span>
-    );
-  }
-
-  return <>{parts}</>;
 }
 
 export default function ChatPage() {
@@ -206,6 +153,16 @@ export default function ChatPage() {
     setMessages((prev) =>
       prev.map((msg) =>
         msg.id === assistantId ? { ...msg, content: msg.content + text } : msg
+      )
+    );
+  };
+
+  const setAssistantPresentation = (assistantId: string, value: unknown) => {
+    const presentation = normalizeMessagePresentation(value);
+    if (!presentation) return;
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === assistantId ? { ...msg, presentation } : msg
       )
     );
   };
@@ -381,6 +338,9 @@ export default function ChatPage() {
               setShowSearchConfig(true);
             }
           }
+          if (eventType === "done") {
+            setAssistantPresentation(assistantMessage.id, payload.presentation);
+          }
         }
       }
     } catch (err: unknown) {
@@ -553,8 +513,19 @@ export default function ChatPage() {
                 >
                   {msg.role === "assistant" ? (
                     <div className="leading-relaxed">
-                      {msg.content ? renderMarkdown(msg.content) : (
-                        <span className="animate-pulse-slow text-[var(--ink-soft)]">...</span>
+                      {msg.presentation ? (
+                        <MessagePresentationView presentation={msg.presentation} />
+                      ) : msg.content ? (
+                        <MessagePresentationView
+                          presentation={{
+                            tone: "neutral",
+                            blocks: [{ type: "text", text: msg.content }],
+                          }}
+                        />
+                      ) : (
+                        <span className="animate-pulse-slow text-[var(--ink-soft)]">
+                          ...
+                        </span>
                       )}
                     </div>
                   ) : (

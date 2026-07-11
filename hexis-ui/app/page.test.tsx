@@ -1,18 +1,21 @@
-import { render, screen } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Home from "./page";
 
+const router = vi.hoisted(() => ({ push: vi.fn() }));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => router,
+}));
+
 describe("Home", () => {
   beforeEach(() => {
+    router.push.mockReset();
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
         ok: true,
-        json: async () => ({
-          status: { stage: "not_started" },
-          profile: {},
-          mode: "persona",
-        }),
+        json: async () => ({ configured: false }),
       })) as unknown as typeof fetch
     );
   });
@@ -21,13 +24,9 @@ describe("Home", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders the model selection stage", async () => {
+  it("redirects an unconfigured deployment to initialization", async () => {
     render(<Home />);
 
-    expect(screen.getByText("Initialization Ritual")).toBeInTheDocument();
-    expect(
-      await screen.findByText(/Select the conscious and subconscious models/i)
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Stage 1 of/i)).toBeInTheDocument();
+    await waitFor(() => expect(router.push).toHaveBeenCalledWith("/init"));
   });
 });

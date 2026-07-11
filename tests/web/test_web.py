@@ -79,9 +79,15 @@ async def test_chat_returns_sse_stream(client):
     async def mock_connect(*args, **kwargs):
         yield mock_mem
 
+    async def mock_stream_completion(**kwargs):
+        await kwargs["on_text_delta"](mock_response["content"])
+        return mock_response
+
     with patch("apps.hexis_api.CognitiveMemory.connect", side_effect=mock_connect):
-        with patch("core.agent_loop.stream_chat_completion", new_callable=AsyncMock) as mock_stream:
-            mock_stream.return_value = mock_response
+        with patch(
+            "core.agent_loop.stream_chat_completion",
+            side_effect=mock_stream_completion,
+        ):
             with patch("core.agent_loop.chat_completion", new_callable=AsyncMock) as mock_chat:
                 mock_chat.return_value = mock_response
                 resp = await client.post(
@@ -105,6 +111,10 @@ async def test_chat_returns_sse_stream(client):
     assert len(done_events) == 1
     done_payload = json.loads(done_events[0]["data"])
     assert "assistant" in done_payload
+    assert done_payload["presentation"] == {
+        "blocks": [{"type": "text", "text": done_payload["assistant"]}],
+        "tone": "neutral",
+    }
 
 
 async def test_chat_missing_message(client):

@@ -22,6 +22,12 @@ from typing import Any, TYPE_CHECKING
 
 import requests
 
+from .presentation import (
+    MessagePresentation,
+    normalize_message_presentation,
+    render_presentation,
+)
+
 if TYPE_CHECKING:
     import asyncpg
     from .manager import ChannelManager
@@ -119,7 +125,7 @@ class ChannelOutboxConsumer:
             except Exception:
                 payload = {"content": payload}
 
-        content = str(payload.get("content") or payload.get("message") or payload.get("text") or "")
+        message, content = _resolve_payload_message(payload)
         if not content:
             return
 
@@ -143,21 +149,28 @@ class ChannelOutboxConsumer:
             return
 
         if delivery_mode == "direct":
-            await self._deliver_direct(content, payload, outbox_msg_id)
+            await self._deliver_direct(message, content, payload, outbox_msg_id)
         elif delivery_mode == "broadcast":
-            await self._deliver_broadcast(content, payload, outbox_msg_id)
+            await self._deliver_broadcast(message, content, payload, outbox_msg_id)
         else:
             # I.2: Check domain-based routing config
             domain = str(payload.get("domain") or payload.get("intent") or "")
             if domain:
-                routed = await self._deliver_by_domain(content, payload, domain, outbox_msg_id)
+                routed = await self._deliver_by_domain(
+                    message, content, payload, domain, outbox_msg_id
+                )
                 if routed:
                     return
             # Default: last_active
-            await self._deliver_last_active(content, payload, outbox_msg_id)
+            await self._deliver_last_active(message, content, payload, outbox_msg_id)
 
     async def _deliver_by_domain(
-        self, content: str, payload: dict, domain: str, outbox_msg_id: str
+        self,
+        message: str | MessagePresentation,
+        content: str,
+        payload: dict,
+        domain: str,
+        outbox_msg_id: str,
     ) -> bool:
         """I.2: Route message based on content domain config.
 
@@ -181,7 +194,7 @@ class ChannelOutboxConsumer:
                 return False
             thread_id = str(route.get("topic") or "") or None
             msg_id = await self._manager.send(
-                channel_type, target_id, content, thread_id=thread_id
+                channel_type, target_id, message, thread_id=thread_id
             )
             await self._log_delivery(
                 outbox_msg_id, channel_type, target_id, thread_id, content, f"domain:{domain}", True
@@ -191,7 +204,13 @@ class ChannelOutboxConsumer:
             logger.warning("Domain routing for %s failed: %s", domain, e)
             return False
 
-    async def _deliver_direct(self, content: str, payload: dict, outbox_msg_id: str) -> None:
+    async def _deliver_direct(
+        self,
+        message: str | MessagePresentation,
+        content: str,
+        payload: dict,
+        outbox_msg_id: str,
+    ) -> None:
         """Send to an explicit channel + target, optionally with thread/topic."""
         channel_type = str(payload.get("target_channel") or "")
         target_id = str(payload.get("target_id") or "")
@@ -203,13 +222,19 @@ class ChannelOutboxConsumer:
 
         try:
             msg_id = await self._manager.send(
-                channel_type, target_id, content, thread_id=thread_id
+                channel_type, target_id, message, thread_id=thread_id
             )
             await self._log_delivery(outbox_msg_id, channel_type, target_id, thread_id, content, "direct", True)
         except Exception as e:
             await self._log_delivery(outbox_msg_id, channel_type, target_id, thread_id, content, "direct", False, str(e))
 
-    async def _deliver_last_active(self, content: str, payload: dict, outbox_msg_id: str) -> None:
+    async def _deliver_last_active(
+        self,
+        message: str | MessagePresentation,
+        content: str,
+        payload: dict,
+        outbox_msg_id: str,
+    ) -> None:
         """Send to the sender's most recently active channel session."""
         sender_id = str(payload.get("sender_id") or payload.get("target_user") or "")
 
@@ -245,12 +270,18 @@ class ChannelOutboxConsumer:
         resolved_sender = row["sender_id"]
 
         try:
-            await self._manager.send(channel_type, channel_id, content)
+            await self._manager.send(channel_type, channel_id, message)
             await self._log_delivery(outbox_msg_id, channel_type, channel_id, resolved_sender, content, "last_active", True)
         except Exception as e:
             await self._log_delivery(outbox_msg_id, channel_type, channel_id, resolved_sender, content, "last_active", False, str(e))
 
-    async def _deliver_broadcast(self, content: str, payload: dict, outbox_msg_id: str) -> None:
+    async def _deliver_broadcast(
+        self,
+        message: str | MessagePresentation,
+        content: str,
+        payload: dict,
+        outbox_msg_id: str,
+    ) -> None:
         """Send to all active channel sessions."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -267,7 +298,7 @@ class ChannelOutboxConsumer:
             channel_id = row["channel_id"]
             sender_id = row["sender_id"]
             try:
-                await self._manager.send(channel_type, channel_id, content)
+                await self._manager.send(channel_type, channel_id, message)
                 await self._log_delivery(outbox_msg_id, channel_type, channel_id, sender_id, content, "broadcast", True)
             except Exception as e:
                 await self._log_delivery(outbox_msg_id, channel_type, channel_id, sender_id, content, "broadcast", False, str(e))
@@ -353,3 +384,20 @@ async def _rmq_request(method: str, path: str, payload: dict | None = None) -> r
         return requests.request(method, url, auth=auth, json=payload, timeout=5)
 
     return await asyncio.to_thread(_do)
+
+
+def _resolve_payload_message(
+    payload: dict[str, Any],
+) -> tuple[str | MessagePresentation, str]:
+    """Return the outbound value and its stable plain-text audit mirror."""
+
+    content = str(
+        payload.get("content") or payload.get("message") or payload.get("text") or ""
+    )
+    raw_presentation = payload.get("presentation")
+    if raw_presentation is None:
+        return content, content
+
+    presentation = normalize_message_presentation(raw_presentation)
+    mirror = content or render_presentation(presentation)
+    return presentation, mirror

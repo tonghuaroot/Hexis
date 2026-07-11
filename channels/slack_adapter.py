@@ -14,6 +14,7 @@ from typing import Any, Callable, Awaitable
 
 from .base import ChannelAdapter, ChannelCapabilities, ChannelMessage, parse_allowlist, resolve_channel_token
 from .media import Attachment
+from .presentation import MarkdownDialect
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class SlackAdapter(ChannelAdapter):
             typing_indicator=True,
             edit_message=True,
             max_message_length=4000,
+            markdown_dialect=MarkdownDialect.SLACK,
         )
 
     @property

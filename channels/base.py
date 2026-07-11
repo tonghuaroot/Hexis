@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable, TYPE_CHECKING
 
+from .presentation import MarkdownDialect, MessagePresentation, render_presentation
+
 if TYPE_CHECKING:
     from .media import Attachment
 
@@ -28,6 +30,7 @@ class ChannelCapabilities:
     typing_indicator: bool = False
     edit_message: bool = False
     max_message_length: int = 4000
+    markdown_dialect: MarkdownDialect = MarkdownDialect.PLAIN
 
 
 @dataclass
@@ -169,6 +172,33 @@ class ChannelAdapter(ABC):
         Returns platform message ID, or None if not supported.
         """
         return None
+
+    async def send_presentation(
+        self,
+        channel_id: str,
+        presentation: MessagePresentation,
+        *,
+        reply_to: str | None = None,
+        thread_id: str | None = None,
+    ) -> str | None:
+        """Render and deliver portable blocks, degrading through text safely.
+
+        The first platform message ID is returned for reply/audit correlation;
+        every additional chunk is still delivered in order.
+        """
+        text = render_presentation(presentation, self.capabilities.markdown_dialect)
+        chunks = chunk_text(text, self.capabilities.max_message_length)
+        first_message_id: str | None = None
+        for index, chunk in enumerate(chunks):
+            message_id = await self.send(
+                channel_id,
+                chunk,
+                reply_to=reply_to if index == 0 else None,
+                thread_id=thread_id,
+            )
+            if index == 0:
+                first_message_id = message_id
+        return first_message_id
 
 
 def parse_allowlist(value: Any) -> set[str] | None:

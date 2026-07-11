@@ -14,6 +14,7 @@ from typing import Any, TYPE_CHECKING
 from .base import ChannelAdapter, ChannelMessage
 from .commands import CommandRegistry, parse_command
 from .conversation import process_channel_message, stream_channel_message
+from .presentation import MessagePresentation
 
 if TYPE_CHECKING:
     import asyncpg
@@ -191,7 +192,7 @@ class ChannelManager:
         self,
         channel_type: str,
         channel_id: str,
-        text: str,
+        message: str | MessagePresentation,
         **kwargs: Any,
     ) -> str | None:
         """
@@ -203,7 +204,9 @@ class ChannelManager:
         if not adapter:
             logger.error("No adapter for channel type: %s", channel_type)
             return None
-        return await adapter.send(channel_id, text, **kwargs)
+        if isinstance(message, MessagePresentation):
+            return await adapter.send_presentation(channel_id, message, **kwargs)
+        return await adapter.send(channel_id, message, **kwargs)
 
     async def stop_all(self) -> None:
         """Stop all adapters gracefully."""
@@ -291,7 +294,9 @@ class ChannelManager:
                     "reactions": adapter.capabilities.reactions,
                     "media": adapter.capabilities.media,
                     "typing_indicator": adapter.capabilities.typing_indicator,
+                    "edit_message": adapter.capabilities.edit_message,
                     "max_message_length": adapter.capabilities.max_message_length,
+                    "markdown_dialect": adapter.capabilities.markdown_dialect.value,
                 },
             })
         return result

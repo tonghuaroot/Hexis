@@ -5,7 +5,12 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: "./test/setup.ts",
     globals: true,
-    include: ["app/**/*.test.ts", "app/**/*.test.tsx"],
+    include: [
+      "app/**/*.test.ts",
+      "app/**/*.test.tsx",
+      "lib/**/*.test.ts",
+      "lib/**/*.test.tsx",
+    ],
     exclude: ["**/e2e/**", "**/node_modules/**", "**/.next/**"],
   },
 });
