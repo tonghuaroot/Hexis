@@ -43,15 +43,17 @@ and agent skill updates require explicit ownership provenance. Phase 5 now has
 a rollback-only end-to-end proof and a live evidence-based maturity scorecard;
 the next implementation boundary is typed portable channel presentation.
 
-The latest hosted green implementation baseline is `d4a48c0` (`Complete Phase
-4 self-improvement workflow`), run
-https://github.com/QuixiAI/Hexis/actions/runs/29131940524 (all jobs succeeded,
+The latest hosted green implementation baseline is `d850805` (`Add rollback
+capability demo and maturity scorecard`), run
+https://github.com/QuixiAI/Hexis/actions/runs/29133417097 (all jobs succeeded,
 including migration-survivor and all-checks-pass). Always verify the current
 head's hosted result with the command in "Useful Commands" below rather than
 assuming this historical baseline applies.
 
 Important recent commits:
 
+- `d850805` - Add rollback capability demo and maturity scorecard
+- `4d5df5c` - Update Phase 4 handoff
 - `d4a48c0` - Complete Phase 4 self-improvement workflow
 - `fb87bf5` - Add cross-session history search
 - `54a40b6` - Harden plugin and agent skill ownership
