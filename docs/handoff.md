@@ -189,6 +189,10 @@ errors and 8 warnings outside the new auth files).
   events. Subconscious phase-end events include provider/model, the complete
   request and raw response, and parsed signals. Both chat and manual heartbeat
   SSE surfaces preserve those events in real time.
+- General status refresh uses 15-second visibility/focus-aware polling instead
+  of a long-lived gateway SSE proxy. Chat and manual heartbeats keep their
+  dedicated real-time streams, while routine navigation no longer consumes a
+  database LISTEN connection per page visit.
 - Memory browsing is a dense searchable list with live type counts, sorting,
   canonical calculated strength, emotional valence, and a fixed detail
   inspector for importance, trust, access history, source, and metadata. The SQL
@@ -212,7 +216,9 @@ verified overview, conversation, memory, goals, and settings at 1440x1000 and
 SSE journeys verified live request/response, subconscious emotion, memory
 strength/valence, mobile inspector close, and heartbeat completion without
 calling a paid model. Live status, portrait, list/filter/semantic memory search,
-and character image routes also returned successfully.
+and character image routes also returned successfully. Twenty rapid
+overview/conversation visits left the live database connection count unchanged
+and the API health endpoint responsive.
 
 ### Skills-first capability surface
 
