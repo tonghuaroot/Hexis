@@ -42,15 +42,20 @@ Plugin manifests and live configuration now fail closed before registration,
 and agent skill updates require explicit ownership provenance. The next
 implementation boundary is Phase 5 demo, DX, and measurement work.
 
-The prior hosted green baseline was `a31b0b8` (`Complete HMX Slice 13 agent
-protocol tools`), run
-https://github.com/QuixiAI/Hexis/actions/runs/29114104335
-(all jobs succeeded). Always verify the current head's hosted result with the
-command in "Useful Commands" below rather than assuming this historical
-baseline applies.
+The latest hosted green implementation baseline is `d4a48c0` (`Complete Phase
+4 self-improvement workflow`), run
+https://github.com/QuixiAI/Hexis/actions/runs/29131940524 (all jobs succeeded,
+including migration-survivor and all-checks-pass). Always verify the current
+head's hosted result with the command in "Useful Commands" below rather than
+assuming this historical baseline applies.
 
 Important recent commits:
 
+- `d4a48c0` - Complete Phase 4 self-improvement workflow
+- `fb87bf5` - Add cross-session history search
+- `54a40b6` - Harden plugin and agent skill ownership
+- `9be4393` - Add OpenAI-compatible chat completions
+- `dd10de5` - Complete HMX acceptance audit
 - `a31b0b8` - Complete HMX Slice 13 agent protocol tools
 - `43f2e70` - Complete HMX Slice 12 operator override
 - `8e2d524` - Complete HMX Slice 11 bounded reversion
