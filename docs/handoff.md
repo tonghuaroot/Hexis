@@ -45,15 +45,16 @@ typed portable presentation across proactive channels and web chat. The next
 boundary should be chosen from concrete interop demand or deferred engineering
 hardening rather than adding speculative surface area.
 
-The latest hosted green implementation baseline is `d850805` (`Add rollback
-capability demo and maturity scorecard`), run
-https://github.com/QuixiAI/Hexis/actions/runs/29133417097 (all jobs succeeded,
+The latest hosted green implementation baseline is `d2f16bb` (`Add portable
+channel presentation`), run
+https://github.com/QuixiAI/Hexis/actions/runs/29136691611 (all jobs succeeded,
 including migration-survivor and all-checks-pass). Always verify the current
 head's hosted result with the command in "Useful Commands" below rather than
 assuming this historical baseline applies.
 
 Important recent commits:
 
+- `d2f16bb` - Add portable channel presentation
 - `d850805` - Add rollback capability demo and maturity scorecard
 - `4d5df5c` - Update Phase 4 handoff
 - `d4a48c0` - Complete Phase 4 self-improvement workflow
