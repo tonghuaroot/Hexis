@@ -2,6 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import Image from "next/image";
+import { ConsentExchangeView, type ConsentExchange } from "./consent-exchange";
+import { getOAuthStatus, OAuthControl } from "./oauth-control";
 
 type InitStage =
   | "llm"
@@ -76,6 +79,11 @@ type ConsentRecord = {
   model: string | null;
   endpoint: string | null;
   decided_at: string | null;
+  exchange?: ConsentExchange | null;
+};
+type ConsentRequestResult = {
+  consent_record?: ConsentRecord;
+  exchange?: ConsentExchange;
 };
 type CharacterEntry = {
   filename: string;
@@ -85,6 +93,30 @@ type CharacterEntry = {
   values: string[];
   personality: string;
   image: string | null;
+};
+type InitStatus = { stage?: string };
+type InitProfile = { agent?: { name?: string } };
+type InitStatusResponse = {
+  status?: InitStatus;
+  profile?: InitProfile;
+  consent_records?: Partial<Record<LlmRole, ConsentRecord | null>>;
+  llm_heartbeat?: Partial<LlmConfig>;
+  llm_subconscious?: Partial<LlmConfig>;
+  mode?: unknown;
+};
+type IdentityForm = {
+  name: string;
+  pronouns: string;
+  voice: string;
+  description: string;
+  purpose: string;
+  creator_name: string;
+};
+type WorldviewForm = {
+  metaphysics: string;
+  human_nature: string;
+  epistemology: string;
+  ethics: string;
 };
 
 // Provider metadata. Model lists + default models are NOT hardcoded here — they
@@ -234,10 +266,21 @@ async function postJson<T>(url: string, payload?: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: payload ? JSON.stringify(payload) : "{}",
   });
+  const responsePayload = await res.json().catch(() => null);
   if (!res.ok) {
-    throw new Error(`Request failed: ${res.status}`);
+    const message =
+      responsePayload && typeof responsePayload === "object"
+        ? (responsePayload as Record<string, unknown>).error ||
+          (responsePayload as Record<string, unknown>).detail ||
+          (responsePayload as Record<string, unknown>).message
+        : null;
+    throw new Error(
+      typeof message === "string" && message.trim()
+        ? message
+        : `Request failed: ${res.status}`
+    );
   }
-  return res.json();
+  return responsePayload as T;
 }
 
 function parseLines(text: string) {
@@ -247,23 +290,8 @@ function parseLines(text: string) {
     .filter(Boolean);
 }
 
-function normalizeNumber(value: unknown, fallback: number) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return fallback;
-}
-
-function formatLabel(value: string) {
-  return value
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (match) => match.toUpperCase());
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 // Map DB init_stage to our UI stages
@@ -278,8 +306,8 @@ function dbStageToUiStage(dbStage: string): InitStage {
 export default function Home() {
   const router = useRouter();
   const [stage, setStage] = useState<InitStage>("llm");
-  const [status, setStatus] = useState<any>({});
-  const [profile, setProfile] = useState<any>({});
+  const [status, setStatus] = useState<InitStatus>({});
+  const [profile, setProfile] = useState<InitProfile>({});
   const [consentRecords, setConsentRecords] = useState<Record<LlmRole, ConsentRecord | null>>({
     conscious: null,
     subconscious: null,
@@ -287,11 +315,30 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Live model catalog per role (derived from /api/init/models, never hardcoded).
-  type ModelCatalog = { models: string[]; loading: boolean; error: string | null };
+  type ModelCatalog = {
+    models: string[];
+    loading: boolean;
+    error: string | null;
+    recommended: string;
+    selectedUnavailable: boolean;
+  };
   const [modelCatalog, setModelCatalog] = useState<Record<LlmRole, ModelCatalog>>({
-    conscious: { models: [], loading: false, error: null },
-    subconscious: { models: [], loading: false, error: null },
+    conscious: {
+      models: [],
+      loading: false,
+      error: null,
+      recommended: "",
+      selectedUnavailable: false,
+    },
+    subconscious: {
+      models: [],
+      loading: false,
+      error: null,
+      recommended: "",
+      selectedUnavailable: false,
+    },
   });
+  const [oauthRefreshKey, setOAuthRefreshKey] = useState(0);
 
   const [llmConscious, setLlmConscious] = useState<LlmConfig>(defaultLlmConfig("openai"));
   const [llmSubconscious, setLlmSubconscious] = useState<LlmConfig>(
@@ -310,7 +357,7 @@ export default function Home() {
   const [customSection, setCustomSection] = useState<"identity" | "values" | "goals">(
     "identity"
   );
-  const [identity, setIdentity] = useState({
+  const [identity, setIdentity] = useState<IdentityForm>({
     name: "",
     pronouns: "",
     voice: "",
@@ -327,7 +374,7 @@ export default function Home() {
     neuroticism: 50,
   });
   const [valuesText, setValuesText] = useState("");
-  const [worldview, setWorldview] = useState({
+  const [worldview, setWorldview] = useState<WorldviewForm>({
     metaphysics: "",
     human_nature: "",
     epistemology: "",
@@ -347,13 +394,6 @@ export default function Home() {
     purpose: "",
   });
 
-  const flow: InitStage[] = [
-    "llm",
-    "choose_path",
-    "consent",
-    "complete",
-  ];
-  const stageIndex = Math.max(flow.indexOf(stage), 0);
   const progress =
     stage === "complete"
       ? 100
@@ -368,7 +408,7 @@ export default function Home() {
   const loadStatus = async () => {
     const res = await fetch("/api/init/status", { cache: "no-store" });
     if (!res.ok) throw new Error("Failed to load init status");
-    const data = await res.json();
+    const data = await res.json() as InitStatusResponse;
     setStatus(data.status ?? {});
     setProfile(data.profile ?? {});
     if (data.consent_records) {
@@ -378,19 +418,21 @@ export default function Home() {
       });
     }
     if (data.llm_heartbeat) {
+      const heartbeatConfig = data.llm_heartbeat;
       setLlmConscious((prev) => ({
         ...prev,
-        provider: data.llm_heartbeat.provider || prev.provider,
-        model: data.llm_heartbeat.model || prev.model,
-        endpoint: data.llm_heartbeat.endpoint || prev.endpoint,
+        provider: heartbeatConfig.provider || prev.provider,
+        model: heartbeatConfig.model || prev.model,
+        endpoint: heartbeatConfig.endpoint || prev.endpoint,
       }));
     }
     if (data.llm_subconscious) {
+      const subconsciousConfig = data.llm_subconscious;
       setLlmSubconscious((prev) => ({
         ...prev,
-        provider: data.llm_subconscious.provider || prev.provider,
-        model: data.llm_subconscious.model || prev.model,
-        endpoint: data.llm_subconscious.endpoint || prev.endpoint,
+        provider: subconsciousConfig.provider || prev.provider,
+        model: subconsciousConfig.model || prev.model,
+        endpoint: subconsciousConfig.endpoint || prev.endpoint,
       }));
     }
     if (typeof data.mode === "string") {
@@ -463,17 +505,35 @@ export default function Home() {
         ? payload.models.filter((item: unknown) => typeof item === "string")
         : [];
       const recommended = typeof payload?.default === "string" ? payload.default : "";
+      const unavailableModels = Array.isArray(payload?.unavailable_models)
+        ? payload.unavailable_models.filter((item: unknown) => typeof item === "string")
+        : [];
+      const selectedUnavailable = unavailableModels.includes(config.model.trim());
       setModelCatalog((prev) => ({
         ...prev,
-        [role]: { models, loading: false, error: null },
+        [role]: {
+          models,
+          loading: false,
+          error: selectedUnavailable
+            ? `${config.model} was rejected by this ChatGPT workspace.`
+            : null,
+          recommended,
+          selectedUnavailable,
+        },
       }));
       if (recommended) {
         setConfig((prev) => (prev.model.trim() ? prev : { ...prev, model: recommended }));
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       setModelCatalog((prev) => ({
         ...prev,
-        [role]: { models: [], loading: false, error: err?.message || "Unable to load models." },
+        [role]: {
+          models: [],
+          loading: false,
+          error: errorMessage(err, "Unable to load models."),
+          recommended: "",
+          selectedUnavailable: false,
+        },
       }));
     }
   }, []);
@@ -492,7 +552,7 @@ export default function Home() {
     }
     loadModels("conscious", llmConscious);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmConscious.provider, consciousEndpointDep, loadModels]);
+  }, [llmConscious.provider, consciousEndpointDep, loadModels, oauthRefreshKey]);
 
   useEffect(() => {
     if (llmSubconscious.provider === "ollama") {
@@ -501,7 +561,7 @@ export default function Home() {
     }
     loadModels("subconscious", llmSubconscious);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmSubconscious.provider, subconsciousEndpointDep, loadModels]);
+  }, [llmSubconscious.provider, subconsciousEndpointDep, loadModels, oauthRefreshKey]);
 
   const updateLlmProvider = (role: LlmRole, provider: LlmProvider) => {
     // Clear the model so the catalog fetch can supply the provider's default.
@@ -513,6 +573,10 @@ export default function Home() {
       setLlmSubconscious((prev) => ({ ...prev, ...patch }));
     }
   };
+
+  const handleOAuthAuthenticated = useCallback(() => {
+    setOAuthRefreshKey((current) => current + 1);
+  }, []);
 
   // --- Handlers ---
 
@@ -531,6 +595,28 @@ export default function Home() {
       };
       validateConfig("conscious", llmConscious);
       validateConfig("subconscious", llmSubconscious);
+      const oauthProviders = Array.from(
+        new Set(
+          [llmConscious, llmSubconscious]
+            .filter((config) => providerMeta[config.provider].oauth)
+            .map((config) => persistedProvider(config.provider))
+        )
+      );
+      const oauthStatuses = await Promise.all(
+        oauthProviders.map(
+          async (provider) => [provider, await getOAuthStatus(provider, true)] as const
+        )
+      );
+      for (const [provider, authStatus] of oauthStatuses) {
+        if (!authStatus.configured) {
+          const selected = [llmConscious, llmSubconscious].find(
+            (config) => persistedProvider(config.provider) === provider
+          );
+          missing.push(
+            `${selected ? providerMeta[selected.provider].label : provider} authorization`
+          );
+        }
+      }
       if (missing.length > 0) throw new Error(`Missing ${missing.join(" and ")}`);
       await postJson("/api/init/llm", {
         conscious: {
@@ -546,9 +632,9 @@ export default function Home() {
           api_key: llmSubconscious.apiKey,
         },
       });
-      setStage("choose_path");
-    } catch (err: any) {
-      setError(err.message || "Failed to save model configuration");
+      setStage(status?.stage === "consent" ? "consent" : "choose_path");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to save model configuration"));
     } finally {
       setBusy(false);
     }
@@ -561,8 +647,8 @@ export default function Home() {
       await postJson("/api/init/defaults", { user_name: userName || "User" });
       await loadStatus();
       setStage("consent");
-    } catch (err: any) {
-      setError(err.message || "Failed to apply defaults");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to apply defaults"));
     } finally {
       setBusy(false);
     }
@@ -579,19 +665,23 @@ export default function Home() {
         `/api/init/characters?load=${encodeURIComponent(selectedCharacter.filename)}`
       );
       if (!res.ok) throw new Error("Failed to load character");
-      const data = await res.json();
-      if (!data.card) throw new Error("No card data returned");
-      const hexisExt = data.card?.data?.extensions?.hexis ?? {};
+      const payload = await res.json() as {
+        card?: { data?: { extensions?: { hexis?: Record<string, unknown> } } };
+      };
+      if (!payload.card) throw new Error("No card data returned");
+      const hexisExt = payload.card.data?.extensions?.hexis ?? {};
 
       // Apply via init_from_character_card
       await postJson("/api/init/character-card", {
         card: hexisExt,
         user_name: userName || "User",
+        character_filename: selectedCharacter.filename,
+        portrait: selectedCharacter.image,
       });
       await loadStatus();
       setStage("consent");
-    } catch (err: any) {
-      setError(err.message || "Failed to apply character");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to apply character"));
     } finally {
       setBusy(false);
       setCharacterLoading(false);
@@ -661,8 +751,8 @@ export default function Home() {
 
       await loadStatus();
       setStage("consent");
-    } catch (err: any) {
-      setError(err.message || "Failed to save custom configuration");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to save custom configuration"));
     } finally {
       setBusy(false);
     }
@@ -670,7 +760,7 @@ export default function Home() {
 
   const requestConsent = async (role: LlmRole) => {
     const config = role === "conscious" ? llmConscious : llmSubconscious;
-    const res = await postJson<any>("/api/init/consent/request", {
+    const res = await postJson<ConsentRequestResult>("/api/init/consent/request", {
       role,
       llm: {
         provider: persistedProvider(config.provider),
@@ -680,7 +770,11 @@ export default function Home() {
       },
     });
     if (res?.consent_record) {
-      setConsentRecords((prev) => ({ ...prev, [role]: res.consent_record }));
+      const record = {
+        ...res.consent_record,
+        exchange: res.exchange ?? res.consent_record.exchange ?? null,
+      };
+      setConsentRecords((prev) => ({ ...prev, [role]: record }));
     }
   };
 
@@ -694,11 +788,17 @@ export default function Home() {
       await requestConsent("subconscious");
       await requestConsent("conscious");
       await loadStatus();
-    } catch (err: any) {
-      setError(err.message || "Failed to request consent");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to request consent"));
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleChangeModel = () => {
+    setStage("llm");
+    loadModels("conscious", llmConscious);
+    loadModels("subconscious", llmSubconscious);
   };
 
   // Owner override: activate even though the model didn't consent. It's the
@@ -707,7 +807,7 @@ export default function Home() {
     setBusy(true);
     setError(null);
     try {
-      await postJson<any>("/api/init/consent/override", {
+      await postJson<unknown>("/api/init/consent/override", {
         role: "conscious",
         llm: {
           provider: persistedProvider(llmConscious.provider),
@@ -717,8 +817,8 @@ export default function Home() {
         model_decision: consentRecords.conscious?.decision || "decline",
       });
       await loadStatus();
-    } catch (err: any) {
-      setError(err.message || "Failed to activate");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to activate"));
     } finally {
       setBusy(false);
     }
@@ -792,7 +892,7 @@ export default function Home() {
     const traits = Object.fromEntries(
       traitKeys.map((key) => [key, personalityTraits[key] / 100])
     );
-    const hexisExt: Record<string, any> = {
+    const hexisExt: Record<string, unknown> = {
       name: identity.name || "Custom",
       pronouns: identity.pronouns || "they/them",
       voice: identity.voice,
@@ -1009,13 +1109,40 @@ export default function Home() {
                                     ? `${modelOptions.length} models available — or type any model id.`
                                     : "No models listed — type a model id."}
                               {catalog.error ? (
-                                <button
-                                  type="button"
-                                  className="ml-2 text-[var(--accent-strong)] underline"
-                                  onClick={() => loadModels(entry.role, entry.config)}
-                                >
-                                  Retry
-                                </button>
+                                catalog.selectedUnavailable && catalog.recommended ? (
+                                  <button
+                                    type="button"
+                                    className="ml-2 text-[var(--accent-strong)] underline"
+                                    onClick={() => {
+                                      entry.setConfig((prev) => ({
+                                        ...prev,
+                                        model: catalog.recommended,
+                                      }));
+                                      setConsentRecords((prev) => ({
+                                        ...prev,
+                                        [entry.role]: null,
+                                      }));
+                                      setModelCatalog((prev) => ({
+                                        ...prev,
+                                        [entry.role]: {
+                                          ...prev[entry.role],
+                                          error: null,
+                                          selectedUnavailable: false,
+                                        },
+                                      }));
+                                    }}
+                                  >
+                                    Use {catalog.recommended}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="ml-2 text-[var(--accent-strong)] underline"
+                                    onClick={() => loadModels(entry.role, entry.config)}
+                                  >
+                                    Retry
+                                  </button>
+                                )
                               ) : null}
                             </p>
                           </div>
@@ -1042,16 +1169,12 @@ export default function Home() {
                             </div>
                           ) : null}
                           {meta.oauth ? (
-                            <div className="rounded-xl border border-[var(--outline)] bg-[var(--surface)] px-4 py-3 text-sm text-[var(--ink)]">
-                              <p className="font-semibold">OAuth required</p>
-                              <p className="mt-1 text-[var(--ink-soft)]">
-                                Run{" "}
-                                <span className="font-mono">
-                                  hexis auth {persistedProvider(entry.config.provider)} login
-                                </span>{" "}
-                                to authorize. No API key is needed here.
-                              </p>
-                            </div>
+                            <OAuthControl
+                              provider={persistedProvider(entry.config.provider)}
+                              label={meta.label}
+                              refreshKey={oauthRefreshKey}
+                              onAuthenticated={handleOAuthAuthenticated}
+                            />
                           ) : (
                             <div>
                               <label
@@ -1207,7 +1330,7 @@ export default function Home() {
                       return (
                         <button
                           key={ch.filename}
-                          className={`group rounded-2xl border text-left transition overflow-hidden ${
+                          className={`group overflow-hidden rounded-lg border text-left transition ${
                             isSelected
                               ? "border-[var(--accent)] bg-[var(--surface-strong)] ring-2 ring-[var(--accent)]/30"
                               : "border-[var(--outline)] bg-white hover:border-[var(--accent)]"
@@ -1216,15 +1339,14 @@ export default function Home() {
                         >
                           {ch.image ? (
                             <div className="relative aspect-square w-full overflow-hidden bg-[var(--surface-strong)]">
-                              <img
+                              <Image
                                 src={`/api/init/characters/image?name=${encodeURIComponent(ch.image)}`}
                                 alt={ch.name}
-                                className="h-full w-full object-cover transition-transform group-hover:scale-105"
-                                loading="lazy"
+                                fill
+                                sizes="(min-width: 1024px) 30vw, (min-width: 640px) 45vw, 90vw"
+                                unoptimized
+                                className="object-cover transition-transform group-hover:scale-105"
                               />
-                              <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent px-4 pb-3 pt-8">
-                                <h4 className="font-display text-lg text-white">{ch.name}</h4>
-                              </div>
                             </div>
                           ) : (
                             <div className="flex aspect-square w-full items-center justify-center bg-[var(--surface-strong)]">
@@ -1234,7 +1356,7 @@ export default function Home() {
                             </div>
                           )}
                           <div className="px-4 py-3">
-                            {!ch.image && <h4 className="font-display text-lg">{ch.name}</h4>}
+                            <h4 className="font-display text-lg">{ch.name}</h4>
                             {ch.values.length > 0 && (
                               <p className="text-xs text-[var(--ink-soft)]">
                                 {ch.values.slice(0, 3).join(", ")}
@@ -1262,7 +1384,7 @@ export default function Home() {
                     onChange={handleImportCard}
                   />
                   <button
-                    className="rounded-full border border-dashed border-[var(--outline)] px-4 py-2 text-xs font-semibold text-[var(--ink-soft)] transition hover:border-[var(--accent)] hover:text-[var(--foreground)]"
+                    className="rounded-md border border-dashed border-[var(--outline)] px-4 py-2 text-xs font-semibold text-[var(--ink-soft)] transition hover:border-[var(--accent)] hover:text-[var(--foreground)]"
                     onClick={() => importFileRef.current?.click()}
                   >
                     Import Card
@@ -1273,12 +1395,15 @@ export default function Home() {
                 </div>
 
                 {selectedCharacter && (
-                  <div className="flex gap-4 rounded-2xl border border-[var(--accent)] bg-[var(--surface)] p-4 text-sm">
+                  <div className="flex gap-4 rounded-lg border border-[var(--accent)] bg-[var(--surface)] p-4 text-sm">
                     {selectedCharacter.image && (
-                      <img
+                      <Image
                         src={`/api/init/characters/image?name=${encodeURIComponent(selectedCharacter.image)}`}
                         alt={selectedCharacter.name}
-                        className="h-20 w-20 flex-shrink-0 rounded-xl object-cover"
+                        width={80}
+                        height={80}
+                        unoptimized
+                        className="h-20 w-20 flex-shrink-0 rounded-lg object-cover"
                       />
                     )}
                     <div>
@@ -1346,12 +1471,12 @@ export default function Home() {
                 {customSection === "identity" && (
                   <div className="space-y-4">
                     <div className="grid gap-4 sm:grid-cols-2">
-                      {[
+                      {([
                         { label: "Name", key: "name", placeholder: "Hexis" },
                         { label: "Pronouns", key: "pronouns", placeholder: "they/them" },
                         { label: "Voice", key: "voice", placeholder: "thoughtful and curious" },
                         { label: "Creator Name", key: "creator_name", placeholder: userName || "Your name" },
-                      ].map((field) => (
+                      ] satisfies { label: string; key: keyof IdentityForm; placeholder: string }[]).map((field) => (
                         <div key={field.key}>
                           <label
                             htmlFor={`identity-${field.key}`}
@@ -1362,7 +1487,7 @@ export default function Home() {
                           <input
                             id={`identity-${field.key}`}
                             className="mt-2 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
-                            value={(identity as any)[field.key]}
+                            value={identity[field.key]}
                             onChange={(e) =>
                               setIdentity((prev) => ({ ...prev, [field.key]: e.target.value }))
                             }
@@ -1470,12 +1595,12 @@ export default function Home() {
                       />
                     </div>
                     <div className="grid gap-4 sm:grid-cols-2">
-                      {[
+                      {([
                         { key: "metaphysics", label: "Metaphysics" },
                         { key: "human_nature", label: "Human Nature" },
                         { key: "epistemology", label: "Epistemology" },
                         { key: "ethics", label: "Ethics" },
-                      ].map((field) => (
+                      ] satisfies { key: keyof WorldviewForm; label: string }[]).map((field) => (
                         <div key={field.key}>
                           <label
                             htmlFor={`worldview-${field.key}`}
@@ -1486,7 +1611,7 @@ export default function Home() {
                           <textarea
                             id={`worldview-${field.key}`}
                             className="mt-2 h-16 w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
-                            value={(worldview as any)[field.key]}
+                            value={worldview[field.key]}
                             onChange={(e) =>
                               setWorldview((prev) => ({
                                 ...prev,
@@ -1728,6 +1853,10 @@ export default function Home() {
                             Signature: <span className="font-mono">{record.signature}</span>
                           </p>
                         ) : null}
+                        {(record?.decision === "decline" || record?.decision === "abstain") &&
+                        record.exchange ? (
+                          <ConsentExchangeView exchange={record.exchange} />
+                        ) : null}
                       </div>
                     );
                   })}
@@ -1735,7 +1864,7 @@ export default function Home() {
                 {consentDeclined ? (
                   <p className="text-sm text-[var(--ink-soft)]">
                     The model didn&apos;t consent. It&apos;s your agent — change the model,
-                    try again, or proceed anyway. Either way, the model&apos;s response is recorded.
+                    try again, or proceed anyway. The full request and response are recorded.
                   </p>
                 ) : null}
                 <div className="flex flex-col gap-3 sm:flex-row">
@@ -1755,7 +1884,7 @@ export default function Home() {
                   </button>
                   <button
                     className="rounded-full border border-[var(--outline)] px-6 py-3 text-sm font-semibold text-[var(--foreground)]"
-                    onClick={() => setStage("llm")}
+                    onClick={handleChangeModel}
                     disabled={busy}
                   >
                     Change model

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { Check, MessageSquarePlus, Plus, X } from "lucide-react";
 import { Card } from "../components/ui/card";
 import { Badge, GoalPriorityBadge } from "../components/ui/badge";
 import { PageHeader } from "../components/ui/page-header";
@@ -113,45 +114,46 @@ export default function GoalsPage() {
   }
 
   return (
-    <div className="app-shell min-h-screen">
-      <div className="relative z-10 mx-auto max-w-6xl px-6 py-10">
-        <div className="flex items-start justify-between">
+    <div className="app-shell">
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+        <div className="flex items-center justify-between gap-4 border-b border-[var(--outline)] pb-5">
           <PageHeader
             title="Goals"
             subtitle={`${goals.length} goals across ${Object.values(grouped).filter((g) => g.length > 0).length} priorities`}
           />
           <button
             onClick={() => setShowNew(!showNew)}
-            className="mt-1 rounded-full bg-[var(--foreground)] px-5 py-2.5 text-sm font-medium text-white transition hover:bg-[var(--accent-strong)]"
+            className="flex items-center gap-2 rounded-lg bg-[var(--foreground)] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--teal)]"
           >
-            {showNew ? "Cancel" : "New Goal"}
+            {showNew ? <X size={16} /> : <Plus size={16} />}
+            {showNew ? "Cancel" : "New goal"}
           </button>
         </div>
 
         {/* New goal form */}
         {showNew && (
-          <Card className="mt-6 fade-up">
-            <h3 className="font-display text-lg">Create Goal</h3>
+          <Card className="mt-6 fade-up max-w-3xl">
+            <h3 className="text-base font-semibold">Create goal</h3>
             <div className="mt-4 space-y-3">
               <input
                 type="text"
-                className="w-full rounded-2xl border border-[var(--outline)] bg-white px-4 py-2.5 text-sm focus:border-[var(--accent)] focus:outline-none"
-                placeholder="Goal title..."
+                className="w-full rounded-md border border-[var(--outline)] bg-white px-3 py-2.5 text-sm focus:border-[var(--teal)] focus:outline-none"
+                placeholder="Goal title"
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
               />
               <textarea
-                className="w-full rounded-2xl border border-[var(--outline)] bg-white px-4 py-2.5 text-sm focus:border-[var(--accent)] focus:outline-none"
-                placeholder="Description (optional)..."
+                className="w-full rounded-md border border-[var(--outline)] bg-white px-3 py-2.5 text-sm focus:border-[var(--teal)] focus:outline-none"
+                placeholder="Description"
                 rows={2}
                 value={newDesc}
                 onChange={(e) => setNewDesc(e.target.value)}
               />
-              <div className="flex gap-3">
+              <div className="flex flex-col gap-3 sm:flex-row">
                 <select
                   value={newPriority}
                   onChange={(e) => setNewPriority(e.target.value)}
-                  className="rounded-2xl border border-[var(--outline)] bg-white px-4 py-2.5 text-sm"
+                  className="rounded-md border border-[var(--outline)] bg-white px-3 py-2.5 text-sm"
                 >
                   {PRIORITIES.map((p) => (
                     <option key={p} value={p}>
@@ -162,7 +164,7 @@ export default function GoalsPage() {
                 <select
                   value={newSource}
                   onChange={(e) => setNewSource(e.target.value)}
-                  className="rounded-2xl border border-[var(--outline)] bg-white px-4 py-2.5 text-sm"
+                  className="rounded-md border border-[var(--outline)] bg-white px-3 py-2.5 text-sm"
                 >
                   {SOURCES.map((s) => (
                     <option key={s} value={s}>
@@ -173,7 +175,7 @@ export default function GoalsPage() {
                 <button
                   onClick={createGoal}
                   disabled={creating || !newTitle.trim()}
-                  className="rounded-2xl bg-[var(--accent-strong)] px-6 py-2.5 text-sm font-medium text-white transition hover:bg-[var(--accent)] disabled:opacity-50"
+                  className="rounded-md bg-[var(--foreground)] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[var(--teal)] disabled:opacity-50"
                 >
                   {creating ? "Creating..." : "Create"}
                 </button>
@@ -198,23 +200,21 @@ export default function GoalsPage() {
         )}
 
         {/* Three-column layout */}
-        <div className="mt-8 grid gap-6 md:grid-cols-3">
+        <div className="mt-6 grid gap-5 lg:grid-cols-3">
           {PRIORITIES.map((priority) => (
             <div key={priority}>
-              <div className="mb-4 flex items-center gap-2">
+              <div className="mb-3 flex items-center gap-2 px-1">
                 <GoalPriorityBadge priority={priority} />
                 <span className="text-xs text-[var(--ink-soft)]">
                   {grouped[priority].length}
                 </span>
               </div>
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {grouped[priority].length === 0 ? (
-                  <Card>
-                    <p className="text-sm text-[var(--ink-soft)]">No {priority} goals.</p>
-                  </Card>
+                  <div className="rounded-lg border border-dashed border-[var(--outline)] px-4 py-8 text-center text-sm text-[var(--ink-soft)]">No {priority} goals.</div>
                 ) : (
                   grouped[priority].map((g) => (
-                    <Card key={g.id}>
+                    <Card key={g.id} className="!p-4">
                       <p className="text-sm font-medium">{g.title}</p>
                       {g.description && (
                         <p className="mt-1 text-xs text-[var(--ink-soft)] line-clamp-2">
@@ -231,45 +231,34 @@ export default function GoalsPage() {
                         {g.is_blocked && <Badge variant="warning">blocked</Badge>}
                       </div>
 
-                      {/* Actions */}
-                      <div className="mt-3 flex flex-wrap gap-1.5">
-                        {priority !== "active" && (
-                          <button
-                            onClick={() => changePriority(g.id, "active")}
-                            className="rounded-lg border border-[var(--outline)] px-2 py-1 text-xs hover:bg-[var(--surface-strong)]"
-                          >
-                            Activate
-                          </button>
-                        )}
-                        {priority !== "queued" && priority !== "active" && (
-                          <button
-                            onClick={() => changePriority(g.id, "queued")}
-                            className="rounded-lg border border-[var(--outline)] px-2 py-1 text-xs hover:bg-[var(--surface-strong)]"
-                          >
-                            Queue
-                          </button>
-                        )}
-                        {priority !== "backburner" && (
-                          <button
-                            onClick={() => changePriority(g.id, "backburner")}
-                            className="rounded-lg border border-[var(--outline)] px-2 py-1 text-xs hover:bg-[var(--surface-strong)]"
-                          >
-                            Backburner
-                          </button>
-                        )}
-                        <button
-                          onClick={() => changePriority(g.id, "completed", "Marked complete via UI")}
-                          className="rounded-lg border border-green-200 px-2 py-1 text-xs text-green-700 hover:bg-green-50"
+                      <div className="mt-4 flex items-center gap-2 border-t border-[var(--outline)] pt-3">
+                        <select
+                          aria-label={`Priority for ${g.title}`}
+                          value={priority}
+                          onChange={(event) => changePriority(g.id, event.target.value)}
+                          className="min-w-0 flex-1 rounded-md border border-[var(--outline)] bg-white px-2 py-1.5 text-xs capitalize"
                         >
-                          Complete
+                          {PRIORITIES.map((value) => <option key={value} value={value}>{value}</option>)}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => changePriority(g.id, "completed", "Marked complete via UI")}
+                          title="Mark complete"
+                          aria-label={`Complete ${g.title}`}
+                          className="flex h-8 w-8 items-center justify-center rounded-md border border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                        >
+                          <Check size={15} />
                         </button>
                         <button
+                          type="button"
                           onClick={() =>
                             setProgressGoalId(progressGoalId === g.id ? null : g.id)
                           }
-                          className="rounded-lg border border-[var(--outline)] px-2 py-1 text-xs hover:bg-[var(--surface-strong)]"
+                          title="Add progress"
+                          aria-label={`Add progress to ${g.title}`}
+                          className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--outline)] hover:bg-[var(--surface-strong)]"
                         >
-                          + Progress
+                          <MessageSquarePlus size={15} />
                         </button>
                       </div>
 
@@ -279,7 +268,7 @@ export default function GoalsPage() {
                           <input
                             type="text"
                             className="flex-1 rounded-lg border border-[var(--outline)] bg-white px-3 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
-                            placeholder="Progress note..."
+                            placeholder="Progress note"
                             value={progressNote}
                             onChange={(e) => setProgressNote(e.target.value)}
                             onKeyDown={(e) => {

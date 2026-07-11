@@ -741,6 +741,8 @@ class TestEvents:
 
         assert events == [
             AgentEvent.LOOP_START,
+            AgentEvent.LLM_REQUEST,
+            AgentEvent.LLM_RESPONSE,
             AgentEvent.TEXT_DELTA,
             AgentEvent.LOOP_END,
         ]
@@ -768,9 +770,13 @@ class TestEvents:
 
         assert events == [
             AgentEvent.LOOP_START,
+            AgentEvent.LLM_REQUEST,
+            AgentEvent.LLM_RESPONSE,
             AgentEvent.TEXT_DELTA,   # "Searching."
             AgentEvent.TOOL_START,
             AgentEvent.TOOL_RESULT,
+            AgentEvent.LLM_REQUEST,
+            AgentEvent.LLM_RESPONSE,
             AgentEvent.TEXT_DELTA,   # "Here you go."
             AgentEvent.LOOP_END,
         ]

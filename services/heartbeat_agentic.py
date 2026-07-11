@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, TYPE_CHECKING
 
 from core.tools.config import ContextOverrides
 from services.agent import run_agent
@@ -18,6 +18,7 @@ from services.heartbeat_prompt import render_heartbeat_decision_prompt_db
 
 if TYPE_CHECKING:
     import asyncpg
+    from core.agent_loop import AgentEventData
     from core.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,7 @@ async def run_agentic_heartbeat(
     registry: "ToolRegistry",
     heartbeat_id: str,
     context: dict[str, Any],
+    on_event: Callable[["AgentEventData"], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """
     Run a single heartbeat cycle using the unified agent runner.
@@ -221,6 +223,7 @@ async def run_agentic_heartbeat(
             allow_shell=True,
             allow_file_write=True,
         ) if has_tasks else None,
+        on_event=on_event,
     )
 
     return {
@@ -333,6 +336,19 @@ async def finalize_heartbeat(
         memory_id = payload.get("memory_id")
     except Exception:
         logger.debug("Failed to finalize heartbeat", exc_info=True)
+
+    await conn.execute(
+        """
+        UPDATE heartbeat_state
+        SET active_heartbeat_id = NULL,
+            active_heartbeat_number = NULL,
+            active_actions = '[]'::jsonb,
+            active_reasoning = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1 AND active_heartbeat_id::text = $1
+        """,
+        heartbeat_id,
+    )
 
     return {
         "completed": True,

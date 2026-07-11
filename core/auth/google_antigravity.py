@@ -38,10 +38,13 @@ ANTIGRAVITY_CONFIG_KEY = "oauth.google_antigravity"
 _ANTIGRAVITY_LOCK_KEY = advisory_lock_key(ANTIGRAVITY_CONFIG_KEY)
 
 
-def _get_client_credentials() -> tuple[str, str]:
-    """Resolve client ID and secret from env vars only."""
-    client_id = os.getenv("ANTIGRAVITY_OAUTH_CLIENT_ID")
-    client_secret = os.getenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
+def _get_client_credentials(
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> tuple[str, str]:
+    """Resolve explicitly supplied client credentials, then environment defaults."""
+    client_id = client_id or os.getenv("ANTIGRAVITY_OAUTH_CLIENT_ID")
+    client_secret = client_secret or os.getenv("ANTIGRAVITY_OAUTH_CLIENT_SECRET")
     if not client_id or not client_secret:
         raise RuntimeError(
             "Google Antigravity OAuth requires ANTIGRAVITY_OAUTH_CLIENT_ID and "
@@ -57,10 +60,18 @@ class AntigravityCredentials:
     expires_ms: int
     project_id: str
     email: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
 
 
-def build_authorize_url(*, challenge: str, state: str) -> str:
-    client_id, _ = _get_client_credentials()
+def build_authorize_url(
+    *,
+    challenge: str,
+    state: str,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> str:
+    client_id, _ = _get_client_credentials(client_id, client_secret)
     params = {
         "client_id": client_id,
         "response_type": "code",
@@ -75,8 +86,14 @@ def build_authorize_url(*, challenge: str, state: str) -> str:
     return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
 
 
-async def exchange_code(*, code: str, verifier: str) -> dict[str, Any]:
-    client_id, client_secret = _get_client_credentials()
+async def exchange_code(
+    *,
+    code: str,
+    verifier: str,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, Any]:
+    client_id, client_secret = _get_client_credentials(client_id, client_secret)
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             GOOGLE_TOKEN_URL,
@@ -91,12 +108,19 @@ async def exchange_code(*, code: str, verifier: str) -> dict[str, Any]:
             },
         )
     if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Google Antigravity token exchange failed: HTTP {resp.status_code}: {resp.text}")
+        raise RuntimeError(
+            f"Google Antigravity token exchange failed: HTTP {resp.status_code}: {resp.text}"
+        )
     return resp.json()
 
 
-async def refresh_access_token(refresh_token: str) -> tuple[str, int]:
-    client_id, client_secret = _get_client_credentials()
+async def refresh_access_token(
+    refresh_token: str,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> tuple[str, int]:
+    client_id, client_secret = _get_client_credentials(client_id, client_secret)
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             GOOGLE_TOKEN_URL,
@@ -109,7 +133,9 @@ async def refresh_access_token(refresh_token: str) -> tuple[str, int]:
             },
         )
     if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Google Antigravity token refresh failed: HTTP {resp.status_code}: {resp.text}")
+        raise RuntimeError(
+            f"Google Antigravity token refresh failed: HTTP {resp.status_code}: {resp.text}"
+        )
     data = resp.json()
     access = data.get("access_token")
     expires_in = data.get("expires_in", 3600)
@@ -139,19 +165,23 @@ async def discover_project(access_token: str) -> str:
         "Content-Type": "application/json",
         "User-Agent": "google-api-nodejs-client/9.15.1",
         "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-        "Client-Metadata": json.dumps({
-            "ideType": "IDE_UNSPECIFIED",
-            "platform": "PLATFORM_UNSPECIFIED",
-            "pluginType": "GEMINI",
-        }),
+        "Client-Metadata": json.dumps(
+            {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            }
+        ),
     }
-    body = json.dumps({
-        "metadata": {
-            "ideType": "IDE_UNSPECIFIED",
-            "platform": "PLATFORM_UNSPECIFIED",
-            "pluginType": "GEMINI",
-        },
-    })
+    body = json.dumps(
+        {
+            "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            },
+        }
+    )
 
     for endpoint in CODE_ASSIST_ENDPOINTS:
         try:
@@ -174,8 +204,22 @@ async def discover_project(access_token: str) -> str:
     return ANTIGRAVITY_DEFAULT_PROJECT_ID
 
 
-async def complete_login(code: str, verifier: str) -> AntigravityCredentials:
-    token_data = await exchange_code(code=code, verifier=verifier)
+async def complete_login(
+    code: str,
+    verifier: str,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> AntigravityCredentials:
+    resolved_client_id, resolved_client_secret = _get_client_credentials(
+        client_id, client_secret
+    )
+    token_data = await exchange_code(
+        code=code,
+        verifier=verifier,
+        client_id=resolved_client_id,
+        client_secret=resolved_client_secret,
+    )
     access = token_data["access_token"]
     refresh = token_data.get("refresh_token", "")
     expires_in = token_data.get("expires_in", 3600)
@@ -190,12 +234,15 @@ async def complete_login(code: str, verifier: str) -> AntigravityCredentials:
         expires_ms=expires_ms,
         project_id=project_id,
         email=email,
+        client_id=resolved_client_id,
+        client_secret=resolved_client_secret,
     )
 
 
 # ---------------------------------------------------------------------------
 # Persistence (filesystem – survives DB resets)
 # ---------------------------------------------------------------------------
+
 
 def credentials_to_dict(creds: AntigravityCredentials) -> dict[str, Any]:
     d: dict[str, Any] = {
@@ -206,6 +253,10 @@ def credentials_to_dict(creds: AntigravityCredentials) -> dict[str, Any]:
     }
     if creds.email:
         d["email"] = creds.email
+    if creds.client_id:
+        d["client_id"] = creds.client_id
+    if creds.client_secret:
+        d["client_secret"] = creds.client_secret
     return d
 
 
@@ -233,42 +284,59 @@ def credentials_from_value(value: Any) -> AntigravityCredentials | None:
         expires_ms=int(expires_ms),
         project_id=project_id,
         email=value.get("email"),
+        client_id=value.get("client_id"),
+        client_secret=value.get("client_secret"),
     )
 
 
 def load_credentials() -> AntigravityCredentials | None:
     from core.auth.store import load_auth
+
     return credentials_from_value(load_auth(ANTIGRAVITY_CONFIG_KEY))
 
 
 def save_credentials(creds: AntigravityCredentials) -> None:
     from core.auth.store import save_auth
+
     save_auth(ANTIGRAVITY_CONFIG_KEY, credentials_to_dict(creds))
 
 
 def delete_credentials() -> None:
     from core.auth.store import delete_auth
+
     delete_auth(ANTIGRAVITY_CONFIG_KEY)
 
 
-async def ensure_fresh_credentials(*, skew_seconds: int = 300) -> AntigravityCredentials:
+async def ensure_fresh_credentials(
+    *, skew_seconds: int = 300
+) -> AntigravityCredentials:
     from core.auth.store import auth_lock
 
     with auth_lock(ANTIGRAVITY_CONFIG_KEY):
         creds = load_credentials()
         if not creds:
-            raise RuntimeError("Google Antigravity is not configured. Run: `hexis auth google-antigravity login`")
+            raise RuntimeError(
+                "Google Antigravity is not configured. Run: `hexis auth google-antigravity login`"
+            )
         if not needs_refresh(creds.expires_ms, skew_seconds):
             return creds
         if not creds.refresh:
-            raise RuntimeError("Google Antigravity credentials expired and no refresh token. Re-login required.")
-        access, expires_ms = await refresh_access_token(creds.refresh)
+            raise RuntimeError(
+                "Google Antigravity credentials expired and no refresh token. Re-login required."
+            )
+        access, expires_ms = await refresh_access_token(
+            creds.refresh,
+            client_id=creds.client_id,
+            client_secret=creds.client_secret,
+        )
         refreshed = AntigravityCredentials(
             access=access,
             refresh=creds.refresh,
             expires_ms=expires_ms,
             project_id=creds.project_id,
             email=creds.email,
+            client_id=creds.client_id,
+            client_secret=creds.client_secret,
         )
         save_credentials(refreshed)
         return refreshed

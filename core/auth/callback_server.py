@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from http.server import BaseHTTPRequestHandler
 from socketserver import TCPServer
 from typing import Any
@@ -16,6 +17,7 @@ def run_callback_server(
     timeout_seconds: int = 60,
     expected_state: str | None = None,
     extract_params: list[str] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, str] | None:
     """Start a local HTTP server, wait for a callback, return extracted params.
 
@@ -67,7 +69,7 @@ def run_callback_server(
                 self.end_headers()
                 self.wfile.write(
                     b"<!doctype html><html><body>"
-                    b"<p>Authentication successful. Return to your terminal.</p>"
+                    b"<p>Authentication successful. Return to Hexis.</p>"
                     b"</body></html>"
                 )
                 try:
@@ -93,10 +95,19 @@ def run_callback_server(
     thread = threading.Thread(target=_serve, daemon=True)
     thread.start()
 
+    result = None
+    deadline = time.monotonic() + max(5, timeout_seconds)
     try:
-        result = result_queue.get(timeout=max(5, timeout_seconds))
-    except Exception:
-        result = None
+        while time.monotonic() < deadline:
+            if cancel_event and cancel_event.is_set():
+                break
+            try:
+                result = result_queue.get(
+                    timeout=min(0.2, max(0.01, deadline - time.monotonic()))
+                )
+                break
+            except queue.Empty:
+                continue
     finally:
         try:
             server.shutdown()

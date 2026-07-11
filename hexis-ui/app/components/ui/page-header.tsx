@@ -6,11 +6,11 @@ interface PageHeaderProps {
 
 export function PageHeader({ title, subtitle, breadcrumb = "Hexis" }: PageHeaderProps) {
   return (
-    <header className="flex flex-col gap-2">
-      <p className="text-xs uppercase tracking-[0.3em] text-[var(--teal)]">
+    <header className="flex flex-col gap-1">
+      <p className="text-xs font-semibold uppercase text-[var(--teal)]">
         {breadcrumb}
       </p>
-      <h1 className="font-display text-3xl leading-tight text-[var(--foreground)] md:text-4xl">
+      <h1 className="font-display text-2xl leading-tight text-[var(--foreground)] md:text-3xl">
         {title}
       </h1>
       {subtitle && (

@@ -1,9 +1,22 @@
 "use client";
 
+import {
+  Activity,
+  BrainCircuit,
+  Database,
+  Eye,
+  EyeOff,
+  Send,
+  Settings2,
+  Trash2,
+  Wrench,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import { Card } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
-import { PageHeader } from "../components/ui/page-header";
 import { Spinner } from "../components/ui/spinner";
 import { normalizeMessagePresentation } from "../../lib/message-presentation";
 import type { MessagePresentation } from "../../lib/message-presentation";
@@ -18,11 +31,19 @@ type ChatMessage = {
 
 type LogEvent = {
   id: string;
-  kind: "log" | "stream" | "error";
+  category: "phase" | "subconscious" | "model" | "tool" | "memory" | "error";
   title: string;
   detail: string;
-  streamId?: string;
+  raw?: unknown;
   ts: number;
+};
+
+type AgentStatus = {
+  configured?: boolean;
+  agent_name?: string;
+  portrait_url?: string | null;
+  mood?: string;
+  valence?: number | null;
 };
 
 type SsePayload = Record<string, unknown>;
@@ -33,6 +54,8 @@ const promptAddendaOptions = [
 ];
 
 const SESSION_KEY = "hexis-chat-messages";
+const MAX_ACTIVITY_EVENTS = 60;
+const ACTIVITY_TTL_MS = 30 * 60 * 1000;
 
 function loadSession(): ChatMessage[] {
   if (typeof window === "undefined") return [];
@@ -59,6 +82,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [ready, setReady] = useState<boolean | null>(null);
+  const [agentStatus, setAgentStatus] = useState<AgentStatus>({});
   const [promptAddenda, setPromptAddenda] = useState<string[]>([]);
   const [currentPhase, setCurrentPhase] = useState<string | null>(null);
   const [showSearchConfig, setShowSearchConfig] = useState(false);
@@ -68,6 +92,10 @@ export default function ChatPage() {
   const [searchConfigNotice, setSearchConfigNotice] = useState<string | null>(null);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [historyDraft, setHistoryDraft] = useState("");
+  const [showInspector, setShowInspector] = useState(false);
+  const [activityFilters, setActivityFilters] = useState<Set<LogEvent["category"]>>(
+    new Set(["subconscious", "model", "tool", "memory", "error"]),
+  );
   const scrollRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -92,14 +120,26 @@ export default function ChatPage() {
   }, [messages]);
 
   useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 1024px)");
+    const sync = () => setShowInspector(desktop.matches);
+    const frame = requestAnimationFrame(sync);
+    desktop.addEventListener("change", sync);
+    return () => {
+      cancelAnimationFrame(frame);
+      desktop.removeEventListener("change", sync);
+    };
+  }, []);
+
+  useEffect(() => {
     const load = async () => {
-      const res = await fetch("/api/init/status", { cache: "no-store" });
+      const res = await fetch("/api/status", { cache: "no-store" });
       if (!res.ok) {
         setReady(false);
         return;
       }
       const data = await res.json();
-      setReady(data?.status?.stage === "complete");
+      setAgentStatus(data);
+      setReady(data?.configured === true);
     };
     load().catch(() => setReady(false));
   }, []);
@@ -115,6 +155,14 @@ export default function ChatPage() {
   }, [events]);
 
   useEffect(() => {
+    const timer = setInterval(() => {
+      const cutoff = Date.now() - ACTIVITY_TTL_MS;
+      setEvents((current) => current.filter((event) => event.ts >= cutoff));
+    }, 60000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     const latestAssistant = [...messages]
       .reverse()
       .find((msg) => msg.role === "assistant" && msg.content);
@@ -124,29 +172,7 @@ export default function ChatPage() {
   }, [messages]);
 
   const appendLog = (event: LogEvent) => {
-    setEvents((prev) => [...prev, event]);
-  };
-
-  const appendStreamToken = (streamId: string, text: string) => {
-    setEvents((prev) => {
-      const idx = prev.findIndex((evt) => evt.streamId === streamId && evt.kind === "stream");
-      if (idx === -1) {
-        return [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            kind: "stream",
-            title: streamLabel(streamId),
-            detail: text,
-            streamId,
-            ts: Date.now(),
-          },
-        ];
-      }
-      const next = [...prev];
-      next[idx] = { ...next[idx], detail: next[idx].detail + text };
-      return next;
-    });
+    setEvents((prev) => [...prev.slice(-(MAX_ACTIVITY_EVENTS - 1)), event]);
   };
 
   const updateAssistantMessage = (assistantId: string, text: string) => {
@@ -192,7 +218,7 @@ export default function ChatPage() {
       }
       appendLog({
         id: crypto.randomUUID(),
-        kind: "log",
+        category: "tool",
         title: "Search Tool",
         detail: "Configured web_search. Retry your question to run live search.",
         ts: Date.now(),
@@ -243,7 +269,7 @@ export default function ChatPage() {
       if (!res.ok || !res.body) {
         appendLog({
           id: crypto.randomUUID(),
-          kind: "error",
+          category: "error",
           title: "Chat error",
           detail: `Failed to reach chat endpoint (${res.status}).`,
           ts: Date.now(),
@@ -290,7 +316,6 @@ export default function ChatPage() {
             const phase = asString(payload.phase);
             const text = asString(payload.text);
             setCurrentPhase(phase);
-            appendStreamToken(phase, text);
             if (phase === "conscious_final" && text) {
               updateAssistantMessage(assistantMessage.id, text);
               if (isSearchToolMisconfigured(text)) {
@@ -304,20 +329,47 @@ export default function ChatPage() {
             setCurrentPhase(phase);
             appendLog({
               id: crypto.randomUUID(),
-              kind: "log",
+              category: "phase",
               title: streamLabel(phase),
               detail: "started",
               ts: Date.now(),
             });
           }
 
-          if (eventType === "log") {
-            const detail = asString(payload.detail);
+          if (eventType === "phase_end" && asString(payload.phase) === "subconscious") {
+            const output = asRecord(payload.output);
+            appendLog({
+              id: crypto.randomUUID(),
+              category: "subconscious",
+              title: "Subconscious appraisal",
+              detail: summarizeSubconscious(output),
+              raw: output,
+              ts: Date.now(),
+            });
+          }
+
+          if (eventType === "trace") {
+            const request = asString(payload.kind) === "llm_request";
             appendLog({
               id: asString(payload.id) || crypto.randomUUID(),
-              kind: "log",
-              title: asString(payload.title) || asString(payload.kind) || "log",
+              category: "model",
+              title: request ? "Model request" : "Model response",
+              detail: `${asString(payload.provider, "provider")}/${asString(payload.model, "model")} · iteration ${String(payload.iteration ?? "-")}`,
+              raw: payload,
+              ts: Date.now(),
+            });
+          }
+
+          if (eventType === "log") {
+            const detail = asString(payload.detail);
+            const logKind = asString(payload.kind).toLowerCase();
+            const title = asString(payload.title) || logKind || "Activity";
+            appendLog({
+              id: asString(payload.id) || crypto.randomUUID(),
+              category: logKind.includes("memory") || title.toLowerCase().includes("memory") ? "memory" : "tool",
+              title,
               detail,
+              raw: payload,
               ts: Date.now(),
             });
             if (isSearchToolMisconfigured(detail)) {
@@ -329,7 +381,7 @@ export default function ChatPage() {
             const detail = asString(payload.message, "Unknown error");
             appendLog({
               id: crypto.randomUUID(),
-              kind: "error",
+              category: "error",
               title: "Error",
               detail,
               ts: Date.now(),
@@ -346,7 +398,7 @@ export default function ChatPage() {
     } catch (err: unknown) {
       appendLog({
         id: crypto.randomUUID(),
-        kind: "error",
+        category: "error",
         title: "Chat error",
         detail: err instanceof Error ? err.message : "Unknown error",
         ts: Date.now(),
@@ -409,6 +461,16 @@ export default function ChatPage() {
     }
   };
 
+  const filteredEvents = events.filter((event) => activityFilters.has(event.category));
+  const toggleActivityFilter = (category: LogEvent["category"]) => {
+    setActivityFilters((current) => {
+      const next = new Set(current);
+      if (next.has(category)) next.delete(category);
+      else next.add(category);
+      return next;
+    });
+  };
+
   if (ready === false) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -437,206 +499,183 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="app-shell min-h-screen">
-      <div className="relative z-10 mx-auto flex min-h-screen max-w-6xl flex-col gap-6 px-6 py-10 lg:flex-row">
-        <section className="flex flex-1 flex-col gap-4">
-          <PageHeader
-            title="Conversation"
-            subtitle={sending ? "Streaming..." : "Idle"}
-          />
-
-          {/* Thinking indicator */}
-          {sending && currentPhase && (
-            <div className="flex items-center gap-3 rounded-2xl border border-[var(--outline)] bg-white px-4 py-3 fade-up">
-              <Spinner />
-              <span className="text-sm text-[var(--ink-soft)]">
-                {phaseDescription(currentPhase)}
-              </span>
-            </div>
-          )}
-
-          {showSearchConfig && (
-            <Card className="border-[var(--accent)]/40 bg-white">
-              <h3 className="font-display text-lg">Enable Web Search</h3>
-              <p className="mt-1 text-sm text-[var(--ink-soft)]">
-                This response indicates web search is not configured. Add a Tavily API key now, or use an env reference like <code>env:TAVILY_API_KEY</code>.
-              </p>
-              <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                <input
-                  type="text"
-                  value={searchConfigValue}
-                  onChange={(e) => setSearchConfigValue(e.target.value)}
-                  placeholder="tvly-... or env:TAVILY_API_KEY"
-                  className="flex-1 rounded-xl border border-[var(--outline)] px-3 py-2 text-sm focus:border-[var(--accent)] focus:outline-none"
-                />
-                <button
-                  onClick={handleConfigureSearchTool}
-                  disabled={searchConfigSaving}
-                  className="rounded-xl bg-[var(--foreground)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                >
-                  {searchConfigSaving ? "Saving..." : "Save & Enable"}
-                </button>
-                <a
-                  href="/settings"
-                  className="rounded-xl border border-[var(--outline)] px-4 py-2 text-center text-sm"
-                >
-                  Open Settings
-                </a>
-              </div>
-              {searchConfigError ? (
-                <p className="mt-2 text-xs text-red-600">{searchConfigError}</p>
-              ) : null}
-            </Card>
-          )}
-
-          {searchConfigNotice && (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-              {searchConfigNotice}
-            </div>
-          )}
-
-          <Card className="flex flex-1 flex-col overflow-hidden !p-0">
-            <div className="flex-1 space-y-4 overflow-y-auto p-6" ref={scrollRef}>
-              {messages.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-[var(--outline)] p-6 text-sm text-[var(--ink-soft)]">
-                  Start the first exchange with Hexis.
-                </div>
-              ) : null}
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`max-w-[85%] rounded-2xl px-4 py-3 text-sm shadow-sm ${
-                    msg.role === "user"
-                      ? "ml-auto bg-[var(--accent-strong)] text-white"
-                      : "bg-white text-[var(--foreground)]"
-                  }`}
-                >
-                  {msg.role === "assistant" ? (
-                    <div className="leading-relaxed">
-                      {msg.presentation ? (
-                        <MessagePresentationView presentation={msg.presentation} />
-                      ) : msg.content ? (
-                        <MessagePresentationView
-                          presentation={{
-                            tone: "neutral",
-                            blocks: [{ type: "text", text: msg.content }],
-                          }}
-                        />
-                      ) : (
-                        <span className="animate-pulse-slow text-[var(--ink-soft)]">
-                          ...
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <p className="whitespace-pre-wrap">{msg.content}</p>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div className="border-t border-[var(--outline)] p-4">
-              <div className="flex gap-3">
-                <textarea
-                  ref={textareaRef}
-                  aria-label="Message Hexis"
-                  className="min-h-[48px] max-h-[120px] flex-1 resize-none rounded-2xl border border-[var(--outline)] bg-white px-4 py-3 text-sm focus:border-[var(--accent)] focus:outline-none"
-                  placeholder="Talk with Hexis... (Enter to send, Shift+Enter for newline)"
-                  value={input}
-                  onChange={(e) => {
-                    if (historyIndex !== null) {
-                      setHistoryIndex(null);
-                    }
-                    setInput(e.target.value);
-                  }}
-                  onKeyDown={handleKeyDown}
-                  rows={1}
-                />
-                <button
-                  className="self-end rounded-full bg-[var(--foreground)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
-                  onClick={handleSend}
-                  disabled={sending || !input.trim()}
-                >
-                  Send
-                </button>
-              </div>
-            </div>
-          </Card>
-        </section>
-
-        <aside className="flex w-full flex-col gap-4 lg:w-80">
-          <Card>
-            <h2 className="font-display text-lg">Prompt Addenda</h2>
-            <p className="mt-1 text-xs text-[var(--ink-soft)]">
-              Add optional modules to the conscious system prompt.
-            </p>
-            <div className="mt-3 space-y-2">
-              {promptAddendaOptions.map((option) => (
-                <label key={option.id} className="flex items-center gap-3 text-sm">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 accent-[var(--accent-strong)]"
-                    checked={promptAddenda.includes(option.id)}
-                    onChange={() =>
-                      setPromptAddenda((prev) =>
-                        prev.includes(option.id)
-                          ? prev.filter((item) => item !== option.id)
-                          : [...prev, option.id]
-                      )
-                    }
-                  />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-          </Card>
-
-          <Card className="flex flex-1 flex-col overflow-hidden !p-0">
-            <div className="border-b border-[var(--outline)] p-4">
-              <h2 className="font-display text-lg">LLM Activity</h2>
-              <p className="text-xs text-[var(--ink-soft)]">
-                Streaming tokens, tool calls, and memory IO.
-              </p>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4" ref={logRef}>
-              {events.length === 0 ? (
-                <p className="text-xs text-[var(--ink-soft)]">No activity yet.</p>
+    <div className="app-shell h-[calc(100vh-3.5rem)] overflow-hidden lg:h-screen">
+      <div className="mx-auto flex h-full max-w-[1600px]">
+        <section className="flex min-w-0 flex-1 flex-col bg-white">
+          <header className="flex h-16 items-center justify-between gap-4 border-b border-[var(--outline)] px-4 sm:px-6">
+            <div className="flex min-w-0 items-center gap-3">
+              {agentStatus.portrait_url ? (
+                <Image src={agentStatus.portrait_url} alt="" width={40} height={40} unoptimized className="h-10 w-10 rounded-md object-cover" />
               ) : (
-                <div className="space-y-2">
-                  {events.map((event) => (
-                    <div
-                      key={event.id}
-                      className={`rounded-xl border px-3 py-2 ${
-                        event.kind === "error"
-                          ? "border-red-200 bg-red-50 text-red-700"
-                          : event.kind === "stream"
-                            ? "border-[var(--outline)] bg-[var(--surface)]"
-                            : "border-[var(--outline)] bg-white"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-medium uppercase tracking-wider text-[var(--ink-soft)]">
-                          {event.title}
-                        </span>
-                        {event.kind === "stream" && (
-                          <Badge variant="teal">stream</Badge>
-                        )}
-                      </div>
-                      <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed">
-                        {event.kind === "stream"
-                          ? (event.detail || "").slice(0, 300) +
-                            ((event.detail || "").length > 300 ? "..." : "")
-                          : event.detail}
-                      </p>
-                    </div>
-                  ))}
+                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-[var(--foreground)] font-display text-white">
+                  {(agentStatus.agent_name || "H").slice(0, 1)}
                 </div>
               )}
+              <div className="min-w-0">
+                <h1 className="truncate text-sm font-semibold">{agentStatus.agent_name || "Hexis"}</h1>
+                <p className="truncate text-xs text-[var(--ink-soft)]">
+                  {sending ? phaseDescription(currentPhase || "") : agentStatus.mood || "Ready"}
+                  {agentStatus.valence != null ? ` · valence ${agentStatus.valence >= 0 ? "+" : ""}${agentStatus.valence.toFixed(2)}` : ""}
+                </p>
+              </div>
             </div>
-          </Card>
-        </aside>
+            <div className="flex items-center gap-1">
+              <details className="relative">
+                <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md px-3 text-xs font-medium text-[var(--ink-soft)] hover:bg-[var(--surface-strong)]">
+                  <Settings2 size={16} /> Options
+                </summary>
+                <div className="absolute right-0 top-11 z-30 w-64 rounded-lg border border-[var(--outline)] bg-white p-4 shadow-lg">
+                  <p className="text-xs font-semibold uppercase text-[var(--ink-soft)]">Prompt modules</p>
+                  <div className="mt-3 space-y-3">
+                    {promptAddendaOptions.map((option) => (
+                      <label key={option.id} className="flex items-center gap-3 text-sm">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-[var(--teal)]"
+                          checked={promptAddenda.includes(option.id)}
+                          onChange={() => setPromptAddenda((current) => current.includes(option.id) ? current.filter((item) => item !== option.id) : [...current, option.id])}
+                        />
+                        {option.label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </details>
+              <button
+                type="button"
+                aria-label={showInspector ? "Hide activity" : "Show activity"}
+                title={showInspector ? "Hide activity" : "Show activity"}
+                onClick={() => setShowInspector((value) => !value)}
+                className={`flex h-9 w-9 items-center justify-center rounded-md ${showInspector ? "bg-[var(--surface-strong)] text-[var(--foreground)]" : "text-[var(--ink-soft)] hover:bg-[var(--surface-strong)]"}`}
+              >
+                {showInspector ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </div>
+          </header>
+
+          {showSearchConfig ? (
+            <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 sm:px-6">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <span className="text-sm font-medium text-amber-900">Web search needs a Tavily key</span>
+                <input value={searchConfigValue} onChange={(event) => setSearchConfigValue(event.target.value)} placeholder="tvly-... or env:TAVILY_API_KEY" className="min-w-0 flex-1 rounded-md border border-amber-200 bg-white px-3 py-2 text-sm" />
+                <button onClick={handleConfigureSearchTool} disabled={searchConfigSaving} className="rounded-md bg-[var(--foreground)] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{searchConfigSaving ? "Saving" : "Enable"}</button>
+                <button onClick={() => setShowSearchConfig(false)} className="px-2 py-2 text-xs text-amber-800">Dismiss</button>
+              </div>
+              {searchConfigError ? <p className="mt-1 text-xs text-red-700">{searchConfigError}</p> : null}
+            </div>
+          ) : null}
+          {searchConfigNotice ? <div className="border-b border-emerald-200 bg-emerald-50 px-6 py-2 text-xs text-emerald-700">{searchConfigNotice}</div> : null}
+
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 sm:px-8">
+            <div className="mx-auto max-w-3xl space-y-6">
+              {messages.length === 0 ? (
+                <div className="flex min-h-80 flex-col items-center justify-center text-center">
+                  {agentStatus.portrait_url ? <Image src={agentStatus.portrait_url} alt="" width={80} height={80} unoptimized className="h-20 w-20 rounded-lg object-cover" /> : <BrainCircuit size={38} className="text-[var(--teal)]" />}
+                  <h2 className="mt-4 font-display text-2xl">Conversation with {agentStatus.agent_name || "Hexis"}</h2>
+                  <p className="mt-2 text-sm text-[var(--ink-soft)]">What is on your mind?</p>
+                </div>
+              ) : null}
+              {messages.map((message) => (
+                <div key={message.id} className={`flex gap-3 ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  {message.role === "assistant" ? (
+                    agentStatus.portrait_url ? <Image src={agentStatus.portrait_url} alt="" width={32} height={32} unoptimized className="mt-1 h-8 w-8 flex-none rounded-md object-cover" /> : <div className="mt-1 flex h-8 w-8 flex-none items-center justify-center rounded-md bg-[var(--surface-strong)] text-xs font-semibold">H</div>
+                  ) : null}
+                  <div className={`max-w-[85%] text-sm leading-6 ${message.role === "user" ? "rounded-lg bg-[var(--foreground)] px-4 py-3 text-white" : "min-w-0 flex-1 py-1 text-[var(--foreground)]"}`}>
+                    {message.role === "assistant" ? (
+                      message.presentation ? <MessagePresentationView presentation={message.presentation} /> : message.content ? <MessagePresentationView presentation={{ tone: "neutral", blocks: [{ type: "text", text: message.content }] }} /> : <Spinner label="Thinking..." />
+                    ) : <p className="whitespace-pre-wrap">{message.content}</p>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border-t border-[var(--outline)] bg-white px-4 py-3 sm:px-6">
+            <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-lg border border-[var(--outline)] bg-white p-2 focus-within:border-[var(--teal)] focus-within:ring-2 focus-within:ring-[var(--teal)]/10">
+              <textarea
+                ref={textareaRef}
+                aria-label={`Message ${agentStatus.agent_name || "Hexis"}`}
+                className="max-h-36 min-h-10 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-sm outline-none"
+                placeholder={`Message ${agentStatus.agent_name || "Hexis"}`}
+                value={input}
+                onChange={(event) => { if (historyIndex !== null) setHistoryIndex(null); setInput(event.target.value); }}
+                onKeyDown={handleKeyDown}
+                rows={1}
+              />
+              <button type="button" aria-label="Send message" title="Send" onClick={handleSend} disabled={sending || !input.trim()} className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-[var(--foreground)] text-white hover:bg-[var(--teal)] disabled:opacity-35">
+                <Send size={17} />
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {showInspector ? (
+          <aside className="fixed inset-y-14 right-0 z-20 flex w-full flex-col border-l border-[var(--outline)] bg-[#f8faf8] sm:w-[390px] lg:static lg:inset-auto lg:w-[380px]">
+            <div className="flex h-16 items-center justify-between border-b border-[var(--outline)] px-4">
+              <div><h2 className="text-sm font-semibold">Activity</h2><p className="text-xs text-[var(--ink-soft)]">{filteredEvents.length} events</p></div>
+              <div className="flex items-center gap-1">
+                <button type="button" title="Clear activity" aria-label="Clear activity" onClick={() => setEvents([])} className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--surface-strong)]"><Trash2 size={16} /></button>
+                <button type="button" title="Close activity" aria-label="Close activity" onClick={() => setShowInspector(false)} className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--surface-strong)] lg:hidden"><X size={17} /></button>
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-1 border-b border-[var(--outline)] p-3">
+              <FilterButton icon={BrainCircuit} label="Subconscious" active={activityFilters.has("subconscious")} onClick={() => toggleActivityFilter("subconscious")} />
+              <FilterButton icon={Database} label="Memory" active={activityFilters.has("memory")} onClick={() => toggleActivityFilter("memory")} />
+              <FilterButton icon={Wrench} label="Tools" active={activityFilters.has("tool")} onClick={() => toggleActivityFilter("tool")} />
+              <FilterButton icon={Activity} label="Models" active={activityFilters.has("model")} onClick={() => toggleActivityFilter("model")} />
+            </div>
+            <div ref={logRef} className="flex-1 overflow-y-auto">
+              {filteredEvents.length === 0 ? <p className="p-5 text-sm text-[var(--ink-soft)]">No matching activity.</p> : filteredEvents.map((event) => (
+                <details key={event.id} className={`border-b border-[var(--outline)] px-4 py-3 ${event.category === "error" ? "bg-red-50" : "bg-white"}`}>
+                  <summary className="cursor-pointer list-none">
+                    <div className="flex items-center justify-between gap-3"><span className="text-xs font-semibold">{event.title}</span><Badge variant={event.category === "subconscious" ? "accent" : event.category === "error" ? "error" : "muted"}>{event.category}</Badge></div>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--ink-soft)]">{event.detail || "No summary"}</p>
+                  </summary>
+                  {event.raw !== undefined ? <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[#eef2ef] p-3 text-xs leading-5">{JSON.stringify(event.raw, null, 2)}</pre> : null}
+                </details>
+              ))}
+            </div>
+          </aside>
+        ) : null}
       </div>
     </div>
   );
+}
+
+function FilterButton({ icon: Icon, label, active, onClick }: { icon: LucideIcon; label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium ${active ? "bg-[var(--foreground)] text-white" : "bg-white text-[var(--ink-soft)] hover:bg-[var(--surface-strong)]"}`}
+    >
+      <Icon size={13} />
+      {label}
+    </button>
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function summarizeSubconscious(output: Record<string, unknown>): string {
+  const signals = asRecord(output.signals);
+  const emotion = asRecord(signals.emotional_state);
+  const parts: string[] = [];
+  const primary = asString(emotion.primary_emotion);
+  if (primary) {
+    const valence = typeof emotion.valence === "number" ? emotion.valence : null;
+    parts.push(`${primary}${valence !== null ? ` · valence ${valence >= 0 ? "+" : ""}${valence.toFixed(2)}` : ""}`);
+  }
+  const reaction = asString(signals.subconscious_response);
+  if (reaction) parts.push(reaction);
+  const memories = Array.isArray(signals.salient_memories) ? signals.salient_memories.length : 0;
+  if (memories) parts.push(`${memories} salient ${memories === 1 ? "memory" : "memories"}`);
+  return parts.join(" · ") || `${asString(output.provider, "provider")}/${asString(output.model, "model")}`;
 }
 
 function streamLabel(phase: string) {

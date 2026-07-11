@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { normalizeJsonValue } from "@/lib/db";
 
+type MemoryRow = Record<string, unknown>;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Failed to fetch memory";
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -9,9 +15,14 @@ export async function GET(
   try {
     const { id } = await params;
 
-    const rows: any[] = await prisma.$queryRawUnsafe(
+    const rows = await prisma.$queryRawUnsafe<MemoryRow[]>(
       `SELECT id, type, content, importance, trust_level, access_count,
-              decay_rate, status, source, metadata, created_at, last_accessed
+              decay_rate, status,
+              COALESCE(source_attribution->>'source', metadata->>'source') AS source,
+              metadata, created_at, last_accessed,
+              calculate_strength(importance, decay_rate, created_at, last_reinforced)::float AS strength,
+              CASE WHEN metadata->>'emotional_valence' ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                   THEN (metadata->>'emotional_valence')::float END AS emotional_valence
        FROM memories
        WHERE id = $1::uuid`,
       id
@@ -34,16 +45,18 @@ export async function GET(
       trust_level: m.trust_level != null ? Number(m.trust_level) : null,
       access_count: m.access_count != null ? Number(m.access_count) : null,
       decay_rate: m.decay_rate != null ? Number(m.decay_rate) : null,
+      strength: m.strength != null ? Number(m.strength) : null,
+      emotional_valence: m.emotional_valence != null ? Number(m.emotional_valence) : null,
       status: m.status,
       source: m.source,
       metadata: normalizeJsonValue(m.metadata),
       created_at: m.created_at,
       last_accessed: m.last_accessed,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Memory detail API error:", error);
     return NextResponse.json(
-      { error: error?.message || "Failed to fetch memory" },
+      { error: errorMessage(error) },
       { status: 500 }
     );
   }

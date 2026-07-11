@@ -1,7 +1,10 @@
 import base64
 import json
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+
+from core.auth.openai_codex import OpenAICodexCredentials, list_openai_codex_models
 
 from core.openai_codex_oauth import (
     OPENAI_AUTH_JWT_CLAIM_PATH,
@@ -80,3 +83,36 @@ def test_credentials_from_legacy_shape_accepts_accountId():
     assert creds is not None
     assert creds.account_id == "acct_123"
 
+
+@pytest.mark.asyncio
+async def test_list_openai_codex_models_uses_account_catalog_and_filters_rows():
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {
+        "models": [
+            {"slug": "gpt-live", "visibility": "list", "supported_in_api": True},
+            {"slug": "gpt-hidden", "visibility": "hide", "supported_in_api": True},
+            {"slug": "gpt-disabled", "visibility": "list", "supported_in_api": False},
+            {"id": "gpt-id", "visibility": "list", "show_in_picker": True},
+        ]
+    }
+    client = AsyncMock()
+    client.get.return_value = response
+    context = AsyncMock()
+    context.__aenter__.return_value = client
+    context.__aexit__.return_value = None
+    creds = OpenAICodexCredentials(
+        access="access-secret",
+        refresh="refresh-secret",
+        expires_ms=4_102_444_800_000,
+        account_id="account-visible",
+    )
+
+    with patch("core.auth.openai_codex.httpx.AsyncClient", return_value=context):
+        models = await list_openai_codex_models(creds)
+
+    assert models == ["gpt-live", "gpt-id"]
+    request = client.get.await_args
+    assert request.args[0].endswith("/codex/models?client_version=1.0.0")
+    assert request.kwargs["headers"]["ChatGPT-Account-ID"] == "account-visible"
+    assert request.kwargs["headers"]["Authorization"] == "Bearer access-secret"

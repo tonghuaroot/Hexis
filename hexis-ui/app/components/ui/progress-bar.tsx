@@ -37,9 +37,9 @@ export function ProgressBar({
           )}
         </div>
       )}
-      <div className="h-2 w-full rounded-full bg-[var(--surface-strong)]">
+      <div className="h-1.5 w-full rounded-full bg-[var(--surface-strong)]">
         <div
-          className={`h-2 rounded-full transition-all ${colorClasses[color]}`}
+          className={`h-1.5 rounded-full transition-all ${colorClasses[color]}`}
           style={{ width: `${pct}%` }}
         />
       </div>

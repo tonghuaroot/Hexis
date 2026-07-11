@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { normalizeJsonValue, toJsonParam } from "@/lib/db";
+import { resolveInitLlmEndpoint } from "@/lib/init-llm";
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
 
@@ -20,11 +21,6 @@ type LlmConfig = {
 };
 
 const API_KEY_REQUIRED = new Set(["openai", "anthropic", "grok", "gemini"]);
-const ENDPOINT_DEFAULTS: Record<string, string> = {
-  openai: "https://api.openai.com/v1",
-  ollama: "http://localhost:11434/v1",
-};
-
 function normalizeText(value: unknown) {
   if (typeof value !== "string") {
     return "";
@@ -142,17 +138,11 @@ export async function POST(request: Request) {
     process.env[subconsciousEnv] = subconsciousKey;
   }
 
-  const resolveEndpoint = (provider: string, endpoint: string) => {
-    if (provider === "openai_compatible") {
-      return endpoint;
-    }
-    if (provider === "anthropic" || provider === "grok" || provider === "gemini") {
-      return "";
-    }
-    return ENDPOINT_DEFAULTS[provider] || endpoint;
-  };
-  const normalizedConsciousEndpoint = resolveEndpoint(consciousProvider, consciousEndpoint);
-  const normalizedSubconsciousEndpoint = resolveEndpoint(
+  const normalizedConsciousEndpoint = resolveInitLlmEndpoint(
+    consciousProvider,
+    consciousEndpoint
+  );
+  const normalizedSubconsciousEndpoint = resolveInitLlmEndpoint(
     subconsciousProvider,
     subconsciousEndpoint
   );

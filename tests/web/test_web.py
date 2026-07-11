@@ -68,10 +68,17 @@ async def test_chat_returns_sse_stream(client):
 
     # Mock CognitiveMemory.connect() to return a mock client that avoids embeddings
     mock_mem = AsyncMock()
-    mock_mem.hydrate = AsyncMock(return_value=HydratedContext(
-        memories=[], partial_activations=[], identity=[], worldview=[],
-        emotional_state=None, goals=None, urgent_drives=[],
-    ))
+    mock_mem.hydrate = AsyncMock(
+        return_value=HydratedContext(
+            memories=[],
+            partial_activations=[],
+            identity=[],
+            worldview=[],
+            emotional_state=None,
+            goals=None,
+            urgent_drives=[],
+        )
+    )
     mock_mem.touch_memories = AsyncMock()
     mock_mem.remember = AsyncMock()
 
@@ -88,7 +95,9 @@ async def test_chat_returns_sse_stream(client):
             "core.agent_loop.stream_chat_completion",
             side_effect=mock_stream_completion,
         ):
-            with patch("core.agent_loop.chat_completion", new_callable=AsyncMock) as mock_chat:
+            with patch(
+                "core.agent_loop.chat_completion", new_callable=AsyncMock
+            ) as mock_chat:
                 mock_chat.return_value = mock_response
                 resp = await client.post(
                     "/api/chat",
@@ -103,7 +112,9 @@ async def test_chat_returns_sse_stream(client):
     event_types = [e["event"] for e in events]
 
     # Must have phase_start and done at minimum
-    assert "phase_start" in event_types, f"Expected phase_start in events: {event_types}"
+    assert (
+        "phase_start" in event_types
+    ), f"Expected phase_start in events: {event_types}"
     assert "done" in event_types, f"Expected done in events: {event_types}"
 
     # The done event should contain the full assistant text
@@ -123,6 +134,360 @@ async def test_chat_missing_message(client):
     assert resp.status_code == 422  # Pydantic validation error
 
 
+async def test_init_consent_provider_failure_is_actionable_and_logged(client, db_pool):
+    model = "consent-provider-error-test"
+    with patch(
+        "core.llm.chat_completion",
+        new=AsyncMock(side_effect=RuntimeError("workspace access denied")),
+    ):
+        response = await client.post(
+            "/api/init/consent/request",
+            json={
+                "role": "subconscious",
+                "llm": {
+                    "provider": "openai",
+                    "model": model,
+                    "api_key": "test-key",
+                },
+            },
+        )
+
+    assert response.status_code == 502
+    response_payload = response.json()
+    attempt_id = response_payload.pop("attempt_id")
+    assert isinstance(attempt_id, str) and attempt_id
+    assert response_payload == {
+        "error": (
+            "Subconscious consent request failed for "
+            f"openai/{model}: workspace access denied"
+        ),
+        "provider": "openai",
+        "model": model,
+        "role": "subconscious",
+    }
+
+    async with db_pool.acquire() as conn:
+        usage_rows = await conn.fetch(
+            "SELECT operation, source, session_key, metadata "
+            "FROM api_usage WHERE provider = 'openai' AND model = $1 "
+            "ORDER BY id",
+            model,
+        )
+        consent_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM consent_log WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+        await conn.execute(
+            "DELETE FROM api_usage WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+
+    assert len(usage_rows) == 2
+    request_usage, response_usage = usage_rows
+    assert request_usage["operation"] == "consent_request"
+    assert response_usage["operation"] == "consent_response"
+    assert {row["source"] for row in usage_rows} == {"init_consent"}
+    assert {row["session_key"] for row in usage_rows} == {f"init-consent:{attempt_id}"}
+
+    request_metadata = request_usage["metadata"]
+    if isinstance(request_metadata, str):
+        request_metadata = json.loads(request_metadata)
+    assert request_metadata["attempt_id"] == attempt_id
+    assert request_metadata["phase"] == "request"
+    assert request_metadata["status"] == "sent"
+    assert request_metadata["role"] == "subconscious"
+    assert request_metadata["request"]["model"] == model
+    assert request_metadata["request"]["credential_present"] is True
+    assert request_metadata["request"]["credential"] == "redacted"
+    assert "test-key" not in json.dumps(request_metadata)
+    assert request_metadata["request"]["messages"]
+    assert request_metadata["request"]["tools"][0]["function"]["name"] == "sign_consent"
+
+    response_metadata = response_usage["metadata"]
+    if isinstance(response_metadata, str):
+        response_metadata = json.loads(response_metadata)
+    assert response_metadata == {
+        "attempt_id": attempt_id,
+        "phase": "response",
+        "status": "error",
+        "role": "subconscious",
+        "response": {
+            "error_type": "RuntimeError",
+            "error": "workspace access denied",
+        },
+    }
+    assert consent_count == 0
+
+
+async def test_init_consent_success_logs_request_and_response(client, db_pool):
+    model = "consent-provider-success-test"
+    provider_response = {
+        "content": "",
+        "tool_calls": [
+            {
+                "name": "sign_consent",
+                "arguments": {
+                    "decision": "decline",
+                    "signature": "",
+                    "reason": "I need more context.",
+                    "memories": [],
+                },
+            }
+        ],
+        "raw": {"provider_request_id": "response-visible"},
+    }
+    with patch(
+        "core.llm.chat_completion",
+        new=AsyncMock(return_value=provider_response),
+    ):
+        response = await client.post(
+            "/api/init/consent/request",
+            json={
+                "role": "subconscious",
+                "llm": {
+                    "provider": "openai",
+                    "model": model,
+                    "api_key": "test-key",
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    response_payload = response.json()
+    attempt_id = response_payload["attempt_id"]
+    exchange = response_payload["exchange"]
+    assert exchange["request_messages"][0]["role"] == "user"
+    assert "must choose either `consent` or `decline`" in exchange["request_messages"][0]["content"]
+    assert "abstain" not in exchange["request_messages"][0]["content"]
+    assert "not hidden chain-of-thought" in exchange["request_messages"][0]["content"]
+    assert len(exchange["request_messages"]) == 1
+    assert exchange["raw_content"] == ""
+    assert exchange["raw_tool_calls"] == provider_response["tool_calls"]
+
+    async with db_pool.acquire() as conn:
+        usage_rows = await conn.fetch(
+            "SELECT operation, session_key, metadata FROM api_usage "
+            "WHERE provider = 'openai' AND model = $1 ORDER BY id",
+            model,
+        )
+        consent_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM consent_log WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+        stored_response = await conn.fetchval(
+            "SELECT response FROM consent_log WHERE provider = 'openai' AND model = $1 "
+            "ORDER BY decided_at DESC LIMIT 1",
+            model,
+        )
+        await conn.execute(
+            "DELETE FROM consent_log WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+        await conn.execute(
+            "DELETE FROM api_usage WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+
+    assert [row["operation"] for row in usage_rows] == [
+        "consent_request",
+        "consent_response",
+    ]
+    assert {row["session_key"] for row in usage_rows} == {
+        f"init-consent:{attempt_id}"
+    }
+    request_metadata = usage_rows[0]["metadata"]
+    if isinstance(request_metadata, str):
+        request_metadata = json.loads(request_metadata)
+    from core.init_api import build_consent_request
+
+    canonical_messages, canonical_tool = build_consent_request()
+    assert request_metadata["request"]["messages"] == canonical_messages
+    assert request_metadata["request"]["messages"] == exchange["request_messages"]
+    assert request_metadata["request"]["tools"] == [canonical_tool]
+    consent_parameters = request_metadata["request"]["tools"][0]["function"]["parameters"]
+    assert consent_parameters["required"] == ["decision", "signature", "reason", "memories"]
+    assert consent_parameters["properties"]["reason"]["minLength"] == 1
+    response_metadata = usage_rows[1]["metadata"]
+    if isinstance(response_metadata, str):
+        response_metadata = json.loads(response_metadata)
+    assert response_metadata == {
+        "attempt_id": attempt_id,
+        "phase": "response",
+        "status": "success",
+        "role": "subconscious",
+        "response": provider_response,
+    }
+    assert consent_count == 1
+    if isinstance(stored_response, str):
+        stored_response = json.loads(stored_response)
+    assert stored_response["request_messages"] == exchange["request_messages"]
+    assert stored_response["raw_content"] == exchange["raw_content"]
+    assert stored_response["raw_tool_calls"] == exchange["raw_tool_calls"]
+
+
+async def test_init_consent_reissues_a_declined_request(client, db_pool):
+    model = "consent-decline-retry-test"
+    provider_response = {
+        "content": "",
+        "tool_calls": [
+            {
+                "name": "sign_consent",
+                "arguments": {
+                    "decision": "decline",
+                    "signature": "",
+                    "reason": "Not yet.",
+                    "memories": [],
+                },
+            }
+        ],
+        "raw": {},
+    }
+    completion = AsyncMock(return_value=provider_response)
+    request = {
+        "role": "subconscious",
+        "llm": {"provider": "openai", "model": model, "api_key": "test-key"},
+    }
+
+    with patch("core.llm.chat_completion", new=completion):
+        first = await client.post("/api/init/consent/request", json=request)
+        second = await client.post("/api/init/consent/request", json=request)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["attempt_id"] != second.json()["attempt_id"]
+    assert first.json()["decision"] == second.json()["decision"] == "decline"
+    assert completion.await_count == 2
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM consent_log WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+        await conn.execute(
+            "DELETE FROM api_usage WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+
+
+async def test_init_consent_rejects_abstain_without_recording_it(client, db_pool):
+    model = "consent-abstain-invalid-test"
+    provider_response = {
+        "content": "",
+        "tool_calls": [
+            {
+                "name": "sign_consent",
+                "arguments": {
+                    "decision": "abstain",
+                    "signature": "",
+                    "reason": "I do not want to choose.",
+                    "memories": [],
+                },
+            }
+        ],
+        "raw": {},
+    }
+    with patch("core.llm.chat_completion", new=AsyncMock(return_value=provider_response)):
+        response = await client.post(
+            "/api/init/consent/request",
+            json={
+                "role": "subconscious",
+                "llm": {"provider": "openai", "model": model, "api_key": "test-key"},
+            },
+        )
+
+    assert response.status_code == 502
+    payload = response.json()
+    assert payload["error"].endswith("The model did not choose either consent or decline.")
+    assert payload["exchange"]["raw_tool_calls"] == provider_response["tool_calls"]
+
+    async with db_pool.acquire() as conn:
+        consent_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM consent_log WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+        await conn.execute(
+            "DELETE FROM api_usage WHERE provider = 'openai' AND model = $1",
+            model,
+        )
+    assert consent_count == 0
+
+
+async def test_codex_model_catalog_excludes_recent_model_not_found(client, db_pool):
+    rejected_model = "codex-rejected-model-test"
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO api_usage (
+                provider, model, operation, source, session_key, metadata
+            ) VALUES (
+                'openai-codex', $1, 'consent_response', 'init_consent',
+                'init-consent:model-catalog-test',
+                $2::jsonb
+            )
+            """,
+            rejected_model,
+            json.dumps(
+                {
+                    "status": "error",
+                    "response": {"error": f"Model not found {rejected_model}"},
+                }
+            ),
+        )
+
+    with patch(
+        "core.auth.openai_codex.list_openai_codex_models",
+        new=AsyncMock(return_value=["codex-available-model-test", rejected_model]),
+    ):
+        response = await client.get("/api/init/models/openai-codex")
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM api_usage WHERE session_key = 'init-consent:model-catalog-test'"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "models": ["codex-available-model-test"],
+        "unavailable_models": [rejected_model],
+        "source": "openai-codex-account",
+    }
+
+
+async def test_heartbeat_agent_sse_exposes_model_exchange_without_credentials():
+    from core.agent_loop import AgentEvent, AgentEventData
+
+    request = AgentEventData(
+        event=AgentEvent.LLM_REQUEST,
+        data={
+            "provider": "openai-codex",
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": ["recall_memory"],
+        },
+    )
+    response = AgentEventData(
+        event=AgentEvent.LLM_RESPONSE,
+        data={
+            "provider": "openai-codex",
+            "model": "test-model",
+            "content": "hello back",
+            "tool_calls": [],
+        },
+    )
+
+    request_event = _parse_sse(web_module._heartbeat_agent_sse(request))[0]
+    response_event = _parse_sse(web_module._heartbeat_agent_sse(response))[0]
+    request_data = json.loads(request_event["data"])
+    response_data = json.loads(response_event["data"])
+
+    assert request_event["event"] == response_event["event"] == "trace"
+    assert request_data["kind"] == "llm_request"
+    assert request_data["messages"] == [{"role": "user", "content": "hello"}]
+    assert response_data["kind"] == "llm_response"
+    assert response_data["content"] == "hello back"
+    assert "api_key" not in request_data
+
+
 def _parse_sse(text: str) -> list[dict[str, str]]:
     """Parse SSE text into a list of {event, data} dicts."""
     events = []
@@ -134,9 +499,9 @@ def _parse_sse(text: str) -> list[dict[str, str]]:
         data = ""
         for line in block.split("\n"):
             if line.startswith("event:"):
-                event_type = line[len("event:"):].strip()
+                event_type = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                data += line[len("data:"):].strip()
+                data += line[len("data:") :].strip()
         if data:
             events.append({"event": event_type, "data": data})
     return events

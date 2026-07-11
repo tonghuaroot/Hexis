@@ -47,6 +47,11 @@ def test_normalize_endpoint_new_providers():
     assert llm.normalize_endpoint("qwen-portal", None) == "https://portal.qwen.ai/v1"
     assert llm.normalize_endpoint("google-gemini-cli", None) == "https://cloudcode-pa.googleapis.com"
     assert llm.normalize_endpoint("google-antigravity", None) == "https://cloudcode-pa.googleapis.com"
+    assert llm.normalize_endpoint("openai-codex", None) == "https://chatgpt.com/backend-api"
+    assert (
+        llm.normalize_endpoint("openai-codex", "https://api.openai.com/v1")
+        == "https://chatgpt.com/backend-api"
+    )
 
 
 def test_normalize_llm_config_preserves_auth_mode():

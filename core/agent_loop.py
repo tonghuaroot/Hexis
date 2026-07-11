@@ -52,6 +52,8 @@ class AgentEvent(str, Enum):
     ERROR = "error"
     PHASE_CHANGE = "phase_change"
     CONTINUATION = "continuation"
+    LLM_REQUEST = "llm_request"
+    LLM_RESPONSE = "llm_response"
 
 
 @dataclass
@@ -312,6 +314,19 @@ class AgentLoop:
         cfg = self.config
         llm = cfg.llm_config
 
+        await self._emit(AgentEvent.LLM_REQUEST, {
+            "iteration": self._iteration_count,
+            "provider": llm.get("provider"),
+            "model": llm.get("model"),
+            "messages": messages,
+            "tools": [
+                spec.get("function", {}).get("name", "unknown")
+                for spec in (tools or [])
+            ],
+            "temperature": cfg.temperature,
+            "max_tokens": cfg.max_tokens,
+        })
+
         if self._streaming:
             async def _on_text_delta(token: str) -> None:
                 await self._emit(AgentEvent.TEXT_DELTA, {
@@ -356,6 +371,14 @@ class AgentLoop:
             source=source,
             pool=cfg.pool,
         ))
+
+        await self._emit(AgentEvent.LLM_RESPONSE, {
+            "iteration": self._iteration_count,
+            "provider": llm.get("provider"),
+            "model": llm.get("model"),
+            "content": result.get("content") or "",
+            "tool_calls": result.get("tool_calls") or [],
+        })
 
         return result
 

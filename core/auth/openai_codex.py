@@ -22,6 +22,7 @@ OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 OPENAI_CODEX_AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"
 OPENAI_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 OPENAI_CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
+OPENAI_CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
 OPENAI_CODEX_SCOPE = "openid profile email offline_access"
 OPENAI_CODEX_ORIGINATOR = "pi"
 
@@ -207,6 +208,48 @@ async def refresh_openai_codex_token(refresh_token: str) -> OpenAICodexCredentia
         expires_ms=now_ms + int(expires_in * 1000),
         account_id=account_id,
     )
+
+
+async def list_openai_codex_models(
+    creds: OpenAICodexCredentials | None = None,
+) -> list[str]:
+    """List picker-visible models from the authenticated Codex workspace."""
+    if creds is None:
+        creds = await ensure_fresh_openai_codex_credentials(skew_seconds=0)
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            OPENAI_CODEX_MODELS_URL,
+            headers={
+                "Authorization": f"Bearer {creds.access}",
+                "ChatGPT-Account-ID": creds.account_id,
+                "Accept": "application/json",
+            },
+        )
+    if response.status_code < 200 or response.status_code >= 300:
+        raise RuntimeError(
+            f"OpenAI Codex model discovery failed: HTTP {response.status_code}: {response.text}"
+        )
+    data = response.json()
+    rows = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise RuntimeError("OpenAI Codex model discovery response was missing models.")
+
+    models: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("visibility") or "list").lower() != "list":
+            continue
+        if row.get("show_in_picker") is False or row.get("supported_in_api") is False:
+            continue
+        model = row.get("slug") or row.get("id")
+        if isinstance(model, str) and model and model not in seen:
+            seen.add(model)
+            models.append(model)
+    if not models:
+        raise RuntimeError("OpenAI Codex model discovery returned no usable models.")
+    return models
 
 
 # ---------------------------------------------------------------------------

@@ -550,12 +550,15 @@ def normalize_provider(provider: str | None) -> str:
 
 
 def normalize_endpoint(provider: str, endpoint: str | None) -> str | None:
+    # ChatGPT subscription OAuth has one registered backend. Never inherit a
+    # stale OpenAI API-key endpoint from a previous provider selection.
+    if provider == "openai-codex":
+        return _CODEX_DEFAULT_BASE_URL
     if endpoint:
         return endpoint.strip() or None
     _DEFAULTS: dict[str, str] = {
         "ollama": "http://localhost:11434/v1",
         "grok": "https://api.x.ai/v1",
-        "openai-codex": _CODEX_DEFAULT_BASE_URL,
         "chutes": "https://api.chutes.ai/v1",
         "qwen-portal": "https://portal.qwen.ai/v1",
         "google-gemini-cli": "https://cloudcode-pa.googleapis.com",

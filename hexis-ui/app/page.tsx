@@ -1,17 +1,29 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import {
+  Activity,
+  Brain,
+  ChevronRight,
+  Clock3,
+  HeartPulse,
+  MessageCircle,
+  Play,
+  Target,
+  Zap,
+} from "lucide-react";
 import Link from "next/link";
-import { useGatewayEvents } from "./hooks/use-gateway-events";
-import { Card } from "./components/ui/card";
+import Image from "next/image";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useState } from "react";
 import { Badge, GoalPriorityBadge, MemoryTypeBadge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
 import { ProgressBar } from "./components/ui/progress-bar";
-import { PageHeader } from "./components/ui/page-header";
 import { Spinner } from "./components/ui/spinner";
+import { useGatewayEvents } from "./hooks/use-gateway-events";
 
 type StatusData = {
   agent_name?: string;
+  portrait_url?: string | null;
   configured?: boolean;
   energy?: number;
   max_energy?: number;
@@ -27,7 +39,12 @@ type StatusData = {
   drives?: { name: string; urgency: number; hours_since: number }[];
   emotional_trend?: { hour: string; valence: number; arousal: number }[];
   goals?: { id: string; content: string; priority: string; source: string }[];
-  recent_heartbeats?: { id: string; narrative: string; emotional_valence: number; created_at: string }[];
+  recent_heartbeats?: {
+    id: string;
+    narrative: string;
+    emotional_valence: number;
+    created_at: string;
+  }[];
   memory_health?: { type: string; count: number; avg_importance: number }[];
 };
 
@@ -36,82 +53,55 @@ type UsageData = {
   total_tokens: number;
   total_calls: number;
   by_model: { provider: string; model: string; calls: number; tokens: number; cost_usd: number }[];
-  daily: { day: string; cost: number; tokens: number; calls: number }[];
 };
 
-const moodColors: Record<string, string> = {
-  enthusiastic: "accent",
-  content: "teal",
-  curious: "teal",
-  calm: "teal",
-  focused: "teal",
-  neutral: "muted",
-  concerned: "warning",
-  subdued: "warning",
-  distressed: "error",
-  withdrawn: "error",
+type HeartbeatTrace = {
+  id: string;
+  event: string;
+  label: string;
+  detail: string;
+  payload: Record<string, unknown>;
 };
-
-function urgencyColor(urgency: number): "accent" | "teal" | "green" | "amber" | "red" {
-  if (urgency > 80) return "red";
-  if (urgency > 60) return "amber";
-  if (urgency > 40) return "accent";
-  return "teal";
-}
 
 export default function Dashboard() {
   const router = useRouter();
   const [status, setStatus] = useState<StatusData | null>(null);
   const [usage, setUsage] = useState<UsageData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [heartbeatRunning, setHeartbeatRunning] = useState(false);
+  const [heartbeatError, setHeartbeatError] = useState<string | null>(null);
+  const [heartbeatTrace, setHeartbeatTrace] = useState<HeartbeatTrace[]>([]);
 
   const refreshStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/status", { cache: "no-store" });
-      if (res.ok) {
-        const data = await res.json();
-        setStatus(data);
-      }
-    } catch {}
+      const response = await fetch("/api/status", { cache: "no-store" });
+      if (response.ok) setStatus(await response.json());
+    } catch {
+      // The page-level connection state remains visible.
+    }
     try {
-      const res = await fetch("/api/usage?period=30 days", { cache: "no-store" });
-      if (res.ok) {
-        setUsage(await res.json());
-      }
-    } catch {}
+      const response = await fetch("/api/usage?period=30 days", { cache: "no-store" });
+      if (response.ok) setUsage(await response.json());
+    } catch {
+      // Usage is secondary to runtime status.
+    }
   }, []);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const res = await fetch("/api/status", { cache: "no-store" });
-        if (!res.ok) throw new Error("Failed to load status");
-        const data = await res.json();
+        const response = await fetch("/api/status", { cache: "no-store" });
+        if (!response.ok) throw new Error("Failed to load status");
+        const data = await response.json();
         setStatus(data);
-
-        // Redirect to init if not configured
         if (data.configured === false) {
           router.push("/init");
           return;
         }
-
-        // Fetch usage data in background
-        fetch("/api/usage?period=30 days", { cache: "no-store" })
-          .then((r) => r.ok ? r.json() : null)
-          .then((u) => { if (u) setUsage(u); })
-          .catch(() => {});
+        const usageResponse = await fetch("/api/usage?period=30 days", { cache: "no-store" });
+        if (usageResponse.ok) setUsage(await usageResponse.json());
       } catch {
-        // If status API fails, try init status check
-        try {
-          const initRes = await fetch("/api/init/status", { cache: "no-store" });
-          if (initRes.ok) {
-            const initData = await initRes.json();
-            if (initData?.status?.stage !== "complete") {
-              router.push("/init");
-              return;
-            }
-          }
-        } catch {}
+        setStatus(null);
       } finally {
         setLoading(false);
       }
@@ -119,271 +109,322 @@ export default function Dashboard() {
     load();
   }, [router]);
 
-  // Refresh when gateway events arrive (replaces 30s polling)
   useGatewayEvents(refreshStatus);
 
+  const appendHeartbeat = (event: string, payload: Record<string, unknown>) => {
+    setHeartbeatTrace((current) => [
+      ...current.slice(-79),
+      {
+        id: crypto.randomUUID(),
+        event,
+        label: heartbeatEventLabel(event, payload),
+        detail: heartbeatEventDetail(event, payload),
+        payload,
+      },
+    ]);
+  };
+
+  const runHeartbeat = async () => {
+    if (heartbeatRunning) return;
+    setHeartbeatRunning(true);
+    setHeartbeatError(null);
+    setHeartbeatTrace([]);
+    try {
+      const response = await fetch("/api/heartbeat/run", { method: "POST" });
+      if (!response.ok || !response.body) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error || `Heartbeat failed (${response.status})`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() || "";
+        for (const chunk of chunks) {
+          const parsed = parseSseChunk(chunk);
+          if (!parsed) continue;
+          appendHeartbeat(parsed.event, parsed.payload);
+          if (parsed.event === "error") {
+            setHeartbeatError(asString(parsed.payload.message, "Heartbeat failed."));
+          }
+        }
+      }
+      await refreshStatus();
+    } catch (error: unknown) {
+      setHeartbeatError(error instanceof Error ? error.message : "Heartbeat failed.");
+    } finally {
+      setHeartbeatRunning(false);
+    }
+  };
+
   if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <Spinner label="Loading..." />
-      </div>
-    );
+    return <div className="flex min-h-screen items-center justify-center"><Spinner label="Loading overview..." /></div>;
   }
 
   if (!status) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
-        <Card className="max-w-md text-center">
-          <p className="text-sm text-[var(--ink-soft)]">Unable to connect to the database.</p>
-          <p className="mt-2 text-xs text-[var(--ink-soft)]">Make sure the Hexis stack is running.</p>
-        </Card>
+      <div className="flex min-h-screen items-center justify-center px-6">
+        <div className="max-w-md rounded-lg border border-red-200 bg-white p-5">
+          <h1 className="font-semibold text-red-800">Unable to reach Hexis</h1>
+          <p className="mt-2 text-sm text-red-700">Start the Hexis stack, then refresh this page.</p>
+        </div>
       </div>
     );
   }
 
-  const totalMemories = (status.memory_health || []).reduce((sum, m) => sum + (m.count || 0), 0);
+  const totalMemories = (status.memory_health || []).reduce((sum, item) => sum + (item.count || 0), 0);
+  const heartbeatState = status.heartbeat_paused
+    ? "Paused"
+    : heartbeatRunning || status.heartbeat_active
+      ? "Running"
+      : "Idle";
 
   return (
-    <div className="app-shell min-h-screen">
-      <div className="relative z-10 mx-auto max-w-6xl px-6 py-10">
-        <PageHeader
-          title="Dashboard"
-          subtitle={`Welcome back. ${status.agent_name || "Hexis"} is ${status.heartbeat_paused ? "paused" : status.heartbeat_active ? "thinking" : "idle"}.`}
-        />
+    <div className="app-shell">
+      <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+        <header className="flex flex-col gap-5 border-b border-[var(--outline)] pb-6 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-4">
+            {status.portrait_url ? (
+              <Image src={status.portrait_url} alt="" width={64} height={64} unoptimized className="h-16 w-16 rounded-lg object-cover" />
+            ) : (
+              <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-[var(--foreground)] font-display text-2xl text-white">
+                {(status.agent_name || "H").slice(0, 1)}
+              </div>
+            )}
+            <div>
+              <p className="text-xs font-semibold uppercase text-[var(--teal)]">Overview</p>
+              <h1 className="font-display text-3xl text-[var(--foreground)]">{status.agent_name || "Hexis"}</h1>
+              <p className="mt-1 text-sm text-[var(--ink-soft)]">
+                {status.mood ? <span className="capitalize">{status.mood}</span> : "No emotional state"}
+                {status.valence != null ? ` · valence ${signed(status.valence)}` : ""}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="secondary"
+              onClick={runHeartbeat}
+              disabled={heartbeatRunning || status.heartbeat_paused || status.heartbeat_active}
+              title={status.heartbeat_paused ? "Resume heartbeat before running one" : "Run heartbeat now"}
+            >
+              {heartbeatRunning ? <Spinner className="mr-2" /> : <Play size={16} className="mr-2 inline" />}
+              {heartbeatRunning ? "Running" : "Run heartbeat"}
+            </Button>
+            <Link href="/chat" className="inline-flex items-center rounded-lg bg-[var(--foreground)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--teal)]">
+              <MessageCircle size={16} className="mr-2" />
+              Open conversation
+            </Link>
+          </div>
+        </header>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_340px]">
-          {/* Left column */}
+        <section className="grid border-x border-b border-[var(--outline)] bg-white sm:grid-cols-2 xl:grid-cols-4">
+          <Metric icon={Activity} label="Heartbeat" value={heartbeatState} detail={formatRelativeTime(status.last_heartbeat_at)} />
+          <Metric icon={Zap} label="Energy" value={`${status.energy ?? 0} / ${status.max_energy ?? 20}`} detail={`${status.heartbeat_count ?? 0} completed`} />
+          <Metric icon={HeartPulse} label="Emotion" value={status.mood || "Unknown"} detail={status.arousal != null ? `arousal ${status.arousal.toFixed(2)}` : "No reading"} />
+          <Metric icon={Brain} label="Memory" value={totalMemories.toLocaleString()} detail={`${status.memory_health?.length || 0} types`} />
+        </section>
+
+        <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]">
           <div className="space-y-6">
-            {/* Identity + Energy card */}
-            <Card>
-              <div className="flex items-start justify-between">
+            {(heartbeatRunning || heartbeatTrace.length > 0 || heartbeatError) ? (
+              <section className="overflow-hidden rounded-lg border border-[var(--outline)] bg-white">
+                <div className="flex items-center justify-between border-b border-[var(--outline)] px-5 py-4">
+                  <div>
+                    <h2 className="font-semibold">Live heartbeat</h2>
+                    <p className="mt-0.5 text-xs text-[var(--ink-soft)]">{heartbeatRunning ? "Running now" : "Latest manual run"}</p>
+                  </div>
+                  <Badge variant={heartbeatRunning ? "teal" : heartbeatError ? "error" : "success"}>
+                    {heartbeatRunning ? "live" : heartbeatError ? "failed" : "complete"}
+                  </Badge>
+                </div>
+                {heartbeatError ? <p className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">{heartbeatError}</p> : null}
+                <div className="max-h-[440px] overflow-y-auto">
+                  {heartbeatTrace.map((trace, index) => (
+                    <details key={trace.id} className="group border-b border-[var(--outline)] px-5 py-3 last:border-0">
+                      <summary className="flex cursor-pointer list-none items-start gap-3">
+                        <span className={`mt-1.5 h-2 w-2 flex-none rounded-full ${index === heartbeatTrace.length - 1 && heartbeatRunning ? "animate-pulse bg-[var(--accent)]" : "bg-[var(--teal)]"}`} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium">{trace.label}</span>
+                          <span className="mt-0.5 block truncate text-xs text-[var(--ink-soft)]">{trace.detail}</span>
+                        </span>
+                      </summary>
+                      <pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[#f5f7f5] p-3 text-xs text-[var(--foreground)]">{JSON.stringify(trace.payload, null, 2)}</pre>
+                    </details>
+                  ))}
+                  {heartbeatRunning && heartbeatTrace.length === 0 ? <div className="p-5"><Spinner label="Starting heartbeat..." /></div> : null}
+                </div>
+              </section>
+            ) : null}
+
+            <section className="rounded-lg border border-[var(--outline)] bg-white">
+              <div className="flex items-center justify-between border-b border-[var(--outline)] px-5 py-4">
+                <div className="flex items-center gap-2"><Activity size={18} /><h2 className="font-semibold">Recent activity</h2></div>
+                <span className="text-xs text-[var(--ink-soft)]">Autonomous heartbeats</span>
+              </div>
+              {(status.recent_heartbeats || []).length ? (
                 <div>
-                  <h2 className="font-display text-2xl">{status.agent_name || "Hexis"}</h2>
-                  {status.mood && (
-                    <Badge variant={(moodColors[status.mood] as any) || "muted"} className="mt-2">
-                      {status.mood}
-                      {status.valence !== null && status.valence !== undefined
-                        ? ` (${status.valence.toFixed(2)})`
-                        : ""}
-                    </Badge>
-                  )}
+                  {(status.recent_heartbeats || []).slice(0, 5).map((heartbeat) => (
+                    <div key={heartbeat.id} className="border-b border-[var(--outline)] px-5 py-4 last:border-0">
+                      <div className="flex items-start justify-between gap-4">
+                        <p className="text-sm leading-6">{heartbeat.narrative || "Heartbeat completed."}</p>
+                        {heartbeat.emotional_valence != null ? <Valence value={heartbeat.emotional_valence} /> : null}
+                      </div>
+                      <p className="mt-2 text-xs text-[var(--ink-soft)]">{formatDateTime(heartbeat.created_at)}</p>
+                    </div>
+                  ))}
                 </div>
-                <div className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
-                  <span
-                    className={`inline-block h-2.5 w-2.5 rounded-full ${
-                      status.heartbeat_paused
-                        ? "bg-amber-400"
-                        : status.heartbeat_active
-                          ? "bg-green-400 animate-pulse"
-                          : "bg-[var(--outline)]"
-                    }`}
-                  />
-                  {status.heartbeat_paused
-                    ? "Paused"
-                    : status.heartbeat_active
-                      ? "Active"
-                      : "Idle"}
-                </div>
-              </div>
-
-              <div className="mt-4">
-                <ProgressBar
-                  value={status.energy ?? 0}
-                  max={status.max_energy ?? 20}
-                  label="Energy"
-                />
-              </div>
-
-              {status.heartbeat_count !== null && status.heartbeat_count !== undefined && (
-                <p className="mt-3 text-xs text-[var(--ink-soft)]">
-                  {status.heartbeat_count} heartbeats total
-                  {status.last_heartbeat_at && (
-                    <> &middot; last: {new Date(status.last_heartbeat_at).toLocaleString()}</>
-                  )}
-                </p>
+              ) : (
+                <div className="px-5 py-8 text-sm text-[var(--ink-soft)]">No completed heartbeats yet.</div>
               )}
-            </Card>
+            </section>
 
-            {/* Active goals */}
-            <Card>
-              <div className="flex items-center justify-between">
-                <h3 className="font-display text-lg">Goals</h3>
-                <Link href="/goals" className="text-xs text-[var(--accent-strong)] hover:underline">
-                  View all
-                </Link>
+            <section className="rounded-lg border border-[var(--outline)] bg-white">
+              <div className="flex items-center justify-between border-b border-[var(--outline)] px-5 py-4">
+                <div className="flex items-center gap-2"><Target size={18} /><h2 className="font-semibold">Current goals</h2></div>
+                <Link href="/goals" className="flex items-center text-xs font-medium text-[var(--teal)]">Manage <ChevronRight size={14} /></Link>
               </div>
-              <div className="mt-4 space-y-3">
-                {(status.goals || []).length === 0 ? (
-                  <p className="text-sm text-[var(--ink-soft)]">No active goals.</p>
-                ) : (
-                  (status.goals || []).slice(0, 5).map((g) => (
-                    <div key={g.id} className="flex items-center gap-3">
-                      <GoalPriorityBadge priority={g.priority} />
-                      <span className="text-sm">{g.content}</span>
-                    </div>
-                  ))
-                )}
-              </div>
-            </Card>
-
-            {/* Recent heartbeats */}
-            <Card>
-              <h3 className="font-display text-lg">Recent Heartbeats</h3>
-              <div className="mt-4 space-y-3">
-                {(status.recent_heartbeats || []).length === 0 ? (
-                  <p className="text-sm text-[var(--ink-soft)]">No heartbeats yet.</p>
-                ) : (
-                  (status.recent_heartbeats || []).slice(0, 3).map((h) => (
-                    <div
-                      key={h.id}
-                      className="rounded-2xl border border-[var(--outline)] bg-white p-4"
-                    >
-                      <p className="text-sm leading-relaxed">
-                        {(h.narrative || "").slice(0, 200)}
-                        {(h.narrative || "").length > 200 ? "..." : ""}
-                      </p>
-                      <p className="mt-2 text-xs text-[var(--ink-soft)]">
-                        {h.created_at ? new Date(h.created_at).toLocaleString() : ""}
-                        {h.emotional_valence !== null && h.emotional_valence !== undefined
-                          ? ` \u00b7 valence: ${h.emotional_valence.toFixed(2)}`
-                          : ""}
-                      </p>
-                    </div>
-                  ))
-                )}
-              </div>
-            </Card>
+              {(status.goals || []).length ? (
+                (status.goals || []).slice(0, 5).map((goal) => (
+                  <div key={goal.id} className="flex items-center gap-3 border-b border-[var(--outline)] px-5 py-3 last:border-0">
+                    <GoalPriorityBadge priority={goal.priority} />
+                    <span className="text-sm">{goal.content}</span>
+                  </div>
+                ))
+              ) : <div className="px-5 py-8 text-sm text-[var(--ink-soft)]">No active goals.</div>}
+            </section>
           </div>
 
-          {/* Right column */}
-          <div className="space-y-6">
-            {/* Drives */}
-            <Card>
-              <h3 className="font-display text-lg">Drives</h3>
-              <div className="mt-4 space-y-3">
-                {(status.drives || []).length === 0 ? (
-                  <p className="text-sm text-[var(--ink-soft)]">No drive data.</p>
-                ) : (
-                  (status.drives || []).map((d) => (
-                    <ProgressBar
-                      key={d.name}
-                      value={d.urgency ?? 0}
-                      max={100}
-                      label={d.name}
-                      color={urgencyColor(d.urgency ?? 0)}
+          <aside className="space-y-6">
+            <section className="rounded-lg border border-[var(--outline)] bg-white p-5">
+              <h2 className="font-semibold">Emotional state</h2>
+              <div className="mt-4 flex items-end justify-between gap-4">
+                <div>
+                  <p className="text-2xl font-semibold capitalize">{status.mood || "Unknown"}</p>
+                  <p className="mt-1 text-xs text-[var(--ink-soft)]">valence {status.valence != null ? signed(status.valence) : "--"}</p>
+                </div>
+                <div className="flex h-20 w-36 items-end gap-1">
+                  {(status.emotional_trend || []).slice(0, 16).reverse().map((point) => (
+                    <span
+                      key={point.hour}
+                      className={`min-h-1 flex-1 rounded-sm ${point.valence >= 0 ? "bg-[var(--teal)]" : "bg-[var(--accent)]"}`}
+                      style={{ height: `${Math.max(5, Math.abs(point.valence || 0) * 100)}%` }}
+                      title={`${point.hour}: ${signed(point.valence || 0)}`}
                     />
-                  ))
-                )}
+                  ))}
+                </div>
               </div>
-            </Card>
+            </section>
 
-            {/* Emotional trend */}
-            <Card>
-              <h3 className="font-display text-lg">Emotional Trend</h3>
-              <div className="mt-4">
-                {(status.emotional_trend || []).length === 0 ? (
-                  <p className="text-sm text-[var(--ink-soft)]">No trend data yet.</p>
-                ) : (
-                  <div className="flex h-24 items-end gap-px">
-                    {(status.emotional_trend || [])
-                      .slice(0, 24)
-                      .reverse()
-                      .map((t, i) => {
-                        const v = t.valence ?? 0;
-                        const h = Math.max(4, Math.abs(v) * 100);
-                        const color = v >= 0 ? "bg-[var(--teal)]" : "bg-[var(--accent)]";
-                        return (
-                          <div
-                            key={i}
-                            className={`flex-1 rounded-t ${color} transition-all`}
-                            style={{ height: `${h}%` }}
-                            title={`${t.hour}: valence ${v.toFixed(2)}`}
-                          />
-                        );
-                      })}
-                  </div>
-                )}
-                <p className="mt-2 text-xs text-[var(--ink-soft)]">24h valence history</p>
-              </div>
-            </Card>
-
-            {/* Memory health */}
-            <Card>
-              <div className="flex items-center justify-between">
-                <h3 className="font-display text-lg">Memory</h3>
-                <Link href="/memories" className="text-xs text-[var(--accent-strong)] hover:underline">
-                  Browse
-                </Link>
-              </div>
-              <p className="mt-2 text-2xl font-display text-[var(--accent)]">
-                {totalMemories}
-                <span className="ml-2 text-sm font-normal text-[var(--ink-soft)]">total</span>
-              </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                {(status.memory_health || []).map((m) => (
-                  <div key={m.type} className="flex items-center gap-1.5">
-                    <MemoryTypeBadge type={m.type} />
-                    <span className="text-xs text-[var(--ink-soft)]">{m.count}</span>
-                  </div>
+            <section className="rounded-lg border border-[var(--outline)] bg-white p-5">
+              <h2 className="font-semibold">Drives</h2>
+              <div className="mt-4 space-y-3">
+                {(status.drives || []).map((drive) => (
+                  <ProgressBar key={drive.name} value={drive.urgency || 0} max={100} label={drive.name} showValue />
                 ))}
               </div>
-            </Card>
+            </section>
 
-            {/* Usage & Cost */}
-            <Card>
-              <h3 className="font-display text-lg">Usage &amp; Cost</h3>
-              {usage ? (
-                <>
-                  <p className="mt-2 text-2xl font-display text-[var(--accent)]">
-                    ${usage.total_cost_usd.toFixed(2)}
-                    <span className="ml-2 text-sm font-normal text-[var(--ink-soft)]">30d</span>
-                  </p>
-                  <div className="mt-3 space-y-1.5">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-[var(--ink-soft)]">API calls</span>
-                      <span>{usage.total_calls.toLocaleString()}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-[var(--ink-soft)]">Tokens</span>
-                      <span>{usage.total_tokens.toLocaleString()}</span>
-                    </div>
-                  </div>
-                  {usage.by_model.length > 0 && (
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {usage.by_model.slice(0, 3).map((m) => (
-                        <Badge key={`${m.provider}/${m.model}`} variant="muted">
-                          {m.model}: ${m.cost_usd.toFixed(2)}
-                        </Badge>
-                      ))}
-                    </div>
-                  )}
-                  {usage.daily.length > 0 && (
-                    <div className="mt-4">
-                      <div className="flex h-16 items-end gap-px">
-                        {usage.daily.slice(-14).map((d, i) => {
-                          const maxCost = Math.max(...usage.daily.slice(-14).map((x) => x.cost), 0.01);
-                          const h = Math.max(4, (d.cost / maxCost) * 100);
-                          return (
-                            <div
-                              key={i}
-                              className="flex-1 rounded-t bg-[var(--teal)] transition-all"
-                              style={{ height: `${h}%` }}
-                              title={`${d.day}: $${d.cost.toFixed(2)}`}
-                            />
-                          );
-                        })}
-                      </div>
-                      <p className="mt-1 text-xs text-[var(--ink-soft)]">Daily cost (14d)</p>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <p className="mt-2 text-sm text-[var(--ink-soft)]">No usage data yet.</p>
-              )}
-            </Card>
-          </div>
+            <section className="rounded-lg border border-[var(--outline)] bg-white p-5">
+              <div className="flex items-center justify-between"><h2 className="font-semibold">Memory</h2><Link href="/memories" className="text-xs font-medium text-[var(--teal)]">Browse</Link></div>
+              <p className="mt-3 text-2xl font-semibold">{totalMemories.toLocaleString()}</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {(status.memory_health || []).map((item) => (
+                  <span key={item.type} className="flex items-center gap-1"><MemoryTypeBadge type={item.type} /><span className="text-xs text-[var(--ink-soft)]">{item.count}</span></span>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-[var(--outline)] bg-white p-5">
+              <h2 className="font-semibold">Usage</h2>
+              <div className="mt-3 grid grid-cols-2 gap-4">
+                <div><p className="text-xl font-semibold">${usage?.total_cost_usd.toFixed(2) || "0.00"}</p><p className="text-xs text-[var(--ink-soft)]">30 days</p></div>
+                <div><p className="text-xl font-semibold">{usage?.total_calls.toLocaleString() || "0"}</p><p className="text-xs text-[var(--ink-soft)]">API calls</p></div>
+              </div>
+              {usage?.by_model.slice(0, 3).map((model) => (
+                <div key={`${model.provider}/${model.model}`} className="mt-3 flex items-center justify-between gap-3 text-xs">
+                  <span className="truncate text-[var(--ink-soft)]">{model.model}</span><span>{model.calls}</span>
+                </div>
+              ))}
+            </section>
+          </aside>
         </div>
       </div>
     </div>
   );
+}
+
+function Metric({ icon: Icon, label, value, detail }: { icon: typeof Clock3; label: string; value: string; detail: string }) {
+  return (
+    <div className="flex min-h-24 items-center gap-3 border-b border-[var(--outline)] p-4 last:border-b-0 sm:border-b-0 sm:border-r sm:last:border-r-0">
+      <Icon size={19} className="text-[var(--teal)]" aria-hidden="true" />
+      <div className="min-w-0"><p className="text-xs text-[var(--ink-soft)]">{label}</p><p className="truncate text-sm font-semibold capitalize">{value}</p><p className="truncate text-xs text-[var(--ink-soft)]">{detail}</p></div>
+    </div>
+  );
+}
+
+function Valence({ value }: { value: number }) {
+  return <span className={`flex-none rounded-full px-2 py-1 text-xs font-medium ${value >= 0 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>{signed(value)}</span>;
+}
+
+function parseSseChunk(chunk: string): { event: string; payload: Record<string, unknown> } | null {
+  let event = "message";
+  let data = "";
+  for (const line of chunk.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  if (!data) return null;
+  try {
+    const value = JSON.parse(data);
+    return { event, payload: value && typeof value === "object" ? value : { value } };
+  } catch {
+    return { event, payload: { value: data } };
+  }
+}
+
+function heartbeatEventLabel(event: string, payload: Record<string, unknown>): string {
+  if (event === "heartbeat_start") return `Heartbeat ${payload.heartbeat_number || ""} started`.trim();
+  if (event === "heartbeat_done") return "Heartbeat completed";
+  if (event === "phase") return `${asString(payload.phase, "Agent")} ${asString(payload.status)}`.trim();
+  if (event === "trace") return asString(payload.kind) === "llm_request" ? "Model request" : "Model response";
+  if (event === "tool") return `${asString(payload.tool_name, "Tool")} ${asString(payload.status)}`;
+  if (event === "text") return "Agent response";
+  if (event === "error") return "Heartbeat error";
+  return asString(payload.event, event);
+}
+
+function heartbeatEventDetail(event: string, payload: Record<string, unknown>): string {
+  if (event === "heartbeat_start") return "Manual heartbeat requested by the user";
+  if (event === "phase") return `${asString(payload.phase, "Agent")} phase ${asString(payload.status, "updated")}`;
+  if (event === "heartbeat_done") return `${payload.energy_spent || 0} energy · ${asString(payload.stopped_reason, "completed")}`;
+  if (event === "trace") return `${asString(payload.provider)}/${asString(payload.model)}`;
+  if (event === "tool") return asString(payload.display_output) || asString(payload.error) || "Tool activity";
+  if (event === "text") return asString(payload.text).slice(0, 180);
+  if (event === "error") return asString(payload.message, "Heartbeat failed");
+  return JSON.stringify(payload).slice(0, 180);
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function signed(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+}
+
+function formatDateTime(value?: string | null): string {
+  return value ? new Date(value).toLocaleString() : "";
+}
+
+function formatRelativeTime(value?: string | null): string {
+  if (!value) return "No previous heartbeat";
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}h ago`;
 }

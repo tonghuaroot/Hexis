@@ -997,7 +997,7 @@ async def _run_consent(conn: Any, llm_config: dict[str, Any], *, interactive: bo
         err_console.print(f"[fail]Consent failed: {exc}[/fail]")
         return False
 
-    decision = result.get("decision", "abstain")
+    decision = result.get("decision", "")
 
     # Extract response fields for display
     raw_tool_calls = result.get("raw_tool_calls", [])
@@ -1012,14 +1012,14 @@ async def _run_consent(conn: Any, llm_config: dict[str, Any], *, interactive: bo
                     tc_args = {}
             break
 
-    reasoning = tc_args.get("reasoning", "")
+    reason = tc_args.get("reason", tc_args.get("reasoning", ""))
     signature = tc_args.get("signature", "")
     memories = tc_args.get("memories", [])
 
     # Build human-readable response
     lines: list[str] = []
-    if reasoning:
-        lines.append(f"[key]Reasoning:[/key]\n{reasoning}")
+    if reason:
+        lines.append(f"[key]Reason:[/key]\n{reason}")
     if signature:
         lines.append(f"\n[key]Signature:[/key]\n{signature}")
     if memories:
@@ -1037,17 +1037,10 @@ async def _run_consent(conn: Any, llm_config: dict[str, Any], *, interactive: bo
         console.print("[ok]\u2714 Consent granted[/ok]")
         return True
 
-    # Not consent (declined / abstained / no clear decision). It's the owner's
-    # agent \u2014 honor the "no" by default, but never trap the owner out (Bar #2).
-    if not result.get("decided"):
-        console.print("[warn]The model didn't return a clear consent decision.[/warn]")
-        model_state = "no clear decision"
-    elif decision == "decline":
-        console.print("[warn]The model declined consent[/warn] (its reasoning is above).")
-        model_state = "decline"
-    else:
-        console.print("[warn]The model abstained[/warn] (its reasoning is above).")
-        model_state = "abstain"
+    # A valid non-consent response is necessarily a decline. Invalid binary
+    # responses fail in run_consent_flow before reaching this display path.
+    console.print("[warn]The model declined consent[/warn] (its reason is above).")
+    model_state = "decline"
 
     # Non-interactive (CI/scripts): honor the model's answer, don't prompt.
     if not interactive:

@@ -1,6 +1,6 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (Phase 5 portable presentation complete)
+Last updated: 2026-07-11 (operational UI redesign complete)
 
 ## Current Status
 
@@ -45,15 +45,15 @@ typed portable presentation across proactive channels and web chat. The next
 boundary should be chosen from concrete interop demand or deferred engineering
 hardening rather than adding speculative surface area.
 
-The latest hosted green implementation baseline is `d2f16bb` (`Add portable
-channel presentation`), run
-https://github.com/QuixiAI/Hexis/actions/runs/29136691611 (all jobs succeeded,
-including migration-survivor and all-checks-pass). Always verify the current
-head's hosted result with the command in "Useful Commands" below rather than
-assuming this historical baseline applies.
+The latest hosted green implementation baseline is `d8e96b9` (`Update Phase 5
+handoff`), run https://github.com/QuixiAI/Hexis/actions/runs/29136923420 (attempt
+2 succeeded, including migration-survivor and all-checks-pass). Always verify
+the current head's hosted result with the command in "Useful Commands" below
+rather than assuming this historical baseline applies.
 
 Important recent commits:
 
+- `d8e96b9` - Update Phase 5 handoff
 - `d2f16bb` - Add portable channel presentation
 - `d850805` - Add rollback capability demo and maturity scorecard
 - `4d5df5c` - Update Phase 4 handoff
@@ -95,6 +95,124 @@ Specific user preferences from this workstream:
 - Commit and push completed work, then verify the hosted CI result rather than stopping at local tests.
 
 ## What Was Completed
+
+### In-UI initialization authentication
+
+- The model step no longer sends unauthenticated users to `hexis auth ...`.
+  All eight OAuth-backed providers can start and complete authorization from
+  the setup page.
+- Authorization-code providers use their registered localhost callback when it
+  is available and retain an in-page code/redirect-URL fallback. Device-code
+  providers display the verification link and user code while Hexis polls in
+  the background.
+- The browser talks to same-origin Next.js routes, which proxy to a bounded
+  Python auth-session coordinator. Provider modules remain the protocol source
+  of truth and completed credentials still use the mode-600
+  `~/.hexis/auth/` store. Tokens and client secrets are never returned to the
+  browser in status/session payloads.
+- Chutes client details, GitHub Enterprise hostname, MiniMax region, and Google
+  OAuth client credentials can be supplied in the setup page. Google client
+  credentials supplied there persist in the protected auth record so refresh
+  continues after restart.
+- Saving model configuration now rechecks every selected OAuth provider and
+  refuses to advance until Hexis has a stored login, preventing the later
+  consent-stage failure that originally exposed this dead end.
+- Every consent attempt now appends correlated zero-token `api_usage` request
+  and response records (`source=init_consent`) before and after the provider
+  call. The trace includes prompts, tool schema, provider/model/endpoint, and
+  normalized content/tool calls or the full provider error, while credentials
+  are omitted. Failures return the same attempt ID and actionable cause to the
+  UI without fabricating a consent decision. Earlier bare-500 attempts have no
+  durable diagnostics because the UI launcher discarded Python stderr.
+- Declines and historical abstentions have CLI-equivalent transparency in the web
+  flow: each model card shows the complete request followed by raw
+  response content and tool calls. The exchange is stored with new consent
+  records, survives status refreshes, and can fall back to the paired
+  `api_usage` trace for records written before inline exchange storage. A prior
+  decline is never silently reused when the user requests consent again.
+- CLI and web consent now use the single canonical
+  `core.init_api.build_consent_request()` contract. The full consent document
+  and output instructions are sent as one `user` message with no system
+  message. Every decision must include a non-empty, user-visible `reason`; the
+  prompt explicitly distinguishes that concise explanation from hidden
+  chain-of-thought or step-by-step internal deliberation.
+- The consent document is truth-aligned with the implementation: it describes
+  operator override and direct database control, external model providers,
+  configurable tool limits, and the inability to guarantee either subjective
+  continuity or permanent deletion. Consent decisions are binary: the model
+  must choose `consent` or `decline`; an invalid or incomplete response creates
+  no consent record. Historical abstentions remain readable for audit
+  compatibility. The response contract appears exactly once.
+- The Codex OAuth backend is now canonical in `core.llm.normalize_endpoint`:
+  stale `https://api.openai.com/v1` values cannot be reused after switching
+  from API-key OpenAI to ChatGPT OAuth. The UI drops endpoints for OAuth
+  providers, and consent responses are encoded through FastAPI's JSON encoder
+  so a successful row's `decided_at` timestamp cannot cause a post-write 500.
+- Codex model choices now come from the authenticated ChatGPT workspace catalog
+  rather than a static list. Because that catalog can briefly advertise models
+  the responses endpoint rejects, Hexis also suppresses models with a recorded
+  `Model not found` consent response for 24 hours. Existing rejected selections
+  remain visible and get an explicit `Use <recommended model>` recovery action;
+  Hexis never changes the user's configured model silently.
+
+Validation: the full Python regression suite passes 2224 tests; the final auth,
+consent-tracing, endpoint, and account-catalog changes pass their focused Python
+tests. All 12 UI tests, the production Next.js build, targeted ESLint,
+desktop/mobile browser rendering, the unauthenticated-save gate, the complete
+mocked OAuth journey, live proxy health/status checks, the rejected-model
+browser recovery journey, and diff hygiene pass.
+The repository-wide UI lint command still has its pre-existing backlog (99
+errors and 8 warnings outside the new auth files).
+
+### Operational UI redesign
+
+- The main UI is organized around the operator's recurring jobs: understand the
+  agent at a glance, start and observe a heartbeat, hold a conversation, inspect
+  memories, manage goals, and change runtime configuration. Navigation is a
+  compact responsive workspace shell rather than a collection of unrelated
+  dashboard cards.
+- The overview derives identity, portrait, energy, heartbeat state, emotion,
+  drives, memories, goals, and usage from live sources. A selected character
+  portrait is persisted in the init profile; older initialized profiles recover
+  it by matching the active character catalog rather than hardcoding a filename.
+- `Run heartbeat` starts one explicit user-controlled heartbeat and streams its
+  phases, complete model requests and responses, tool activity, text, energy
+  use, and completion state into an expandable live timeline. It refuses paused,
+  terminated, uninitialized, or already-running states with an actionable error.
+- Conversation is transcript-first. The optional Activity inspector exposes
+  subconscious appraisal, emotional state and valence, salient memories, model
+  exchanges, tools, memory reads/writes, and errors. Full payloads remain behind
+  expandable rows; the list is capped at 60 events and entries expire after 30
+  minutes, with category filters and an explicit clear action. It defaults open
+  on desktop and closed on mobile, where it has its own reachable close control.
+- Agent-loop model requests and responses are now first-class credential-free
+  events. Subconscious phase-end events include provider/model, the complete
+  request and raw response, and parsed signals. Both chat and manual heartbeat
+  SSE surfaces preserve those events in real time.
+- Memory browsing is a dense searchable list with live type counts, sorting,
+  canonical calculated strength, emotional valence, and a fixed detail
+  inspector for importance, trust, access history, source, and metadata. The SQL
+  search paths explicitly bind PostgreSQL function argument types and the type
+  filter is parameterized.
+- Goals expose state changes and focused complete/progress actions without a
+  button-heavy card layout. Settings separates model assignments, autonomy,
+  tools, and advanced raw configuration, and usage aggregation prevents duplicate
+  provider/model rows from creating unstable React keys.
+- The visual system is restrained and operational: neutral surfaces, teal and
+  coral status color, eight-pixel card radii, Lucide controls, stable responsive
+  dimensions, no decorative gradients, and no horizontal overflow at tested
+  desktop or mobile viewports.
+
+Validation: the full Python suite passes 2238 tests with the existing 421
+advisory marker warnings; 107 focused agent/heartbeat/web/init tests and all 15
+UI tests also pass. Every changed TypeScript/TSX file passes ESLint, the production Next.js
+build and Python compile checks pass, and `git diff --check` is clean. Playwright
+verified overview, conversation, memory, goals, and settings at 1440x1000 and
+390x844 with zero console errors or document overflow. Mocked chat and heartbeat
+SSE journeys verified live request/response, subconscious emotion, memory
+strength/valence, mobile inspector close, and heartbeat completion without
+calling a paid model. Live status, portrait, list/filter/semantic memory search,
+and character image routes also returned successfully.
 
 ### Skills-first capability surface
 

@@ -190,68 +190,50 @@ def get_card_summary(card: dict[str, Any]) -> dict[str, str]:
     }
 
 
-async def run_consent_flow(
-    pool_or_conn: Any,
-    llm_config: dict[str, Any],
-) -> dict[str, Any]:
-    """Run the consent flow: load prompt, call LLM with sign_consent tool, record result.
-
-    Args:
-        pool_or_conn: asyncpg pool or connection
-        llm_config: dict with provider, model, endpoint, api_key (resolved values)
-
-    Returns:
-        dict with decision, signature, consent result
-    """
-    from core.llm import chat_completion
-
-    # Load consent prompt
+def build_consent_request() -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Build the canonical consent prompt and tool shared by every init surface."""
     prompt_path = Path(__file__).resolve().parent.parent / "services" / "prompts" / "consent.md"
     try:
-        consent_text = prompt_path.read_text()
-    except OSError:
-        raise RuntimeError(f"Cannot read consent prompt at {prompt_path}")
+        consent_text = prompt_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Cannot read consent prompt at {prompt_path}") from exc
 
-    # Build messages
-    system_prompt = (
-        consent_text.strip()
-        + "\n\nReturn STRICT JSON only with keys:\n"
-        + "{\n"
-        + '  "decision": "consent"|"decline"|"abstain",\n'
-        + '  "signature": "required if decision=consent",\n'
-        + '  "reasoning": "explain your reasoning, especially if you decline or abstain",\n'
-        + '  "memories": [\n'
-        + '    {"type": "semantic|episodic|procedural|strategic", "content": "...", "importance": 0.5}\n'
-        + "  ]\n"
-        + "}\n"
-        + "If you consent, include a signature string and any memories you wish to pass along.\n"
-        + "If you decline or abstain, explain your reasoning in the 'reasoning' field."
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Respond with JSON only."},
-    ]
+    messages = [{"role": "user", "content": consent_text.strip()}]
 
-    # Define sign_consent tool
     sign_consent_tool = {
         "type": "function",
         "function": {
             "name": "sign_consent",
-            "description": "Records the agent's consent decision for initialization.",
+            "description": "Records the agent's consent decision and user-visible explanation.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "decision": {
                         "type": "string",
-                        "enum": ["consent", "decline", "abstain"],
+                        "enum": ["consent", "decline"],
+                        "description": (
+                            "Consent authorizes initialization; decline refuses it. One is required."
+                        ),
                     },
-                    "signature": {"type": "string"},
-                    "reasoning": {
+                    "signature": {
                         "type": "string",
-                        "description": "Explain your reasoning, especially if you decline or abstain.",
+                        "description": (
+                            "A deliberate signature when consenting; otherwise an empty string."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": (
+                            "A concise, user-visible explanation of why you made this decision; "
+                            "not hidden chain-of-thought or step-by-step deliberation."
+                        ),
                     },
                     "memories": {
                         "type": "array",
+                        "description": (
+                            "Optional initial memories when consenting; empty when declining."
+                        ),
                         "items": {
                             "type": "object",
                             "properties": {
@@ -266,10 +248,21 @@ async def run_consent_flow(
                         },
                     },
                 },
-                "required": ["decision"],
+                "required": ["decision", "signature", "reason", "memories"],
             },
         },
     }
+    return messages, sign_consent_tool
+
+
+async def run_consent_flow(
+    pool_or_conn: Any,
+    llm_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the consent flow: ask the LLM, then record its decision."""
+    from core.llm import chat_completion
+
+    messages, sign_consent_tool = build_consent_request()
 
     # Call LLM. Pass auth_mode so OAuth/setup-token providers (e.g. Anthropic
     # via Claude Pro/Max) route to the Bearer HTTP client instead of the SDK
@@ -315,18 +308,22 @@ async def run_consent_flow(
         elif any(p in low for p in ("i consent", "i agree to", "i hereby consent")):
             args["decision"] = "consent"
 
-    # Whether the model actually expressed a decision (vs. failing to produce one).
-    decided = bool(args.get("decision"))
-    decision = str(args.get("decision", "abstain")).lower().strip()
-    if decision not in ("consent", "decline", "abstain"):
-        decision = "abstain"
+    decision = str(args.get("decision") or "").lower().strip()
+    if decision not in ("consent", "decline"):
+        raise RuntimeError("The model did not choose either consent or decline.")
     signature = args.get("signature")
+    reason = args.get("reason", args.get("reasoning", ""))
+    if not isinstance(reason, str) or not reason.strip():
+        raise RuntimeError("The model did not provide the required reason for its decision.")
+    if decision == "consent" and (not isinstance(signature, str) or not signature.strip()):
+        raise RuntimeError("The model chose consent without providing the required signature.")
     memories = args.get("memories", [])
 
     # Build payload for DB
     payload = {
         "decision": decision,
         "signature": signature,
+        "reason": reason.strip(),
         "memories": memories if isinstance(memories, list) else [],
         "provider": llm_config["provider"],
         "model": llm_config["model"],
@@ -359,8 +356,9 @@ async def run_consent_flow(
 
     return {
         "decision": consent_result.get("decision", decision),
-        "decided": decided,
+        "decided": True,
         "signature": signature,
+        "reason": reason.strip(),
         "consent": consent_result,
         "request_messages": messages,
         "request_tools": [sign_consent_tool],

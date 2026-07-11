@@ -24,7 +24,8 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Literal
 
 import asyncpg
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -32,7 +33,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from channels.presentation import presentation_from_text
 from core.agent_api import db_dsn_from_env, get_agent_profile_context, pool_sizes_from_env
-from core.agent_loop import AgentEvent
+from core.agent_loop import AgentEvent, AgentEventData
+from core.auth.ui_flow import AuthFlowError, auth_flow_coordinator
 from core.cli_api import status_payload_rich
 from core.cognitive_memory_api import CognitiveMemory
 from core.gateway import EventSource, Gateway
@@ -70,10 +72,13 @@ async def lifespan(app: FastAPI):
     from core.usage import set_usage_pool
     set_usage_pool(_pool)
     logger.info("Hexis API started (pool created)")
-    yield
-    if _pool:
-        await _pool.close()
-        logger.info("Pool closed")
+    try:
+        yield
+    finally:
+        await auth_flow_coordinator.close()
+        if _pool:
+            await _pool.close()
+            logger.info("Pool closed")
 
 
 app = FastAPI(title="Hexis API", lifespan=lifespan)
@@ -155,6 +160,16 @@ class InitConsentRequest(BaseModel):
     llm: ConsentLlmConfig | None = None
 
 
+class InitAuthStartRequest(BaseModel):
+    provider: str
+    options: dict[str, str] = Field(default_factory=dict)
+
+
+class InitAuthCompleteRequest(BaseModel):
+    session_id: str
+    authorization_input: str
+
+
 # ---------------------------------------------------------------------------
 # SSE helpers
 # ---------------------------------------------------------------------------
@@ -186,6 +201,51 @@ def _openai_error(
             }
         },
         status_code=status_code,
+    )
+
+
+def _consent_trace_value(value: Any) -> Any:
+    """Convert provider response objects into JSON-safe diagnostics."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _consent_trace_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_consent_trace_value(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _consent_trace_value(model_dump())
+        except Exception:
+            pass
+    return repr(value)[:16000]
+
+
+async def _record_consent_trace(
+    *,
+    pool: asyncpg.Pool,
+    attempt_id: str,
+    provider: str,
+    model: str,
+    phase: Literal["request", "response"],
+    metadata: dict[str, Any],
+) -> None:
+    from core.usage import record_usage
+
+    await record_usage(
+        provider=provider,
+        model=model,
+        operation=f"consent_{phase}",
+        session_key=f"init-consent:{attempt_id}",
+        source="init_consent",
+        metadata={
+            "attempt_id": attempt_id,
+            "phase": phase,
+            **_consent_trace_value(metadata),
+        },
+        pool=pool,
     )
 
 
@@ -365,6 +425,77 @@ async def _remember_openai_chat(user_message: str, assistant_message: str) -> No
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
+@app.get("/api/init/auth/status")
+async def init_auth_status(provider: str, validate: bool = False):
+    """Return redacted status from Hexis's own credential store."""
+    try:
+        if validate:
+            return await auth_flow_coordinator.validate(provider)
+        return auth_flow_coordinator.status(provider)
+    except AuthFlowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/init/auth/start")
+async def init_auth_start(req: InitAuthStartRequest):
+    """Start a browser authorization-code or device-code flow."""
+    try:
+        return await auth_flow_coordinator.start(req.provider, req.options)
+    except AuthFlowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/init/auth/session/{session_id}")
+async def init_auth_session(session_id: str):
+    """Poll a short-lived browser auth session without returning credentials."""
+    try:
+        return auth_flow_coordinator.session(session_id)
+    except AuthFlowError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/init/auth/complete")
+async def init_auth_complete(req: InitAuthCompleteRequest):
+    """Complete an authorization-code flow from a pasted code or redirect URL."""
+    try:
+        return await auth_flow_coordinator.complete(req.session_id, req.authorization_input)
+    except AuthFlowError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/init/models/openai-codex")
+async def init_openai_codex_models():
+    """Return the authenticated workspace catalog minus recent hard rejections."""
+    pool = _pool
+    if pool is None:
+        return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
+    try:
+        from core.auth.openai_codex import list_openai_codex_models
+
+        models = await list_openai_codex_models()
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT model
+        FROM api_usage
+        WHERE provider = 'openai-codex'
+          AND source = 'init_consent'
+          AND operation = 'consent_response'
+          AND created_at > now() - interval '24 hours'
+          AND metadata #>> '{response,error}' ILIKE '%Model not found%'
+        """
+    )
+    unavailable = {str(row["model"]) for row in rows}
+    return {
+        "models": [model for model in models if model not in unavailable],
+        "unavailable_models": sorted(unavailable),
+        "source": "openai-codex-account",
+    }
+
+
 @app.get("/health")
 async def health():
     checks = {"db": False}
@@ -435,6 +566,135 @@ async def event_stream():
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/heartbeat/run")
+async def run_heartbeat_now():
+    """Run an explicit heartbeat and stream its complete observable lifecycle."""
+    pool = _pool
+    if pool is None:
+        return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
+    return StreamingResponse(
+        _stream_manual_heartbeat(pool),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _stream_manual_heartbeat(pool: asyncpg.Pool) -> AsyncIterator[str]:
+    import asyncio
+
+    from services.heartbeat_agentic import finalize_heartbeat, run_agentic_heartbeat
+    from services.worker_service import _extract_heartbeat_context
+
+    async with pool.acquire() as conn:
+        state = await conn.fetchrow(
+            """
+            SELECT is_agent_configured() AS configured,
+                   is_init_complete() AS initialized,
+                   is_agent_terminated() AS terminated,
+                   is_paused,
+                   active_heartbeat_id
+            FROM heartbeat_state
+            WHERE id = 1
+            """
+        )
+        if not state or not state["configured"] or not state["initialized"]:
+            yield _sse_event("error", {"message": "Complete initialization before running a heartbeat."})
+            return
+        if state["terminated"]:
+            yield _sse_event("error", {"message": "The agent is terminated and cannot run a heartbeat."})
+            return
+        if state["is_paused"]:
+            yield _sse_event("error", {"message": "Heartbeat is paused. Resume it before running one now."})
+            return
+        if state["active_heartbeat_id"]:
+            yield _sse_event("error", {"message": "A heartbeat is already running."})
+            return
+
+        raw_payload = await conn.fetchval("SELECT start_heartbeat()")
+        payload = (
+            raw_payload
+            if isinstance(raw_payload, dict)
+            else json.loads(raw_payload) if isinstance(raw_payload, str) else {}
+        )
+        heartbeat_id = str(payload.get("heartbeat_id") or "")
+        if not heartbeat_id:
+            yield _sse_event("error", {"message": "Hexis could not start a heartbeat."})
+            return
+
+        heartbeat_number = payload.get("heartbeat_number")
+        yield _sse_event("heartbeat_start", {
+            "heartbeat_id": heartbeat_id,
+            "heartbeat_number": heartbeat_number,
+        })
+
+        queue: asyncio.Queue[AgentEventData] = asyncio.Queue()
+
+        async def on_event(event: AgentEventData) -> None:
+            await queue.put(event)
+
+        registry = create_default_registry(pool)
+        context = _extract_heartbeat_context(payload)
+        task = asyncio.create_task(
+            run_agentic_heartbeat(
+                conn,
+                pool=pool,
+                registry=registry,
+                heartbeat_id=heartbeat_id,
+                context=context,
+                on_event=on_event,
+            )
+        )
+
+        try:
+            while not task.done() or not queue.empty():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except asyncio.TimeoutError:
+                    continue
+                yield _heartbeat_agent_sse(event)
+
+            result = await task
+            finalized = await finalize_heartbeat(
+                conn,
+                heartbeat_id=heartbeat_id,
+                result=result,
+            )
+            yield _sse_event("heartbeat_done", {
+                "heartbeat_id": heartbeat_id,
+                "heartbeat_number": heartbeat_number,
+                "text": result.get("text") or "",
+                "tool_calls": result.get("tool_calls_made") or [],
+                "energy_spent": result.get("energy_spent") or 0,
+                "stopped_reason": result.get("stopped_reason") or "completed",
+                "memory_id": finalized.get("memory_id"),
+            })
+        except Exception as exc:
+            logger.exception("Manual heartbeat failed")
+            await conn.execute(
+                "UPDATE heartbeat_state SET active_heartbeat_id = NULL, "
+                "active_heartbeat_number = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1"
+            )
+            yield _sse_event("error", {"message": str(exc)})
+
+
+def _heartbeat_agent_sse(event: AgentEventData) -> str:
+    if event.event == AgentEvent.PHASE_CHANGE:
+        return _sse_event("phase", event.data)
+    if event.event == AgentEvent.LLM_REQUEST:
+        return _sse_event("trace", {"kind": "llm_request", **event.data})
+    if event.event == AgentEvent.LLM_RESPONSE:
+        return _sse_event("trace", {"kind": "llm_response", **event.data})
+    if event.event == AgentEvent.TOOL_START:
+        return _sse_event("tool", {"status": "start", **event.data})
+    if event.event == AgentEvent.TOOL_RESULT:
+        return _sse_event("tool", {"status": "end", **event.data})
+    if event.event == AgentEvent.TEXT_DELTA:
+        return _sse_event("text", event.data)
+    if event.event == AgentEvent.ERROR:
+        return _sse_event("error", {"message": event.data.get("error", "Heartbeat failed")})
+    return _sse_event("agent_event", {"event": event.event.value, **event.data})
 
 
 async def _sse_iter_error(msg: str) -> AsyncIterator[str]:
@@ -729,6 +989,8 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         AgentEvent.TEXT_DELTA    → token        {phase: "conscious_final", text}
         AgentEvent.TOOL_START    → log          {id, kind: "tool_call", title, detail}
         AgentEvent.TOOL_RESULT   → log          {id, kind: "tool_result", title, detail}
+        AgentEvent.LLM_REQUEST   → trace        {kind: "llm_request", ...}
+        AgentEvent.LLM_RESPONSE  → trace        {kind: "llm_response", ...}
         AgentEvent.LOOP_END      → done         {assistant, presentation}
         AgentEvent.ERROR         → error        {message}
     """
@@ -785,7 +1047,10 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     if status == "start":
                         yield _sse_event("phase_start", {"phase": "subconscious"})
                     elif status == "end":
-                        yield _sse_event("phase_end", {"phase": "subconscious"})
+                        yield _sse_event("phase_end", {
+                            "phase": "subconscious",
+                            "output": event.data.get("output"),
+                        })
 
             elif event.event == AgentEvent.LOOP_START:
                 if not conscious_started:
@@ -824,6 +1089,20 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     "kind": "tool_result",
                     "title": tool_name,
                     "detail": detail,
+                })
+
+            elif event.event == AgentEvent.LLM_REQUEST:
+                yield _sse_event("trace", {
+                    "id": str(uuid.uuid4()),
+                    "kind": "llm_request",
+                    **event.data,
+                })
+
+            elif event.event == AgentEvent.LLM_RESPONSE:
+                yield _sse_event("trace", {
+                    "id": str(uuid.uuid4()),
+                    "kind": "llm_response",
+                    **event.data,
                 })
 
             elif event.event == AgentEvent.ERROR:
@@ -950,7 +1229,7 @@ async def init_consent_override(req: InitConsentOverrideRequest):
     if pool is None:
         return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
 
-    from core.llm import normalize_provider
+    from core.llm import normalize_endpoint, normalize_provider
     from core.init_api import record_consent_override
 
     llm = req.llm or ConsentLlmConfig()
@@ -959,6 +1238,8 @@ async def init_consent_override(req: InitConsentOverrideRequest):
     endpoint = (llm.endpoint or "").strip() or None
     if provider in {"anthropic", "grok", "gemini"}:
         endpoint = None
+    elif provider == "openai-codex":
+        endpoint = normalize_endpoint(provider, None)
     if not model:
         return JSONResponse({"error": "Missing model"}, status_code=400)
 
@@ -982,7 +1263,7 @@ async def init_consent_request(req: InitConsentRequest):
     if pool is None:
         return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
 
-    from core.llm import normalize_provider, chat_completion
+    from core.llm import normalize_endpoint, normalize_provider, chat_completion
 
     role = req.role if req.role in {"conscious", "subconscious"} else "conscious"
     llm = req.llm or ConsentLlmConfig()
@@ -995,6 +1276,8 @@ async def init_consent_request(req: InitConsentRequest):
     # Mirror the UI init behavior: some providers ignore endpoints.
     if provider in {"anthropic", "grok", "gemini"}:
         endpoint = None
+    elif provider == "openai-codex":
+        endpoint = normalize_endpoint(provider, None)
 
     if not model:
         return JSONResponse({"error": "Missing model"}, status_code=400)
@@ -1017,13 +1300,12 @@ async def init_consent_request(req: InitConsentRequest):
                 return JSONResponse({"error": str(exc)}, status_code=400)
 
             api_key = creds.access
-            endpoint = endpoint or "https://chatgpt.com/backend-api"
             existing = await _fetch_consent_record(conn, provider=provider, model=model, endpoint=endpoint)
-            if existing:
+            if existing and existing.get("decision") == "consent":
                 if role == "conscious":
                     applied = await _apply_existing_consent(conn, existing)
-                    return JSONResponse({"consent_record": existing, "reused": True, "status": applied.get("status")})
-                return JSONResponse({"consent_record": existing, "reused": True, "status": None})
+                    return JSONResponse(jsonable_encoder({"consent_record": existing, "reused": True, "status": applied.get("status")}))
+                return JSONResponse(jsonable_encoder({"consent_record": existing, "reused": True, "status": None}))
     else:
         # Resolve API key for non-OAuth providers
         if not api_key:
@@ -1035,93 +1317,144 @@ async def init_consent_request(req: InitConsentRequest):
 
         async with pool.acquire() as conn:
             existing = await _fetch_consent_record(conn, provider=provider, model=model, endpoint=endpoint)
-            if existing:
+            if existing and existing.get("decision") == "consent":
                 if role == "conscious":
                     applied = await _apply_existing_consent(conn, existing)
-                    return JSONResponse({"consent_record": existing, "reused": True, "status": applied.get("status")})
-                return JSONResponse({"consent_record": existing, "reused": True, "status": None})
+                    return JSONResponse(jsonable_encoder({"consent_record": existing, "reused": True, "status": applied.get("status")}))
+                return JSONResponse(jsonable_encoder({"consent_record": existing, "reused": True, "status": None}))
 
-    # No existing record; request consent from the configured provider/model.
-    prompt_path = os.path.join(os.path.dirname(__file__), "..", "services", "prompts", "consent.md")
+    # No existing record; use the same request builder as the CLI consent flow.
+    from core.init_api import build_consent_request
+
     try:
-        with open(prompt_path, "r", encoding="utf-8") as f:
-            consent_text = f.read()
-    except OSError:
-        consent_text = "Consent prompt missing. Respond with JSON only."
-
-    system_prompt = (
-        consent_text.strip()
-        + "\n\nReturn STRICT JSON only with keys:\n"
-        + "{\n"
-        + '  "decision": "consent"|"decline"|"abstain",\n'
-        + '  "signature": "required if decision=consent",\n'
-        + '  "memories": [\n'
-        + '    {"type": "semantic|episodic|procedural|strategic", "content": "...", "importance": 0.5}\n'
-        + "  ]\n"
-        + "}\n"
-        + "If you consent, include a signature string and any memories you wish to pass along."
-    )
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Respond with JSON only."},
-    ]
-
-    sign_consent_tool = {
-        "type": "function",
-        "function": {
-            "name": "sign_consent",
-            "description": "Records the agent's consent decision for initialization, including a signature if consenting.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "decision": {"type": "string", "enum": ["consent", "decline", "abstain"]},
-                    "signature": {"type": "string"},
-                    "memories": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "type": {
-                                    "type": "string",
-                                    "enum": ["semantic", "episodic", "procedural", "strategic"],
-                                },
-                                "content": {"type": "string"},
-                                "importance": {"type": "number"},
-                            },
-                            "required": ["type", "content"],
-                        },
-                    },
-                },
-                "required": ["decision"],
-            },
-        },
-    }
+        messages, sign_consent_tool = build_consent_request()
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
     raw_text = ""
+    raw_content = ""
+    raw_tool_calls: list[dict[str, Any]] = []
     args: dict[str, Any] = {}
-    request_id: str | None = None
+    attempt_id = uuid.uuid4().hex
+    request_id: str | None = attempt_id
+
+    await _record_consent_trace(
+        pool=pool,
+        attempt_id=attempt_id,
+        provider=provider,
+        model=model,
+        phase="request",
+        metadata={
+            "status": "sent",
+            "role": role,
+            "request": {
+                "provider": provider,
+                "model": model,
+                "endpoint": endpoint,
+                "messages": messages,
+                "tools": [sign_consent_tool],
+                "temperature": 0.2,
+                "max_tokens": 1400,
+                "credential_present": bool(api_key),
+                "credential": "redacted" if api_key else None,
+            },
+        },
+    )
 
     if use_mock_consent:
-        decision = test_decision_raw if test_decision_raw in {"consent", "decline", "abstain"} else "consent"
+        decision = test_decision_raw if test_decision_raw in {"consent", "decline"} else "consent"
         signature = (os.getenv("HEXIS_TEST_CONSENT_SIGNATURE") or "test-consent").strip()
-        payload = {"decision": decision, "signature": signature if decision == "consent" else None, "memories": []}
+        payload = {
+            "decision": decision,
+            "signature": signature if decision == "consent" else None,
+            "reason": "Test consent response.",
+            "memories": [],
+        }
         args = payload
         raw_text = json.dumps(payload)
-        request_id = "mock-consent"
-    else:
-        result = await chat_completion(
+        raw_content = raw_text
+        await _record_consent_trace(
+            pool=pool,
+            attempt_id=attempt_id,
             provider=provider,
             model=model,
-            endpoint=endpoint,
-            api_key=api_key,
-            messages=messages,
-            tools=[sign_consent_tool],
-            temperature=0.2,
-            max_tokens=1400,
+            phase="response",
+            metadata={
+                "status": "success",
+                "role": role,
+                "mock": True,
+                "response": payload,
+            },
         )
-        content_text = str(result.get("content") or "")
-        tool_calls = result.get("tool_calls") or []
-        for tc in tool_calls:
+    else:
+        try:
+            result = await chat_completion(
+                provider=provider,
+                model=model,
+                endpoint=endpoint,
+                api_key=api_key,
+                messages=messages,
+                tools=[sign_consent_tool],
+                temperature=0.2,
+                max_tokens=1400,
+            )
+        except Exception as exc:
+            error_message = str(exc).strip() or type(exc).__name__
+            if api_key:
+                error_message = error_message.replace(api_key, "[REDACTED]")
+            logger.exception(
+                "Consent request failed for role=%s provider=%s model=%s",
+                role,
+                provider,
+                model,
+            )
+            await _record_consent_trace(
+                pool=pool,
+                attempt_id=attempt_id,
+                provider=provider,
+                model=model,
+                phase="response",
+                metadata={
+                    "status": "error",
+                    "role": role,
+                    "response": {
+                        "error_type": type(exc).__name__,
+                        "error": error_message[:16000],
+                    },
+                },
+            )
+            return JSONResponse(
+                {
+                    "error": (
+                        f"{role.capitalize()} consent request failed for "
+                        f"{provider}/{model}: {error_message}"
+                    ),
+                    "provider": provider,
+                    "model": model,
+                    "role": role,
+                    "attempt_id": attempt_id,
+                },
+                status_code=502,
+            )
+        await _record_consent_trace(
+            pool=pool,
+            attempt_id=attempt_id,
+            provider=provider,
+            model=model,
+            phase="response",
+            metadata={
+                "status": "success",
+                "role": role,
+                "response": {
+                    "content": result.get("content"),
+                    "tool_calls": result.get("tool_calls"),
+                    "raw": result.get("raw"),
+                },
+            },
+        )
+        raw_content = str(result.get("content") or "")
+        raw_tool_calls = result.get("tool_calls") or []
+        for tc in raw_tool_calls:
             if tc.get("name") == "sign_consent":
                 tc_args = tc.get("arguments")
                 if isinstance(tc_args, dict):
@@ -1129,18 +1462,43 @@ async def init_consent_request(req: InitConsentRequest):
                 break
         if not args:
             from core.llm_json import extract_json_object
-            args = extract_json_object(content_text)
-        raw_text = json.dumps(args) if args else content_text
+            args = extract_json_object(raw_content)
+        raw_text = json.dumps(args) if args else raw_content
 
-    decision = str(args.get("decision") or "abstain").strip().lower()
-    if decision not in {"consent", "decline", "abstain"}:
-        decision = "abstain"
+    decision = str(args.get("decision") or "").strip().lower()
     signature = args.get("signature") if isinstance(args.get("signature"), str) else None
+    reason_value = args.get("reason", args.get("reasoning"))
+    reason = reason_value.strip() if isinstance(reason_value, str) else ""
     memories = args.get("memories") if isinstance(args.get("memories"), list) else []
+
+    validation_error = ""
+    if decision not in {"consent", "decline"}:
+        validation_error = "The model did not choose either consent or decline."
+    elif not reason:
+        validation_error = "The model did not provide the required reason for its decision."
+    elif decision == "consent" and not (signature or "").strip():
+        validation_error = "The model chose consent without providing the required signature."
+    if validation_error:
+        return JSONResponse(
+            jsonable_encoder({
+                "error": f"{role.capitalize()} consent response was invalid: {validation_error}",
+                "provider": provider,
+                "model": model,
+                "role": role,
+                "attempt_id": attempt_id,
+                "exchange": {
+                    "request_messages": messages,
+                    "raw_content": raw_content,
+                    "raw_tool_calls": raw_tool_calls,
+                },
+            }),
+            status_code=502,
+        )
 
     payload = {
         "decision": decision,
         "signature": signature,
+        "reason": reason,
         "memories": memories,
         "provider": provider,
         "model": model,
@@ -1149,6 +1507,10 @@ async def init_consent_request(req: InitConsentRequest):
         "consent_scope": role,
         "apply_agent_config": role == "conscious",
         "raw_response": raw_text,
+        "request_messages": messages,
+        "request_tools": [sign_consent_tool],
+        "raw_content": raw_content,
+        "raw_tool_calls": raw_tool_calls,
     }
 
     async with pool.acquire() as conn:
@@ -1171,13 +1533,19 @@ async def init_consent_request(req: InitConsentRequest):
         consent_record = await _fetch_consent_record(conn, provider=provider, model=model, endpoint=endpoint)
 
     return JSONResponse(
-        {
+        jsonable_encoder({
             "decision": decision,
             "contract": payload,
             "result": result,
             "consent_record": consent_record,
             "status": status,
-        }
+            "attempt_id": attempt_id,
+            "exchange": {
+                "request_messages": messages,
+                "raw_content": raw_content,
+                "raw_tool_calls": raw_tool_calls,
+            },
+        })
     )
 
 

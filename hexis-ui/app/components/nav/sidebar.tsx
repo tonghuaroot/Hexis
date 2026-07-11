@@ -1,43 +1,38 @@
 "use client";
 
+import {
+  Activity,
+  Brain,
+  LayoutDashboard,
+  MessageCircle,
+  Settings,
+  Target,
+  X,
+} from "lucide-react";
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { useGatewayEvents } from "../../hooks/use-gateway-events";
 import { ProgressBar } from "../ui/progress-bar";
-import { Badge } from "../ui/badge";
 
 type StatusData = {
   agent_name?: string;
+  portrait_url?: string | null;
   energy?: number;
   max_energy?: number;
   mood?: string;
-  valence?: number;
   heartbeat_active?: boolean;
   heartbeat_paused?: boolean;
-  configured?: boolean;
 };
 
 const navItems = [
-  { href: "/", label: "Dashboard", icon: "\u25a3" },
-  { href: "/chat", label: "Chat", icon: "\u25c6" },
-  { href: "/memories", label: "Memories", icon: "\u25c9" },
-  { href: "/goals", label: "Goals", icon: "\u25b2" },
-  { href: "/settings", label: "Settings", icon: "\u2699" },
+  { href: "/", label: "Overview", icon: LayoutDashboard },
+  { href: "/chat", label: "Conversation", icon: MessageCircle },
+  { href: "/goals", label: "Goals", icon: Target },
+  { href: "/memories", label: "Memory", icon: Brain },
+  { href: "/settings", label: "Settings", icon: Settings },
 ];
-
-const moodColors: Record<string, string> = {
-  enthusiastic: "accent",
-  content: "teal",
-  curious: "teal",
-  calm: "teal",
-  focused: "teal",
-  neutral: "muted",
-  concerned: "warning",
-  subdued: "warning",
-  distressed: "error",
-  withdrawn: "error",
-};
 
 export function Sidebar({
   open = false,
@@ -45,106 +40,112 @@ export function Sidebar({
 }: {
   open?: boolean;
   onClose?: () => void;
-} = {}) {
+}) {
   const pathname = usePathname();
   const [status, setStatus] = useState<StatusData>({});
 
   const loadStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/status", { cache: "no-store" });
-      if (res.ok) {
-        const data = await res.json();
-        setStatus(data);
-      }
-    } catch {}
+      const response = await fetch("/api/status", { cache: "no-store" });
+      if (response.ok) setStatus(await response.json());
+    } catch {
+      // The active page owns visible connection errors.
+    }
   }, []);
 
-  // Load on mount
-  useEffect(() => { loadStatus(); }, [loadStatus]);
-
-  // Refresh when gateway events arrive (replaces 30s polling)
+  useEffect(() => {
+    const timer = window.setTimeout(loadStatus, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadStatus]);
   useGatewayEvents(loadStatus);
+
+  const heartbeatLabel = status.heartbeat_paused
+    ? "Paused"
+    : status.heartbeat_active
+      ? "Running"
+      : "Idle";
 
   return (
     <aside
-      className={`fixed left-0 top-0 z-40 flex h-screen w-56 flex-col border-r border-[var(--outline)] bg-[var(--surface)] px-4 py-6 transition-transform lg:translate-x-0 ${
+      className={`fixed inset-y-0 left-0 z-40 flex w-60 flex-col border-r border-[var(--outline)] bg-white transition-transform lg:translate-x-0 ${
         open ? "translate-x-0" : "-translate-x-full"
       }`}
     >
-      {/* Logo / Agent name */}
-      <div className="mb-8">
-        <p className="text-xs uppercase tracking-[0.3em] text-[var(--teal)]">
-          Hexis
-        </p>
-        <p className="mt-1 font-display text-lg text-[var(--foreground)]">
-          {status.agent_name || "Agent"}
-        </p>
+      <div className="flex h-16 items-center gap-3 border-b border-[var(--outline)] px-4">
+        {status.portrait_url ? (
+          <Image
+            src={status.portrait_url}
+            alt=""
+            width={40}
+            height={40}
+            unoptimized
+            className="h-10 w-10 rounded-md object-cover"
+          />
+        ) : (
+          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-[var(--foreground)] font-display text-lg text-white">
+            {(status.agent_name || "H").slice(0, 1).toUpperCase()}
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] font-semibold uppercase text-[var(--teal)]">Hexis</p>
+          <p className="truncate text-sm font-semibold text-[var(--foreground)]">
+            {status.agent_name || "Agent"}
+          </p>
+        </div>
+        <button
+          type="button"
+          aria-label="Close navigation menu"
+          onClick={onClose}
+          className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--surface-strong)] lg:hidden"
+        >
+          <X size={18} />
+        </button>
       </div>
 
-      {/* Navigation */}
-      <nav className="flex-1 space-y-1">
+      <nav className="flex-1 space-y-1 px-3 py-4" aria-label="Primary navigation">
         {navItems.map((item) => {
-          const isActive =
-            item.href === "/"
-              ? pathname === "/"
-              : pathname.startsWith(item.href);
+          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+          const Icon = item.icon;
           return (
             <Link
               key={item.href}
               href={item.href}
               onClick={onClose}
-              className={`flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm transition ${
-                isActive
-                  ? "bg-[var(--surface-strong)] font-medium text-[var(--foreground)]"
+              className={`flex h-10 items-center gap-3 rounded-md px-3 text-sm transition ${
+                active
+                  ? "bg-[var(--surface-strong)] font-semibold text-[var(--foreground)]"
                   : "text-[var(--ink-soft)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)]"
               }`}
             >
-              <span className="text-base" aria-hidden="true">{item.icon}</span>
+              <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
               {item.label}
             </Link>
           );
         })}
       </nav>
 
-      {/* Status footer */}
-      <div className="space-y-4 border-t border-[var(--outline)] pt-4">
-        {/* Energy bar */}
-        {status.energy !== undefined && (
+      <div className="space-y-4 border-t border-[var(--outline)] px-4 py-4">
+        <div className="flex items-center justify-between text-xs">
+          <span className="flex items-center gap-2 text-[var(--ink-soft)]">
+            <Activity size={15} aria-hidden="true" />
+            Heartbeat
+          </span>
+          <span className="font-medium text-[var(--foreground)]">{heartbeatLabel}</span>
+        </div>
+        {status.energy !== undefined ? (
           <ProgressBar
             value={status.energy}
             max={status.max_energy || 20}
             label="Energy"
+            color="teal"
           />
-        )}
-
-        {/* Mood */}
-        {status.mood && (
+        ) : null}
+        {status.mood ? (
           <div className="flex items-center justify-between text-xs">
             <span className="text-[var(--ink-soft)]">Mood</span>
-            <Badge variant={moodColors[status.mood] as any || "muted"}>
-              {status.mood}
-            </Badge>
+            <span className="capitalize text-[var(--foreground)]">{status.mood}</span>
           </div>
-        )}
-
-        {/* Heartbeat indicator */}
-        <div className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
-          <span
-            aria-hidden="true"
-            className={`inline-block h-2 w-2 rounded-full ${
-              status.heartbeat_paused
-                ? "bg-amber-400"
-                : status.heartbeat_active
-                  ? "bg-green-400 animate-pulse"
-                  : "bg-[var(--outline)]"
-            }`}
-          />
-          {status.heartbeat_paused
-            ? "Heartbeat paused"
-            : status.heartbeat_active
-              ? "Heartbeat active"
-              : "Heartbeat idle"}
-        </div>
+        ) : null}
       </div>
     </aside>
   );

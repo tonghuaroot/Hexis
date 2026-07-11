@@ -1,5 +1,13 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { summarizeUsageByModel, type UsageSummaryRow } from "@/lib/usage-summary";
+
+type DailyUsageRow = {
+  day?: unknown;
+  total_cost?: unknown;
+  total_tokens?: unknown;
+  call_count?: unknown;
+};
 
 export async function GET(request: Request) {
   try {
@@ -8,39 +16,22 @@ export async function GET(request: Request) {
     const source = searchParams.get("source") || null;
 
     const [summaryRows, dailyRows] = await Promise.all([
-      prisma.$queryRawUnsafe(
+      prisma.$queryRawUnsafe<UsageSummaryRow[]>(
         "SELECT * FROM usage_summary($1::interval, $2)",
         period,
         source,
-      ) as Promise<any[]>,
-      prisma.$queryRawUnsafe(
+      ),
+      prisma.$queryRawUnsafe<DailyUsageRow[]>(
         "SELECT * FROM usage_daily($1::interval, $2)",
         period,
         source,
-      ) as Promise<any[]>,
+      ),
     ]);
 
-    // Aggregate totals
-    let totalCost = 0;
-    let totalTokens = 0;
-    let totalCalls = 0;
-
-    const byModel = (summaryRows || []).map((r: any) => {
-      const cost = toNum(r.total_cost) ?? 0;
-      const tokens = toNum(r.total_tokens) ?? 0;
-      const calls = toNum(r.call_count) ?? 0;
-      totalCost += cost;
-      totalTokens += tokens;
-      totalCalls += calls;
-      return {
-        provider: r.provider,
-        model: r.model,
-        operation: r.operation,
-        calls,
-        tokens,
-        cost_usd: cost,
-      };
-    });
+    // usage_summary is operation-grained; the dashboard presents model totals.
+    const { byModel, totalCost, totalTokens, totalCalls } = summarizeUsageByModel(
+      summaryRows || [],
+    );
 
     // Aggregate daily by date (sum across models)
     const dailyMap = new Map<string, { day: string; cost: number; tokens: number; calls: number }>();
@@ -70,10 +61,10 @@ export async function GET(request: Request) {
       by_model: byModel,
       daily,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Usage API error:", error);
     return NextResponse.json(
-      { error: error?.message || "Failed to fetch usage data" },
+      { error: error instanceof Error ? error.message : "Failed to fetch usage data" },
       { status: 500 },
     );
   }

@@ -3,6 +3,12 @@ import { normalizeJsonValue } from "@/lib/db";
 
 export const runtime = "nodejs";
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 export async function GET() {
   const statusRows =
     await prisma.$queryRaw<{ status: unknown }[]>`SELECT get_init_status() as status`;
@@ -39,8 +45,8 @@ export async function GET() {
     `;
   const toolsRows =
     await prisma.$queryRaw<{ value: unknown }[]>`SELECT get_config('agent.tools') as value`;
-  const llmConfig = normalizeJsonValue(llmRows[0]?.llm) as any;
-  const llmSubConfig = normalizeJsonValue(llmSubRows[0]?.llm) as any;
+  const llmConfig = asRecord(normalizeJsonValue(llmRows[0]?.llm));
+  const llmSubConfig = asRecord(normalizeJsonValue(llmSubRows[0]?.llm));
   const consentRecords = {
     conscious: await fetchConsentRecord(llmConfig),
     subconscious: await fetchConsentRecord(llmSubConfig),
@@ -74,7 +80,7 @@ export async function GET() {
   });
 }
 
-async function fetchConsentRecord(llmConfig: any) {
+async function fetchConsentRecord(llmConfig: Record<string, unknown> | null) {
   const provider = typeof llmConfig?.provider === "string" ? llmConfig.provider : null;
   const model = typeof llmConfig?.model === "string" ? llmConfig.model : null;
   const endpoint = typeof llmConfig?.endpoint === "string" ? llmConfig.endpoint : null;
@@ -89,13 +95,68 @@ async function fetchConsentRecord(llmConfig: any) {
       model: string | null;
       endpoint: string | null;
       decided_at: string;
+      response: unknown;
     }[]
-  >`SELECT decision, signature, provider, model, endpoint, decided_at
+  >`SELECT decision, signature, provider, model, endpoint, decided_at, response
     FROM consent_log
     WHERE (${provider}::text IS NULL OR provider = ${provider}::text)
       AND (${model}::text IS NULL OR model = ${model}::text)
       AND (${endpoint}::text IS NULL OR endpoint = ${endpoint}::text)
     ORDER BY decided_at DESC
     LIMIT 1`;
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) return null;
+
+  const stored = normalizeJsonValue(row.response) as Record<string, unknown> | null;
+  let requestMessages = Array.isArray(stored?.request_messages)
+    ? stored.request_messages
+    : [];
+  let rawContent = typeof stored?.raw_content === "string" ? stored.raw_content : "";
+  let rawToolCalls = Array.isArray(stored?.raw_tool_calls) ? stored.raw_tool_calls : [];
+
+  // Older consent rows predate inline exchange storage. Their paired usage
+  // trace is still authoritative and lets a refreshed UI show the same detail.
+  if (
+    (row.decision === "decline" || row.decision === "abstain") &&
+    requestMessages.length === 0 &&
+    typeof stored?.request_id === "string"
+  ) {
+    const sessionKey = `init-consent:${stored.request_id}`;
+    const traces = await prisma.$queryRaw<{ operation: string; metadata: unknown }[]>`
+      SELECT operation, metadata
+      FROM api_usage
+      WHERE session_key = ${sessionKey}
+        AND operation IN ('consent_request', 'consent_response')
+      ORDER BY id
+    `;
+    for (const trace of traces) {
+      const metadata = asRecord(normalizeJsonValue(trace.metadata));
+      const request = asRecord(metadata?.request);
+      if (trace.operation === "consent_request" && Array.isArray(request?.messages)) {
+        requestMessages = request.messages;
+      }
+      if (trace.operation === "consent_response") {
+        const response = asRecord(metadata?.response);
+        if (typeof response?.content === "string") rawContent = response.content;
+        if (Array.isArray(response?.tool_calls)) rawToolCalls = response.tool_calls;
+      }
+    }
+  }
+
+  const hasExchange = requestMessages.length > 0 || rawContent || rawToolCalls.length > 0;
+  return {
+    decision: row.decision,
+    signature: row.signature,
+    provider: row.provider,
+    model: row.model,
+    endpoint: row.endpoint,
+    decided_at: row.decided_at,
+    exchange: hasExchange
+      ? {
+          request_messages: requestMessages,
+          raw_content: rawContent,
+          raw_tool_calls: rawToolCalls,
+        }
+      : null,
+  };
 }

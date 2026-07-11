@@ -1103,7 +1103,7 @@ class ConsentScreen(Screen):
                 id="consent-status",
             )
         with VerticalScroll(classes="consent-result", id="consent-result"):
-            # markup=False → the agent's reasoning/signature (model output, may
+            # markup=False → the agent's reason/signature (model output, may
             # contain brackets) is written as Rich Text, never re-parsed.
             yield RichLog(id="consent-log", wrap=True, markup=False)
         with Horizontal(classes="button-bar"):
@@ -1178,7 +1178,7 @@ class ConsentScreen(Screen):
         self.query_one("#consent-result").display = True
         log = self.query_one("#consent-log", RichLog)
 
-        decision = result.get("decision", "abstain")
+        decision = result.get("decision", "")
         state = _state(self)
 
         # Extract tool call arguments
@@ -1194,18 +1194,18 @@ class ConsentScreen(Screen):
                         tc_args = {}
                 break
 
-        reasoning = tc_args.get("reasoning", "")
+        reason = tc_args.get("reason", tc_args.get("reasoning", ""))
         signature = tc_args.get("signature", "")
         memories = tc_args.get("memories", [])
 
         state.consent_decision = decision
-        state.consent_reasoning = reasoning
+        state.consent_reasoning = reason
         state.consent_signature = signature
         state.consent_memories = memories
 
-        if reasoning:
-            log.write(_teal("Reasoning:"))
-            log.write(_plain(str(reasoning)))
+        if reason:
+            log.write(_teal("Reason:"))
+            log.write(_plain(str(reason)))
             log.write("")
 
         if signature:
@@ -1255,14 +1255,11 @@ class ConsentScreen(Screen):
             exit_btn.disabled = False
             open_chat.focus()
         else:
-            # Refusal (decline or abstain): show the FULL exchange so the user
+            # A decline shows the FULL exchange so the user
             # can see whether the prompt was worded poorly, and let them change
             # the model and retry instead of exiting.
-            if decision == "decline":
-                log.write(Text("Consent declined \u2014 the agent chose not to initialize.",
-                               style=Style(color=COLORS["danger"], bold=True)))
-            else:
-                log.write(Text("Consent abstained.", style=Style(color=COLORS["warn"], bold=True)))
+            log.write(Text("Consent declined \u2014 the agent chose not to initialize.",
+                           style=Style(color=COLORS["danger"], bold=True)))
             log.write("")
             log.write(_plain(
                 "Full exchange below \u2014 refine services/prompts/consent.md or try "

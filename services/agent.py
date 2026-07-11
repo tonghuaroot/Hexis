@@ -58,6 +58,10 @@ class SubconsciousOutput:
     instincts: list[dict[str, Any]] = field(default_factory=list)
     emotional_state: dict[str, Any] = field(default_factory=dict)
     subconscious_response: str = ""
+    provider: str = ""
+    model: str = ""
+    request_messages: list[dict[str, Any]] = field(default_factory=list)
+    raw_response: Any = None
 
     # Observational patterns (passed through for completeness)
     narrative_observations: list[dict[str, Any]] = field(default_factory=list)
@@ -132,6 +136,26 @@ def format_subconscious_signals(output: SubconsciousOutput) -> str:
     if len(parts) <= 1:
         return ""
     return "\n".join(parts)
+
+
+def _subconscious_event_payload(output: SubconsciousOutput) -> dict[str, Any]:
+    raw = output.raw_response
+    if not isinstance(raw, (str, int, float, bool, dict, list, type(None))):
+        model_dump = getattr(raw, "model_dump", None)
+        raw = model_dump() if callable(model_dump) else repr(raw)
+    return {
+        "provider": output.provider,
+        "model": output.model,
+        "request": {"messages": output.request_messages},
+        "response": raw,
+        "signals": {
+            "salient_memories": output.salient_memories,
+            "memory_expansions": output.memory_expansions,
+            "instincts": output.instincts,
+            "emotional_state": output.emotional_state,
+            "subconscious_response": output.subconscious_response,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -221,13 +245,14 @@ async def run_subconscious_appraisal(
         + json.dumps({"input": chr(10).join(context_parts)})[:_SUBCONSCIOUS_TOTAL_CONTEXT_CHARS]
     )
 
+    request_messages = [
+        {"role": "system", "content": load_subconscious_prompt().strip()},
+        {"role": "user", "content": user_prompt},
+    ]
     try:
-        doc, _raw = await chat_json(
+        doc, raw = await chat_json(
             llm_config=llm_config,
-            messages=[
-                {"role": "system", "content": load_subconscious_prompt().strip()},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=request_messages,
             max_tokens=1800,
             response_format={"type": "json_object"},
             fallback={},
@@ -239,7 +264,12 @@ async def run_subconscious_appraisal(
     if not isinstance(doc, dict):
         return SubconsciousOutput()
 
-    return _parse_subconscious_output(doc)
+    output = _parse_subconscious_output(doc)
+    output.provider = str(llm_config.get("provider") or "")
+    output.model = str(llm_config.get("model") or "")
+    output.request_messages = request_messages
+    output.raw_response = raw
+    return output
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +442,11 @@ async def run_agent(
                 if on_event:
                     await on_event(AgentEventData(
                         event=AgentEvent.PHASE_CHANGE,
-                        data={"phase": "subconscious", "status": "end"},
+                        data={
+                            "phase": "subconscious",
+                            "status": "end",
+                            "output": _subconscious_event_payload(subconscious_output),
+                        },
                     ))
         except Exception as exc:
             logger.warning("Subconscious pre-phase failed: %s", exc)
@@ -624,7 +658,11 @@ async def stream_agent(
                 )
                 yield AgentEventData(
                     event=AgentEvent.PHASE_CHANGE,
-                    data={"phase": "subconscious", "status": "end"},
+                    data={
+                        "phase": "subconscious",
+                        "status": "end",
+                        "output": _subconscious_event_payload(subconscious_output),
+                    },
                 )
         except Exception as exc:
             logger.warning("Subconscious pre-phase failed: %s", exc)

@@ -1,16 +1,16 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f6f1e8;
-  --foreground: #1c1915;
-  --surface: #fbf7f0;
-  --surface-strong: #f1e7da;
-  --ink-soft: #4e463d;
-  --accent: #d8774f;
-  --accent-strong: #b45835;
-  --teal: #3c6f64;
-  --outline: rgba(28, 25, 21, 0.12);
-  --shadow: rgba(28, 25, 21, 0.12);
+  --background: #f3f5f2;
+  --foreground: #18211e;
+  --surface: #ffffff;
+  --surface-strong: #e9eeea;
+  --ink-soft: #5d6863;
+  --accent: #d65d3b;
+  --accent-strong: #a84026;
+  --teal: #176c63;
+  --outline: #d8ded9;
+  --shadow: rgba(24, 33, 30, 0.08);
 }
 
 @theme inline {
@@ -23,7 +23,7 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-body), "Georgia", serif;
+  font-family: var(--font-body), system-ui, sans-serif;
   min-height: 100vh;
 }
 
@@ -32,50 +32,8 @@ body {
 }
 
 .app-shell {
-  background: radial-gradient(circle at top left, rgba(216, 119, 79, 0.15), transparent 45%),
-    radial-gradient(circle at 20% 80%, rgba(60, 111, 100, 0.12), transparent 40%),
-    linear-gradient(135deg, #f6f1e8 0%, #efe4d7 45%, #f7f1e6 100%);
-  position: relative;
-  overflow: hidden;
-}
-
-.app-shell::before,
-.app-shell::after {
-  content: "";
-  position: absolute;
-  width: 420px;
-  height: 420px;
-  border-radius: 999px;
-  filter: blur(0px);
-  opacity: 0.7;
-  pointer-events: none;
-  z-index: 0;
-}
-
-.app-shell::before {
-  top: -120px;
-  right: -140px;
-  background: radial-gradient(circle, rgba(216, 119, 79, 0.25), transparent 60%);
-  animation: drift 18s ease-in-out infinite;
-}
-
-.app-shell::after {
-  bottom: -160px;
-  left: -140px;
-  background: radial-gradient(circle, rgba(60, 111, 100, 0.2), transparent 65%);
-  animation: drift 22s ease-in-out infinite reverse;
-}
-
-@keyframes drift {
-  0% {
-    transform: translateY(0px);
-  }
-  50% {
-    transform: translateY(18px);
-  }
-  100% {
-    transform: translateY(0px);
-  }
+  background: var(--background);
+  min-height: 100vh;
 }
 
 @keyframes fadeUp {
@@ -96,7 +54,7 @@ body {
 .card-surface {
   background: var(--surface);
   border: 1px solid var(--outline);
-  box-shadow: 0 20px 40px -30px var(--shadow);
+  box-shadow: 0 1px 2px var(--shadow);
 }
 
 @keyframes pulse-slow {

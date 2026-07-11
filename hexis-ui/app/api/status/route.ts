@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { normalizeJsonValue } from "@/lib/db";
+import { access, readFile, readdir } from "fs/promises";
+import os from "os";
+import path from "path";
+
+type DbRow = Record<string, unknown>;
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Failed to fetch status";
+}
 
 export async function GET() {
   try {
@@ -17,77 +26,82 @@ export async function GET() {
       configuredRows,
       profileRows,
     ] = await Promise.all([
-      prisma.$queryRawUnsafe("SELECT * FROM cognitive_health LIMIT 1"),
-      prisma.$queryRawUnsafe("SELECT * FROM heartbeat_state LIMIT 1"),
-      prisma.$queryRawUnsafe("SELECT * FROM drive_status"),
-      prisma.$queryRawUnsafe("SELECT * FROM current_emotional_state LIMIT 1"),
-      prisma.$queryRawUnsafe("SELECT * FROM emotional_trend ORDER BY hour DESC LIMIT 24"),
-      prisma.$queryRawUnsafe("SELECT * FROM active_goals"),
-      prisma.$queryRawUnsafe("SELECT * FROM recent_heartbeats LIMIT 5"),
-      prisma.$queryRawUnsafe("SELECT * FROM memory_health"),
-      prisma.$queryRawUnsafe("SELECT is_agent_configured() AS configured"),
-      prisma.$queryRawUnsafe("SELECT get_init_profile() AS profile"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM cognitive_health LIMIT 1"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM heartbeat_state LIMIT 1"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM drive_status"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM current_emotional_state LIMIT 1"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM emotional_trend ORDER BY hour DESC LIMIT 24"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM active_goals"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM recent_heartbeats LIMIT 5"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT * FROM memory_health"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT is_agent_configured() AS configured"),
+      prisma.$queryRawUnsafe<DbRow[]>("SELECT get_init_profile() AS profile"),
     ]);
 
     const cogHealth = normalize(cogHealthRows);
     const heartbeat = normalize(heartbeatRows);
     const emotion = normalize(emotionRows);
-    const profile = normalizeJsonValue(
-      (profileRows as any)?.[0]?.profile
-    );
+    const profile = normalizeJsonValue(profileRows[0]?.profile);
+    const profileRecord = asRecord(profile);
+    const profileAgent = asRecord(profileRecord.agent);
 
     const agentName =
-      (profile as any)?.agent?.name ||
-      cogHealth?.identity ||
+      stringValue(profileAgent.name) ||
+      stringValue(cogHealth.identity) ||
       "Hexis";
+    const portraitStem = await resolvePortraitStem(agentName, profile);
 
     return NextResponse.json({
       agent_name: agentName,
-      configured: (configuredRows as any)?.[0]?.configured ?? false,
+      portrait_url: portraitStem
+        ? `/api/init/characters/image?name=${encodeURIComponent(portraitStem)}`
+        : null,
+      configured: configuredRows[0]?.configured ?? false,
 
       // Energy
-      energy: toNum(cogHealth?.current_energy ?? heartbeat?.current_energy),
-      max_energy: toNum(cogHealth?.max_energy ?? 20),
+      energy: toNum(cogHealth.current_energy ?? heartbeat.current_energy),
+      max_energy: toNum(cogHealth.max_energy ?? 20),
 
       // Heartbeat
-      heartbeat_active: !!heartbeat?.active_heartbeat_id,
-      heartbeat_paused: heartbeat?.is_paused ?? false,
-      heartbeat_count: toNum(heartbeat?.heartbeat_count),
-      last_heartbeat_at: heartbeat?.last_heartbeat_at ?? null,
-      next_heartbeat_at: heartbeat?.next_heartbeat_at ?? null,
+      heartbeat_active: !!heartbeat.active_heartbeat_id,
+      heartbeat_paused: heartbeat.is_paused ?? false,
+      heartbeat_count: toNum(heartbeat.heartbeat_count),
+      last_heartbeat_at: heartbeat.last_heartbeat_at ?? null,
+      next_heartbeat_at: heartbeat.next_heartbeat_at ?? null,
 
       // Mood
-      mood: cogHealth?.primary_emotion ?? emotion?.primary_emotion ?? null,
-      valence: toNum(emotion?.valence),
-      arousal: toNum(emotion?.arousal),
-      dominance: toNum(emotion?.dominance),
-      intensity: toNum(emotion?.intensity),
+      mood: cogHealth.primary_emotion ?? emotion.primary_emotion ?? null,
+      valence: toNum(emotion.valence),
+      arousal: toNum(emotion.arousal),
+      dominance: toNum(emotion.dominance),
+      intensity: toNum(emotion.intensity),
 
       // Drives
-      drives: (driveRows as any[]).map((d: any) => ({
+      drives: driveRows.map((d) => ({
         name: d.drive_name ?? d.name,
         urgency: toNum(d.urgency_percent),
         hours_since: toNum(d.hours_since_satisfied),
       })),
 
       // Emotional trend (24h hourly)
-      emotional_trend: (trendRows as any[]).map((t: any) => ({
+      emotional_trend: trendRows.map((t) => ({
         hour: t.hour,
         valence: toNum(t.avg_valence),
         arousal: toNum(t.avg_arousal),
       })),
 
       // Goals
-      goals: (goalRows as any[]).map((g: any) => ({
+      goals: goalRows.map((g) => ({
         id: g.id,
-        content: g.content,
-        priority: g.priority,
+        content: g.title ?? g.description ?? "Untitled goal",
+        priority: g.is_blocked ? "blocked" : "active",
         source: g.source,
-        metadata: normalizeJsonValue(g.metadata),
+        progress_count: toNum(g.progress_count),
+        last_touched: g.last_touched,
       })),
 
       // Recent heartbeats
-      recent_heartbeats: (recentHbRows as any[]).map((h: any) => ({
+      recent_heartbeats: recentHbRows.map((h) => ({
         id: h.id,
         narrative: h.content ?? h.narrative,
         emotional_valence: toNum(h.emotional_valence),
@@ -95,24 +109,62 @@ export async function GET() {
       })),
 
       // Memory health
-      memory_health: (memHealthRows as any[]).map((m: any) => ({
-        type: m.memory_type ?? m.type,
-        count: toNum(m.memory_count ?? m.count),
+      memory_health: memHealthRows.map((m) => ({
+        type: m.type,
+        count: toNum(m.total_memories),
         avg_importance: toNum(m.avg_importance),
       })),
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Status API error:", error);
     return NextResponse.json(
-      { error: error?.message || "Failed to fetch status" },
+      { error: errorMessage(error) },
       { status: 500 }
     );
   }
 }
 
-function normalize(rows: unknown): any {
-  if (Array.isArray(rows) && rows.length > 0) return rows[0];
+async function resolvePortraitStem(agentName: string, profile: unknown): Promise<string | null> {
+  const configured = asRecord(asRecord(profile).agent).portrait;
+  if (typeof configured === "string" && configured.trim()) return configured.trim();
+
+  const dirs = [
+    process.env.HEXIS_CHARACTERS_DIR,
+    path.join(os.homedir(), ".hexis", "characters"),
+    path.resolve(process.cwd(), "..", "characters"),
+  ].filter((value): value is string => Boolean(value));
+
+  for (const dir of dirs) {
+    try {
+      const files = await readdir(dir);
+      for (const filename of files.filter((name) => name.endsWith(".json")).sort()) {
+        const card = asRecord(JSON.parse(await readFile(path.join(dir, filename), "utf-8")));
+        const data = asRecord(card.data);
+        const hexis = asRecord(asRecord(data.extensions).hexis);
+        const name = hexis.name ?? data.name;
+        if (typeof name !== "string" || name.toLowerCase() !== agentName.toLowerCase()) continue;
+        const stem = filename.replace(/\.json$/, "");
+        await access(path.join(dir, `${stem}.jpg`));
+        return stem;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function normalize(rows: unknown): DbRow {
+  if (Array.isArray(rows) && rows.length > 0) return asRecord(rows[0]);
   return {};
+}
+
+function asRecord(value: unknown): DbRow {
+  return value !== null && typeof value === "object" ? value as DbRow : {};
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function toNum(v: unknown): number | null {
