@@ -187,6 +187,8 @@ def _make_db_flags() -> argparse.ArgumentParser:
 _HELP_GROUPS = [
     ("Getting Started", [
         ("init", "Set up your agent"),
+        ("demo", "Prove core capabilities without retaining demo state"),
+        ("maturity", "Score live capability maturity and next steps"),
         ("doctor", "Diagnose common issues"),
         ("status", "Show agent status"),
     ]),
@@ -455,16 +457,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", parents=[_db], help="Diagnose common issues")
     doctor.add_argument("--json", action="store_true", help="Output JSON")
-    doctor.add_argument("--demo", action="store_true", help="Run end-to-end sanity check against the DB")
+    doctor.add_argument("--demo", action="store_true", help="Run rollback-only end-to-end capability proof")
     doctor.add_argument("--llm", action="store_true", help="Make one real LLM call to verify provider/model/key")
     doctor.set_defaults(func="doctor")
 
-    # Hidden alias: 'demo' → 'doctor --demo'
-    demo_alias = sub.add_parser("demo")  # no help= → hidden
-    demo_alias.add_argument("--dsn", default=None)
-    demo_alias.add_argument("--wait-seconds", type=int, default=int(os.getenv("POSTGRES_WAIT_SECONDS", "30")))
-    demo_alias.add_argument("--json", action="store_true")
+    demo_alias = sub.add_parser(
+        "demo", parents=[_db], help="Prove core capabilities without retaining demo state"
+    )
+    demo_alias.add_argument("--json", action="store_true", help="Output JSON")
     demo_alias.set_defaults(func="demo")
+
+    maturity = sub.add_parser(
+        "maturity", parents=[_db], help="Score live capability maturity and next steps"
+    )
+    maturity.add_argument("--json", action="store_true", help="Output JSON")
+    maturity.set_defaults(func="maturity")
 
     # -- Config (defaults to 'show') --
     config = sub.add_parser("config", parents=[_db], help="Show/validate agent configuration")
@@ -1925,6 +1932,41 @@ def _print_dry_run(d: dict[str, Any]) -> None:
         "None of the above has happened. To turn it on for real:  hexis retention enable",
     ]
     sys.stdout.write("\n".join(lines) + "\n")
+
+
+def _print_alive_demo(result: dict[str, Any]) -> None:
+    heading = "Hexis is alive" if result.get("ok") else "Hexis capability proof needs attention"
+    sys.stdout.write(
+        f"{heading} ({result.get('passed', 0)}/{result.get('total', 0)} proofs passed)\n"
+        "Mode: rollback-only; no LLM call, token cost, or retained demo state.\n\n"
+    )
+    for proof in result.get("proofs") or []:
+        sys.stdout.write(
+            f"[{proof.get('status', 'FAIL')}] {proof.get('label', proof.get('id', 'proof'))}\n"
+            f"  {proof.get('detail', '')}\n"
+        )
+        evidence = proof.get("evidence") or {}
+        if evidence:
+            rendered = ", ".join(f"{key}={value}" for key, value in evidence.items())
+            sys.stdout.write(f"  Evidence: {rendered}\n")
+        if proof.get("next_step"):
+            sys.stdout.write(f"  Next: {proof['next_step']}\n")
+
+
+def _print_maturity_scorecard(result: dict[str, Any]) -> None:
+    sys.stdout.write(
+        f"Capability maturity: {result.get('score', 0)}% "
+        f"({result.get('points', 0)}/{result.get('max_points', 0)} points)\n\n"
+    )
+    for scenario in result.get("scenarios") or []:
+        sys.stdout.write(
+            f"L{scenario['level']}/{scenario['max_level']} "
+            f"{scenario['label']} [{scenario['level_name']}]\n"
+        )
+        for evidence in scenario.get("evidence") or []:
+            sys.stdout.write(f"  - {evidence}\n")
+        if scenario.get("next_step"):
+            sys.stdout.write(f"  Next: {scenario['next_step']}\n")
 
 
 async def _retention_dry_run(dsn: str, as_json: bool) -> int:
@@ -3423,14 +3465,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             if args.json:
                 sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
             else:
-                sys.stdout.write(
-                    "Demo ok\n"
-                    f"- remembered_ids: {', '.join(result['remembered_ids'])}\n"
-                    f"- recall_count: {result['recall_count']}\n"
-                    f"- hydrate_memory_count: {result['hydrate_memory_count']}\n"
-                    f"- working_search_count: {result['working_search_count']}\n"
-                )
-            return 0
+                _print_alive_demo(result)
+            return 0 if result.get("ok") else 1
 
         from apps.cli_theme import console as _con, make_table as _mt
         from rich.spinner import Spinner
@@ -3464,19 +3500,21 @@ def _dispatch(argv: list[str] | None = None) -> int:
             _con.print(f"\n[ok]{ok} passed[/ok], [warn]{warn_count} warnings[/warn], [fail]{fail_count} failures[/fail]")
         return 0 if all(c["status"] != "FAIL" for c in checks) else 1
     if func == "demo":
-        # Hidden alias for 'doctor --demo'
         dsn = _get_dsn(args)
         result = asyncio.run(cli_api.demo(dsn, wait_seconds=args.wait_seconds))
         if args.json:
             sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
         else:
-            sys.stdout.write(
-                "Demo ok\n"
-                f"- remembered_ids: {', '.join(result['remembered_ids'])}\n"
-                f"- recall_count: {result['recall_count']}\n"
-                f"- hydrate_memory_count: {result['hydrate_memory_count']}\n"
-                f"- working_search_count: {result['working_search_count']}\n"
-            )
+            _print_alive_demo(result)
+        return 0 if result.get("ok") else 1
+    if func == "maturity":
+        result = asyncio.run(
+            cli_api.maturity_scorecard(_get_dsn(args), wait_seconds=args.wait_seconds)
+        )
+        if args.json:
+            sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        else:
+            _print_maturity_scorecard(result)
         return 0
     if func == "status":
         dsn = _get_dsn(args)

@@ -4,12 +4,10 @@ import asyncio
 import json
 import logging
 import os
-import time
 from datetime import datetime, timezone
 from typing import Any
 
 from core.agent_api import _connect_with_retry, db_dsn_from_env
-from core.cognitive_memory_api import CognitiveMemory, MemoryType
 
 logger = logging.getLogger(__name__)
 
@@ -218,53 +216,28 @@ async def config_validate(dsn: str | None = None, *, wait_seconds: int = 30) -> 
 
 
 async def demo(dsn: str | None = None, *, wait_seconds: int = 30) -> dict[str, Any]:
+    """Run the rollback-only end-to-end capability proof."""
+    from core.capability_maturity import run_alive_demo
+
     dsn = dsn or db_dsn_from_env()
     conn = await _connect_with_retry(dsn, wait_seconds=wait_seconds)
     try:
-        deadline = time.monotonic() + wait_seconds
-        last: Exception | None = None
-        while time.monotonic() < deadline:
-            try:
-                ok = await conn.fetchval("SELECT check_embedding_service_health()")
-                if ok is True:
-                    break
-            except Exception as exc:  # pragma: no cover (timing-dependent)
-                last = exc
-            await asyncio.sleep(1)
-        else:
-            raise TimeoutError(f"Embedding service not healthy after {wait_seconds}s: {last!r}")
+        return await run_alive_demo(conn)
     finally:
         await conn.close()
 
-    async with CognitiveMemory.connect(dsn) as mem:
-        m1 = await mem.remember("Demo: the user prefers short, direct answers", type=MemoryType.SEMANTIC, importance=0.7)
-        m2 = await mem.remember(
-            "Demo: the user is working on the Hexis memory system",
-            type=MemoryType.EPISODIC,
-            importance=0.6,
-        )
-        held = await mem.hold("Demo: temporary context in working memory", ttl_seconds=600)
 
-        recall = await mem.recall("What do I know about the user's preferences?", limit=5)
-        hydrate = await mem.hydrate("Summarize what we know about the user", include_goals=False)
-        working_hits = await mem.search_working("temporary context", limit=5)
+async def maturity_scorecard(
+    dsn: str | None = None, *, wait_seconds: int = 30
+) -> dict[str, Any]:
+    from core.capability_maturity import capability_maturity_scorecard
 
-    # A health check must not leave demo rows in the agent's real memory (Bar #5).
-    # The working-memory entry auto-expires via its TTL; delete the persistent ones.
-    cleanup = await _connect_with_retry(dsn, wait_seconds=wait_seconds)
+    dsn = dsn or db_dsn_from_env()
+    conn = await _connect_with_retry(dsn, wait_seconds=wait_seconds)
     try:
-        await cleanup.execute("DELETE FROM memories WHERE id = ANY($1::uuid[])", [m1, m2])
+        return await capability_maturity_scorecard(conn)
     finally:
-        await cleanup.close()
-
-    return {
-        "remembered_ids": [str(m1), str(m2)],
-        "cleaned_up": True,
-        "working_memory_id": str(held),
-        "recall_count": len(recall.memories),
-        "hydrate_memory_count": len(hydrate.memories),
-        "working_search_count": len(working_hits),
-    }
+        await conn.close()
 
 
 # ---------------------------------------------------------------------------

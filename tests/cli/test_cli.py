@@ -129,6 +129,37 @@ async def test_cli_status_raw_json_no_docker(db_pool):
     assert "pending_external_calls" in data
 
 
+async def test_cli_demo_and_maturity_json(db_pool):
+    env = os.environ.copy()
+    command = [sys.executable, "-m", "apps.hexis_cli"]
+    cwd = str(Path(__file__).resolve().parents[1])
+
+    demo = subprocess.run(
+        command + ["demo", "--json", "--wait-seconds", "60"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=cwd,
+    )
+    assert demo.returncode == 0, demo.stderr + demo.stdout
+    demo_result = json.loads(demo.stdout)
+    assert demo_result["ok"] is True
+    assert demo_result["mode"] == "rollback_only"
+    assert demo_result["passed"] == demo_result["total"] == 6
+
+    maturity = subprocess.run(
+        command + ["maturity", "--json", "--wait-seconds", "60"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=cwd,
+    )
+    assert maturity.returncode == 0, maturity.stderr
+    maturity_result = json.loads(maturity.stdout)
+    assert maturity_result["max_points"] == 20
+    assert len(maturity_result["scenarios"]) == 5
+
+
 async def test_cli_config_show_and_validate(db_pool):
     env = os.environ.copy()
 

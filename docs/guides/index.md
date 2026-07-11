@@ -28,6 +28,7 @@ Task-oriented walkthroughs for everything you can do with Hexis.
 | [Backup and Recovery](backup-and-recovery.md) | Database backup, retention, config export/import |
 | [MCP Integration](mcp-integration.md) | Use Hexis as an MCP server or connect external MCP |
 | [Web UI](web-ui.md) | Web dashboard for init, chat, and management |
+| [Capability Proof and Maturity](alive-demo.md) | Prove core behavior safely and inspect live maturity evidence |
 
 ## I want to...
 
@@ -43,3 +44,4 @@ Task-oriented walkthroughs for everything you can do with Hexis.
 | Schedule a daily briefing | [Scheduling](scheduling.md) |
 | Run multiple agents | [Multi-Instance](multi-instance.md) |
 | Back up my agent's brain | [Backup and Recovery](backup-and-recovery.md) |
+| Prove the core system works end to end | [Capability Proof and Maturity](alive-demo.md) |

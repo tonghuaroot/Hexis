@@ -1,6 +1,6 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (Phase 4 "it learns" complete)
+Last updated: 2026-07-10 (Phase 5 demo and maturity scorecard complete)
 
 ## Current Status
 
@@ -39,8 +39,9 @@ criterion-by-criterion completion record is `docs/hmx-acceptance.md`. Hexis now
 also serves its canonical agent through OpenAI-compatible model discovery and
 buffered/streamed chat completions, with tested MCP listing and dispatch.
 Plugin manifests and live configuration now fail closed before registration,
-and agent skill updates require explicit ownership provenance. The next
-implementation boundary is Phase 5 demo, DX, and measurement work.
+and agent skill updates require explicit ownership provenance. Phase 5 now has
+a rollback-only end-to-end proof and a live evidence-based maturity scorecard;
+the next implementation boundary is typed portable channel presentation.
 
 The latest hosted green implementation baseline is `d4a48c0` (`Complete Phase
 4 self-improvement workflow`), run
@@ -1022,13 +1023,51 @@ Likely files:
 
 ### Phase 5 - Demo, DX, and measurement
 
+Status: demo and capability measurement complete; channel presentation remains.
+
 Goals:
 
-- Build a one-command "it's alive" demo that proves heartbeat, recall, boundary
-  refusal, energy, and self-initiated behavior.
-- Add a capability maturity scorecard similar to OpenClaw's QA scenarios.
+- Completed: `hexis demo` proves heartbeat, cross-session recall, boundary
+  refusal, energy exhaustion, and self-initiated decision intent using real
+  DB-owned paths under one outer rollback transaction.
+- Completed: `hexis maturity` scores live implementation, configuration,
+  operational readiness, and observed evidence across five scenarios.
 - Improve channel presentation with typed portable message blocks.
 - Continue docs coherence work.
+
+Key files:
+
+- `core/capability_maturity.py` - nested-savepoint proof runner, rollback residue
+  verification, and read-only five-scenario maturity scoring;
+- `core/cli_api.py` and `apps/hexis_cli.py` - public `demo` and `maturity`
+  commands with JSON output, per-proof recovery, and truthful exit codes;
+- `docs/guides/alive-demo.md`, quickstart, guide index, and CLI reference - the
+  difference between ephemeral proof, live maturity, and explicit paid
+  `doctor --llm` provider verification;
+- `tests/core/test_capability_maturity.py` and `tests/cli/test_cli.py` - real
+  heartbeat/recall/policy/energy execution plus before/after state equality.
+
+Important behavior:
+
+- The demo does not call an LLM, reports zero token cost, and never claims that
+  generating a heartbeat intent proves the configured provider can answer it.
+- Each core proof runs in a nested savepoint so one failure does not hide the
+  other results. The outer transaction always rolls back, then the command
+  searches for its unique marker and compares heartbeat state before/after.
+- An incomplete initialization produces a failed heartbeat proof with the exact
+  `hexis init` recovery step; it does not force configuration to manufacture a
+  green demo. The current live development instance therefore truthfully passes
+  4/6 proofs (including cleanup) until initialized.
+- Maturity is deployment evidence, not a static feature checklist. Levels are
+  unavailable, implemented, configured, operational, and observed. Disabled
+  opt-in skill review remains configured rather than being scored operational.
+- The current uninitialized live development database scores 40% (8/20): the
+  scorecard derives this from its actual empty/uninitialized state.
+
+Validation: focused proof/CLI coverage passes 17 tests. Full validation passes
+2207 tests with the existing 421 advisory marker warnings. Import smoke,
+formatting of new modules, CLI help discovery, JSON serialization, and diff
+hygiene pass.
 
 ## Generic Identity Adaptation Notes
 
@@ -1124,9 +1163,8 @@ proposal/approval boundary when changing self-improvement.
 
 Next highest-leverage options, in rough priority order:
 
-1. Start Phase 5 with a one-command "it's alive" demo and capability maturity
-   scorecard that exercise the real heartbeat, recall, boundary, energy, and
-   self-improvement proposal journeys.
+1. Continue Phase 5 with typed portable channel message blocks and end-to-end
+   rendering checks across terminal, web, and configured messaging adapters.
 2. Optional interop extension: streamable HTTP MCP transport, driven by a
    specific client requirement rather than added speculatively.
 3. Deferred Phase 1 hardening: formatting/type-check cleanup, action SHA

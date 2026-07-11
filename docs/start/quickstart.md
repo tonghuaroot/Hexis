@@ -68,6 +68,8 @@ hexis init --api-key sk-ant-...
 ```bash
 hexis status    # shows agent status, memory counts, energy level
 hexis doctor    # checks Docker, DB, embedding service health
+hexis demo      # proves recall, refusal, energy, and heartbeat, then rolls back
+hexis maturity  # shows live capability levels and exact next steps
 ```
 
 ## Enable Autonomy (Optional)

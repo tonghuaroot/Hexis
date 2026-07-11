@@ -34,5 +34,6 @@ Hexis is a Postgres-native cognitive architecture that wraps any LLM with persis
 | Connect external tools (HubSpot, Todoist, etc.) | [External integrations](integrations/external/index.md) |
 | Deploy to production | [Production deployment](operations/production.md) |
 | Troubleshoot a problem | [Troubleshooting](operations/troubleshooting.md) |
+| Prove core behavior and inspect maturity | [Capability Proof and Maturity](guides/alive-demo.md) |
 | Understand the CLI | [CLI reference](reference/cli.md) |
 | Read the philosophical framework | [Philosophy](philosophy/PHILOSOPHY.md) |
