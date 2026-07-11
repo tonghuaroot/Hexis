@@ -25,6 +25,7 @@ RECMEM_EPISODE_MERGE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" /
 RECMEM_EPISODE_CREATE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_episode_create.md"
 RECMEM_SEMANTIC_REFINE_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "recmem_semantic_refine.md"
 MEMORY_SUMMARIZATION_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "memory_summarization.md"
+SKILL_IMPROVEMENT_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "skill_improvement.md"
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,15 @@ def load_memory_summarization_prompt() -> str:
         "Compact these consolidated memories into one concise first-person recollection, and list the "
         "durable lessons worth keeping. Respond with JSON {\"summary\": str, \"lessons\": [{\"content\": str, "
         "\"kind\": \"semantic\"|\"strategic\"}]}."
+    )
+
+
+def load_skill_improvement_prompt() -> str:
+    if SKILL_IMPROVEMENT_PROMPT_PATH.exists():
+        return SKILL_IMPROVEMENT_PROMPT_PATH.read_text(encoding="utf-8")
+    return (
+        "Review repeated cross-session experience for one reusable workflow. "
+        "Return JSON with proposal set to null or a grounded skill proposal."
     )
 
 

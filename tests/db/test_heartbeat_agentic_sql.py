@@ -38,6 +38,8 @@ async def test_is_within_active_hours(db_pool):
             # Malformed value -> fail open (True).
             await conn.execute("SELECT set_config('heartbeat.active_hours', '\"garbage\"')")
             assert await conn.fetchval("SELECT is_within_active_hours()") is True
+            await conn.execute("SELECT set_config('heartbeat.active_hours', '\"25:00-26:00\"')")
+            assert await conn.fetchval("SELECT is_within_active_hours()") is True
 
             # Unknown timezone falls back to UTC (still evaluates the window).
             await conn.execute("SELECT set_config('heartbeat.active_hours', '\"00:00-00:00\"')")

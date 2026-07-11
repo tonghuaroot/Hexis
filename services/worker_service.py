@@ -32,6 +32,7 @@ from services.recmem import (
     run_recmem_sweep_step,
 )
 from services.summarization import run_memory_summarization_step
+from services.skill_improvement import run_skill_improvement_review_step
 from services.reconsolidation import run_reconsolidation_step
 from services.subconscious import run_subconscious_decider
 
@@ -339,6 +340,7 @@ class MaintenanceWorker:
         self.pool: asyncpg.Pool | None = None
         self.running = False
         self.bridge: RabbitMQBridge | None = None
+        self.tool_registry = None
 
     async def connect(self) -> None:
         self.pool = await asyncpg.create_pool(dsn=db_dsn_from_env(self.instance), min_size=1, max_size=5)
@@ -492,6 +494,14 @@ class MaintenanceWorker:
             if not result.get("skipped"):
                 logger.info("Memory summarization: %s", result)
 
+    async def _run_skill_improvement_if_due(self) -> None:
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            result = await run_skill_improvement_review_step(conn, registry=self.tool_registry)
+            if not result.get("skipped"):
+                logger.info("Skill-improvement review: %s", result)
+
     async def run(self) -> None:
         self.running = True
         logger.info("Maintenance worker starting...")
@@ -515,6 +525,7 @@ class MaintenanceWorker:
                     await self._run_reconsolidation_if_pending()
                     await self._run_recmem_if_enabled()
                     await self._run_memory_rest_if_enabled()
+                    await self._run_skill_improvement_if_due()
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")
                 await asyncio.sleep(POLL_INTERVAL)
@@ -627,6 +638,7 @@ async def _amain(mode: str, instance: str | None = None) -> None:
         from core.tools import create_default_registry, create_mcp_manager
 
         tool_registry = create_default_registry(consumer_pool)
+        maint_worker.tool_registry = tool_registry
         call_processor.set_tool_registry(tool_registry)
         logger.info("Tool registry initialized for consumer")
 

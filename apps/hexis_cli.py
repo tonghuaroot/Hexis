@@ -216,6 +216,7 @@ _HELP_GROUPS = [
         ("import", "Inspect or import an HMX exchange"),
         ("import-review", "Review staged HMX records"),
         ("retention", "Show memory-retention status"),
+        ("skills", "Manage skill-improvement reviews and proposals"),
         ("schedule", "Manage scheduled tasks"),
     ]),
     ("Configuration", [
@@ -432,6 +433,25 @@ def build_parser() -> argparse.ArgumentParser:
     ret_en.set_defaults(func="retention_enable")
     ret_dis = ret_sub.add_parser("disable", parents=[_db], help="Turn retention off")
     ret_dis.set_defaults(func="retention_disable")
+
+    skills = sub.add_parser("skills", parents=[_db], help="Manage skill-improvement reviews and proposals")
+    skills.add_argument("--json", action="store_true", help="Output JSON")
+    skills.set_defaults(func="skills_status")
+    skills_sub = skills.add_subparsers(dest="skills_command")
+    skills_en = skills_sub.add_parser("enable", parents=[_db], help="Opt in to background skill proposal review")
+    skills_en.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
+    skills_en.set_defaults(func="skills_enable")
+    skills_dis = skills_sub.add_parser("disable", parents=[_db], help="Stop background skill proposal review")
+    skills_dis.set_defaults(func="skills_disable")
+    skills_proposals = skills_sub.add_parser("proposals", parents=[_db], help="List durable skill proposals")
+    skills_proposals.add_argument("--status", choices=["pending", "applied", "rejected", "all"], default="pending")
+    skills_proposals.add_argument("--json", action="store_true", help="Output JSON")
+    skills_proposals.set_defaults(func="skills_proposals")
+    skills_review = skills_sub.add_parser("review", parents=[_db], help="Apply, reject, or reopen one proposal")
+    skills_review.add_argument("proposal_id", help="Proposal UUID from `hexis skills proposals`")
+    skills_review.add_argument("--action", choices=["apply", "reject", "reopen"], required=True)
+    skills_review.add_argument("--yes", "-y", action="store_true", help="Skip the confirmation prompt")
+    skills_review.set_defaults(func="skills_review")
 
     doctor = sub.add_parser("doctor", parents=[_db], help="Diagnose common issues")
     doctor.add_argument("--json", action="store_true", help="Output JSON")
@@ -1985,6 +2005,218 @@ async def _retention_disable(dsn: str) -> int:
         await pool.close()
 
 
+async def _skills_status(dsn: str, as_json: bool) -> int:
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            enabled = bool(await conn.fetchval("SELECT get_config_bool('skills.self_improvement.enabled')"))
+            interval = await conn.fetchval("SELECT get_config_int('skills.self_improvement.interval_seconds')")
+            state = await conn.fetchval("SELECT get_state('skill_improvement_state')")
+            summary = await conn.fetchval("SELECT skill_improvement_pending_summary()")
+        state = json.loads(state) if isinstance(state, str) else (state or {})
+        summary = json.loads(summary) if isinstance(summary, str) else (summary or {})
+        data = {
+            "enabled": enabled,
+            "interval_seconds": interval,
+            "pending": summary.get("count", 0),
+            "last_completed_at": state.get("last_completed_at"),
+            "last_result": state.get("last_result"),
+        }
+        if as_json:
+            sys.stdout.write(json.dumps(data, indent=2, default=str) + "\n")
+        else:
+            sys.stdout.write(
+                "Skill improvement: " + ("ENABLED" if enabled else "DISABLED") + "\n"
+                f"  Review interval: {interval or 'not configured'} seconds\n"
+                f"  Pending proposals: {data['pending']}\n"
+                f"  Last review: {data['last_completed_at'] or 'never'}\n"
+            )
+            if data["pending"]:
+                sys.stdout.write("  Next: hexis skills proposals\n")
+            elif not enabled:
+                sys.stdout.write("  To opt in: hexis skills enable\n")
+        return 0
+    except Exception as exc:
+        _print_err(
+            f"Could not load skill-improvement status: {exc}. "
+            "Run `hexis migrate` to ensure the proposal schema is current."
+        )
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _skills_enable(dsn: str, skip_confirm: bool) -> int:
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            if await conn.fetchval("SELECT get_config_bool('skills.self_improvement.enabled')"):
+                sys.stdout.write("Background skill-improvement review is already enabled.\n")
+                return 0
+            settings = await conn.fetch(
+                "SELECT key, value FROM config WHERE key LIKE 'skills.self_improvement.%' ORDER BY key"
+            )
+        sys.stdout.write(
+            "Background skill review examines bounded recent conversation excerpts using your "
+            "configured LLM. It creates reviewable proposals only; it never applies a skill automatically.\n\n"
+            "Current settings:\n"
+        )
+        for row in settings:
+            value = json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+            sys.stdout.write(f"  {row['key']} = {value}\n")
+        if not skip_confirm:
+            sys.stdout.write("\nEnable background skill proposal review? [y/N] ")
+            sys.stdout.flush()
+            if input().strip().lower() not in ("y", "yes"):
+                sys.stdout.write("Left disabled.\n")
+                return 0
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT set_config('skills.self_improvement.enabled', 'true'::jsonb)")
+        sys.stdout.write(
+            "Background skill-improvement review is ENABLED. "
+            "Use `hexis skills` for status and `hexis skills proposals` for review.\n"
+        )
+        return 0
+    except Exception as exc:
+        _print_err(f"Could not enable skill-improvement review: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _skills_disable(dsn: str) -> int:
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT set_config('skills.self_improvement.enabled', 'false'::jsonb)")
+        sys.stdout.write(
+            "Background skill-improvement review is DISABLED. Existing proposals were kept.\n"
+        )
+        return 0
+    except Exception as exc:
+        _print_err(f"Could not disable skill-improvement review: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _skills_proposals(dsn: str, status: str, as_json: bool) -> int:
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, status, name, description, mode, rationale, confidence,
+                       cardinality(source_memory_ids) AS source_memories,
+                       cardinality(source_unit_ids) AS source_units,
+                       created_at, reviewed_at, applied_at, last_error
+                FROM skill_improvement_proposals
+                WHERE ($1::text = 'all' OR status = $1::text)
+                ORDER BY created_at DESC, id
+                """,
+                status,
+            )
+        proposals = [dict(row) for row in rows]
+        if as_json:
+            sys.stdout.write(json.dumps(proposals, indent=2, default=str) + "\n")
+        elif not proposals:
+            sys.stdout.write(f"No {status} skill proposals.\n")
+        else:
+            for proposal in proposals:
+                sys.stdout.write(
+                    f"{proposal['id']}  [{proposal['status']}] {proposal['mode']} {proposal['name']} "
+                    f"(confidence {proposal['confidence']:.2f}, "
+                    f"{proposal['source_units']} source turns)\n"
+                    f"  {proposal['description']}\n"
+                )
+                if proposal["last_error"]:
+                    sys.stdout.write(f"  Last error: {proposal['last_error']}\n")
+            sys.stdout.write(
+                "\nReview one in place: hexis skills review <proposal-id> --action apply|reject\n"
+            )
+        return 0
+    except Exception as exc:
+        _print_err(f"Could not list skill proposals: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _skills_review(dsn: str, proposal_id: str, action: str, skip_confirm: bool) -> int:
+    import asyncpg
+
+    from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+    from core.tools.skills import ReviewSkillProposalHandler
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT id, status, name, description, content, mode, rationale,
+                       confidence, cardinality(source_memory_ids) AS source_memories,
+                       cardinality(source_unit_ids) AS source_units
+                FROM skill_improvement_proposals WHERE id = $1::uuid
+                """,
+                proposal_id,
+            )
+        if not row:
+            _print_err(f"Skill proposal not found: {proposal_id}")
+            return 1
+        sys.stdout.write(
+            f"Proposal {row['id']} [{row['status']}]\n"
+            f"  {row['mode']} skill: {row['name']}\n"
+            f"  Confidence: {row['confidence']:.2f}\n"
+            f"  Evidence: {row['source_units']} source turns, {row['source_memories']} memories\n"
+            f"  Description: {row['description']}\n"
+            f"  Rationale: {row['rationale']}\n\n"
+            f"{row['content']}\n"
+        )
+        if not skip_confirm:
+            consequence = (
+                "create or update the agent-authored skill file"
+                if action == "apply"
+                else f"mark this proposal {action}ed without deleting it"
+            )
+            sys.stdout.write(f"\n{action.title()} this proposal and {consequence}? [y/N] ")
+            sys.stdout.flush()
+            if input().strip().lower() not in ("y", "yes"):
+                sys.stdout.write("No change made.\n")
+                return 0
+        registry = create_default_registry(pool)
+        context = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id=f"cli-skill-review-{proposal_id}",
+            registry=registry,
+        )
+        handler = ReviewSkillProposalHandler()
+        errors = handler.validate({"proposal_id": proposal_id, "action": action})
+        if errors:
+            _print_err("; ".join(errors))
+            return 1
+        result = await handler.execute(
+            {"proposal_id": proposal_id, "action": action}, context
+        )
+        if not result.success:
+            _print_err(result.error or "Skill proposal review failed")
+            return 1
+        sys.stdout.write(result.to_display_output() + "\n")
+        return 0
+    except Exception as exc:
+        _print_err(f"Could not review skill proposal: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
 async def _migrate(dsn: str, status_only: bool) -> int:
     """Apply pending schema migrations to the active database (never wipes data)."""
     import asyncpg
@@ -3296,6 +3528,16 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return asyncio.run(_retention_enable(_get_dsn(args), args.yes))
     if func == "retention_disable":
         return asyncio.run(_retention_disable(_get_dsn(args)))
+    if func == "skills_status":
+        return asyncio.run(_skills_status(_get_dsn(args), args.json))
+    if func == "skills_enable":
+        return asyncio.run(_skills_enable(_get_dsn(args), args.yes))
+    if func == "skills_disable":
+        return asyncio.run(_skills_disable(_get_dsn(args)))
+    if func == "skills_proposals":
+        return asyncio.run(_skills_proposals(_get_dsn(args), args.status, args.json))
+    if func == "skills_review":
+        return asyncio.run(_skills_review(_get_dsn(args), args.proposal_id, args.action, args.yes))
     if func == "migrate":
         return asyncio.run(_migrate(_get_dsn(args), args.status))
     if func == "backup":

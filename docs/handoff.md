@@ -1,12 +1,13 @@
 # Hexis Handoff
 
-Last updated: 2026-07-10 (Phase 4 cross-session FTS complete)
+Last updated: 2026-07-10 (Phase 4 "it learns" complete)
 
 ## Current Status
 
 The HMX workstream (`plans/hmx.md`) is MVP-complete, Phase 2 extensibility is
 hardened, the core Phase 3 interop work is complete, and Phase 4 now has free
-cross-session lexical search. Slices 0-13 and the final HMX acceptance audit are complete:
+cross-session lexical search plus user-controlled background skill improvement.
+Slices 0-13 and the final HMX acceptance audit are complete:
 schema prerequisites, canonical hashing, schema-valid JSON/JSONL export, a
 fail-closed trust-anchor boundary, target-state diagnostics, transactional
 additive import with full reference remapping, the operator CLI with
@@ -39,7 +40,7 @@ also serves its canonical agent through OpenAI-compatible model discovery and
 buffered/streamed chat completions, with tested MCP listing and dispatch.
 Plugin manifests and live configuration now fail closed before registration,
 and agent skill updates require explicit ownership provenance. The next
-implementation boundary is the Phase 4 self-improvement worker.
+implementation boundary is Phase 5 demo, DX, and measurement work.
 
 The prior hosted green baseline was `a31b0b8` (`Complete HMX Slice 13 agent
 protocol tools`), run
@@ -880,6 +881,56 @@ Focused validation passes 146 RecMem/memory/tool/skill tests with the existing
 live schema reports no pending migrations. Full validation passes 2198 tests
 with the existing 421 advisory marker warnings.
 
+### Phase 4 self-improvement worker complete
+
+Key files:
+
+- `db/56_functions_skill_improvement.sql` and migration
+  `0017_skill_improvement_proposals` - opt-in scheduling, bounded multi-session
+  evidence, durable/idempotent proposals, recoverable review transitions, and
+  heartbeat summaries;
+- `services/skill_improvement.py`, `services/prompts/skill_improvement.md`, and
+  `services/worker_service.py` - strict one-proposal LLM review in the existing
+  maintenance loop, with live skill/tool catalogs and visible failure state;
+- `core/tools/skills.py` and `skills/installed/skill-authoring/SKILL.md` -
+  skill-gated proposal listing plus approved apply/reject/reopen actions that
+  reuse `author_skill` ownership and validation;
+- `apps/hexis_cli.py` and `docs/reference/cli.md` - complete terminal status,
+  opt-in, proposal listing, and confirmed review flows;
+- `tests/services/test_skill_improvement.py` and supporting CLI, heartbeat,
+  skill, and migration tests - dark-default, cross-session evidence,
+  malformed-output recovery, apply lineage, and recoverable rejection.
+
+Important behavior:
+
+- The worker ships disabled. `hexis skills enable` explains that bounded recent
+  conversation excerpts go to the configured LLM and asks for confirmation;
+  `hexis skills disable` stops review without deleting proposals.
+- Background work never creates or changes a skill file. It can only create a
+  durable pending proposal from at least two sessions and the configurable
+  evidence/confidence thresholds.
+- `review_skill_proposal` and `hexis skills review` are the explicit boundary.
+  Apply reuses the protected agent-authored directory and ownership checks;
+  reject retains history and can be reopened.
+- Applied skill frontmatter records proposal ID, confidence, source memory IDs,
+  source raw-unit IDs, and the evidence-window digest. A retry after a DB
+  finalize failure recognizes that proposal ID and completes idempotently.
+- Pending proposals are compactly attached to heartbeat context, which makes
+  the skill-authoring capability discoverable without granting autonomous
+  permission to apply it.
+- Invalid JSON, unknown tools/contexts, unauthorized updates, low confidence,
+  and secret-like output never become active behavior. Review errors are stored
+  in `skill_improvement_state.last_result` for diagnosis.
+- Migration `0018_full_day_active_hours` also closes a time-dependent existing
+  defect found by the full run: `00:00-23:59` now covers the last minute of the
+  day, while out-of-range schedules fail open as documented.
+
+Validation: focused CLI/worker/heartbeat/skill/agent/migration coverage passes
+151 tests. Both migrations apply without data loss, the live schema reports no
+pending migrations, and the live worker remains opted out with zero proposals.
+Full validation passes 2202 tests with the existing 421 advisory marker
+warnings.
+
 ## Current Roadmap
 
 This is the active quality-parity roadmap derived from reviewing Hermes and OpenClaw.
@@ -945,14 +996,15 @@ Likely files:
 
 ### Phase 4 - "It learns" differentiator
 
-Status: cross-session FTS complete; self-improvement worker remains open.
+Status: complete.
 
 Goals:
 
 - Completed: free cross-session search over stored turns/memories using Postgres FTS.
-- Add a background self-improvement worker that reviews recent experience and
-  authors or updates skills.
-- Tag self-authored skills with provenance, source memories, and confidence.
+- Completed: an opt-in background worker reviews bounded multi-session
+  experience and creates durable skill proposals without changing behavior.
+- Completed: explicit approved apply/reject/reopen flows through agent tools and
+  `hexis skills`, with source-memory/raw-unit lineage and confidence provenance.
 
 Likely files:
 
@@ -1059,17 +1111,17 @@ bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts
 
 ## Resume Recommendation
 
-HMX, Phase 2 extensibility, core Phase 3 interop, and Phase 4 cross-session FTS
-are complete. Preserve `docs/hmx-acceptance.md` evidence when changing exchange
-or protected-state behavior, preserve the official-client journeys when
-changing API framing, and preserve the no-embedding search contracts when
-building the self-improvement worker.
+HMX, Phase 2 extensibility, core Phase 3 interop, and Phase 4 "it learns" are
+complete. Preserve `docs/hmx-acceptance.md` evidence when changing exchange or
+protected-state behavior, preserve the official-client journeys when changing
+API framing, preserve the no-embedding search contracts, and preserve the
+proposal/approval boundary when changing self-improvement.
 
 Next highest-leverage options, in rough priority order:
 
-1. Finish Phase 4 "it learns": add a background self-improvement worker that
-   reviews recent experience and proposes or authors skills using the structured
-   `author_skill` provenance and new free cross-session search contracts.
+1. Start Phase 5 with a one-command "it's alive" demo and capability maturity
+   scorecard that exercise the real heartbeat, recall, boundary, energy, and
+   self-improvement proposal journeys.
 2. Optional interop extension: streamable HTTP MCP transport, driven by a
    specific client requirement rather than added speculatively.
 3. Deferred Phase 1 hardening: formatting/type-check cleanup, action SHA

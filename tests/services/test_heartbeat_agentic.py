@@ -159,6 +159,7 @@ class TestRunAgenticHeartbeat:
         conn = AsyncMock()
         conn.fetchval.side_effect = [
             '{"count": 2, "by_section": {"memories": 2}}',
+            '{"count": 1, "proposals": [{"id": "proposal-1", "name": "release-review"}]}',
             '{"total": 0, "records": []}',
             '{"total": 0, "records": []}',
             "rendered heartbeat prompt",
@@ -177,6 +178,7 @@ class TestRunAgenticHeartbeat:
             "count": 2,
             "by_section": {"memories": 2},
         }
+        assert heartbeat_context["pending_skill_proposals"]["count"] == 1
 
     @patch("services.heartbeat_agentic.run_agent")
     async def test_surfaces_pending_protected_replacement_with_action(
@@ -193,6 +195,7 @@ class TestRunAgenticHeartbeat:
         conn = AsyncMock()
         conn.fetchval.side_effect = [
             '{"count": 0, "by_section": {}}',
+            '{"count": 0, "proposals": []}',
             json.dumps(
                 {
                     "total": 1,
@@ -241,6 +244,7 @@ class TestRunAgenticHeartbeat:
         conn = AsyncMock()
         conn.fetchval.side_effect = [
             '{"count": 0, "by_section": {}}',
+            '{"count": 0, "proposals": []}',
             '{"total": 0, "records": []}',
             json.dumps(
                 {

@@ -108,6 +108,8 @@ async def test_migrate_existing_database_preserves_data():
             assert "0014_hmx_reversion" in applied
             assert "0015_hmx_acceptance_diagnostics" in applied
             assert "0016_cross_session_fts" in applied
+            assert "0017_skill_improvement_proposals" in applied
+            assert "0018_full_day_active_hours" in applied
 
             # AFTER: the data is intact AND the schema evolved
             assert (
@@ -162,6 +164,11 @@ async def test_migrate_existing_database_preserves_data():
             )
             assert await conn.fetchval(
                 "SELECT to_regclass('public.idx_subconscious_units_content_fts') IS NOT NULL"
+            )
+            assert await conn.fetchval(
+                "SELECT to_regclass('public.skill_improvement_proposals') IS NOT NULL "
+                "AND to_regprocedure('public.claim_skill_improvement_review()') IS NOT NULL "
+                "AND to_regprocedure('public.skill_improvement_pending_summary()') IS NOT NULL"
             )
             assert await conn.fetchval(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.columns "

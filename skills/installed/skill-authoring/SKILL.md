@@ -3,9 +3,9 @@ name: skill-authoring
 description: Author or revise reusable Hexis skills from repeated successful workflows
 category: system
 requires:
-  tools: [author_skill]
+  tools: [author_skill, list_skill_proposals, review_skill_proposal]
 contexts: [heartbeat, chat]
-bound_tools: [author_skill, list_skills, use_skill]
+bound_tools: [author_skill, list_skill_proposals, review_skill_proposal, list_skills, use_skill]
 ---
 
 # Skill Authoring
@@ -33,6 +33,9 @@ Use this skill when a repeated workflow, hard-won lesson, or stable procedure sh
 6. Never try to replace a user-authored skill. `author_skill` updates only files
    carrying Hexis ownership provenance; if ownership cannot be verified, choose
    a new name or leave the exact manual-edit step to the user.
+7. Use `list_skill_proposals` to inspect background review results. Apply,
+   reject, or reopen one only through `review_skill_proposal`; applying always
+   requires explicit approval and preserves confidence plus source lineage.
 
 ## Quality Guidelines
 

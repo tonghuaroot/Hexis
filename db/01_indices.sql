@@ -113,3 +113,5 @@ CREATE INDEX idx_memory_activation_expires_at ON memory_activation (expires_at);
 CREATE INDEX idx_scheduled_tasks_due ON scheduled_tasks (next_run_at)
     WHERE status = 'active';
 CREATE INDEX idx_scheduled_tasks_status ON scheduled_tasks (status);
+CREATE INDEX IF NOT EXISTS idx_skill_improvement_proposals_status_created
+    ON skill_improvement_proposals (status, created_at DESC);

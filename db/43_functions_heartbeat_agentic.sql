@@ -32,6 +32,9 @@ BEGIN
         END IF;
         start_min := split_part(btrim(parts[1]), ':', 1)::int * 60 + split_part(btrim(parts[1]), ':', 2)::int;
         end_min := split_part(btrim(parts[2]), ':', 1)::int * 60 + split_part(btrim(parts[2]), ':', 2)::int;
+        IF start_min < 0 OR start_min > 1439 OR end_min < 0 OR end_min > 1439 THEN
+            RETURN TRUE;
+        END IF;
 
         BEGIN
             local_ts := now() AT TIME ZONE tz;
@@ -39,6 +42,12 @@ BEGIN
             local_ts := now() AT TIME ZONE 'UTC';  -- unknown tz -> UTC, like the Python
         END;
         cur_min := extract(hour FROM local_ts)::int * 60 + extract(minute FROM local_ts)::int;
+
+        -- 23:59 is the last representable minute, so 00:00-23:59 is the
+        -- conventional full-day window rather than a one-minute daily gap.
+        IF start_min = 0 AND end_min = 1439 THEN
+            RETURN TRUE;
+        END IF;
 
         IF start_min <= end_min THEN
             RETURN cur_min >= start_min AND cur_min < end_min;

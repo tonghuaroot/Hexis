@@ -153,6 +153,44 @@ async def test_cli_config_show_and_validate(db_pool):
     assert validate.returncode == 0, validate.stderr
 
 
+async def test_cli_skill_improvement_opt_in_status_and_disable(db_pool):
+    env = os.environ.copy()
+    command = [sys.executable, "-m", "apps.hexis_cli"]
+    cwd = str(Path(__file__).resolve().parents[1])
+    try:
+        disabled = subprocess.run(
+            command + ["skills", "disable", "--wait-seconds", "60"],
+            capture_output=True, text=True, env=env, cwd=cwd,
+        )
+        assert disabled.returncode == 0, disabled.stderr
+
+        status = subprocess.run(
+            command + ["skills", "--json", "--wait-seconds", "60"],
+            capture_output=True, text=True, env=env, cwd=cwd,
+        )
+        assert status.returncode == 0, status.stderr
+        assert json.loads(status.stdout)["enabled"] is False
+
+        enabled = subprocess.run(
+            command + ["skills", "enable", "--yes", "--wait-seconds", "60"],
+            capture_output=True, text=True, env=env, cwd=cwd,
+        )
+        assert enabled.returncode == 0, enabled.stderr
+        assert "never applies a skill automatically" in enabled.stdout
+
+        proposals = subprocess.run(
+            command + ["skills", "proposals", "--json", "--wait-seconds", "60"],
+            capture_output=True, text=True, env=env, cwd=cwd,
+        )
+        assert proposals.returncode == 0, proposals.stderr
+        assert isinstance(json.loads(proposals.stdout), list)
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('skills.self_improvement.enabled', 'false'::jsonb)"
+            )
+
+
 async def test_cli_config_validate_fails_when_unconfigured(db_pool):
     async with db_pool.acquire() as conn:
         await conn.execute("SELECT set_config('agent.is_configured', 'false'::jsonb)")

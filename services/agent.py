@@ -425,6 +425,7 @@ async def run_agent(
                 "pending_protected_replacements",
                 "open_protected_reversions",
                 "pending_import_review",
+                "pending_skill_proposals",
                 "backlog",
             )
             if key in heartbeat_context

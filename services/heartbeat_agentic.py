@@ -132,6 +132,20 @@ async def run_agentic_heartbeat(
         logger.warning("Could not load pending HMX review summary: %s", exc)
 
     try:
+        pending_skills = await conn.fetchval("SELECT skill_improvement_pending_summary()")
+        if isinstance(pending_skills, str):
+            pending_skills = json.loads(pending_skills)
+        if not isinstance(pending_skills, dict):
+            raise TypeError("pending skill proposal summary was not an object")
+        context = dict(context)
+        context["pending_skill_proposals"] = pending_skills or {
+            "count": 0,
+            "proposals": [],
+        }
+    except Exception as exc:
+        logger.warning("Could not load pending skill proposal summary: %s", exc)
+
+    try:
         pending_replacements = await conn.fetchval("SELECT hmx_pending_replacements()")
         if isinstance(pending_replacements, str):
             pending_replacements = json.loads(pending_replacements)

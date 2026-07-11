@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -176,6 +177,31 @@ class AuthorSkillHandler(ToolHandler):
                         "type": "string",
                         "description": "Why this skill is worth keeping.",
                     },
+                    "proposal_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Optional durable improvement proposal that supports this skill.",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "Optional confidence of the supporting improvement review.",
+                    },
+                    "source_memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "description": "Optional source memories supporting this skill.",
+                    },
+                    "source_unit_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "description": "Optional raw experience units supporting this skill.",
+                    },
+                    "evidence_digest": {
+                        "type": "string",
+                        "description": "Optional digest of the reviewed evidence window.",
+                    },
                 },
                 "required": ["name", "description", "content"],
             },
@@ -206,6 +232,27 @@ class AuthorSkillHandler(ToolHandler):
         category = str(arguments.get("category") or SkillCategory.OTHER.value)
         if category not in {c.value for c in SkillCategory}:
             errors.append(f"unknown category: {category}")
+        for field in ("proposal_id",):
+            value = arguments.get(field)
+            if value:
+                try:
+                    uuid.UUID(str(value))
+                except ValueError:
+                    errors.append(f"{field} must be a UUID")
+        for field in ("source_memory_ids", "source_unit_ids"):
+            for value in arguments.get(field) or []:
+                try:
+                    uuid.UUID(str(value))
+                except ValueError:
+                    errors.append(f"{field} contains a non-UUID value: {value}")
+        confidence = arguments.get("confidence")
+        if confidence is not None:
+            try:
+                numeric_confidence = float(confidence)
+                if not 0 <= numeric_confidence <= 1:
+                    errors.append("confidence must be between 0 and 1")
+            except (TypeError, ValueError):
+                errors.append("confidence must be numeric")
         return errors
 
     async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
@@ -246,11 +293,25 @@ class AuthorSkillHandler(ToolHandler):
                 ToolErrorType.FILE_NOT_FOUND,
             )
 
-        created_at: str | None = None
+        existing_provenance: dict[str, Any] = {}
         if mode == "update":
-            managed, detail, created_at = _agent_skill_ownership(path)
+            managed, detail, existing_provenance = _agent_skill_ownership(path)
             if not managed:
                 return ToolResult.error_result(detail, ToolErrorType.PERMISSION_DENIED)
+
+        evidence_provenance = {
+            "proposal_id": arguments.get("proposal_id", existing_provenance.get("proposal_id")),
+            "confidence": arguments.get("confidence", existing_provenance.get("confidence")),
+            "source_memory_ids": _string_list(
+                arguments.get("source_memory_ids", existing_provenance.get("source_memory_ids"))
+            ),
+            "source_unit_ids": _string_list(
+                arguments.get("source_unit_ids", existing_provenance.get("source_unit_ids"))
+            ),
+            "evidence_digest": arguments.get(
+                "evidence_digest", existing_provenance.get("evidence_digest")
+            ),
+        }
 
         skill_text = _render_skill_markdown(
             name=name,
@@ -261,7 +322,8 @@ class AuthorSkillHandler(ToolHandler):
             requires_tools=requires_tools,
             content=content,
             rationale=str(arguments.get("rationale") or "").strip(),
-            created_at=created_at,
+            created_at=existing_provenance.get("created_at"),
+            evidence_provenance=evidence_provenance,
         )
         valid, detail = _validate_skill_text(name, skill_text)
         if not valid:
@@ -280,6 +342,7 @@ class AuthorSkillHandler(ToolHandler):
                 "provenance": {
                     "authored_by": _AGENT_SKILL_AUTHOR,
                     "managed_by": _AGENT_SKILL_MANAGER,
+                    **{key: value for key, value in evidence_provenance.items() if value not in (None, [], "")},
                 },
                 "discoverable_next_turn": True,
             },
@@ -315,7 +378,7 @@ def _agent_skill_path(name: str) -> tuple[Path, Path]:
     return skill_dir, path
 
 
-def _agent_skill_ownership(path: Path) -> tuple[bool, str, str | None]:
+def _agent_skill_ownership(path: Path) -> tuple[bool, str, dict[str, Any]]:
     parsed = [
         skill
         for skill in load_skills_from_dir(path.parent)
@@ -327,22 +390,19 @@ def _agent_skill_ownership(path: Path) -> tuple[bool, str, str | None]:
             provenance.get("authored_by") == _AGENT_SKILL_AUTHOR
             and provenance.get("managed_by") == _AGENT_SKILL_MANAGER
         ):
-            created_at = provenance.get("created_at")
-            return True, "structured agent ownership verified", (
-                created_at if isinstance(created_at, str) and created_at else None
-            )
+            return True, "structured agent ownership verified", dict(provenance)
 
     try:
         existing_text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        return False, f"Could not verify ownership of {path}: {exc}", None
+        return False, f"Could not verify ownership of {path}: {exc}", {}
     if _LEGACY_AGENT_PROVENANCE in existing_text:
-        return True, "legacy agent ownership verified", None
+        return True, "legacy agent ownership verified", {}
     return (
         False,
         f"Refusing to replace '{path}': it is not marked as managed by Hexis "
         "author_skill. Choose a new skill name or edit the user-authored file manually.",
-        None,
+        {},
     )
 
 
@@ -357,6 +417,7 @@ def _render_skill_markdown(
     content: str,
     rationale: str,
     created_at: str | None = None,
+    evidence_provenance: dict[str, Any] | None = None,
 ) -> str:
     now = datetime.now(UTC).isoformat()
     metadata = [
@@ -373,9 +434,12 @@ def _render_skill_markdown(
         f"  managed_by: {json.dumps(_AGENT_SKILL_MANAGER)}",
         f"  created_at: {json.dumps(created_at or now)}",
         f"  updated_at: {json.dumps(now)}",
-        "---",
-        "",
     ]
+    for key in ("proposal_id", "confidence", "source_memory_ids", "source_unit_ids", "evidence_digest"):
+        value = (evidence_provenance or {}).get(key)
+        if value not in (None, [], ""):
+            metadata.append(f"  {key}: {json.dumps(value)}")
+    metadata.extend(["---", ""])
     body = content.rstrip() + "\n"
     footer = [
         "",
@@ -407,5 +471,216 @@ def _validate_skill_text(expected_name: str, skill_text: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _proposal_output(row: Any) -> dict[str, Any]:
+    output = dict(row)
+    for field in ("id",):
+        if output.get(field) is not None:
+            output[field] = str(output[field])
+    for field in ("source_memory_ids", "source_unit_ids"):
+        output[field] = [str(value) for value in output.get(field) or []]
+    for field in ("created_at", "updated_at", "reviewed_at", "applied_at"):
+        value = output.get(field)
+        if value is not None:
+            output[field] = value.isoformat() if hasattr(value, "isoformat") else str(value)
+    return output
+
+
+class ListSkillProposalsHandler(ToolHandler):
+    """List durable self-improvement proposals awaiting explicit review."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="list_skill_proposals",
+            description=(
+                "List background skill-improvement proposals and their evidence lineage. "
+                "No proposal changes behavior until review_skill_proposal applies it."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "applied", "rejected", "all"],
+                        "default": "pending",
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
+            },
+            category=ToolCategory.EXTERNAL,
+            energy_cost=0,
+            is_read_only=True,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result("Proposal review requires a registry reference", ToolErrorType.EXECUTION_FAILED)
+        status = str(arguments.get("status") or "pending")
+        limit = min(max(int(arguments.get("limit") or 20), 1), 100)
+        if status not in {"pending", "applied", "rejected", "all"}:
+            return ToolResult.error_result("status must be pending, applied, rejected, or all", ToolErrorType.INVALID_PARAMS)
+        async with context.registry.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, status, name, description, category, contexts,
+                       bound_tools, requires_tools, mode, rationale, confidence,
+                       source_memory_ids, source_unit_ids, evidence_digest,
+                       last_error, created_at, reviewed_at, applied_at
+                FROM skill_improvement_proposals
+                WHERE ($1::text = 'all' OR status = $1::text)
+                ORDER BY created_at DESC, id
+                LIMIT $2::int
+                """,
+                status,
+                limit,
+            )
+        proposals = [_proposal_output(row) for row in rows]
+        return ToolResult.success_result(
+            {"proposals": proposals}, f"{len(proposals)} skill proposal(s)"
+        )
+
+
+class ReviewSkillProposalHandler(ToolHandler):
+    """Apply, reject, or reopen one durable proposal with explicit approval."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="review_skill_proposal",
+            description=(
+                "Explicitly apply, reject, or reopen a skill-improvement proposal. "
+                "Apply writes through author_skill ownership validation; reject keeps the proposal recoverable."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "proposal_id": {"type": "string", "format": "uuid"},
+                    "action": {"type": "string", "enum": ["apply", "reject", "reopen"]},
+                },
+                "required": ["proposal_id", "action"],
+            },
+            category=ToolCategory.EXTERNAL,
+            energy_cost=3,
+            is_read_only=False,
+            requires_approval=True,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT},
+        )
+
+    def validate(self, arguments: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        try:
+            uuid.UUID(str(arguments.get("proposal_id") or ""))
+        except ValueError:
+            errors.append("proposal_id must be a UUID")
+        if arguments.get("action") not in {"apply", "reject", "reopen"}:
+            errors.append("action must be apply, reject, or reopen")
+        return errors
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result("Proposal review requires a registry reference", ToolErrorType.EXECUTION_FAILED)
+        proposal_id = str(arguments["proposal_id"])
+        action = str(arguments["action"])
+        async with context.registry.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM skill_improvement_proposals WHERE id = $1::uuid",
+                proposal_id,
+            )
+            if not row:
+                return ToolResult.error_result(f"Skill proposal not found: {proposal_id}", ToolErrorType.FILE_NOT_FOUND)
+            if action != "apply":
+                try:
+                    transitioned = await conn.fetchval(
+                        "SELECT transition_skill_improvement_proposal($1::uuid, $2::text)",
+                        proposal_id,
+                        action,
+                    )
+                except Exception as exc:
+                    return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
+                return ToolResult.success_result(
+                    {"proposal_id": proposal_id, "action": action, "proposal": transitioned},
+                    f"{action.title()}ed skill proposal '{row['name']}'",
+                )
+
+        try:
+            _skill_dir, skill_path = _agent_skill_path(str(row["name"]))
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.PATH_NOT_ALLOWED)
+        if skill_path.exists():
+            parsed = load_skills_from_dir(skill_path.parent)
+            if len(parsed) == 1 and parsed[0].provenance.get("proposal_id") == proposal_id:
+                author_result = ToolResult.success_result({"skill": row["name"], "already_written": True})
+            else:
+                author_result = await self._apply_with_author(row, proposal_id, context)
+        else:
+            author_result = await self._apply_with_author(row, proposal_id, context)
+
+        if not author_result.success:
+            async with context.registry.pool.acquire() as conn:
+                try:
+                    await conn.fetchval(
+                        "SELECT transition_skill_improvement_proposal($1::uuid, 'error', $2::text)",
+                        proposal_id,
+                        author_result.error,
+                    )
+                except Exception:
+                    pass
+            return author_result
+
+        async with context.registry.pool.acquire() as conn:
+            try:
+                transitioned = await conn.fetchval(
+                    "SELECT transition_skill_improvement_proposal($1::uuid, 'apply')",
+                    proposal_id,
+                )
+            except Exception as exc:
+                return ToolResult.error_result(
+                    f"Skill file was written but proposal state could not be finalized: {exc}. "
+                    "Retry this same apply action; proposal provenance makes it idempotent.",
+                    ToolErrorType.EXECUTION_FAILED,
+                )
+        return ToolResult.success_result(
+            {
+                "proposal_id": proposal_id,
+                "action": "apply",
+                "skill": author_result.output,
+                "proposal": transitioned,
+            },
+            f"Applied skill proposal '{row['name']}'",
+        )
+
+    @staticmethod
+    async def _apply_with_author(row: Any, proposal_id: str, context: ToolExecutionContext) -> ToolResult:
+        arguments = {
+                "name": row["name"],
+                "description": row["description"],
+                "content": row["content"],
+                "category": row["category"],
+                "contexts": list(row["contexts"]),
+                "bound_tools": list(row["bound_tools"]),
+                "requires_tools": list(row["requires_tools"]),
+                "mode": row["mode"],
+                "rationale": row["rationale"],
+                "proposal_id": proposal_id,
+                "confidence": row["confidence"],
+                "source_memory_ids": [str(value) for value in row["source_memory_ids"]],
+                "source_unit_ids": [str(value) for value in row["source_unit_ids"]],
+                "evidence_digest": row["evidence_digest"],
+        }
+        author = AuthorSkillHandler()
+        errors = author.validate(arguments)
+        if errors:
+            return ToolResult.error_result("; ".join(errors), ToolErrorType.INVALID_PARAMS)
+        return await author.execute(arguments, context)
+
+
 def create_skill_tools() -> list[ToolHandler]:
-    return [ListSkillsHandler(), UseSkillHandler(), AuthorSkillHandler()]
+    return [
+        ListSkillsHandler(),
+        UseSkillHandler(),
+        AuthorSkillHandler(),
+        ListSkillProposalsHandler(),
+        ReviewSkillProposalHandler(),
+    ]

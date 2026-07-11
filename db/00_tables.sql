@@ -900,6 +900,45 @@ VALUES
     )
 ON CONFLICT (key) DO NOTHING;
 
+-- Self-improvement reviews produce durable proposals only. Applying a proposal
+-- to the agent-authored skill directory remains an explicit approved action.
+CREATE TABLE IF NOT EXISTS skill_improvement_proposals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'applied', 'rejected')),
+    name TEXT NOT NULL CHECK (name ~ '^[a-z0-9][a-z0-9_-]{1,63}$'),
+    description TEXT NOT NULL,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'other',
+    contexts TEXT[] NOT NULL DEFAULT ARRAY['chat', 'heartbeat']::TEXT[],
+    bound_tools TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
+    requires_tools TEXT[] NOT NULL DEFAULT '{}'::TEXT[],
+    mode TEXT NOT NULL DEFAULT 'create' CHECK (mode IN ('create', 'update')),
+    rationale TEXT NOT NULL,
+    confidence FLOAT NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    source_memory_ids UUID[] NOT NULL DEFAULT '{}'::UUID[],
+    source_unit_ids UUID[] NOT NULL DEFAULT '{}'::UUID[],
+    evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+    evidence_digest TEXT NOT NULL UNIQUE,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TIMESTAMPTZ,
+    applied_at TIMESTAMPTZ
+);
+
+INSERT INTO config (key, value, description) VALUES
+    ('skills.self_improvement.enabled', 'false'::jsonb, 'Opt in to background experience review that creates skill proposals; proposals are never auto-applied'),
+    ('skills.self_improvement.interval_seconds', '604800'::jsonb, 'Minimum seconds between skill-improvement reviews'),
+    ('skills.self_improvement.claim_timeout_seconds', '1800'::jsonb, 'Seconds before an interrupted review claim can be retried'),
+    ('skills.self_improvement.lookback_days', '30'::jsonb, 'Recent experience window considered by skill-improvement review'),
+    ('skills.self_improvement.evidence_limit', '30'::jsonb, 'Maximum raw conversation turns supplied to one skill-improvement review'),
+    ('skills.self_improvement.min_units', '6'::jsonb, 'Minimum active raw turns required before skill-improvement review'),
+    ('skills.self_improvement.min_sessions', '2'::jsonb, 'Minimum distinct sessions required before skill-improvement review'),
+    ('skills.self_improvement.min_confidence', '0.8'::jsonb, 'Minimum model confidence accepted for a durable skill proposal'),
+    ('llm.skill_improvement', 'null'::jsonb, 'Optional LLM override for skill-improvement review')
+ON CONFLICT (key) DO NOTHING;
+
 -- ============================================================================
 -- SCHEDULED TASKS (CRON-LIKE REMINDERS)
 -- ============================================================================

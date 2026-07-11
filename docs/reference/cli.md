@@ -49,6 +49,10 @@ Complete reference for the `hexis` CLI. Install via `pip install hexis`.
 | `hexis doctor [--json] [--demo]` | Health check (Docker, DB, embeddings) |
 | `hexis config show [--json] [--no-redact]` | Show current configuration |
 | `hexis config validate` | Validate config keys and env references |
+| `hexis skills [--json]` | Show background skill-review status |
+| `hexis skills enable\|disable` | Opt in or out of background proposal review |
+| `hexis skills proposals [--status STATUS]` | List durable skill proposals |
+| `hexis skills review ID --action apply\|reject\|reopen` | Review one proposal with confirmation |
 | `hexis demo [--json]` | Run demo scenario |
 
 ### Chat and Memory
