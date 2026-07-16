@@ -348,6 +348,98 @@
         "value_conflicts": []
       },
       "expected_digest": "995ea7a5ed365b3afda72af2876506d3698fbfbe4024ec850af4ae203cd5133c"
+    },
+    {
+      "name": "drive_number_grammar",
+      "section": "drives",
+      "input": [
+        {
+          "ref": "export-a:drive-grammar",
+          "name": "number_grammar",
+          "description": "Pins every branch of the canonical v1 number grammar.",
+          "parameters": {
+            "integral_float": 5.0,
+            "fixed_small": 0.0001,
+            "sci_small": 0.000002,
+            "collapses_to_zero": 0.0000001,
+            "negative_collapses_to_zero": -0.00000049,
+            "near_tie_rounds_down": 0.1234565,
+            "exact_tie_rounds_to_even": 0.0078125,
+            "fixed_max": 1000000000000000.0,
+            "sci_min": 10000000000000000.0,
+            "sci_large": 150000000000000000000.0,
+            "negative_fixed": -0.2,
+            "big_integer": 1000000000000000000
+          }
+        }
+      ],
+      "expected_digest": "a72777c6cdc1809d3915509084fca261943b566d49adfe82d4c6b8236d9675c2"
+    },
+    {
+      "name": "drive_number_grammar_noisy",
+      "section": "drives",
+      "input": [
+        {
+          "ref": "export-b:drive-grammar",
+          "name": "number_grammar",
+          "description": "Pins every branch of the canonical v1 number grammar.",
+          "parameters": {
+            "integral_float": 5.0000004,
+            "fixed_small": 0.00010000049,
+            "sci_small": 0.0000019999996,
+            "collapses_to_zero": 0.00000049,
+            "negative_collapses_to_zero": -0.0000001,
+            "near_tie_rounds_down": 0.12345649,
+            "exact_tie_rounds_to_even": 0.0078120001,
+            "fixed_max": 1000000000000000.0,
+            "sci_min": 10000000000000000.0,
+            "sci_large": 150000000000000000000.0,
+            "negative_fixed": -0.1999996,
+            "big_integer": 1000000000000000000
+          }
+        }
+      ],
+      "expected_digest": "a72777c6cdc1809d3915509084fca261943b566d49adfe82d4c6b8236d9675c2"
+    },
+    {
+      "name": "drive_number_grammar_tie_away",
+      "section": "drives",
+      "input": [
+        {
+          "ref": "export-c:drive-grammar",
+          "name": "number_grammar",
+          "description": "Pins every branch of the canonical v1 number grammar.",
+          "parameters": {
+            "integral_float": 5.0,
+            "fixed_small": 0.0001,
+            "sci_small": 0.000002,
+            "collapses_to_zero": 0.0000001,
+            "negative_collapses_to_zero": -0.00000049,
+            "near_tie_rounds_down": 0.1234565,
+            "exact_tie_rounds_to_even": 0.007813,
+            "fixed_max": 1000000000000000.0,
+            "sci_min": 10000000000000000.0,
+            "sci_large": 150000000000000000000.0,
+            "negative_fixed": -0.2,
+            "big_integer": 1000000000000000000
+          }
+        }
+      ],
+      "expected_digest": "0208a7c8fbf98d99bae56e98c1137d3b1dc7f366627757efedd3a5391a95275e"
+    },
+    {
+      "name": "worldview_string_escapes",
+      "section": "worldview",
+      "input": [
+        {
+          "ref": "export-a:belief-escapes",
+          "category": "identity",
+          "content": "Escapes: quote \" backslash \\ tab \t newline \n control \u0001 latin é astral 😀 end",
+          "confidence": 0.8,
+          "metadata": {"notação": "non-ascii key"}
+        }
+      ],
+      "expected_digest": "d27be4513e73808ed8e7b08b1074eb82871067038490720f54369be1cbfe1305"
     }
   ],
   "relations": [

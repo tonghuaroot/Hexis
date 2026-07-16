@@ -510,10 +510,19 @@ HMX uses versioned hashes for deduplication and integrity verification. Three ha
 
 For textual content (memory bodies, episode summaries, fact statements, raw unit text):
 
-```python
+```text
 normalize_v1(content) = lowercase(collapse_whitespace(trim(content)))
-content_hash_v1 = sha256(normalize_v1(content)).hexdigest()
+content_hash_v1 = sha256(utf8(normalize_v1(content))) as lowercase hex
 ```
+
+Defined language-neutrally: *whitespace* is exactly the code point set
+U+0009–U+000D, U+001C–U+001F, U+0020, U+0085, U+00A0, U+1680, U+2000–U+200A,
+U+2028, U+2029, U+202F, U+205F, U+3000 (Unicode White_Space plus the
+U+001C–U+001F separators). *trim* removes leading and trailing whitespace;
+*collapse_whitespace* replaces each maximal remaining whitespace run with one
+U+0020; *lowercase* is Unicode default (full, locale-independent) case
+conversion. Implementations MUST NOT substitute their regex engine's own
+notion of `\s` or a locale-dependent case mapping.
 
 This hash is intentionally coarse. Two memories with the same normalized content are considered duplicate candidates even if metadata differs. The selected import strategy decides how metadata conflicts are resolved.
 
@@ -523,27 +532,78 @@ Exporters SHOULD include `content_hash_v1` on memory-like records. Importers MAY
 
 For protected sections — including those that are structured rather than textual (drives, narrative scaffolding, identity facets, emotional triggers, goal hierarchies) — `content_hash_v1` is insufficient. Protected sections require a canonical digest over their normalized JSON representation:
 
-```python
-def canonicalize_json(obj):
-    if isinstance(obj, dict):
-        return {k: canonicalize_json(obj[k]) for k in sorted(obj.keys())}
-    if isinstance(obj, list):
-        return [canonicalize_json(item) for item in obj]
-    return obj
-
-def protected_section_digest_v1(section_name, section_data):
-    pruned = strip_excluded_fields(section_name, section_data)
-    sorted_records = sort_records(section_name, pruned)
-    canonical = canonicalize_json(sorted_records)
-    return sha256(json.dumps(canonical, separators=(',', ':')).encode()).hexdigest()
+```text
+protected_section_digest_v1(section_name, section_data):
+    pruned  = strip_excluded_fields(section_name, section_data)
+    sorted  = sort_records(section_name, pruned)
+    return sha256(canonical_json_serialization_v1(sorted)) as lowercase hex
 ```
 
-The v1 serialization byte contract is the compact JSON emitted above with
-recursively sorted keys, ASCII string escaping (`ensure_ascii=True`), and UTF-8
-encoding. Floats are rounded to six decimal places before serialization;
-negative zero normalizes to `0.0`, and non-finite values are rejected. These
-details are compatibility requirements, not implementation choices. The fixed
-vectors in `tests/fixtures/digest/` pin the resulting SHA-256 output.
+#### Canonical JSON Serialization v1
+
+HMX is an open standard: this byte contract is defined entirely in terms of
+JSON values, Unicode, and IEEE-754 binary64 — never in terms of any
+programming language's formatting behavior. Any language that can see a JSON
+value and (for producers holding binary floats) the bits of a binary64 can
+implement it. The fixed vectors in `tests/fixtures/digest/` are the
+conformance suite; every grammar branch below is pinned by at least one
+vector, and a changed digest against them is a compatibility break.
+
+The serialization of a JSON value is a single JSON text, encoded as UTF-8,
+with **no whitespace** between tokens:
+
+1. **Objects** — `{` member list `}` with members separated by `,` and keys
+   separated from values by `:`. Members are ordered by comparing raw
+   (unescaped) key strings lexicographically by Unicode code point. Keys MUST
+   be strings.
+2. **Arrays** — `[` elements separated by `,` `]`. Element order is
+   preserved (order is semantic where the digest algorithm has not already
+   sorted records).
+3. **Strings** — `"`-delimited with this exact escaping: `"` as `\"`, `\` as
+   `\\`, backspace `\b`, form feed `\f`, line feed `\n`, carriage return
+   `\r`, tab `\t`; every other code point below U+0020 as `\u00XX`; every
+   code point above U+007E as `\uXXXX` UTF-16 code units (code points above
+   U+FFFF become surrogate pairs, e.g. U+1F600 → `\ud83d\ude00`). Hex digits
+   are lowercase, four digits per escape. Code points U+0020–U+007E other
+   than `"` and `\` are emitted literally.
+4. **Booleans / null** — `true`, `false`, `null`.
+5. **Integers** — a number that is a mathematical integer conveyed without a
+   fraction or exponent marker serializes as its minimal decimal digits
+   (optional leading `-`, no `+`, no leading zeros, arbitrary precision, no
+   exponent).
+6. **Non-integer numbers** — the value is an IEEE-754 binary64 `f` (readers
+   of JSON text bind a fraction/exponent-bearing token to the nearest
+   binary64; producers holding binary floats use them directly). NaN and
+   infinities MUST be rejected. The canonical form is computed exactly:
+   a. Round the exact real value of `f` to the nearest integer multiple of
+      10⁻⁶, **ties to even**, then take the binary64 nearest to that decimal;
+      call it `r`.
+   b. If `r` is zero of either sign, emit `0.0`.
+   c. Otherwise take the **shortest round-trip decimal representation** of
+      `r`: the decimal with the fewest significant digits that converts back
+      to exactly `r` under round-to-nearest-even binary64 conversion (closest
+      to `r` among equal-length candidates). Write it as
+      `d0.d1…dn × 10^e` in normalized scientific form (`1 ≤ d0 ≤ 9`).
+   d. If `-4 ≤ e < 16`, emit fixed notation: the digits with the decimal
+      point placed by `e`, a `0.` prefix and zero-fill for `e < 0`, zero-fill
+      and a trailing `.0` for integral values (`5.0`, `1000000000000000.0`,
+      `0.0001`). Otherwise emit scientific notation: `d0` followed by
+      `.d1…dn` only when `n ≥ 1`, then `e`, a mandatory exponent sign, and
+      the exponent zero-padded to at least two digits (`2e-06`, `1e+16`,
+      `1.5e+20`). Negative values take a leading `-`.
+
+Producer requirement: exporters MUST emit integers as bare decimal digits
+(no fraction or exponent marker) and non-integer numbers with an explicit
+decimal point, so that every conforming reader binds the same token kind. A
+bare exponent token (`1e+16`) is a producer violation; readers MAY bind it as
+an integer. (A decimal-native reader — for example one backed by PostgreSQL
+`numeric` — distinguishes the kinds by the presence of a fraction; a
+binary-float reader distinguishes them by parsed type.)
+
+These details are compatibility requirements, not implementation choices.
+Reference implementations: `core/digest.py` (Python) and
+`db/57_functions_hmx_digest.sql` (PL/pgSQL) — two independent languages
+reproducing the same conformance vectors byte-for-byte.
 
 #### Sort key principle
 
@@ -603,7 +663,7 @@ The digest is used in the Protected Section Replacement Protocol's fast-path ver
 
 For audit-record dedupe comparison. The algorithm canonicalizes the audit record JSON, excludes `audit_id` and transport-local fields, then SHA-256:
 
-```python
+```text
 AUDIT_DIGEST_EXCLUDED_FIELDS = {
     'audit_id',
     'imported_at',
@@ -611,11 +671,14 @@ AUDIT_DIGEST_EXCLUDED_FIELDS = {
     'metadata.unrecognized_hmx_fields',
 }
 
-def audit_record_digest_v1(record):
-    record_for_digest = strip_paths(record, AUDIT_DIGEST_EXCLUDED_FIELDS)
-    canonical = canonicalize_json(record_for_digest)
-    return sha256(json.dumps(canonical, separators=(',', ':')).encode()).hexdigest()
+audit_record_digest_v1(record):
+    pruned = strip_paths(record, AUDIT_DIGEST_EXCLUDED_FIELDS)
+    # a parent object emptied by stripping is dropped entirely
+    return sha256(canonical_json_serialization_v1(pruned)) as lowercase hex
 ```
+
+The byte contract is the same "Canonical JSON Serialization v1" defined for
+`protected_section_digest_v1` above.
 
 Excluded fields cover identifier-only data and transport metadata that should not affect dedupe semantics. Two audit records with the same `audit_id` are treated as identical if their `audit_record_digest_v1` matches, and divergent if it does not. This replaces byte-identical comparison, which is too brittle across JSON formatters, key orderings, and whitespace differences.
 

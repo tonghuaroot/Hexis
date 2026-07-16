@@ -102,6 +102,53 @@ Specific user preferences from this workstream:
 
 ## What Was Completed
 
+### HMX digest contract is a language-neutral open standard
+
+User ruling: HMX must not be tied to any programming language; any language
+must be able to implement it. The v1 digest byte contract was previously
+"whatever CPython `round`/`json.dumps` emit" in its corner cases. It is now
+specified normatively — with zero byte changes to existing digests.
+
+Key pieces:
+
+- `plans/hmx.md` "Canonical JSON Serialization v1" - the byte contract in
+  decimal/IEEE-754/Unicode terms only: exact string-escape table, key ordering
+  by Unicode code point, integer vs non-integer token rules, and a number
+  grammar (round the binary64's exact value to 6 fractional digits ties-even,
+  then emit the shortest round-trip representation in a fixed/scientific
+  notation grammar with pinned thresholds). `normalize_v1` whitespace is an
+  explicit code point enumeration and case conversion is Unicode-default —
+  never a regex engine's `\s` or a locale mapping. Producers MUST mark
+  non-integers with a decimal point (bare exponent tokens bind as integers).
+- `core/digest.py` - the serializer is now an explicit rule-by-rule
+  implementation (`canonical_number_v1`, `_serialize_canonical`) instead of
+  `json.dumps` inheritance; verified byte-identical over a 20k randomized
+  corpus plus all fixtures.
+- `db/57_functions_hmx_digest.sql` + migration `0024` - an independent
+  PL/pgSQL implementation: exact binary64 decimal expansion via
+  `float8send` bits, exact ties-to-even rounding in numeric, shortest
+  round-trip digit generation with an explicit parse-back test (PostgreSQL's
+  own float8 output formatting is never trusted — its Ryu skips
+  closed-boundary shortest forms), spec-conformant string escaping including
+  surrogate pairs, and the full protected-section prune/sort/digest pipeline
+  plus `hmx_content_hash_v1` / `hmx_audit_record_digest_v1`.
+- `tests/fixtures/digest/` - new conformance vectors pin every number-grammar
+  branch (integral floats, 1e-4/1e16 notation boundaries, zero collapse,
+  ties-to-even) and string escaping; a `number_tie_to_even` divergence
+  relation traps implementations that round ties away from zero. Existing
+  vector digests are unchanged.
+- `tests/db/test_hmx_digest_sql.py` - the SQL implementation must reproduce
+  every fixture vector and relation, match the Python reference on a
+  423-value float corpus (including DBL_MAX and denormals), and reject
+  non-finite numbers.
+
+Wire-format subtlety worth remembering: reading a fixture with Python
+`json.loads` and re-serializing turns `150000000000000000000.0` into the
+bare-exponent token `1.5e+20`, which a decimal-native reader (PostgreSQL
+jsonb) correctly binds as an integer. Tests that feed JSON across languages
+must preserve number token kinds (`parse_float=Decimal` + scale-preserving
+serialization).
+
 ### Active persona and evidence-grounded appraisal
 
 This implements the durable fix recommended in "Generic Identity Adaptation

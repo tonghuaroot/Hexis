@@ -16,3 +16,14 @@ Implementations should:
 `core.digest.protected_section_canonical_bytes_v1` and
 `core.digest.audit_record_canonical_bytes_v1` expose the exact pre-hash bytes
 for diagnosing a mismatch in the Python implementation.
+
+HMX is an open standard: the byte contract is specified language-neutrally in
+`plans/hmx.md` ("Canonical JSON Serialization v1") and these vectors are its
+conformance suite. Two independent implementations reproduce them
+byte-for-byte — `core/digest.py` (Python) and
+`db/57_functions_hmx_digest.sql` (PL/pgSQL) — and the
+`drive_number_grammar*` / `worldview_string_escapes` vectors pin every branch
+of the number grammar (integral floats, fixed/scientific notation boundaries,
+zero collapse, ties-to-even) and the string escaping rules. An implementation
+that rounds decimal ties away from zero fails the `number_tie_to_even`
+divergence relation by design.

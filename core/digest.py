@@ -1,5 +1,12 @@
 """HMX canonical hashing (plans/hmx.md, "Canonical Hashing").
 
+HMX is an open standard: the byte contract here is defined entirely in
+decimal/IEEE-754/Unicode terms (see "Canonical JSON Serialization v1" in the
+spec) so ANY language can implement it, and the fixed vectors in
+``tests/fixtures/digest/`` are the conformance suite. This module is the
+Python reference implementation; ``db/57_functions_hmx_digest.sql`` is an
+independent plpgsql implementation proving the contract is language-neutral.
+
 Three versioned hash families:
 
 - ``content_hash_v1``: coarse dedup hash over normalized text.
@@ -37,6 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from typing import Any
 
@@ -114,19 +122,93 @@ def canonicalize_json(obj: Any) -> Any:
     return obj
 
 
-def _canonical_bytes(obj: Any) -> bytes:
-    """Serialize canonical JSON using the byte contract pinned by the fixtures.
+def canonical_number_v1(value: float) -> str:
+    """Serialize a non-integer number per Canonical JSON Serialization v1.
 
-    ``ensure_ascii=True`` is intentional: JSON strings use ASCII escapes before
-    UTF-8 encoding, matching the original v1 algorithm's ``json.dumps``
-    pseudocode. Non-finite floats are not JSON and fail loudly.
+    Defined entirely in decimal/IEEE-754 terms (plans/hmx.md, "Canonical JSON
+    Serialization v1") so any language can implement it:
+
+    1. Reject non-finite values.
+    2. Round the exact real value of the binary64 to the nearest integer
+       multiple of 10^-6, ties to even (both steps exact over the reals), and
+       take the binary64 nearest to that decimal. If the result is a zero of
+       either sign, emit ``0.0``.
+    3. Otherwise emit the shortest round-trip decimal representation of the
+       result. With that representation written as d0.d1...dn x 10^e
+       (normalized scientific form): use fixed notation when -4 <= e < 16
+       (integral values keep a trailing ``.0``); otherwise scientific notation
+       ``d0[.d1...dn]e<sign><exponent>`` with a mandatory sign and the exponent
+       zero-padded to at least two digits.
+
+    CPython's ``round(value, 6)`` and ``repr`` implement exactly this contract
+    (correctly-rounded decimal rounding and Gay/Grisu shortest repr with the
+    same notation thresholds); the conformance vectors in
+    ``tests/fixtures/digest/`` pin every grammar branch for other
+    implementations.
     """
-    return json.dumps(
-        canonicalize_json(obj),
-        ensure_ascii=True,
-        allow_nan=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    if math.isnan(value) or math.isinf(value):
+        raise ValueError("non-finite numbers are not valid HMX canonical JSON")
+    rounded = round(value, FLOAT_PRECISION)
+    if rounded == 0:
+        return "0.0"
+    return repr(rounded)
+
+
+def _serialize_canonical(obj: Any, out: list[str]) -> None:
+    """Append the canonical serialization of ``obj`` to ``out``.
+
+    Explicit rule-by-rule implementation of Canonical JSON Serialization v1
+    (plans/hmx.md) so every emitted byte is a specified decision rather than
+    inherited serializer behavior.
+    """
+    if obj is None:
+        out.append("null")
+    elif isinstance(obj, bool):  # bool before int: bool is an int subclass
+        out.append("true" if obj else "false")
+    elif isinstance(obj, str):
+        # RFC 8259 escaping with all non-ASCII escaped as lowercase-hex
+        # \uXXXX UTF-16 code units (astral code points become surrogate
+        # pairs). json.dumps(ensure_ascii=True) implements exactly this.
+        out.append(json.dumps(obj, ensure_ascii=True))
+    elif isinstance(obj, int):
+        # Integers: minimal decimal digits, arbitrary precision, no exponent.
+        out.append(str(obj))
+    elif isinstance(obj, float):
+        out.append(canonical_number_v1(obj))
+    elif isinstance(obj, dict):
+        out.append("{")
+        first = True
+        for key in sorted(obj.keys()):  # lexicographic by Unicode code point
+            if not isinstance(key, str):
+                raise TypeError(f"canonical JSON object keys must be strings, got {type(key).__name__}")
+            if not first:
+                out.append(",")
+            first = False
+            out.append(json.dumps(key, ensure_ascii=True))
+            out.append(":")
+            _serialize_canonical(obj[key], out)
+        out.append("}")
+    elif isinstance(obj, list):
+        out.append("[")
+        for index, item in enumerate(obj):
+            if index:
+                out.append(",")
+            _serialize_canonical(item, out)
+        out.append("]")
+    else:
+        raise TypeError(f"{type(obj).__name__} is not a canonical JSON value")
+
+
+def _canonical_bytes(obj: Any) -> bytes:
+    """UTF-8 bytes of the Canonical JSON Serialization v1 of ``obj``.
+
+    No whitespace, keys sorted by code point, ASCII-escaped strings, numbers
+    per :func:`canonical_number_v1`. The fixed vectors in
+    ``tests/fixtures/digest/`` pin this byte contract for all implementations.
+    """
+    out: list[str] = []
+    _serialize_canonical(obj, out)
+    return "".join(out).encode("utf-8")
 
 
 def _sha256_hex(data: bytes) -> str:
