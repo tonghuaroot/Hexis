@@ -321,7 +321,7 @@ BEGIN
     IF schedule_str IS NOT NULL THEN
         IF db_brain_is_cron_expression(schedule_str) THEN
             schedule_kind := 'cron';
-            schedule := jsonb_build_object('cron', schedule_str, '_next_run', (CURRENT_TIMESTAMP + INTERVAL '1 minute')::text);
+            schedule := jsonb_build_object('cron', schedule_str);
         ELSIF schedule_str LIKE '{%' THEN
             schedule := schedule_str::jsonb;
         ELSIF position(':' in schedule_str) > 0 THEN
@@ -382,7 +382,13 @@ BEGIN
     END IF;
 
     IF schedule_kind = 'cron' THEN
-        schedule := schedule || jsonb_build_object('_next_run', COALESCE(NULLIF(schedule->>'_next_run', ''), (CURRENT_TIMESTAMP + INTERVAL '1 minute')::text));
+        IF NULLIF(schedule->>'cron', '') IS NULL THEN
+            RAISE EXCEPTION 'cron schedule requires a "cron" expression';
+        END IF;
+        -- cron_next_fire validates the expression (raises on bad syntax,
+        -- out-of-range values, or a never-firing schedule).
+        schedule := schedule || jsonb_build_object(
+            '_next_run', cron_next_fire(schedule->>'cron', timezone_value, CURRENT_TIMESTAMP)::text);
     END IF;
 
     IF schedule_kind = 'once' AND schedule ? '_offset' THEN
@@ -495,7 +501,25 @@ BEGIN
             'delivery', delivery
         ), 'display_output', format('Created scheduled task: %s (%s)', p_args->>'name', parsed->>'schedule_kind'));
     ELSIF action = 'list' THEN
-        SELECT COALESCE(jsonb_agg(to_jsonb(t)), '[]'::jsonb)
+        SELECT COALESCE(jsonb_agg(
+            jsonb_build_object(
+                'id', t.id::text,
+                'name', t.name,
+                'description', t.description,
+                'schedule_kind', t.schedule_kind,
+                'status', t.status,
+                'next_run_at', t.next_run_at::text,
+                'last_run_at', t.last_run_at::text,
+                'run_count', COALESCE(t.run_count, 0),
+                'action_kind', t.action_kind,
+                'last_error', t.last_error
+            )
+            -- default outbox delivery is implementation detail; only
+            -- non-default routing is surfaced
+            || CASE WHEN t.delivery IS NOT NULL AND (t.delivery->>'mode') IS DISTINCT FROM 'outbox'
+                    THEN jsonb_build_object('delivery', t.delivery)
+                    ELSE '{}'::jsonb END
+        ), '[]'::jsonb)
         INTO tasks
         FROM list_scheduled_tasks(NULLIF(p_args->>'status', '')) t;
         RETURN jsonb_build_object('success', true, 'output', jsonb_build_object('tasks', tasks, 'count', jsonb_array_length(tasks)), 'display_output', format('Found %s scheduled task(s)', jsonb_array_length(tasks)));
@@ -506,6 +530,12 @@ BEGIN
         END IF;
         parsed := CASE WHEN p_args ? 'schedule' OR p_args ? 'schedule_kind' THEN parse_schedule_input(p_args) ELSE NULL END;
         delivery := CASE WHEN p_args ? 'delivery_mode' OR p_args ? 'delivery_channel' OR p_args ? 'delivery_target_id' OR p_args ? 'delivery_webhook_url' THEN build_schedule_delivery(p_args) ELSE NULL END;
+        IF delivery IS NOT NULL AND delivery->>'mode' = 'channel' AND NULLIF(delivery->>'target_id', '') IS NULL THEN
+            RETURN jsonb_build_object('success', false, 'error', 'delivery_target_id is required when delivery_mode is channel', 'error_type', 'invalid_params');
+        END IF;
+        IF delivery IS NOT NULL AND delivery->>'mode' = 'webhook' AND NULLIF(delivery->>'url', '') IS NULL THEN
+            RETURN jsonb_build_object('success', false, 'error', 'delivery_webhook_url is required when delivery_mode is webhook', 'error_type', 'invalid_params');
+        END IF;
         action_payload := CASE
             WHEN p_args ? 'message' THEN jsonb_build_object('message', p_args->>'message')
             WHEN p_args ? 'goal_title' THEN jsonb_build_object('title', p_args->>'goal_title')
@@ -539,9 +569,21 @@ BEGIN
         RETURN jsonb_build_object('success', false, 'error', format('Task %s not found', task_id), 'error_type', 'invalid_params');
     ELSE
         IF NULLIF(p_args->>'task_id', '') IS NOT NULL THEN
-            SELECT to_jsonb(t) INTO row_data FROM scheduled_tasks t WHERE id = (p_args->>'task_id')::uuid;
+            SELECT jsonb_build_object(
+                'task_id', t.id::text,
+                'name', t.name,
+                'schedule_kind', t.schedule_kind,
+                'status', t.status,
+                'run_count', t.run_count,
+                'max_runs', t.max_runs,
+                'last_run_at', t.last_run_at::text,
+                'next_run_at', t.next_run_at::text,
+                'last_error', t.last_error,
+                'created_at', t.created_at::text
+            ) INTO row_data
+            FROM scheduled_tasks t WHERE id = (p_args->>'task_id')::uuid;
             IF row_data IS NULL THEN
-                RETURN jsonb_build_object('success', false, 'error', 'Task not found', 'error_type', 'invalid_params');
+                RETURN jsonb_build_object('success', false, 'error', format('Task %s not found', p_args->>'task_id'), 'error_type', 'execution_failed');
             END IF;
             RETURN jsonb_build_object('success', true, 'output', row_data);
         END IF;
@@ -551,10 +593,19 @@ BEGIN
             'disabled_tasks', COUNT(*) FILTER (WHERE status = 'disabled'),
             'total_executions', COALESCE(SUM(run_count), 0),
             'tasks_with_errors', COUNT(*) FILTER (WHERE last_error IS NOT NULL AND status = 'active'),
-            'last_execution', MAX(last_run_at),
-            'next_execution', MIN(next_run_at) FILTER (WHERE status = 'active')
+            'last_execution', MAX(last_run_at)::text,
+            'next_execution', (MIN(next_run_at) FILTER (WHERE status = 'active'))::text
         ) INTO row_data
         FROM scheduled_tasks;
+        row_data := row_data || jsonb_build_object('recent_runs', COALESCE(
+            (SELECT jsonb_agg(jsonb_build_object(
+                    'at', e.created_at::text,
+                    'tasks_executed', e.payload->'executed'
+                ) ORDER BY e.created_at DESC)
+             FROM (SELECT created_at, payload FROM gateway_events
+                   WHERE source = 'cron'
+                   ORDER BY created_at DESC LIMIT 10) e),
+            '[]'::jsonb));
         RETURN jsonb_build_object('success', true, 'output', row_data);
     END IF;
 EXCEPTION WHEN OTHERS THEN
@@ -572,18 +623,19 @@ DECLARE
     task_id UUID;
     schedule_value JSONB;
     next_run TIMESTAMPTZ;
+    task_tz TEXT;
 BEGIN
     IF p_task_ids IS NULL OR cardinality(p_task_ids) = 0 THEN
         RETURN 0;
     END IF;
     FOREACH task_id IN ARRAY p_task_ids LOOP
-        SELECT schedule INTO schedule_value FROM scheduled_tasks WHERE id = task_id AND schedule_kind = 'cron';
+        SELECT schedule, COALESCE(timezone, 'UTC') INTO schedule_value, task_tz FROM scheduled_tasks WHERE id = task_id AND schedule_kind = 'cron';
         IF NOT FOUND THEN
             CONTINUE;
         END IF;
+        next_run := compute_next_run_at('cron', schedule_value, task_tz, CURRENT_TIMESTAMP);
         schedule_value := COALESCE(schedule_value, '{}'::jsonb)
-            || jsonb_build_object('_next_run', (CURRENT_TIMESTAMP + INTERVAL '1 minute')::text);
-        next_run := compute_next_run_at('cron', schedule_value, 'UTC', CURRENT_TIMESTAMP);
+            || jsonb_build_object('_next_run', next_run::text);
         UPDATE scheduled_tasks
         SET schedule = schedule_value,
             next_run_at = next_run,

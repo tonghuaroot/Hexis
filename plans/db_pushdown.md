@@ -107,16 +107,22 @@ Highest value per unit effort; every item below is drift risk today.
 > `retrieval_source`, and flattens `source_attribution` into `source_*` keys;
 > malformed uuid args return `invalid_params`. Validation tests run against
 > the real dispatcher.
-> **cron is deferred with cause**: `manage_schedule_tool` has real gaps
-> (stats `recent_runs`, list shaping/outbox hiding, update delivery
-> validation, no cron-expression validation), and — bigger — the SQL cron
-> "math" is a `now + 1 minute` placeholder (db/19 `compute_next_run_at` cron
-> branch, db/36 `recompute_cron_next_runs`), so DB-native cron tasks
-> effectively degrade to every-minute firing after their first run. The right
-> fix is a real cron evaluator in SQL (parse fields, compute next fire in the
-> task's timezone), then dispatcher parity, then delete cron.py's fallback +
-> croniter helpers. This is its own work item.
-> Still open in Tranche 1: 1.6-cron (above), 1.7 (personhood).
+> **cron is done** (migration `0028`): the SQL cron "math" was a
+> `now + 1 minute` placeholder — a real defect that made DB-native cron tasks
+> degrade to every-minute firing after their first run. `cron_next_fire`
+> (db/19) now evaluates 5-field cron expressions with Vixie semantics
+> (ranges/steps/lists/names, dom-OR-dow rule, 0/7=Sunday, timezone-aware,
+> minute resolution; 6-field drops the seconds field) and doubles as the
+> validator; `parse_schedule_input` validates cron at creation with a real
+> `_next_run`; `recompute_cron_next_runs` uses the task's timezone;
+> `manage_schedule_tool` reached fallback parity (curated list/stats shapes,
+> outbox-delivery hiding, `recent_runs`, update delivery validation).
+> cron.py went 810 → 209 lines (croniter helpers + fallback deleted); its
+> tests now pin the SQL semantics directly, including a nine-case
+> next-fire table.
+> Still open in Tranche 1: 1.7 (personhood). Also queued from 1.6 discovery:
+> workflow loop adoption of `apply_workflow_step_result` +
+> `finalize_workflow_execution` (Tranche-D note above).
 
 | # | Python | SQL twin (exists) | Notes | Effort |
 |---|--------|-------------------|-------|--------|

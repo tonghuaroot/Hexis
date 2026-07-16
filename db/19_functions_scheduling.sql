@@ -71,6 +71,178 @@ EXCEPTION
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
+-- One atom of a cron field: a number or a name (JAN..DEC / SUN..SAT).
+CREATE OR REPLACE FUNCTION cron_field_atom(
+    p_atom TEXT, p_min INT, p_max INT, p_names TEXT[] DEFAULT NULL
+) RETURNS INT AS $$
+DECLARE
+    idx INT;
+    val INT;
+BEGIN
+    IF p_names IS NOT NULL THEN
+        idx := array_position(p_names, upper(btrim(p_atom)));
+        IF idx IS NOT NULL THEN
+            RETURN p_min + idx - 1;
+        END IF;
+    END IF;
+    IF btrim(p_atom) !~ '^\d+$' THEN
+        RAISE EXCEPTION 'invalid cron atom: %', p_atom;
+    END IF;
+    val := btrim(p_atom)::int;
+    IF val < p_min OR val > p_max THEN
+        RAISE EXCEPTION 'cron value % out of range %-%', val, p_min, p_max;
+    END IF;
+    RETURN val;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+-- Expand one cron field ('*', 'a', 'a-b', '*/n', 'a-b/n', 'a/n', lists) into
+-- its sorted value set. Raises on any invalid syntax or out-of-range value,
+-- so this doubles as the cron validator.
+CREATE OR REPLACE FUNCTION cron_field_values(
+    p_field TEXT, p_min INT, p_max INT, p_names TEXT[] DEFAULT NULL
+) RETURNS INT[] AS $$
+DECLARE
+    field TEXT := btrim(coalesce(p_field, ''));
+    part TEXT;
+    body TEXT;
+    step_txt TEXT;
+    step INT;
+    lo INT;
+    hi INT;
+    seen BOOLEAN[] := array_fill(false, ARRAY[p_max - p_min + 1]);
+    result INT[] := '{}';
+    i INT;
+BEGIN
+    IF field = '' THEN
+        RAISE EXCEPTION 'empty cron field';
+    END IF;
+    FOREACH part IN ARRAY string_to_array(field, ',') LOOP
+        part := btrim(part);
+        step := 1;
+        body := part;
+        IF position('/' in part) > 0 THEN
+            body := split_part(part, '/', 1);
+            step_txt := split_part(part, '/', 2);
+            IF step_txt !~ '^\d+$' OR step_txt::int < 1 THEN
+                RAISE EXCEPTION 'invalid cron step: %', part;
+            END IF;
+            step := step_txt::int;
+        END IF;
+        IF body = '*' THEN
+            lo := p_min;
+            hi := p_max;
+        ELSIF position('-' in body) > 0 THEN
+            lo := cron_field_atom(split_part(body, '-', 1), p_min, p_max, p_names);
+            hi := cron_field_atom(split_part(body, '-', 2), p_min, p_max, p_names);
+            IF lo > hi THEN
+                RAISE EXCEPTION 'inverted cron range: %', body;
+            END IF;
+        ELSE
+            lo := cron_field_atom(body, p_min, p_max, p_names);
+            -- 'a/n' means a..max stepped by n; a bare 'a' is just a.
+            hi := CASE WHEN step > 1 THEN p_max ELSE lo END;
+        END IF;
+        i := lo;
+        WHILE i <= hi LOOP
+            seen[i - p_min + 1] := true;
+            i := i + step;
+        END LOOP;
+    END LOOP;
+    FOR i IN p_min..p_max LOOP
+        IF seen[i - p_min + 1] THEN
+            result := result || i;
+        END IF;
+    END LOOP;
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+-- Real cron next-fire computation (minute resolution) in the task's
+-- timezone. Fields: minute hour day-of-month month day-of-week; a 6-field
+-- expression drops its trailing seconds field. Standard Vixie semantics: when
+-- both day fields are restricted (not '*'), a day matches if EITHER matches;
+-- day-of-week accepts 0-7 (0 and 7 are Sunday) and SUN-SAT names.
+CREATE OR REPLACE FUNCTION cron_next_fire(
+    p_cron TEXT,
+    p_timezone TEXT DEFAULT 'UTC',
+    p_after TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+) RETURNS TIMESTAMPTZ AS $$
+DECLARE
+    fields TEXT[] := regexp_split_to_array(btrim(coalesce(p_cron, '')), '\s+');
+    minutes INT[];
+    hours INT[];
+    doms INT[];
+    months INT[];
+    dows INT[];
+    dom_star BOOLEAN;
+    dow_star BOOLEAN;
+    tz TEXT := normalize_timezone(p_timezone);
+    local_after TIMESTAMP;
+    day0 DATE;
+    day DATE;
+    d INT;
+    h INT;
+    m INT;
+    day_ok BOOLEAN;
+    cursor_time TIME;
+    result TIMESTAMPTZ;
+BEGIN
+    IF array_length(fields, 1) = 6 THEN
+        fields := fields[1:5];
+    END IF;
+    IF array_length(fields, 1) <> 5 THEN
+        RAISE EXCEPTION 'cron expression must have 5 fields: %', p_cron;
+    END IF;
+    minutes := cron_field_values(fields[1], 0, 59);
+    hours := cron_field_values(fields[2], 0, 23);
+    doms := cron_field_values(fields[3], 1, 31);
+    months := cron_field_values(fields[4], 1, 12,
+        ARRAY['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC']);
+    dows := ARRAY(SELECT DISTINCT v % 7 FROM unnest(cron_field_values(fields[5], 0, 7,
+        ARRAY['SUN','MON','TUE','WED','THU','FRI','SAT','SUN'])) v ORDER BY v % 7);
+    dom_star := btrim(fields[3]) = '*';
+    dow_star := btrim(fields[5]) = '*';
+
+    local_after := date_trunc('minute', p_after AT TIME ZONE tz) + INTERVAL '1 minute';
+    day0 := local_after::date;
+    FOR d IN 0..1500 LOOP
+        day := day0 + d;
+        IF NOT (EXTRACT(MONTH FROM day)::int = ANY(months)) THEN
+            CONTINUE;
+        END IF;
+        IF dom_star AND dow_star THEN
+            day_ok := true;
+        ELSIF dom_star THEN
+            day_ok := EXTRACT(DOW FROM day)::int = ANY(dows);
+        ELSIF dow_star THEN
+            day_ok := EXTRACT(DAY FROM day)::int = ANY(doms);
+        ELSE
+            day_ok := EXTRACT(DAY FROM day)::int = ANY(doms)
+                   OR EXTRACT(DOW FROM day)::int = ANY(dows);
+        END IF;
+        IF NOT day_ok THEN
+            CONTINUE;
+        END IF;
+        cursor_time := CASE WHEN d = 0 THEN local_after::time ELSE '00:00'::time END;
+        FOREACH h IN ARRAY hours LOOP
+            IF make_time(h, 59, 59.0) < cursor_time THEN
+                CONTINUE;
+            END IF;
+            FOREACH m IN ARRAY minutes LOOP
+                IF make_time(h, m, 0.0) >= cursor_time THEN
+                    result := (day + make_time(h, m, 0.0)) AT TIME ZONE tz;
+                    IF result > p_after THEN
+                        RETURN result;
+                    END IF;
+                END IF;
+            END LOOP;
+        END LOOP;
+    END LOOP;
+    RAISE EXCEPTION 'cron expression never fires: %', p_cron;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 CREATE OR REPLACE FUNCTION compute_next_run_at(
     p_schedule_kind TEXT,
     p_schedule JSONB,
@@ -148,16 +320,20 @@ BEGIN
             END IF;
             RETURN run_at;
         WHEN 'cron' THEN
-            -- Cron expressions are computed in Python via croniter.
-            -- The schedule JSONB stores {"cron": "...", "_next_run": "ISO8601"}.
-            -- Python pre-computes _next_run and updates it after each execution.
-            run_at := NULLIF(p_schedule->>'_next_run', '')::timestamptz;
-            IF run_at IS NOT NULL AND run_at > after_ts THEN
-                RETURN run_at;
-            END IF;
-            -- Fallback: return near-future time so task stays active.
-            -- Python worker will fix up the real next_run_at immediately.
-            RETURN after_ts + INTERVAL '1 minute';
+            -- Real cron math lives in cron_next_fire; the schedule JSONB
+            -- stores {"cron": "..."} (a stale "_next_run" is ignored).
+            -- Fail open to +1 minute only if evaluation fails at runtime —
+            -- creation-time validation should make that unreachable.
+            BEGIN
+                RETURN cron_next_fire(p_schedule->>'cron', tz, after_ts);
+            EXCEPTION WHEN OTHERS THEN
+                RAISE WARNING 'cron_next_fire failed for %: %', p_schedule->>'cron', SQLERRM;
+                run_at := NULLIF(p_schedule->>'_next_run', '')::timestamptz;
+                IF run_at IS NOT NULL AND run_at > after_ts THEN
+                    RETURN run_at;
+                END IF;
+                RETURN after_ts + INTERVAL '1 minute';
+            END;
         ELSE
             RAISE EXCEPTION 'Unsupported schedule_kind: %', schedule_kind;
     END CASE;

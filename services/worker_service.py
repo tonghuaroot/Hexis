@@ -402,7 +402,7 @@ class MaintenanceWorker:
                     )
                 except Exception:
                     logger.debug("Gateway record failed (non-fatal)", exc_info=True)
-            # Recompute next_run_at for cron-expression tasks (Python-side croniter)
+            # Recompute next_run_at for cron-expression tasks (cron_next_fire in the DB)
             cron_task_ids = payload.get("cron_task_ids") or []
             if cron_task_ids:
                 try:
