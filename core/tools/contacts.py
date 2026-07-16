@@ -52,23 +52,6 @@ async def _try_db_contact_tool(tool_name: str, arguments: dict[str, Any], contex
     return None
 
 
-def _contact_to_dict(row: Any) -> dict[str, Any]:
-    """Convert a contacts row to a JSON-friendly dict."""
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "email": row.get("email"),
-        "company": row.get("company"),
-        "role": row.get("role"),
-        "phone": row.get("phone"),
-        "notes": row.get("notes"),
-        "tags": list(row.get("tags") or []),
-        "source": row.get("source"),
-        "first_seen": str(row["first_seen"]) if row.get("first_seen") else None,
-        "last_touch": str(row["last_touch"]) if row.get("last_touch") else None,
-    }
-
-
 class SearchContactsHandler(ToolHandler):
     """Search contacts by text query or list recent contacts."""
 
@@ -106,28 +89,12 @@ class SearchContactsHandler(ToolHandler):
         db_result = await _try_db_contact_tool("search_contacts", arguments, context)
         if db_result is not None:
             return db_result
-        pool: asyncpg.Pool = context.registry.pool
-        query = arguments.get("query", "").strip()
-        limit = min(arguments.get("limit", 20), 100)
-
-        try:
-            if query:
-                rows = await pool.fetch(
-                    "SELECT * FROM search_contacts($1, $2)", query, limit,
-                )
-            else:
-                rows = await pool.fetch(
-                    "SELECT * FROM recent_contacts($1)", limit,
-                )
-
-            contacts = [_contact_to_dict(r) for r in rows]
-            return ToolResult.success_result(
-                {"count": len(contacts), "contacts": contacts},
-                display_output=f"Found {len(contacts)} contact(s)",
-            )
-        except Exception as exc:
-            logger.error("search_contacts failed: %s", exc)
-            return ToolResult.error_result(str(exc))
+        # execute_contact_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_contact_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class GetContactHandler(ToolHandler):
@@ -163,30 +130,12 @@ class GetContactHandler(ToolHandler):
         db_result = await _try_db_contact_tool("get_contact", arguments, context)
         if db_result is not None:
             return db_result
-        pool: asyncpg.Pool = context.registry.pool
-        contact_id = arguments.get("id")
-        email = arguments.get("email", "").strip()
-
-        try:
-            if contact_id:
-                row = await pool.fetchrow(
-                    "SELECT * FROM contacts WHERE id = $1", int(contact_id),
-                )
-            elif email:
-                row = await pool.fetchrow(
-                    "SELECT * FROM get_contact_by_email($1)", email,
-                )
-            else:
-                return ToolResult.error_result("Provide either 'id' or 'email'.")
-
-            if row is None:
-                return ToolResult.success_result({"found": False})
-
-            contact = _contact_to_dict(row)
-            return ToolResult.success_result({"found": True, "contact": contact})
-        except Exception as exc:
-            logger.error("get_contact failed: %s", exc)
-            return ToolResult.error_result(str(exc))
+        # execute_contact_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_contact_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class CreateContactHandler(ToolHandler):
@@ -226,30 +175,12 @@ class CreateContactHandler(ToolHandler):
         db_result = await _try_db_contact_tool("create_contact", arguments, context)
         if db_result is not None:
             return db_result
-        pool: asyncpg.Pool = context.registry.pool
-        name = arguments.get("name", "").strip()
-        if not name:
-            return ToolResult.error_result("Name is required.")
-
-        try:
-            contact_id = await pool.fetchval(
-                "SELECT create_contact($1,$2,$3,$4,$5,$6,$7,$8)",
-                name,
-                arguments.get("email"),
-                arguments.get("company"),
-                arguments.get("role"),
-                arguments.get("phone"),
-                arguments.get("notes"),
-                arguments.get("tags", []),
-                arguments.get("source", "manual"),
-            )
-            return ToolResult.success_result(
-                {"id": contact_id, "name": name},
-                display_output=f"Created contact #{contact_id}: {name}",
-            )
-        except Exception as exc:
-            logger.error("create_contact failed: %s", exc)
-            return ToolResult.error_result(str(exc))
+        # execute_contact_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_contact_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class UpdateContactHandler(ToolHandler):
@@ -289,35 +220,12 @@ class UpdateContactHandler(ToolHandler):
         db_result = await _try_db_contact_tool("update_contact", arguments, context)
         if db_result is not None:
             return db_result
-        pool: asyncpg.Pool = context.registry.pool
-        contact_id = arguments.get("id")
-        if not contact_id:
-            return ToolResult.error_result("Contact ID is required.")
-
-        try:
-            updated = await pool.fetchval(
-                "SELECT update_contact($1,$2,$3,$4,$5,$6,$7,$8)",
-                int(contact_id),
-                arguments.get("name"),
-                arguments.get("email"),
-                arguments.get("company"),
-                arguments.get("role"),
-                arguments.get("phone"),
-                arguments.get("notes"),
-                arguments.get("tags"),
-            )
-            if not updated:
-                return ToolResult.error_result(f"Contact #{contact_id} not found.")
-
-            # Touch the contact
-            await pool.execute("SELECT touch_contact($1)", int(contact_id))
-            return ToolResult.success_result(
-                {"id": contact_id, "updated": True},
-                display_output=f"Updated contact #{contact_id}",
-            )
-        except Exception as exc:
-            logger.error("update_contact failed: %s", exc)
-            return ToolResult.error_result(str(exc))
+        # execute_contact_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_contact_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class MergeContactsHandler(ToolHandler):
@@ -356,30 +264,12 @@ class MergeContactsHandler(ToolHandler):
         db_result = await _try_db_contact_tool("merge_contacts", arguments, context)
         if db_result is not None:
             return db_result
-        pool: asyncpg.Pool = context.registry.pool
-        keep_id = arguments.get("keep_id")
-        remove_id = arguments.get("remove_id")
-
-        if not keep_id or not remove_id:
-            return ToolResult.error_result("Both keep_id and remove_id are required.")
-        if keep_id == remove_id:
-            return ToolResult.error_result("Cannot merge a contact with itself.")
-
-        try:
-            merged = await pool.fetchval(
-                "SELECT merge_contacts($1, $2)",
-                int(keep_id), int(remove_id),
-            )
-            if not merged:
-                return ToolResult.error_result(f"Contact #{remove_id} not found.")
-
-            return ToolResult.success_result(
-                {"keep_id": keep_id, "removed_id": remove_id, "merged": True},
-                display_output=f"Merged contact #{remove_id} into #{keep_id}",
-            )
-        except Exception as exc:
-            logger.error("merge_contacts failed: %s", exc)
-            return ToolResult.error_result(str(exc))
+        # execute_contact_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_contact_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class IngestContactsFromEmailHandler(ToolHandler):

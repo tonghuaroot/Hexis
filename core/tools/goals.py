@@ -98,161 +98,41 @@ class ManageGoalsHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        pool = context.registry.pool if context.registry else None
-        if pool:
-            try:
-                async with pool.acquire() as conn:
-                    raw = await conn.fetchval("SELECT execute_goals_tool($1::jsonb)", json.dumps(arguments))
-                payload = json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(payload, dict) and "success" in payload:
-                    if payload.get("success"):
-                        return ToolResult.success_result(payload.get("output"), payload.get("display_output"))
-                    return ToolResult.error_result(
-                        payload.get("error") or "Goal tool failed",
-                        ToolErrorType(payload.get("error_type") or ToolErrorType.EXECUTION_FAILED.value),
-                    )
-            except Exception:
-                logger.debug("DB goals tool failed; falling back to compatibility path", exc_info=True)
-
         action = arguments.get("action", "")
         if action not in _VALID_ACTIONS:
             return ToolResult.error_result(
                 f"Invalid action '{action}'. Must be one of: {', '.join(sorted(_VALID_ACTIONS))}",
                 ToolErrorType.INVALID_PARAMS,
             )
-
+        pool = context.registry.pool if context.registry else None
         if not pool:
             return ToolResult.error_result(
                 "Database pool not available",
                 ToolErrorType.MISSING_CONFIG,
             )
-
-        if action == "create":
-            return await self._create_goal(pool, arguments)
-        if action == "update_priority":
-            return await self._update_priority(pool, arguments)
-        if action == "add_progress":
-            return await self._add_progress(pool, arguments)
-        if action == "list":
-            return await self._list_goals(pool, arguments)
-
-        return ToolResult.error_result(f"Unhandled action: {action}")
-
-    async def _create_goal(self, pool: "asyncpg.Pool", args: dict[str, Any]) -> ToolResult:
-        title = (args.get("title") or "").strip()
-        if not title:
-            return ToolResult.error_result("Title is required for create", ToolErrorType.INVALID_PARAMS)
-
-        description = args.get("description")
-        source = args.get("source", "curiosity")
-        priority = args.get("priority", "queued")
-
-        if source not in _VALID_SOURCES:
-            source = "curiosity"
-        if priority not in _VALID_PRIORITIES:
-            priority = "queued"
-
+        # execute_goals_tool (db/38) owns validation, mutation, and result
+        # shaping; the former Python compatibility path was deleted.
         try:
             async with pool.acquire() as conn:
-                goal_id = await conn.fetchval(
-                    "SELECT create_goal($1, $2, $3::goal_source, $4::goal_priority)",
-                    title,
-                    description,
-                    source,
-                    priority,
+                raw = await conn.fetchval(
+                    "SELECT execute_goals_tool($1::jsonb)",
+                    json.dumps(arguments),
                 )
-            return ToolResult.success_result(
-                {"goal_id": str(goal_id), "title": title, "priority": priority},
-                display_output=f"Created goal: {title} ({priority})",
-            )
-        except Exception as e:
-            logger.error("Failed to create goal: %s", e)
-            return ToolResult.error_result(f"Failed to create goal: {e}")
-
-    async def _update_priority(self, pool: "asyncpg.Pool", args: dict[str, Any]) -> ToolResult:
-        goal_id = (args.get("goal_id") or "").strip()
-        if not goal_id:
-            return ToolResult.error_result("goal_id is required for update_priority", ToolErrorType.INVALID_PARAMS)
-
-        priority = args.get("priority", "")
-        if priority not in _VALID_PRIORITIES:
+        except Exception as exc:
+            logger.exception("Goals tool failed")
+            return ToolResult.error_result(f"Goals tool failed: {exc}", ToolErrorType.EXECUTION_FAILED)
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(payload, dict) and "success" in payload:
+            if payload.get("success"):
+                return ToolResult.success_result(payload.get("output"), payload.get("display_output"))
             return ToolResult.error_result(
-                f"Invalid priority '{priority}'. Must be one of: {', '.join(sorted(_VALID_PRIORITIES))}",
-                ToolErrorType.INVALID_PARAMS,
+                payload.get("error") or "Goals tool failed",
+                ToolErrorType(payload.get("error_type") or ToolErrorType.EXECUTION_FAILED.value),
             )
-
-        reason = args.get("reason", "")
-
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "SELECT change_goal_priority($1::uuid, $2::goal_priority, $3)",
-                    goal_id,
-                    priority,
-                    reason,
-                )
-            return ToolResult.success_result(
-                {"goal_id": goal_id, "new_priority": priority, "reason": reason},
-                display_output=f"Updated goal {goal_id[:8]}... to {priority}",
-            )
-        except Exception as e:
-            logger.error("Failed to update goal priority: %s", e)
-            return ToolResult.error_result(f"Failed to update goal priority: {e}")
-
-    async def _add_progress(self, pool: "asyncpg.Pool", args: dict[str, Any]) -> ToolResult:
-        goal_id = (args.get("goal_id") or "").strip()
-        if not goal_id:
-            return ToolResult.error_result("goal_id is required for add_progress", ToolErrorType.INVALID_PARAMS)
-
-        note = (args.get("note") or "").strip()
-        if not note:
-            return ToolResult.error_result("note is required for add_progress", ToolErrorType.INVALID_PARAMS)
-
-        try:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "SELECT add_goal_progress($1::uuid, $2)",
-                    goal_id,
-                    note,
-                )
-            return ToolResult.success_result(
-                {"goal_id": goal_id, "note": note},
-                display_output=f"Added progress to goal {goal_id[:8]}...",
-            )
-        except Exception as e:
-            logger.error("Failed to add goal progress: %s", e)
-            return ToolResult.error_result(f"Failed to add goal progress: {e}")
-
-    async def _list_goals(self, pool: "asyncpg.Pool", args: dict[str, Any]) -> ToolResult:
-        priority_filter = args.get("priority")
-
-        try:
-            async with pool.acquire() as conn:
-                if priority_filter and priority_filter in _VALID_PRIORITIES:
-                    rows = await conn.fetch(
-                        "SELECT * FROM get_goals_by_priority($1::goal_priority)",
-                        priority_filter,
-                    )
-                else:
-                    snapshot = await conn.fetchval("SELECT get_goals_snapshot()")
-                    if snapshot:
-                        parsed = json.loads(snapshot) if isinstance(snapshot, str) else snapshot
-                        return ToolResult.success_result(parsed)
-                    rows = []
-
-            goals = []
-            for row in rows:
-                goals.append({
-                    "id": str(row["id"]),
-                    "title": row["title"],
-                    "description": row.get("description"),
-                    "priority": row["priority"],
-                    "source": row.get("source"),
-                })
-            return ToolResult.success_result({"goals": goals, "count": len(goals)})
-        except Exception as e:
-            logger.error("Failed to list goals: %s", e)
-            return ToolResult.error_result(f"Failed to list goals: {e}")
+        return ToolResult.error_result(
+            "Goals tool returned an unexpected payload",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 def create_goal_tools() -> list[ToolHandler]:

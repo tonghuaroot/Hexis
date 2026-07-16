@@ -1,22 +1,28 @@
-"""Tests for memory tool behavior."""
+"""Memory tool behavior through the DB dispatcher.
+
+execute_memory_tool (db/38) owns retrieval policy: plain-query recalls route
+to the hybrid retriever (and label rows with retrieval_source), filtered
+recalls route to recall_memories_structured, and source_attribution is
+flattened into source_* keys. The former Python fallback was deleted.
+"""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+import json
+from unittest.mock import MagicMock
 
 import pytest
 
 from core.tools.base import ToolContext, ToolExecutionContext
-from core.tools.memory import RecallHandler
+from core.tools.memory import RecallHandler, RememberHandler
+from tests.utils import get_test_identifier
+
+pytestmark = [pytest.mark.asyncio(loop_scope="session")]
 
 
-def _make_context(mock_conn: AsyncMock) -> ToolExecutionContext:
-    pool = MagicMock()
-    pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-    pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-
+def _ctx(db_pool) -> ToolExecutionContext:
     registry = MagicMock()
-    registry.pool = pool
+    registry.pool = db_pool
     return ToolExecutionContext(
         tool_context=ToolContext.CHAT,
         call_id="test-call",
@@ -24,56 +30,61 @@ def _make_context(mock_conn: AsyncMock) -> ToolExecutionContext:
     )
 
 
-class TestRecallHandlerHybrid:
-    @pytest.mark.asyncio
-    async def test_query_only_uses_hybrid(self):
-        handler = RecallHandler()
-        mock_conn = AsyncMock()
-        mock_conn.fetch = AsyncMock(return_value=[{
-            "memory_id": "00000000-0000-0000-0000-000000000001",
-            "content": "Hybrid memory result",
-            "memory_type": "episodic",
-            "score": 0.88,
-            "importance": 0.7,
-            "source": "hybrid",
-        }])
-        mock_conn.execute = AsyncMock(return_value=None)
-        ctx = _make_context(mock_conn)
+async def _cleanup(db_pool, marker: str) -> None:
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM memories WHERE content LIKE $1", f"%{marker}%")
 
-        result = await handler.execute({"query": "hybrid retrieval", "limit": 3}, ctx)
 
-        assert result.success
-        sql = mock_conn.fetch.await_args.args[0]
-        assert "recall_hybrid" in sql
-        assert result.output["count"] == 1
-        assert result.output["memories"][0]["retrieval_source"] == "hybrid"
-        mock_conn.execute.assert_awaited_once()
+class TestRecallThroughDbDispatcher:
+    async def test_query_only_uses_hybrid(self, db_pool, ensure_embedding_service):
+        marker = get_test_identifier("hybridrecall")
+        try:
+            remembered = await RememberHandler().execute(
+                {"content": f"The zephyr protocol codename is {marker}", "type": "semantic"},
+                _ctx(db_pool),
+            )
+            assert remembered.success, remembered.error
 
-    @pytest.mark.asyncio
-    async def test_structured_filters_use_structured_query(self):
-        handler = RecallHandler()
-        mock_conn = AsyncMock()
-        mock_conn.fetch = AsyncMock(return_value=[{
-            "memory_id": "00000000-0000-0000-0000-000000000002",
-            "content": "Structured memory result",
-            "memory_type": "semantic",
-            "score": 0.75,
-            "importance": 0.6,
-            "source": "hybrid",
-            "source_attribution": {"kind": "web", "label": "Doc"},
-        }])
-        mock_conn.execute = AsyncMock(return_value=None)
-        ctx = _make_context(mock_conn)
+            result = await RecallHandler().execute(
+                {"query": f"zephyr protocol codename {marker}", "limit": 5},
+                _ctx(db_pool),
+            )
+            assert result.success, result.error
+            hits = [m for m in result.output["memories"] if marker in m["content"]]
+            assert hits, result.output
+            # The plain-query path is the hybrid retriever, which labels rows.
+            assert hits[0].get("retrieval_source"), hits[0]
+        finally:
+            await _cleanup(db_pool, marker)
 
-        result = await handler.execute(
-            {"query": "structured retrieval", "source_kind": "web"},
-            ctx,
-        )
+    async def test_structured_filters_use_structured_query(self, db_pool, ensure_embedding_service):
+        marker = get_test_identifier("structuredrecall")
+        kind = f"web_{marker}"
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO memories (type, content, embedding, importance, trust_level, status, source_attribution)
+                    VALUES ('semantic', $1, array_fill(0.1, ARRAY[embedding_dimension()])::vector,
+                            0.8, 0.9, 'active', $2::jsonb)
+                    """,
+                    f"Structured recall subject {marker}",
+                    json.dumps({"kind": kind, "label": "Doc"}),
+                )
 
-        assert result.success
-        sql = mock_conn.fetch.await_args.args[0]
-        assert "recall_memories_structured" in sql
-        memory = result.output["memories"][0]
-        assert "retrieval_source" not in memory
-        assert memory["source_kind"] == "web"
+            result = await RecallHandler().execute({"source_kind": kind}, _ctx(db_pool))
+            assert result.success, result.error
+            assert result.output["count"] == 1, result.output
+            memory = result.output["memories"][0]
+            # Filtered recalls take the structured path: no retrieval_source,
+            # and source_attribution is flattened into source_* keys.
+            assert "retrieval_source" not in memory
+            assert memory["source_kind"] == kind
+            assert memory["source_label"] == "Doc"
+        finally:
+            await _cleanup(db_pool, marker)
 
+    async def test_recall_requires_query_or_filter(self, db_pool):
+        result = await RecallHandler().execute({}, _ctx(db_pool))
+        assert not result.success
+        assert "query or one filter" in (result.error or "")

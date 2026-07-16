@@ -132,133 +132,12 @@ class RecallHandler(ToolHandler):
         db_result = await _try_db_memory_tool("recall", arguments, context)
         if db_result is not None:
             return db_result
-        from core.cognitive_memory_api import MemoryType
-        from datetime import datetime, timezone
-
-        query = arguments.get("query")
-        limit = min(arguments.get("limit", 5), 50)
-        memory_types_raw = arguments.get("memory_types")
-        min_importance = arguments.get("min_importance", 0.0)
-        source_path = arguments.get("source_path")
-        source_kind = arguments.get("source_kind")
-        created_after_raw = arguments.get("created_after")
-        created_before_raw = arguments.get("created_before")
-        concept = arguments.get("concept")
-
-        # Must have at least a query or a filter
-        has_filters = any([
-            memory_types_raw, source_path, source_kind,
-            created_after_raw, created_before_raw, concept,
-        ])
-        if not query and not has_filters:
-            return ToolResult.error_result(
-                "Provide at least a query or one filter (memory_types, source_path, source_kind, created_after, created_before, concept).",
-                ToolErrorType.INVALID_PARAMS,
-            )
-
-        # Parse memory types
-        memory_types = None
-        if memory_types_raw:
-            try:
-                memory_types = [MemoryType(t) for t in memory_types_raw]
-            except ValueError as e:
-                return ToolResult.error_result(
-                    f"Invalid memory type: {e}",
-                    ToolErrorType.INVALID_PARAMS,
-                )
-
-        # Parse date filters
-        created_after = None
-        created_before = None
-        try:
-            if created_after_raw:
-                created_after = datetime.fromisoformat(created_after_raw).replace(tzinfo=timezone.utc) if "+" not in created_after_raw and "Z" not in created_after_raw else datetime.fromisoformat(created_after_raw.replace("Z", "+00:00"))
-            if created_before_raw:
-                created_before = datetime.fromisoformat(created_before_raw).replace(tzinfo=timezone.utc) if "+" not in created_before_raw and "Z" not in created_before_raw else datetime.fromisoformat(created_before_raw.replace("Z", "+00:00"))
-        except ValueError as e:
-            return ToolResult.error_result(
-                f"Invalid date format: {e}. Use ISO format (e.g. '2025-01-15').",
-                ToolErrorType.INVALID_PARAMS,
-            )
-
-        try:
-            async with context.registry.pool.acquire() as conn:
-                type_filter = [t.value for t in memory_types] if memory_types else None
-                use_hybrid = bool(
-                    query
-                    and not any([memory_types_raw, source_path, source_kind, created_after_raw, created_before_raw, concept])
-                    and float(min_importance or 0.0) <= 0.0
-                )
-                if use_hybrid:
-                    rows = await conn.fetch(
-                        "SELECT * FROM recall_hybrid($1, $2)",
-                        query,
-                        limit,
-                    )
-                else:
-                    rows = await conn.fetch(
-                        """SELECT * FROM recall_memories_structured(
-                            $1, $2, $3::memory_type[], $4,
-                            $5, $6, $7, $8, $9, $10::jsonb
-                        )""",
-                        query,
-                        limit,
-                        type_filter,
-                        min_importance,
-                        source_path,
-                        source_kind,
-                        created_after,
-                        created_before,
-                        concept,
-                        None,  # metadata_filter
-                    )
-
-                memories = []
-                for row in rows:
-                    mem = {
-                        "memory_id": str(row["memory_id"]),
-                        "content": row["content"],
-                        "type": str(row["memory_type"]),
-                        "score": float(row["score"]) if row["score"] is not None else 0.0,
-                        "importance": float(row["importance"]) if row["importance"] is not None else 0.0,
-                    }
-                    if use_hybrid and row.get("source"):
-                        mem["retrieval_source"] = row["source"]
-                    if row.get("source_attribution"):
-                        sa = row["source_attribution"]
-                        if isinstance(sa, str):
-                            import json
-                            try:
-                                sa = json.loads(sa)
-                            except Exception:
-                                sa = {}
-                        if isinstance(sa, dict):
-                            if sa.get("kind"):
-                                mem["source_kind"] = sa["kind"]
-                            if sa.get("label"):
-                                mem["source_label"] = sa["label"]
-                            if sa.get("path"):
-                                mem["source_path"] = sa["path"]
-                            if sa.get("ref"):
-                                mem["source_ref"] = sa["ref"]
-                    memories.append(mem)
-
-                # Touch accessed memories
-                if memories:
-                    memory_ids = [UUID(m["memory_id"]) for m in memories]
-                    await conn.execute(
-                        "SELECT touch_memories($1::uuid[])",
-                        memory_ids,
-                    )
-
-            display_query = query or "(filters only)"
-            return ToolResult.success_result(
-                output={"memories": memories, "count": len(memories), "query": display_query},
-                display_output=f"Found {len(memories)} memories for '{display_query}'",
-            )
-
-        except Exception as e:
-            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+        # execute_memory_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class SearchHistoryHandler(ToolHandler):
@@ -493,41 +372,12 @@ class RememberHandler(ToolHandler):
         db_result = await _try_db_memory_tool("remember", arguments, context)
         if db_result is not None:
             return db_result
-        content = arguments["content"]
-        memory_type = arguments.get("type", "episodic")
-        importance = arguments.get("importance", 0.5)
-        concepts = arguments.get("concepts", [])
-
-        try:
-            async with context.registry.pool.acquire() as conn:
-                # Create the memory
-                memory_id = await conn.fetchval(
-                    """
-                    SELECT create_memory(
-                        p_type := $1::memory_type,
-                        p_content := $2,
-                        p_importance := $3
-                    )
-                    """,
-                    memory_type,
-                    content,
-                    importance,
-                )
-
-                # Link concepts in batch
-                if concepts:
-                    await conn.executemany(
-                        "SELECT link_memory_to_concept($1::uuid, $2)",
-                        [(memory_id, c) for c in concepts],
-                    )
-
-            return ToolResult.success_result(
-                output={"memory_id": str(memory_id), "content": content[:100]},
-                display_output=f"Stored memory: {content[:50]}...",
-            )
-
-        except Exception as e:
-            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+        # execute_memory_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class SenseMemoryAvailabilityHandler(ToolHandler):
@@ -564,28 +414,12 @@ class SenseMemoryAvailabilityHandler(ToolHandler):
         db_result = await _try_db_memory_tool("sense_memory_availability", arguments, context)
         if db_result is not None:
             return db_result
-        query = arguments["query"]
-
-        try:
-            async with context.registry.pool.acquire() as conn:
-                result = await conn.fetchrow(
-                    "SELECT * FROM sense_memory_availability($1)",
-                    query,
-                )
-
-                if result:
-                    return ToolResult.success_result(
-                        output=dict(result),
-                        display_output=f"Memory availability: {result.get('activation_strength', 0):.2f}",
-                    )
-                else:
-                    return ToolResult.success_result(
-                        output={"has_memories": False, "activation_strength": 0.0},
-                        display_output="No strong memory activation",
-                    )
-
-        except Exception as e:
-            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+        # execute_memory_tool (db/38) owns this tool; the former Python
+        # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class ExploreConceptHandler(ToolHandler):

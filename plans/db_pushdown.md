@@ -100,7 +100,23 @@ Highest value per unit effort; every item below is drift risk today.
 > block is now DB-owned and pinned by `chatctx_*` goldens. (The deleted
 > renderer's f-strings were not among the audit rules' patterns, so the count
 > holds at 559 — the metric tracks its rule set, not every deletion.)
-> Still open in Tranche 1: 1.6 (tool fallbacks), 1.7 (personhood).
+> 1.6 is done for four of five handlers (migration `0027`): backlog, goals,
+> contacts, and memory recall/remember/sense are DB-dispatch-only. Closing the
+> gaps moved real policy into SQL — `execute_memory_tool` now owns the
+> hybrid-vs-structured retrieval decision, labels rows with
+> `retrieval_source`, and flattens `source_attribution` into `source_*` keys;
+> malformed uuid args return `invalid_params`. Validation tests run against
+> the real dispatcher.
+> **cron is deferred with cause**: `manage_schedule_tool` has real gaps
+> (stats `recent_runs`, list shaping/outbox hiding, update delivery
+> validation, no cron-expression validation), and — bigger — the SQL cron
+> "math" is a `now + 1 minute` placeholder (db/19 `compute_next_run_at` cron
+> branch, db/36 `recompute_cron_next_runs`), so DB-native cron tasks
+> effectively degrade to every-minute firing after their first run. The right
+> fix is a real cron evaluator in SQL (parse fields, compute next fire in the
+> task's timezone), then dispatcher parity, then delete cron.py's fallback +
+> croniter helpers. This is its own work item.
+> Still open in Tranche 1: 1.6-cron (above), 1.7 (personhood).
 
 | # | Python | SQL twin (exists) | Notes | Effort |
 |---|--------|-------------------|-------|--------|

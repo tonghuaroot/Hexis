@@ -100,33 +100,24 @@ class TestGoalsValidation:
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_create_requires_title(self):
+    async def test_create_requires_title(self, db_pool):
         handler = ManageGoalsHandler()
-        mock_pool = MagicMock()
-        registry = MagicMock()
-        registry.pool = mock_pool
-        ctx = _make_exec_context(pool=mock_pool, registry=registry)
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
 
         result = await handler.execute({"action": "create"}, ctx)
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_create_blank_title_rejected(self):
+    async def test_create_blank_title_rejected(self, db_pool):
         handler = ManageGoalsHandler()
-        mock_pool = MagicMock()
-        registry = MagicMock()
-        registry.pool = mock_pool
-        ctx = _make_exec_context(pool=mock_pool, registry=registry)
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
 
         result = await handler.execute({"action": "create", "title": "   "}, ctx)
         assert not result.success
 
-    async def test_update_priority_requires_goal_id(self):
+    async def test_update_priority_requires_goal_id(self, db_pool):
         handler = ManageGoalsHandler()
-        mock_pool = MagicMock()
-        registry = MagicMock()
-        registry.pool = mock_pool
-        ctx = _make_exec_context(pool=mock_pool, registry=registry)
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
 
         result = await handler.execute(
             {"action": "update_priority", "priority": "active"}, ctx
@@ -134,12 +125,9 @@ class TestGoalsValidation:
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_update_priority_requires_valid_priority(self):
+    async def test_update_priority_requires_valid_priority(self, db_pool):
         handler = ManageGoalsHandler()
-        mock_pool = MagicMock()
-        registry = MagicMock()
-        registry.pool = mock_pool
-        ctx = _make_exec_context(pool=mock_pool, registry=registry)
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
 
         result = await handler.execute(
             {"action": "update_priority", "goal_id": "abc", "priority": "mega_urgent"},
@@ -148,12 +136,9 @@ class TestGoalsValidation:
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_add_progress_requires_goal_id(self):
+    async def test_add_progress_requires_goal_id(self, db_pool):
         handler = ManageGoalsHandler()
-        mock_pool = MagicMock()
-        registry = MagicMock()
-        registry.pool = mock_pool
-        ctx = _make_exec_context(pool=mock_pool, registry=registry)
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
 
         result = await handler.execute(
             {"action": "add_progress", "note": "some progress"}, ctx
@@ -161,12 +146,9 @@ class TestGoalsValidation:
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_add_progress_requires_note(self):
+    async def test_add_progress_requires_note(self, db_pool):
         handler = ManageGoalsHandler()
-        mock_pool = MagicMock()
-        registry = MagicMock()
-        registry.pool = mock_pool
-        ctx = _make_exec_context(pool=mock_pool, registry=registry)
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
 
         result = await handler.execute(
             {"action": "add_progress", "goal_id": "abc"}, ctx

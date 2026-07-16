@@ -1,25 +1,10 @@
--- DB-native tool execution helpers for tools that do not need Python side effects.
-SET search_path = public, ag_catalog, "$user";
+-- DB-native tool dispatchers reach full parity with the deleted Python
+-- fallbacks: recall gains the hybrid-retriever branch, retrieval_source,
+-- and flattened source_* keys; malformed uuid arguments now return
+-- invalid_params instead of execution_failed.
+-- Mirrors db/38_functions_db_native_tools.sql.
 
-CREATE OR REPLACE FUNCTION tool_success(
-    p_output JSONB,
-    p_display_output TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT jsonb_build_object('success', true, 'output', COALESCE(p_output, '{}'::jsonb), 'display_output', p_display_output);
-$$;
-
-CREATE OR REPLACE FUNCTION tool_error(
-    p_error TEXT,
-    p_error_type TEXT DEFAULT 'execution_failed'
-) RETURNS JSONB
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT jsonb_build_object('success', false, 'error', COALESCE(p_error, 'Tool failed'), 'error_type', COALESCE(p_error_type, 'execution_failed'));
-$$;
+SET check_function_bodies = off;
 
 CREATE OR REPLACE FUNCTION execute_goals_tool(
     p_args JSONB
@@ -100,27 +85,6 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION record_backlog_user_change(
-    p_action TEXT,
-    p_title TEXT,
-    p_item_id UUID
-) RETURNS VOID
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    INSERT INTO memories (type, content, embedding, importance, trust_level, metadata)
-    VALUES (
-        'episodic',
-        format('User %s backlog item: %s', p_action, p_title),
-        array_fill(0.1, ARRAY[embedding_dimension()])::vector,
-        0.6,
-        1.0,
-        jsonb_build_object('backlog_item_id', p_item_id::text, 'action', p_action, 'source', 'user_backlog_change')
-    );
-EXCEPTION WHEN OTHERS THEN
-    NULL;
-END;
-$$;
 
 CREATE OR REPLACE FUNCTION execute_backlog_tool(
     p_args JSONB,
@@ -238,117 +202,6 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION contact_row_json(c contacts)
-RETURNS JSONB
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT jsonb_build_object(
-        'id', c.id,
-        'name', c.name,
-        'email', c.email,
-        'company', c.company,
-        'role', c.role,
-        'phone', c.phone,
-        'notes', c.notes,
-        'tags', to_jsonb(c.tags),
-        'source', c.source,
-        'first_seen', c.first_seen,
-        'last_touch', c.last_touch
-    );
-$$;
-
-CREATE OR REPLACE FUNCTION execute_contact_tool(
-    p_tool_name TEXT,
-    p_args JSONB
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    row_data contacts%ROWTYPE;
-    rows_json JSONB;
-    contact_id BIGINT;
-    keep_id BIGINT;
-    remove_id BIGINT;
-    query TEXT;
-    limit_value INT;
-    updated BOOLEAN;
-BEGIN
-    limit_value := LEAST(GREATEST(COALESCE(NULLIF(p_args->>'limit', '')::int, 20), 1), 100);
-    IF p_tool_name = 'search_contacts' THEN
-        query := NULLIF(btrim(COALESCE(p_args->>'query', '')), '');
-        IF query IS NULL THEN
-            SELECT COALESCE(jsonb_agg(contact_row_json(c)), '[]'::jsonb) INTO rows_json FROM recent_contacts(limit_value) c;
-        ELSE
-            SELECT COALESCE(jsonb_agg(contact_row_json(c)), '[]'::jsonb) INTO rows_json FROM search_contacts(query, limit_value) c;
-        END IF;
-        RETURN tool_success(jsonb_build_object('count', jsonb_array_length(rows_json), 'contacts', rows_json), format('Found %s contact(s)', jsonb_array_length(rows_json)));
-    ELSIF p_tool_name = 'get_contact' THEN
-        IF p_args ? 'id' THEN
-            SELECT * INTO row_data FROM contacts WHERE id = (p_args->>'id')::bigint;
-        ELSIF NULLIF(p_args->>'email', '') IS NOT NULL THEN
-            SELECT * INTO row_data FROM get_contact_by_email(p_args->>'email');
-        ELSE
-            RETURN tool_error('Provide either id or email.', 'invalid_params');
-        END IF;
-        IF row_data.id IS NULL THEN
-            RETURN tool_success('{"found": false}'::jsonb);
-        END IF;
-        RETURN tool_success(jsonb_build_object('found', true, 'contact', contact_row_json(row_data)));
-    ELSIF p_tool_name = 'create_contact' THEN
-        IF NULLIF(btrim(COALESCE(p_args->>'name', '')), '') IS NULL THEN
-            RETURN tool_error('Name is required.', 'invalid_params');
-        END IF;
-        contact_id := create_contact(
-            p_args->>'name',
-            p_args->>'email',
-            p_args->>'company',
-            p_args->>'role',
-            p_args->>'phone',
-            p_args->>'notes',
-            COALESCE(ARRAY(SELECT jsonb_array_elements_text(COALESCE(p_args->'tags', '[]'::jsonb))), ARRAY[]::TEXT[]),
-            COALESCE(NULLIF(p_args->>'source', ''), 'manual')
-        );
-        RETURN tool_success(jsonb_build_object('id', contact_id, 'name', p_args->>'name'), format('Created contact #%s: %s', contact_id, p_args->>'name'));
-    ELSIF p_tool_name = 'update_contact' THEN
-        contact_id := NULLIF(p_args->>'id', '')::bigint;
-        IF contact_id IS NULL THEN
-            RETURN tool_error('Contact ID is required.', 'invalid_params');
-        END IF;
-        updated := update_contact(
-            contact_id,
-            p_args->>'name',
-            p_args->>'email',
-            p_args->>'company',
-            p_args->>'role',
-            p_args->>'phone',
-            p_args->>'notes',
-            CASE WHEN p_args ? 'tags' THEN ARRAY(SELECT jsonb_array_elements_text(COALESCE(p_args->'tags', '[]'::jsonb))) ELSE NULL END
-        );
-        IF NOT updated THEN
-            RETURN tool_error(format('Contact #%s not found.', contact_id), 'execution_failed');
-        END IF;
-        PERFORM touch_contact(contact_id);
-        RETURN tool_success(jsonb_build_object('id', contact_id, 'updated', true), format('Updated contact #%s', contact_id));
-    ELSIF p_tool_name = 'merge_contacts' THEN
-        keep_id := NULLIF(p_args->>'keep_id', '')::bigint;
-        remove_id := NULLIF(p_args->>'remove_id', '')::bigint;
-        IF keep_id IS NULL OR remove_id IS NULL THEN
-            RETURN tool_error('Both keep_id and remove_id are required.', 'invalid_params');
-        END IF;
-        IF keep_id = remove_id THEN
-            RETURN tool_error('Cannot merge a contact with itself.', 'invalid_params');
-        END IF;
-        IF NOT merge_contacts(keep_id, remove_id) THEN
-            RETURN tool_error(format('Contact #%s not found.', remove_id), 'execution_failed');
-        END IF;
-        RETURN tool_success(jsonb_build_object('keep_id', keep_id, 'removed_id', remove_id, 'merged', true), format('Merged contact #%s into #%s', remove_id, keep_id));
-    END IF;
-    RETURN tool_error(format('Unsupported contact tool: %s', p_tool_name), 'invalid_params');
-EXCEPTION WHEN OTHERS THEN
-    RETURN tool_error(SQLERRM);
-END;
-$$;
 
 CREATE OR REPLACE FUNCTION execute_memory_tool(
     p_tool_name TEXT,
@@ -459,3 +312,5 @@ EXCEPTION WHEN OTHERS THEN
     RETURN tool_error(SQLERRM);
 END;
 $$;
+
+SET check_function_bodies = on;

@@ -98,57 +98,57 @@ class TestBacklogValidation:
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_create_requires_title(self):
+    async def test_create_requires_title(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute({"action": "create"}, ctx)
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_create_blank_title_rejected(self):
+    async def test_create_blank_title_rejected(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute({"action": "create", "title": "   "}, ctx)
         assert not result.success
 
-    async def test_update_requires_item_id(self):
+    async def test_update_requires_item_id(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute({"action": "update", "title": "new"}, ctx)
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_update_requires_fields(self):
+    async def test_update_requires_fields(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute({"action": "update", "item_id": "abc"}, ctx)
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_delete_requires_item_id(self):
+    async def test_delete_requires_item_id(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute({"action": "delete"}, ctx)
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_get_requires_item_id(self):
+    async def test_get_requires_item_id(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute({"action": "get"}, ctx)
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_set_status_requires_item_id(self):
+    async def test_set_status_requires_item_id(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute({"action": "set_status", "status": "done"}, ctx)
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_set_status_requires_valid_status(self):
+    async def test_set_status_requires_valid_status(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute(
             {"action": "set_status", "item_id": "abc", "status": "mega"},
             ctx,
@@ -156,18 +156,18 @@ class TestBacklogValidation:
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_set_checkpoint_requires_item_id(self):
+    async def test_set_checkpoint_requires_item_id(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute(
             {"action": "set_checkpoint", "checkpoint": {}}, ctx
         )
         assert not result.success
         assert result.error_type == ToolErrorType.INVALID_PARAMS
 
-    async def test_set_checkpoint_requires_data(self):
+    async def test_set_checkpoint_requires_data(self, db_pool):
         handler = ManageBacklogHandler()
-        ctx = _make_exec_context(pool=MagicMock(), registry=MagicMock(pool=MagicMock()))
+        ctx = _make_exec_context(registry=MagicMock(pool=db_pool))
         result = await handler.execute(
             {"action": "set_checkpoint", "item_id": "abc"}, ctx
         )
