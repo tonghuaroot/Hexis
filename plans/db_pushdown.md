@@ -73,6 +73,35 @@ SQL functions, and removal of every known Python/SQL drift hazard.
 
 Highest value per unit effort; every item below is drift risk today.
 
+> **Progress (2026-07-16, commits `484dfda` + `7ee6ab1`): audit 579 → 559.**
+> Done: 1.1 (heartbeat prompt fork deleted; golden fixtures in
+> `tests/fixtures/prompt_render/` pin the SQL output), 1.2 (dead channel
+> helpers deleted; tests exercise prepare/finalize_channel_turn and
+> flush_channel_history_to_memory directly), 1.3 (`render_subconscious_signals`
+> is the only renderer; Python formatter deleted), 1.5 (croniter fallback
+> deleted; delegation + live-DB tests). 1b done: `touch_contact` ×5, backlog
+> `record_backlog_user_change`, fathom `create_episodic_memory`, and migration
+> `0025` (finalize_agentic_heartbeat releases the active claim itself;
+> `release_active_heartbeat()` for error paths).
+> Corrections found during execution: the four "raw recall projections" were
+> already thin SQL-function wrappers (no change needed; only
+> `get_ingestion_receipts` remains raw — single read, Tranche 3.12 material).
+> The `capability_maturity.py` worldview insert stays by design: the
+> rollback-only alive-demo must not depend on the embedding service. The
+> workflow `_update_workflow_record` swap moved to Tranche-D scope: the Python
+> execution loop never records `workflow_step_runs`, so
+> `finalize_workflow_execution` would derive empty results — the loop must
+> adopt `apply_workflow_step_result` first. The agent pause/resume raw
+> UPDATEs fold into 2.1 `apply_agent_config`. 1.4 done (migration `0026`):
+> `render_chat_memory_context` gained the recall-hedge/felt-emotion-cue
+> prefixes (config thresholds) and the knowledge-subgraph section, the chat
+> paths render via `render_chat_memory_context_db`, and the Python renderer
+> plus its hardcoded thresholds are deleted — a ~2,600-token-per-turn prompt
+> block is now DB-owned and pinned by `chatctx_*` goldens. (The deleted
+> renderer's f-strings were not among the audit rules' patterns, so the count
+> holds at 559 — the metric tracks its rule set, not every deletion.)
+> Still open in Tranche 1: 1.6 (tool fallbacks), 1.7 (personhood).
+
 | # | Python | SQL twin (exists) | Notes | Effort |
 |---|--------|-------------------|-------|--------|
 | 1.1 | `services/heartbeat_prompt.py:20-440` — `build_heartbeat_decision_prompt` + ~20 `_format_*` | `render_heartbeat_decision_prompt` + `render_*` family (db/39) | Self-admitted byte-parity fork; production already uses `render_heartbeat_decision_prompt_db`. Only `tests/db/test_prompt_render.py` uses the Python fork. Delete; keep golden-fixture parity tests against the SQL output. | S |

@@ -10,18 +10,10 @@ Python formatters that still exist pending their own pushdown.
 from __future__ import annotations
 
 import json
-import uuid
 from pathlib import Path
 
 import pytest
 
-from core.cognitive_memory_api import (
-    HydratedContext,
-    Memory,
-    MemoryType,
-    PartialActivation,
-    format_context_for_prompt,
-)
 from services.prompt_resources import compose_personhood_prompt
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
@@ -128,27 +120,8 @@ async def test_heartbeat_prompt_edge_case_golden(db_pool, name):
 
 
 # ---------------------------------------------------------------------------
-# Chat memory context: render_chat_memory_context vs format_context_for_prompt
+# Chat memory context: render_chat_memory_context golden output
 # ---------------------------------------------------------------------------
-
-
-def _mk_ctx(j: dict) -> HydratedContext:
-    def mem(d):
-        return Memory(id=uuid.uuid4(), type=MemoryType.SEMANTIC, content=d.get("content", ""),
-                      importance=0.5, similarity=d.get("similarity"), trust_level=d.get("trust_level"),
-                      source_attribution=d.get("source_attribution"), tier=d.get("tier"))
-
-    def pa(d):
-        return PartialActivation(cluster_id=uuid.uuid4(), cluster_name=d.get("cluster_name", ""),
-                                 keywords=d.get("keywords", []), emotional_signature=None,
-                                 cluster_similarity=0.5, best_memory_similarity=0.5)
-
-    return HydratedContext(
-        memories=[mem(m) for m in j.get("memories", [])],
-        partial_activations=[pa(x) for x in j.get("partial_activations", [])],
-        identity=j.get("identity", []), worldview=j.get("worldview", []),
-        emotional_state=j.get("emotional_state"), goals=j.get("goals"),
-        urgent_drives=j.get("urgent_drives", []))
 
 
 _CTX_CASES = {
@@ -168,15 +141,39 @@ _CTX_CASES = {
                                      {"cluster_name": "empty", "keywords": []}]},
     "empty": {},
     "drives_only": {"urgent_drives": [{"name": "x", "urgency_ratio": 0.05}]},
+    # Recall hedges (vividness = min(strength, fidelity) vs config threshold)
+    # and felt-emotion cues (signed intensity at/above the cue threshold).
+    "hedged_and_felt": {"memories": [
+        {"content": "faint one", "strength": 0.1, "similarity": 0.8},
+        {"content": "vague one", "strength": 0.3, "fidelity": 0.9},
+        {"content": "warm one", "emotional_intensity": 0.5, "trust_level": 0.9},
+        {"content": "painful one", "emotional_intensity": -0.41},
+        {"content": "exactly at cue", "emotional_intensity": 0.4},
+    ]},
+    "subgraph": {
+        "memories": [{"content": "m1", "similarity": 0.9}],
+        "subgraph": {
+            "nodes": [
+                {"type": "memory", "id": "n1", "label": "First memory label"},
+                {"type": "memory", "id": "n2", "label": "  padded label  "},
+                {"type": "concept", "id": "c1", "label": ""},
+            ],
+            "edges": [
+                {"src_type": "memory", "src_id": "n2", "rel": "SUPPORTS", "dst_type": "concept", "dst_id": "c1"},
+                {"src_type": "memory", "src_id": "n1", "rel": "ASSOCIATED", "dst_type": "memory", "dst_id": "n2"},
+                {"src_type": "memory", "src_id": "n1", "dst_type": "memory", "dst_id": "missing"},
+            ],
+        },
+    },
 }
 
 
 @pytest.mark.parametrize("name", list(_CTX_CASES))
-async def test_chat_memory_context_parity(db_pool, name):
+async def test_chat_memory_context_golden(db_pool, name):
     j = _CTX_CASES[name]
     async with db_pool.acquire() as conn:
         sql = await conn.fetchval("SELECT render_chat_memory_context($1::jsonb)", json.dumps(j))
-    assert sql == format_context_for_prompt(_mk_ctx(j)), name
+    assert sql == _golden(f"chatctx_{name}"), name
 
 
 # ---------------------------------------------------------------------------

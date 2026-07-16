@@ -601,7 +601,7 @@ async def run_agent(
     - Heartbeat: finite budget, planning enabled, continuation nudges
     """
     from core.agent_api import db_dsn_from_env
-    from core.cognitive_memory_api import CognitiveMemory, format_context_for_prompt
+    from core.cognitive_memory_api import CognitiveMemory, render_chat_memory_context_db
 
     dsn = dsn or db_dsn_from_env()
     history = history or []
@@ -631,7 +631,7 @@ async def run_agent(
                     include_goals=True,
                     include_drives=True,
                 )
-                memory_context = format_context_for_prompt(context, max_memories=10)
+                memory_context = await render_chat_memory_context_db(conn, context, max_memories=10)
 
                 # Emit memory recall event
                 if on_event and context.memories:
@@ -838,7 +838,7 @@ async def stream_agent(
     Used by the SSE chat endpoint to stream tokens to the frontend.
     """
     from core.agent_api import db_dsn_from_env
-    from core.cognitive_memory_api import CognitiveMemory, format_context_for_prompt
+    from core.cognitive_memory_api import CognitiveMemory, render_chat_memory_context_db
 
     dsn = dsn or db_dsn_from_env()
     history = history or []
@@ -872,7 +872,7 @@ async def stream_agent(
                     include_goals=True,
                     include_drives=True,
                 )
-                memory_context = format_context_for_prompt(context, max_memories=10)
+                memory_context = await render_chat_memory_context_db(conn, context, max_memories=10)
 
                 yield AgentEventData(
                     event=AgentEvent.PHASE_CHANGE,

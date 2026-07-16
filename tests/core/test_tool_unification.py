@@ -505,7 +505,7 @@ class TestChatTurnWithRegistry:
         with (
             patch("core.agent_loop.chat_completion", new_callable=AsyncMock, return_value=mock_response),
             patch("services.chat.get_agent_profile_context", new_callable=AsyncMock, return_value={}),
-            patch("core.cognitive_memory_api.format_context_for_prompt", return_value=""),
+            patch("core.cognitive_memory_api.render_chat_memory_context_db", new_callable=AsyncMock, return_value=""),
             patch("services.chat.CognitiveMemory") as MockMem,
         ):
             mock_mem_instance = AsyncMock()
@@ -553,7 +553,7 @@ class TestChatTurnWithRegistry:
         with (
             patch("core.agent_loop.chat_completion", side_effect=mock_chat_completion),
             patch("services.chat.get_agent_profile_context", new_callable=AsyncMock, return_value={}),
-            patch("core.cognitive_memory_api.format_context_for_prompt", return_value=""),
+            patch("core.cognitive_memory_api.render_chat_memory_context_db", new_callable=AsyncMock, return_value=""),
             patch("services.chat.CognitiveMemory") as MockMem,
         ):
             mock_mem_instance = AsyncMock()
@@ -592,7 +592,7 @@ class TestChatTurnWithRegistry:
         with (
             patch("core.agent_loop.chat_completion", side_effect=always_tool),
             patch("services.chat.get_agent_profile_context", new_callable=AsyncMock, return_value={}),
-            patch("core.cognitive_memory_api.format_context_for_prompt", return_value=""),
+            patch("core.cognitive_memory_api.render_chat_memory_context_db", new_callable=AsyncMock, return_value=""),
             patch("services.chat.CognitiveMemory") as MockMem,
         ):
             mock_mem_instance = AsyncMock()
@@ -623,7 +623,7 @@ class TestChatTurnWithRegistry:
         with (
             patch("core.agent_loop.chat_completion", new_callable=AsyncMock, return_value=mock_response),
             patch("services.chat.get_agent_profile_context", new_callable=AsyncMock, return_value={}),
-            patch("core.cognitive_memory_api.format_context_for_prompt", return_value=""),
+            patch("core.cognitive_memory_api.render_chat_memory_context_db", new_callable=AsyncMock, return_value=""),
             patch("services.chat.CognitiveMemory") as MockMem,
         ):
             mock_mem_instance = AsyncMock()

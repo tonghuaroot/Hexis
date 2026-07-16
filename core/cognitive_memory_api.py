@@ -11,6 +11,7 @@ Design:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -1666,158 +1667,59 @@ class CognitiveMemorySync:
         return self._loop.run_until_complete(self._async.record_ingestion_receipts(items))
 
 
-def _format_subgraph(subgraph: dict[str, Any] | None, *, max_edges: int = 20) -> str | None:
-    """Render a build_context_subgraph result ({nodes, edges}) as compact markdown:
-    one 'A  —rel→  B' line per typed edge, using node labels. None if no structure."""
-    if not isinstance(subgraph, dict):
-        return None
-    nodes = subgraph.get("nodes") or []
-    edges = subgraph.get("edges") or []
-    if not edges:
-        return None
-    label: dict[tuple[Any, Any], str] = {}
-    for n in nodes:
-        if isinstance(n, dict):
-            lbl = str(n.get("label") or n.get("id") or "").strip()
-            label[(n.get("type"), n.get("id"))] = lbl[:80]
-    lines: list[str] = []
-    for e in sorted(
-        (e for e in edges if isinstance(e, dict)),
-        key=lambda e: (str(e.get("rel", "")), str(e.get("src_id", ""))),
-    )[:max_edges]:
-        s = label.get((e.get("src_type"), e.get("src_id")), e.get("src_id"))
-        d = label.get((e.get("dst_type"), e.get("dst_id")), e.get("dst_id"))
-        rel = str(e.get("rel") or "related").lower()
-        lines.append(f"- {s}  —{rel}→  {d}")
-    return "\n".join(lines) if lines else None
+def hydrated_context_to_render_json(context: HydratedContext) -> dict[str, Any]:
+    """Serialize a HydratedContext into the JSON shape render_chat_memory_context
+    (db/39) consumes. The DB owns the rendered text; Python only ships data."""
+
+    def mem(m: Memory) -> dict[str, Any]:
+        out = {
+            "content": m.content,
+            "tier": m.tier,
+            "similarity": m.similarity,
+            "trust_level": m.trust_level,
+            "source_attribution": m.source_attribution,
+            "strength": m.strength,
+            "fidelity": m.fidelity,
+            "emotional_intensity": m.emotional_intensity,
+        }
+        return {k: v for k, v in out.items() if v is not None}
+
+    return {
+        "memories": [mem(m) for m in context.memories],
+        "partial_activations": [
+            {"cluster_name": pa.cluster_name, "keywords": pa.keywords}
+            for pa in context.partial_activations
+        ],
+        "identity": context.identity,
+        "worldview": context.worldview,
+        "emotional_state": context.emotional_state,
+        "goals": context.goals,
+        "urgent_drives": context.urgent_drives,
+        "subgraph": context.subgraph,
+    }
 
 
-# Below this vividness, recall renders as a hedged reconstruction rather than an
-# assertion of detail (mirrors config memory.recall_low_vividness_threshold).
-_LOW_VIVIDNESS_THRESHOLD = 0.35
+async def render_chat_memory_context_db(
+    conn: asyncpg.Connection,
+    context: HydratedContext,
+    *,
+    max_memories: int = 5,
+    max_partials: int = 3,
+) -> str:
+    """Render the chat memory-context block via the DB-owned renderer.
 
-
-def _recall_hedge(m: Memory) -> str:
-    """Prefix that renders a faint/low-fidelity memory honestly ("I vaguely
-    recall…") instead of asserting faded detail. Vividness = min(strength,
-    fidelity): strength varies now; fidelity drops only once consolidation exists."""
-    strength = m.strength if m.strength is not None else 1.0
-    fidelity = m.fidelity if m.fidelity is not None else 1.0
-    vividness = min(strength, fidelity)
-    if vividness < 0.15:
-        return "(faint, uncertain) "
-    if vividness < _LOW_VIVIDNESS_THRESHOLD:
-        return "(vaguely recall) "
-    return ""
-
-
-# Recalled memories with signed felt intensity at/above this get a felt-emotion cue.
-_EMOTION_CUE_THRESHOLD = 0.4
-
-
-def _emotion_cue(m: Memory) -> str:
-    """A tag reflecting the memory's CURRENT felt tone (signed intensity, decayed
-    asymmetrically): a positive peak stays '(still warm)', fresh pain reads
-    '(still painful)'; healed pain and mundane memories get nothing (calm)."""
-    felt = m.emotional_intensity
-    if felt is None or abs(felt) < _EMOTION_CUE_THRESHOLD:
-        return ""
-    return "(still warm) " if felt > 0 else "(still painful) "
-
-
-def format_context_for_prompt(context: HydratedContext, *, max_memories: int = 5, max_partials: int = 3) -> str:
-    parts: list[str] = []
-
-    if context.memories:
-        if any(m.tier for m in context.memories):
-            tier_titles = {
-                "subconscious": "## Subconscious Raw Turns",
-                "episodic": "## Episodic Memories",
-                "semantic": "## Semantic Facts",
-            }
-            emitted: set[str] = set()
-            for tier in ("subconscious", "episodic", "semantic", None):
-                group = [m for m in context.memories[:max_memories] if m.tier == tier]
-                if not group:
-                    continue
-                title = tier_titles.get(tier, "## Relevant Memories")
-                if title not in emitted:
-                    parts.append(title)
-                    emitted.add(title)
-                for m in group:
-                    score = f" (score: {m.similarity:.2f})" if m.similarity is not None else ""
-                    trust = f", trust: {m.trust_level:.2f}" if m.trust_level is not None else ""
-                    parts.append(f"- {_recall_hedge(m)}{_emotion_cue(m)}{m.content}{score}{trust}")
-        else:
-            parts.append("## Relevant Memories")
-            for m in context.memories[:max_memories]:
-                score = f" (score: {m.similarity:.2f})" if m.similarity is not None else ""
-                trust = f", trust: {m.trust_level:.2f}" if m.trust_level is not None else ""
-                src_kind = ""
-                if m.source_attribution and isinstance(m.source_attribution, dict):
-                    kind = m.source_attribution.get("kind")
-                    ref = m.source_attribution.get("ref")
-                    if kind and ref:
-                        src_kind = f", source: {kind} ({ref})"
-                    elif kind:
-                        src_kind = f", source: {kind}"
-                parts.append(f"- {_recall_hedge(m)}{_emotion_cue(m)}{m.content}{score}{trust}{src_kind}")
-
-    subgraph_md = _format_subgraph(context.subgraph)
-    if subgraph_md:
-        parts.append("\n## Knowledge Subgraph")
-        parts.append("How the recalled memories connect (typed links among + around them):")
-        parts.append(subgraph_md)
-
-    if context.partial_activations:
-        parts.append("\n## Vague Recollections (tip-of-tongue)")
-        for pa in context.partial_activations[:max_partials]:
-            keywords = ", ".join(pa.keywords[:5]) if pa.keywords else "unknown"
-            parts.append(f"- Theme '{pa.cluster_name}': {keywords}")
-
-    if context.identity:
-        parts.append("\n## Identity")
-        for aspect in context.identity[:3]:
-            kind = aspect.get("type", aspect.get("aspect_type", "unknown"))
-            concept = aspect.get("concept", aspect.get("content", ""))
-            strength = aspect.get("strength")
-            suffix = f" ({strength:.1f})" if strength is not None else ""
-            parts.append(f"- {kind}: {concept}{suffix}")
-
-    if context.worldview:
-        parts.append("\n## Beliefs")
-        for belief in context.worldview[:3]:
-            conf = belief.get("confidence", 0)
-            parts.append(f"- {belief.get('belief', '')} (confidence: {conf:.1f})")
-
-    if context.emotional_state:
-        es = context.emotional_state
-        parts.append("\n## Current Emotional State")
-        parts.append(f"- Feeling: {es.get('primary_emotion', 'neutral')}")
-        parts.append(f"- Valence: {es.get('valence', 0):.2f}, Arousal: {es.get('arousal', 0.5):.2f}")
-
-    if context.goals:
-        active = context.goals.get("active", [])
-        queued = context.goals.get("queued", [])
-        all_goals = active + queued
-        if all_goals:
-            parts.append("\n## Goals")
-            for g in all_goals[:5]:
-                title = g.get("title", "")
-                source = g.get("source", "")
-                suffix = f" (source: {source})" if source else ""
-                parts.append(f"- {title}{suffix}")
-
-    if context.urgent_drives:
-        parts.append("\n## Urgent Drives")
-        for drive in context.urgent_drives:
-            ratio = drive.get("urgency_ratio")
-            if ratio is None:
-                parts.append(f"- {drive.get('name')}: {drive.get('level')}")
-            else:
-                parts.append(f"- {drive.get('name')}: {float(ratio):.1%} urgent")
-
-    return "\n".join(parts)
+    render_chat_memory_context (db/39) is the single source of the prompt
+    text, including recall hedges, felt-emotion cues (config thresholds), and
+    the knowledge-subgraph section. The former Python renderer was deleted;
+    golden fixtures in tests/fixtures/prompt_render/ pin the output.
+    """
+    raw = await conn.fetchval(
+        "SELECT render_chat_memory_context($1::jsonb, $2::int, $3::int)",
+        json.dumps(hydrated_context_to_render_json(context), default=str),
+        max_memories,
+        max_partials,
+    )
+    return str(raw or "")
 
 
 def _coerce_json(val: Any) -> Any:
