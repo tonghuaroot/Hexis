@@ -153,3 +153,258 @@ async def test_execute_memory_tool_remember_sense_and_recall(db_pool):
             assert recalled["output"]["count"] >= 1
         finally:
             await tr.rollback()
+
+
+# ---------------------------------------------------------------------------
+# remember with provenance + add_evidence dispatch (#33/#36)
+# ---------------------------------------------------------------------------
+
+
+async def test_remember_semantic_records_confidence_and_sources(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            result = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('remember', $1::jsonb)",
+                    json.dumps({
+                        "content": "Eric is the inventor of Hexis (dispatch test)",
+                        "type": "semantic",
+                        "confidence": 0.8,
+                        "sources": [
+                            {"kind": "user_testimony", "ref": "conversation:test", "trust": 0.75},
+                            {"kind": "user_testimony", "ref": "conversation:test", "trust": 0.75},
+                        ],
+                    }),
+                )
+            )
+            assert result["success"] is True
+            out = result["output"]
+            assert out["type"] == "semantic"
+            assert out["confidence"] == 0.8
+            assert out["trust_level"] is not None
+            meta = _coerce_json(
+                await conn.fetchval(
+                    "SELECT metadata FROM memories WHERE id = $1::uuid", out["memory_id"]
+                )
+            )
+            # Duplicate source entries are deduped on the way in.
+            assert len(meta["source_references"]) == 1
+            assert meta["source_references"][0]["ref"] == "conversation:test"
+        finally:
+            await tr.rollback()
+
+
+async def test_remember_episodic_takes_first_source_as_attribution(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            result = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('remember', $1::jsonb)",
+                    json.dumps({
+                        "content": "Met Eric today (dispatch test)",
+                        "type": "episodic",
+                        "sources": [{"kind": "conversation", "ref": "session:abc"}],
+                    }),
+                )
+            )
+            assert result["success"] is True
+            attribution = _coerce_json(
+                await conn.fetchval(
+                    "SELECT source_attribution FROM memories WHERE id = $1::uuid",
+                    result["output"]["memory_id"],
+                )
+            )
+            assert attribution["ref"] == "session:abc"
+            # Episodic memories carry no confidence key in the response.
+            assert "confidence" not in result["output"]
+        finally:
+            await tr.rollback()
+
+
+async def test_add_evidence_dispatch_happy_path_and_validation(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            mid = str(
+                await conn.fetchval(
+                    """
+                    INSERT INTO memories (type, content, embedding, importance, trust_level, status, metadata)
+                    VALUES ('semantic', 'dispatch belief', array_fill(0.1, ARRAY[embedding_dimension()])::vector,
+                            0.8, 0.3, 'active', '{"confidence": 0.5}'::jsonb)
+                    RETURNING id
+                    """
+                )
+            )
+            result = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('add_evidence', $1::jsonb)",
+                    json.dumps({
+                        "memory_id": mid,
+                        "stance": "supports",
+                        "source": {"kind": "repository_document", "ref": "README.md", "trust": 0.8},
+                    }),
+                )
+            )
+            assert result["success"] is True
+            out = result["output"]
+            assert out["applied"] is True
+            assert out["posterior"] > out["prior"]
+            assert "->" in result["display_output"]
+
+            bad_uuid = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('add_evidence', $1::jsonb)",
+                    json.dumps({"memory_id": "not-a-uuid", "stance": "supports",
+                                "source": {"ref": "x"}}),
+                )
+            )
+            assert bad_uuid["success"] is False
+            assert bad_uuid["error_type"] == "invalid_params"
+
+            bad_stance = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('add_evidence', $1::jsonb)",
+                    json.dumps({"memory_id": mid, "stance": "maybe", "source": {"ref": "x"}}),
+                )
+            )
+            assert bad_stance["success"] is False
+
+            no_source = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('add_evidence', $1::jsonb)",
+                    json.dumps({"memory_id": mid, "stance": "supports", "source": {}}),
+                )
+            )
+            assert no_source["success"] is False
+        finally:
+            await tr.rollback()
+
+
+async def test_recall_surfaces_trust_and_confidence(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            created = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('remember', $1::jsonb)",
+                    json.dumps({
+                        "content": "Recall projection test fact",
+                        "type": "semantic",
+                        "confidence": 0.7,
+                        "sources": [{"kind": "test", "ref": "recall-projection"}],
+                    }),
+                )
+            )
+            assert created["success"] is True
+
+            for args in (
+                {"query": "Recall projection test fact"},                      # hybrid
+                {"query": "Recall projection test fact",
+                 "memory_types": ["semantic"]},                                 # structured
+            ):
+                recalled = _coerce_json(
+                    await conn.fetchval(
+                        "SELECT execute_memory_tool('recall', $1::jsonb)", json.dumps(args)
+                    )
+                )
+                assert recalled["success"] is True
+                match = next(
+                    (m for m in recalled["output"]["memories"]
+                     if m["memory_id"] == created["output"]["memory_id"]),
+                    None,
+                )
+                assert match is not None, f"memory not recalled with args {args}"
+                assert "trust" in match
+                assert match["confidence"] == 0.7
+        finally:
+            await tr.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Memory-count budgets (WS6): config-driven defaults/ceiling + min_score floor
+# ---------------------------------------------------------------------------
+
+
+async def test_recall_limit_is_config_driven_budget(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            for i in range(4):
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('remember', $1::jsonb)",
+                    json.dumps({"content": f"budget test fact number {i}", "type": "semantic"}),
+                )
+            # Default budget honored.
+            await conn.execute(
+                "UPDATE config SET value = '2'::jsonb WHERE key = 'memory.recall_default_limit'"
+            )
+            recalled = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('recall', $1::jsonb)",
+                    json.dumps({"query": "budget test fact"}),
+                )
+            )
+            assert recalled["output"]["count"] <= 2
+
+            # Ceiling clamps explicit asks.
+            await conn.execute(
+                "UPDATE config SET value = '3'::jsonb WHERE key = 'memory.recall_max_limit'"
+            )
+            recalled = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('recall', $1::jsonb)",
+                    json.dumps({"query": "budget test fact", "limit": 40}),
+                )
+            )
+            assert recalled["output"]["count"] <= 3
+        finally:
+            await tr.rollback()
+
+
+async def test_recall_min_score_is_a_relevance_floor(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            created = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('remember', $1::jsonb)",
+                    json.dumps({"content": "relevance floor target fact", "type": "semantic"}),
+                )
+            )
+            assert created["success"] is True
+            # An impossible floor returns nothing rather than padding to N.
+            recalled = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('recall', $1::jsonb)",
+                    json.dumps({"query": "relevance floor target fact", "min_score": 0.999999,
+                                "limit": 10}),
+                )
+            )
+            assert recalled["success"] is True
+            assert recalled["output"]["count"] == 0
+            # Floor 0 returns the memory.
+            recalled = _coerce_json(
+                await conn.fetchval(
+                    "SELECT execute_memory_tool('recall', $1::jsonb)",
+                    json.dumps({"query": "relevance floor target fact", "min_score": 0.0,
+                                "limit": 10}),
+                )
+            )
+            contents = [m["content"] for m in recalled["output"]["memories"]]
+            assert "relevance floor target fact" in contents
+        finally:
+            await tr.rollback()

@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from core.tools.base import ToolContext
-from skills.base import SkillContext, SkillSpec
+from skills.base import MCPBinding, SkillCategory, SkillContext, SkillSpec
 from skills.loader import load_skills
 
 if False:  # pragma: no cover - typing only
+    from core.tools.config import MCPServerConfig
     from core.tools.registry import ToolRegistry
 
 
@@ -100,14 +101,68 @@ def _plugin_skill_dirs(registry: "ToolRegistry") -> list[Path]:
     return [Path(d) for d in dirs]
 
 
-def load_available_skills(registry: "ToolRegistry", context: ToolContext) -> list[SkillSpec]:
-    """All loadable skills for a context, including plugin-provided ones."""
-    return load_skills(
+def synthesize_implicit_mcp_skills(
+    configs: list["MCPServerConfig"],
+    bound_servers: set[str],
+) -> list[SkillSpec]:
+    """Back-compat (#41): every configured MCP server not bound by a manifest
+    gets an implicit `mcp-<server>` skill, so existing integrations stay
+    reachable through the skills front door with zero manifest work."""
+    implicit: list[SkillSpec] = []
+    for config in configs:
+        if not config.enabled or config.name in bound_servers:
+            continue
+        implicit.append(SkillSpec(
+            name=f"mcp-{config.name}",
+            description=(
+                f"Tools from the configured MCP server '{config.name}'. "
+                "Write a proper skill manifest to customize instructions and "
+                "bound tools."
+            ),
+            content=(
+                f"This skill exposes every tool of the configured MCP server "
+                f"'{config.name}'. Activating it connects the server (if not "
+                "already running) and unlocks its tools for this turn."
+            ),
+            category=SkillCategory.SYSTEM,
+            bound_tools=[f"mcp_{config.name}_*"],
+            mcp_binding=MCPBinding(server=config.name),
+            provenance={"generated": "mcp_server_config"},
+        ))
+    return implicit
+
+
+def load_available_skills(
+    registry: "ToolRegistry",
+    context: ToolContext,
+    *,
+    include_unmet: bool = False,
+    mcp_configs: list["MCPServerConfig"] | None = None,
+) -> list[SkillSpec]:
+    """All loadable skills for a context, including plugin-provided ones and
+    (when mcp_configs is supplied) implicit skills for configured MCP servers
+    no manifest binds."""
+    skills = load_skills(
         tool_context_to_skill_context(context),
         available_tools=set(registry.list_names()),
         available_config=None,  # tool handlers validate credentials at execution time
         extra_dirs=_plugin_skill_dirs(registry),
+        include_unmet=include_unmet,
     )
+    if mcp_configs:
+        bound_servers = {
+            s.mcp_binding.server for s in skills if s.mcp_binding is not None
+        }
+        skills = [*skills, *synthesize_implicit_mcp_skills(mcp_configs, bound_servers)]
+    return skills
+
+
+async def _mcp_configs(registry: "ToolRegistry") -> list["MCPServerConfig"]:
+    try:
+        config = await registry.get_config()
+        return list(config.mcp_servers or [])
+    except Exception:
+        return []
 
 
 async def select_skills(
@@ -119,7 +174,9 @@ async def select_skills(
 ) -> SkillSelection:
     """Select active skills for this turn and derive the exposed tool set."""
     available_tools = set(registry.list_names())
-    skills = load_available_skills(registry, tool_context)
+    skills = load_available_skills(
+        registry, tool_context, mcp_configs=await _mcp_configs(registry)
+    )
 
     default_names = HEARTBEAT_DEFAULT_SKILL_NAMES if tool_context == ToolContext.HEARTBEAT else DEFAULT_SKILL_NAMES
     selected: list[SkillSpec] = [s for s in skills if s.name in default_names]
@@ -176,23 +233,50 @@ def format_skills_prompt(
     return "\n\n".join(lines)
 
 
-def skill_catalog(registry: "ToolRegistry", context: ToolContext) -> list[dict[str, Any]]:
+async def skill_catalog(registry: "ToolRegistry", context: ToolContext) -> list[dict[str, Any]]:
+    """The honest answer to "what can I do?" (#39): every skill for this
+    context — including ones whose requirements currently fail — with a
+    tri-state status and the exact next step. No silent drops, no dead-ends."""
     available_tools = set(registry.list_names())
-    skills = load_available_skills(registry, context)
-    return [
-        {
+    mcp_configs = await _mcp_configs(registry)
+    server_names = {c.name for c in mcp_configs if c.enabled}
+    skills = load_available_skills(
+        registry, context, include_unmet=True, mcp_configs=mcp_configs
+    )
+    catalog: list[dict[str, Any]] = []
+    for s in skills:
+        status, missing, next_step = s.usability(available_tools, server_names)
+        if s.mcp_binding is not None:
+            # MCP tools exist only after activation: list them from the
+            # manifest, not from the live registry.
+            bound = skill_bound_tools(s)
+            transport = f"mcp:{s.mcp_binding.server}"
+        else:
+            bound = [t for t in skill_bound_tools(s) if t in available_tools]
+            transport = None
+        entry: dict[str, Any] = {
             "name": s.name,
             "description": s.description,
             "category": s.category.value,
-            "bound_tools": [t for t in skill_bound_tools(s) if t in available_tools],
+            "bound_tools": bound,
+            "status": status,
         }
-        for s in skills
-    ]
+        if missing:
+            entry["missing"] = missing
+        if next_step:
+            entry["next_step"] = next_step
+        if transport:
+            entry["transport"] = transport
+            entry["note"] = "MCP tools become callable after use_skill activates this skill."
+        catalog.append(entry)
+    return catalog
 
 
-def get_skill_by_name(registry: "ToolRegistry", context: ToolContext, name: str) -> SkillSpec | None:
+async def get_skill_by_name(registry: "ToolRegistry", context: ToolContext, name: str) -> SkillSpec | None:
     wanted = name.strip().lower()
-    skills = load_available_skills(registry, context)
+    skills = load_available_skills(
+        registry, context, include_unmet=True, mcp_configs=await _mcp_configs(registry)
+    )
     for skill in skills:
         if skill.name.lower() == wanted:
             return skill

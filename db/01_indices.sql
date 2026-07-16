@@ -48,6 +48,9 @@ CREATE INDEX IF NOT EXISTS idx_subconscious_units_route_claimed
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_raw_only
     ON subconscious_units (last_routed_at)
     WHERE route_status = 'raw_only' AND consolidated_at IS NULL AND status = 'active';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_extraction_pending
+    ON subconscious_units (turn_at)
+    WHERE extraction_status = 'pending' AND status = 'active';
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_status_created
     ON subconscious_units (status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_session_created

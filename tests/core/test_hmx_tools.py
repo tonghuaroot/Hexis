@@ -172,7 +172,7 @@ async def test_registry_and_memory_exchange_skill_bind_all_tools(db_pool):
     registry = create_default_registry(db_pool)
     assert _TOOL_NAMES <= set(registry.list_names())
 
-    skill = get_skill_by_name(registry, ToolContext.CHAT, "memory-exchange")
+    skill = await get_skill_by_name(registry, ToolContext.CHAT, "memory-exchange")
     assert skill is not None
     assert set(skill_bound_tools(skill)) == _TOOL_NAMES
 

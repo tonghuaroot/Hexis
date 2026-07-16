@@ -70,10 +70,22 @@ class RecallHandler(ToolHandler):
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Maximum number of memories to return (default: 5, max: 50)",
-                        "default": 5,
+                        "description": (
+                            "Memory-count budget for this recall. Defaults and ceiling "
+                            "are config-driven (memory.recall_default_limit / "
+                            "memory.recall_max_limit); ask for more when the question "
+                            "genuinely spans many memories."
+                        ),
                         "minimum": 1,
-                        "maximum": 50,
+                    },
+                    "min_score": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": (
+                            "Relevance floor: drop results scoring below this instead "
+                            "of relying on count alone."
+                        ),
                     },
                     "memory_types": {
                         "type": "array",
@@ -329,7 +341,10 @@ class RememberHandler(ToolHandler):
             name="remember",
             description=(
                 "Store a new memory. Use this to save important information, "
-                "events, or learnings for future recall."
+                "events, or learnings for future recall. When the memory comes "
+                "from a document, conversation, or other source, cite it in "
+                "`sources` — provenance is what makes a belief revisable and "
+                "explainable later."
             ),
             parameters={
                 "type": "object",
@@ -356,6 +371,47 @@ class RememberHandler(ToolHandler):
                         "items": {"type": "string"},
                         "description": "Concepts to link this memory to.",
                     },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "default": 0.5,
+                        "description": (
+                            "How confident you are the content is true, given the "
+                            "evidence (semantic memories only)."
+                        ),
+                    },
+                    "sources": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "description": (
+                                        "Evidence kind, e.g. user_testimony, "
+                                        "repository_document, web_page, self_observation."
+                                    ),
+                                },
+                                "ref": {
+                                    "type": "string",
+                                    "description": "Path, URL, or identifier of the source.",
+                                },
+                                "label": {"type": "string"},
+                                "author": {"type": "string"},
+                                "trust": {
+                                    "type": "number",
+                                    "minimum": 0.0,
+                                    "maximum": 1.0,
+                                },
+                            },
+                        },
+                        "description": (
+                            "Where this came from. Semantic memories record every "
+                            "source and derive trust from them; other types use "
+                            "the first as attribution."
+                        ),
+                    },
                 },
                 "required": ["content"],
             },
@@ -374,6 +430,87 @@ class RememberHandler(ToolHandler):
             return db_result
         # execute_memory_tool (db/38) owns this tool; the former Python
         # compatibility path was deleted.
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
+
+
+class AddEvidenceHandler(ToolHandler):
+    """Attach evidence to an existing belief and revise its confidence."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="add_evidence",
+            description=(
+                "Attach new evidence to an existing semantic memory (belief) and "
+                "revise its confidence through the calibrated evidence policy. "
+                "Use this when something you read or were told corroborates or "
+                "contradicts a belief you already hold, instead of creating a "
+                "duplicate memory. Returns prior and posterior confidence so you "
+                "can report honestly how much the evidence moved you; duplicate "
+                "sources are merged without changing confidence."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "UUID of the semantic memory the evidence bears on (from recall).",
+                    },
+                    "stance": {
+                        "type": "string",
+                        "enum": ["supports", "contradicts"],
+                        "description": "Whether the evidence supports or contradicts the belief.",
+                    },
+                    "source": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "description": (
+                                    "Evidence kind, e.g. user_testimony, "
+                                    "repository_document, web_page, self_observation."
+                                ),
+                            },
+                            "ref": {
+                                "type": "string",
+                                "description": "Path, URL, or identifier of the source.",
+                            },
+                            "label": {"type": "string"},
+                            "author": {"type": "string"},
+                            "trust": {
+                                "type": "number",
+                                "minimum": 0.0,
+                                "maximum": 1.0,
+                            },
+                        },
+                        "description": "The evidence source; must include at least ref or label.",
+                    },
+                    "note": {
+                        "type": "string",
+                        "description": (
+                            "Optional short observation of what the evidence says; "
+                            "stored as an episodic evidence memory linked to the belief."
+                        ),
+                    },
+                },
+                "required": ["memory_id", "stance", "source"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=1,
+            is_read_only=False,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        db_result = await _try_db_memory_tool("add_evidence", arguments, context)
+        if db_result is not None:
+            return db_result
         return ToolResult.error_result(
             "execute_memory_tool dispatch failed (database unavailable or errored)",
             ToolErrorType.EXECUTION_FAILED,
@@ -1169,6 +1306,7 @@ def create_memory_tools() -> list[ToolHandler]:
         RecallHandler(),
         SearchHistoryHandler(),
         RememberHandler(),
+        AddEvidenceHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
         ExploreSubgraphHandler(),

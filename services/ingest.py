@@ -1530,22 +1530,32 @@ class MemoryStore:
             self.client._async.add_source(UUID(memory_id), source)
         )
 
-    def boost_confidence(self, memory_id: str, boost: float = 0.05) -> None:
-        """Boost confidence of a memory when it's corroborated by a new source."""
+    def add_evidence(
+        self,
+        memory_id: str,
+        stance: str,
+        source: dict[str, Any],
+        note: str | None = None,
+        evidence_memory_id: str | None = None,
+        context: str = "ingest",
+    ) -> dict[str, Any]:
+        """Attach evidence to an existing memory through the DB-owned belief
+        revision policy (db/59): source merge, SUPPORTS/CONTRADICTS edge,
+        calibrated confidence update, and an audit row. Returns the revision
+        result ({prior, posterior, applied, reason, ...})."""
         if self.client is None:
             self.connect()
-        self._exec(
-            """
-            UPDATE memories SET metadata = jsonb_set(
-                COALESCE(metadata, '{}'::jsonb),
-                '{confidence}',
-                to_jsonb(LEAST(1.0, COALESCE((metadata->>'confidence')::float, 0.5) + $2))
-            )
-            WHERE id = $1::uuid
-            """,
+        raw = self._fetchval(
+            "SELECT add_memory_evidence($1::uuid, $2::text, $3::jsonb, $4::text, $5::uuid, $6::text)",
             memory_id,
-            boost,
+            stance,
+            json.dumps(source),
+            note,
+            evidence_memory_id,
+            context,
         )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, dict) else {}
 
     def link_concept(self, memory_id: str, concept: str, strength: float = 1.0) -> None:
         """Link a memory to a concept in the knowledge graph."""
@@ -1618,6 +1628,17 @@ class MemoryStore:
             memory_types=[ApiMemoryType.SEMANTIC],
         ).memories
 
+    def recall_similar(self, query: str, memory_types: list[str], limit: int = 5):
+        """Recall nearest memories of the given types (list result)."""
+        if self.client is None:
+            self.connect()
+        assert self.client is not None
+        return self.client.recall(
+            query,
+            limit=limit,
+            memory_types=[ApiMemoryType(t) for t in memory_types],
+        ).memories
+
     def route_extractions(self, extractions: list, min_confidence: float) -> list:
         """Route extractions through the DB dedup/related/create policy
         (db/41 ingest_route_extractions): config-driven thresholds + one batched
@@ -1628,6 +1649,23 @@ class MemoryStore:
         payload = json.dumps([
             {"content": ext.content, "confidence": ext.confidence}
             for ext in extractions
+        ])
+        raw = self._fetchval(
+            "SELECT ingest_route_extractions($1::jsonb, $2::float)", payload, min_confidence
+        )
+        plan = json.loads(raw) if isinstance(raw, str) else raw
+        return plan or []
+
+    def route_texts(self, items: list[tuple[str, float]], min_confidence: float = 0.0) -> list:
+        """Route bare (content, confidence) pairs through the same DB
+        dedup/related/create policy as route_extractions."""
+        if not items:
+            return []
+        if self.client is None:
+            self.connect()
+        payload = json.dumps([
+            {"content": content, "confidence": confidence}
+            for content, confidence in items
         ])
         raw = self._fetchval(
             "SELECT ingest_route_extractions($1::jsonb, $2::float)", payload, min_confidence
@@ -2252,11 +2290,19 @@ class IngestionPipeline:
             matched_id = routed.get("matched_memory_id")
 
             if decision == "duplicate" and matched_id:
+                # Corroboration, not re-creation: merge the source, revise
+                # confidence via the audited policy, and keep an evidence edge
+                # from the encounter memory (#34/#35).
                 try:
-                    self.store.add_source(str(matched_id), source)
-                    self.store.boost_confidence(str(matched_id), 0.05)
+                    self.store.add_evidence(
+                        str(matched_id),
+                        "supports",
+                        source,
+                        evidence_memory_id=encounter_id,
+                        context="fast_ingest",
+                    )
                 except Exception:
-                    pass
+                    logger.exception("fast ingest corroboration failed for memory %s", matched_id)
                 continue
 
             importance = ext.importance

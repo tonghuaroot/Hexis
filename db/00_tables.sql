@@ -263,6 +263,16 @@ CREATE TABLE subconscious_units (
     route_attempts INT NOT NULL DEFAULT 0,
     route_result JSONB NOT NULL DEFAULT '{}'::jsonb,
 
+    -- Conscious-episode extraction (#37): the subconscious sweep that
+    -- selectively promotes salient facts from conversation turns and
+    -- heartbeat episodes into durable memories. Orthogonal to route_status
+    -- (recmem raw/episode routing).
+    extraction_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (extraction_status IN ('pending','in_progress','extracted','skipped','failed')),
+    extraction_attempts INT NOT NULL DEFAULT 0,
+    extracted_at TIMESTAMPTZ,
+    extraction_error TEXT,
+
     importance FLOAT DEFAULT 0.3 CHECK (importance BETWEEN 0 AND 1),
     source_attribution JSONB NOT NULL DEFAULT '{}'::jsonb,
     trust_level FLOAT NOT NULL DEFAULT 0.95 CHECK (trust_level BETWEEN 0 AND 1),
@@ -303,7 +313,7 @@ CREATE TABLE memory_source_units (
     memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     subconscious_unit_id UUID NOT NULL REFERENCES subconscious_units(id) ON DELETE CASCADE,
     role TEXT NOT NULL DEFAULT 'source'
-        CHECK (role IN ('source','direct_promotion','merge_addition')),
+        CHECK (role IN ('source','direct_promotion','merge_addition','extraction','corroboration')),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (memory_id, subconscious_unit_id)
 );

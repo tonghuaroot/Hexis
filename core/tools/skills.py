@@ -60,8 +60,25 @@ class ListSkillsHandler(ToolHandler):
     async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         if not context.registry:
             return ToolResult.error_result("No registry available", ToolErrorType.EXECUTION_FAILED)
-        skills = skill_catalog(context.registry, context.tool_context)
-        return ToolResult.success_result({"skills": skills}, f"{len(skills)} skill(s) available")
+        skills = await skill_catalog(context.registry, context.tool_context)
+        usable = sum(1 for s in skills if s.get("status") == "usable")
+        return ToolResult.success_result(
+            {
+                "skills": skills,
+                "acquirable": {
+                    "author_skill": (
+                        "Create a new skill with the author_skill tool — packaged "
+                        "instructions plus the tools it binds."
+                    ),
+                    "mcp_skill": (
+                        "New external integrations are added by installing a skill "
+                        "manifest whose mcp block binds an MCP server; no core code "
+                        "changes are needed."
+                    ),
+                },
+            },
+            f"{len(skills)} skill(s): {usable} usable",
+        )
 
 
 class UseSkillHandler(ToolHandler):
@@ -97,22 +114,97 @@ class UseSkillHandler(ToolHandler):
         name = str(arguments.get("name") or "").strip()
         if not name:
             return ToolResult.error_result("Skill name is required", ToolErrorType.INVALID_PARAMS)
-        skill = get_skill_by_name(context.registry, context.tool_context, name)
+        skill = await get_skill_by_name(context.registry, context.tool_context, name)
         if not skill:
             return ToolResult.error_result(f"Unknown or unavailable skill: {name}", ToolErrorType.INVALID_PARAMS)
-        bound_tools = [
+
+        native_bound = [
             t for t in skill_bound_tools(skill)
-            if context.registry.get_spec(t) is not None
+            if not t.startswith("mcp_") and context.registry.get_spec(t) is not None
         ]
-        return ToolResult.success_result(
-            {
-                "name": skill.name,
-                "description": skill.description,
-                "instructions": skill.content,
-                "bound_tools": bound_tools,
-            },
-            f"Activated skill: {skill.name}",
+        payload: dict[str, Any] = {
+            "name": skill.name,
+            "description": skill.description,
+            "instructions": skill.content,
+            "bound_tools": native_bound,
+        }
+
+        if skill.mcp_binding is not None:
+            activation = await self._activate_mcp(skill, context)
+            payload.update(activation)
+            if activation.get("status") != "activated":
+                # No dead-end: instructions and the exact next step are still
+                # delivered; only the MCP tools stay locked.
+                return ToolResult.success_result(
+                    payload,
+                    f"Skill {skill.name}: {activation.get('status')} — {activation.get('next_step', '')}".strip(),
+                )
+            payload["bound_tools"] = [*native_bound, *activation.get("mcp_tools", [])]
+
+        return ToolResult.success_result(payload, f"Activated skill: {skill.name}")
+
+    async def _activate_mcp(
+        self, skill, context: ToolExecutionContext
+    ) -> dict[str, Any]:
+        """Lazily connect the skill's MCP server and register ONLY its
+        manifest-bound tools (#41). Returns a status dict for the payload."""
+        import os
+
+        from core.tools.mcp_runtime import MCPRuntime
+        from core.tools.config import MCPServerConfig
+
+        binding = skill.mcp_binding
+        missing_env = [v for v in binding.env_requires if not os.environ.get(v)]
+        if missing_env:
+            return {
+                "status": "needs_setup",
+                "missing": [f"missing env var: {v}" for v in missing_env],
+                "next_step": (
+                    f"Set {', '.join(missing_env)} in the service environment and "
+                    "call use_skill again."
+                ),
+            }
+
+        if binding.command:
+            server_config = MCPServerConfig(
+                name=binding.server, command=binding.command, args=list(binding.args)
+            )
+        else:
+            config = await context.registry.get_config()
+            server_config = next(
+                (c for c in (config.mcp_servers or []) if c.name == binding.server and c.enabled),
+                None,
+            )
+            if server_config is None:
+                return {
+                    "status": "unavailable",
+                    "next_step": (
+                        f"Add an MCP server named '{binding.server}' to the tools config "
+                        "(mcp_servers), or add a command to the skill manifest."
+                    ),
+                }
+
+        runtime = MCPRuntime.instance()
+        result = await runtime.ensure_connected(server_config)
+        if not result.get("connected"):
+            return {
+                "status": "connection_failed",
+                "error": result.get("error"),
+                "next_step": result.get("next_step"),
+            }
+        mcp_tools = runtime.register_into(
+            context.registry, binding.server, skill_bound_tools(skill)
         )
+        if not mcp_tools:
+            return {
+                "status": "connection_failed",
+                "error": (
+                    "server connected but exposes none of the tools this skill binds "
+                    f"({', '.join(t for t in skill_bound_tools(skill) if t.startswith('mcp_'))})"
+                ),
+                "next_step": "Check the skill manifest's bound_tools against the server's tool list.",
+            }
+        return {"status": "activated", "mcp_tools": mcp_tools}
 
 
 class AuthorSkillHandler(ToolHandler):

@@ -151,7 +151,15 @@ class InspectSourceHandler(ToolHandler):
 
         limit = min(500, max(1, int(arguments.get("limit") or 100)))
         if action == "read":
-            return self._read(path, raw_path, int(arguments.get("offset") or 0), limit)
+            result = self._read(path, raw_path, int(arguments.get("offset") or 0), limit)
+            if result.success and isinstance(result.output, dict) and await self._retention_hint_enabled(context):
+                result.output["retention"] = (
+                    "This content is in-context only — nothing was ingested or "
+                    "remembered. If it is identity-, relationship-, goal-, or "
+                    "strategy-relevant, store the salient claims with remember or "
+                    "slow_ingest; otherwise deliberately let it go."
+                )
+            return result
         if action == "list":
             return self._list(path, raw_path, str(arguments.get("file_pattern") or "*"), limit)
         if action == "search":
@@ -163,6 +171,21 @@ class InspectSourceHandler(ToolHandler):
                 limit,
             )
         return ToolResult.error_result("Unknown source inspection action.", ToolErrorType.INVALID_PARAMS)
+
+    async def _retention_hint_enabled(self, context: ToolExecutionContext) -> bool:
+        """Config gate for the retention reminder; defaults on when unreadable —
+        the hint is advisory and losing it silently would defeat its purpose."""
+        registry = getattr(context, "registry", None)
+        pool = getattr(registry, "pool", None)
+        if pool is None:
+            return True
+        try:
+            async with pool.acquire() as conn:
+                return bool(await conn.fetchval(
+                    "SELECT COALESCE(get_config_bool('inspection.retention_hint_enabled'), TRUE)"
+                ))
+        except Exception:
+            return True
 
     def _read(self, path: Path, raw_path: str, offset: int, limit: int) -> ToolResult:
         if not _is_source_file(path):

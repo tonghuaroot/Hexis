@@ -314,20 +314,39 @@ async def run_slow_ingest(
         connection_ids = assessment.get("connections", [])
         rejection_reason_ids = assessment.get("rejection_reasons", [])
 
-        for fact in facts:
-            if not fact or not isinstance(fact, str) or len(fact.strip()) < 10:
-                continue
+        valid_facts = [
+            fact for fact in facts
+            if fact and isinstance(fact, str) and len(fact.strip()) >= 10
+        ]
+        # Dedup/related/create routing is DB-owned (db/41). Near-duplicates are
+        # corroborating evidence for the matched memory (#34) — merged source,
+        # audited confidence revision, SUPPORTS edge from the encounter — never
+        # silently dropped or re-created.
+        fact_confidence = assessment.get("trust_assessment", 0.5)
+        try:
+            plan = pipeline.store.route_texts([(f, fact_confidence) for f in valid_facts])
+        except Exception:
+            logger.exception("slow ingest fact routing failed; treating all facts as new")
+            plan = []
+        plan_by_index = {p.get("index"): p for p in plan if isinstance(p, dict)}
 
-            # Dedup check
-            try:
-                similar = pipeline.store.recall_similar_semantic(fact, limit=3)
-                if similar and hasattr(similar, "memories") and any(
-                    m.similarity is not None and m.similarity >= 0.92
-                    for m in similar.memories
-                ):
-                    continue
-            except Exception:
-                pass
+        for fact_index, fact in enumerate(valid_facts):
+            routed = plan_by_index.get(fact_index, {})
+            decision = routed.get("decision")
+            matched_id = routed.get("matched_memory_id")
+
+            if decision == "duplicate" and matched_id:
+                try:
+                    pipeline.store.add_evidence(
+                        str(matched_id),
+                        "supports",
+                        chunk_source,
+                        evidence_memory_id=encounter_id,
+                        context="slow_ingest",
+                    )
+                except Exception:
+                    logger.exception("slow ingest corroboration failed for memory %s", matched_id)
+                continue
 
             # Create semantic memory
             try:
@@ -351,6 +370,18 @@ async def run_slow_ingest(
                                 encounter_id,
                                 RelationshipType.DERIVED_FROM,
                                 confidence=0.9,
+                            )
+                        except Exception:
+                            pass
+
+                    # Router said this fact is related to an existing memory
+                    if decision == "related" and matched_id:
+                        try:
+                            pipeline.store.connect_memories(
+                                memory_id,
+                                str(matched_id),
+                                RelationshipType.ASSOCIATED,
+                                confidence=0.6,
                             )
                         except Exception:
                             pass
@@ -513,19 +544,17 @@ async def run_hybrid_ingest(
             high_signal_indices.add(section.index)
             continue
 
-        # Criterion 2/3: Similarity to worldview or goals
-        # Use a quick memory search to check relevance
+        # Criterion 2/3: Similarity to worldview or goals. Query those types
+        # directly — the old semantic-only recall could never return them.
         try:
-            similar = pipeline.store.recall_similar_semantic(
-                section.content[:500], limit=3
+            similar = pipeline.store.recall_similar(
+                section.content[:500], memory_types=["worldview", "goal"], limit=3
             )
-            if similar and hasattr(similar, "memories"):
-                for mem in similar.memories:
-                    if mem.similarity is not None and mem.similarity >= 0.6:
-                        mem_type = getattr(mem, "type", None) or getattr(mem, "memory_type", "")
-                        if str(mem_type) in ("worldview", "goal"):
-                            high_signal_indices.add(section.index)
-                            break
+            if any(
+                mem.similarity is not None and mem.similarity >= 0.6
+                for mem in similar
+            ):
+                high_signal_indices.add(section.index)
         except Exception:
             pass
 
@@ -583,9 +612,42 @@ async def run_hybrid_ingest(
             elif acceptance == "question":
                 chunk_source["questioned"] = True
 
-            for fact in assessment.get("extracted_facts", []):
-                if not fact or not isinstance(fact, str) or len(fact.strip()) < 10:
+            hybrid_facts = [
+                fact for fact in assessment.get("extracted_facts", [])
+                if fact and isinstance(fact, str) and len(fact.strip()) >= 10
+            ]
+            hybrid_confidence = assessment.get("trust_assessment", 0.5)
+            try:
+                hybrid_plan = pipeline.store.route_texts(
+                    [(f, hybrid_confidence) for f in hybrid_facts]
+                )
+            except Exception:
+                logger.exception("hybrid slow fact routing failed; treating all facts as new")
+                hybrid_plan = []
+            hybrid_plan_by_index = {
+                p.get("index"): p for p in hybrid_plan if isinstance(p, dict)
+            }
+
+            for fact_index, fact in enumerate(hybrid_facts):
+                routed = hybrid_plan_by_index.get(fact_index, {})
+                decision = routed.get("decision")
+                matched_id = routed.get("matched_memory_id")
+
+                if decision == "duplicate" and matched_id:
+                    try:
+                        pipeline.store.add_evidence(
+                            str(matched_id),
+                            "supports",
+                            chunk_source,
+                            evidence_memory_id=encounter_id,
+                            context="hybrid_ingest",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "hybrid ingest corroboration failed for memory %s", matched_id
+                        )
                     continue
+
                 try:
                     memory_id = pipeline.store.create_semantic_memory(
                         content=fact,
@@ -603,6 +665,14 @@ async def run_hybrid_ingest(
                                 pipeline.store.connect_memories(
                                     memory_id, encounter_id,
                                     RelationshipType.DERIVED_FROM, confidence=0.9,
+                                )
+                            except Exception:
+                                pass
+                        if decision == "related" and matched_id:
+                            try:
+                                pipeline.store.connect_memories(
+                                    memory_id, str(matched_id),
+                                    RelationshipType.ASSOCIATED, confidence=0.6,
                                 )
                             except Exception:
                                 pass

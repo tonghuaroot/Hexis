@@ -1068,6 +1068,9 @@ BEGIN
                 0.9
             );
         END IF;
+        -- Mirror the origin documents into protected, recallable memory (#40);
+        -- config-gated + idempotent, so re-running consent is safe.
+        PERFORM seed_origin_memories();
         PERFORM set_config('agent.is_configured', 'true'::jsonb);
         PERFORM advance_init_stage('complete', jsonb_build_object(
             'consent', consent_result,

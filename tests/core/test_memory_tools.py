@@ -88,3 +88,23 @@ class TestRecallThroughDbDispatcher:
         result = await RecallHandler().execute({}, _ctx(db_pool))
         assert not result.success
         assert "query or one filter" in (result.error or "")
+
+
+class TestProvenanceTooling:
+    def test_remember_schema_supports_sources_and_confidence(self):
+        spec = RememberHandler().spec
+        props = spec.parameters["properties"]
+        assert "confidence" in props
+        assert props["sources"]["type"] == "array"
+        source_props = props["sources"]["items"]["properties"]
+        assert {"kind", "ref", "label", "author", "trust"} <= set(source_props)
+
+    def test_add_evidence_handler_registered(self):
+        from core.tools.memory import AddEvidenceHandler, create_memory_tools
+
+        names = [handler.spec.name for handler in create_memory_tools()]
+        assert "add_evidence" in names
+        spec = AddEvidenceHandler().spec
+        assert spec.parameters["required"] == ["memory_id", "stance", "source"]
+        assert spec.is_read_only is False
+        assert "prior" in spec.description

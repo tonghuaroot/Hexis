@@ -155,9 +155,10 @@ class ToolRegistry:
 
     def _tool_catalog_payload(self) -> list[dict[str, Any]]:
         payload: list[dict[str, Any]] = []
+        mcp_names = set(self._mcp_handlers.keys())
         for handler in self.list_all():
             spec = handler.spec
-            payload.append({
+            entry: dict[str, Any] = {
                 "name": spec.name,
                 "description": spec.description,
                 "schema": spec.parameters,
@@ -169,7 +170,14 @@ class ToolRegistry:
                 "optional": spec.optional,
                 "allowed_contexts": [ctx.value for ctx in spec.allowed_contexts],
                 "execution_kind": "python_driver",
-            })
+            }
+            if spec.name in mcp_names:
+                # Transport truth in the DB catalog (#41).
+                entry["metadata"] = {
+                    "transport": "mcp",
+                    "server": getattr(handler, "_server_name", None),
+                }
+            payload.append(entry)
         return payload
 
     async def sync_tool_catalog(self) -> None:

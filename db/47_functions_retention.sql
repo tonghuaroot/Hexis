@@ -658,6 +658,8 @@ AS $$
         FROM memories m
         WHERE m.status = 'active'
           AND m.source_attribution->>'content_hash' IS NOT NULL
+          -- Protected memories (e.g. seeded origin documents) never fade.
+          AND COALESCE((m.metadata->>'protected')::boolean, FALSE) = FALSE
         GROUP BY m.source_attribution->>'content_hash'
         HAVING max(age_in_days(COALESCE((m.source_attribution->>'observed_at')::timestamptz, m.created_at)))
                  >= COALESCE(get_config_float('retention.doc_stale_days'), 180)

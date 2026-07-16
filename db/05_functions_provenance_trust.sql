@@ -779,6 +779,11 @@ BEGIN
     IF mtype <> 'semantic' THEN
         RETURN;
     END IF;
+    -- Protected memories (e.g. origin documents) keep their seeded trust:
+    -- confidence may still be revised, but derived trust is pinned.
+    IF COALESCE((mem_metadata->>'protected')::boolean, FALSE) THEN
+        RETURN;
+    END IF;
     conf := COALESCE((mem_metadata->>'confidence')::float, 0.5);
     sources := mem_metadata->'source_references';
 

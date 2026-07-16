@@ -70,3 +70,45 @@ async def test_self_inspection_skill_activates_shared_read_only_tools(db_pool):
     assert {"inspect_source", "inspect_database_schema"}.issubset(
         selection.allowed_tool_names
     )
+
+
+async def test_read_result_carries_retention_hint():
+    """Read results remind the agent that inspection is not retention (#32).
+    Without a pool the hint defaults on (advisory, fail-open)."""
+    handler = InspectSourceHandler()
+    context = ToolExecutionContext(tool_context=ToolContext.CHAT, call_id="retention-test")
+
+    result = await handler.execute(
+        {"action": "read", "path": "README.md", "limit": 5}, context
+    )
+    assert result.success
+    assert "in-context only" in result.output["retention"]
+
+    listing = await handler.execute(
+        {"action": "list", "path": "core/tools", "file_pattern": "*.py"}, context
+    )
+    assert listing.success
+    assert "retention" not in listing.output
+
+
+async def test_retention_hint_config_gate(db_pool):
+    registry = create_default_registry(db_pool)
+    context = ToolExecutionContext(
+        tool_context=ToolContext.CHAT, call_id="retention-gate", registry=registry
+    )
+    handler = InspectSourceHandler()
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE config SET value = 'false'::jsonb WHERE key = 'inspection.retention_hint_enabled'"
+        )
+    try:
+        result = await handler.execute(
+            {"action": "read", "path": "README.md", "limit": 5}, context
+        )
+        assert result.success
+        assert "retention" not in result.output
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE config SET value = 'true'::jsonb WHERE key = 'inspection.retention_hint_enabled'"
+            )

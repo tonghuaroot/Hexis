@@ -193,6 +193,7 @@ def load_skills(
     available_tools: set[str],
     available_config: set[str] | None = None,
     extra_dirs: list[Path] | None = None,
+    include_unmet: bool = False,
 ) -> list[SkillSpec]:
     """
     Load all skills matching a context whose requirements are met.
@@ -202,6 +203,9 @@ def load_skills(
         available_tools: Set of tool names currently enabled
         available_config: Set of config keys present (e.g., api key names)
         extra_dirs: Additional directories to scan for skills
+        include_unmet: Keep skills whose requirements fail (#39) — the catalog
+            path must SHOW them with a needs_setup/unavailable status instead
+            of silently dropping them, or "can I do X?" dead-ends in a wrong "no".
 
     Returns:
         List of SkillSpec objects ready for prompt injection
@@ -224,7 +228,7 @@ def load_skills(
                 continue
 
             # Check requirements
-            if not spec.requirements_met(available_tools, available_config):
+            if not include_unmet and not spec.requirements_met(available_tools, available_config):
                 logger.debug(
                     "Skill '%s' requirements not met (tools=%s config=%s)",
                     spec.name, spec.requires_tools, spec.requires_config,

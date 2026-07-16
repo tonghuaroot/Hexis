@@ -76,6 +76,11 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await auth_flow_coordinator.close()
+        try:
+            from core.tools.mcp_runtime import MCPRuntime
+            await MCPRuntime.instance().shutdown()
+        except Exception:
+            logger.debug("MCP runtime shutdown failed", exc_info=True)
         if _pool:
             await _pool.close()
             logger.info("Pool closed")
@@ -1086,6 +1091,14 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     "kind": "tool_result",
                     "title": tool_name,
                     "detail": detail,
+                })
+
+            elif event.event == AgentEvent.CLAIM_FLAGGED:
+                yield _sse_event("log", {
+                    "id": str(uuid.uuid4()),
+                    "kind": "claim_flagged",
+                    "title": "Consistency check",
+                    "detail": json.dumps(event.data.get("findings", []))[:500],
                 })
 
             elif event.event == AgentEvent.LLM_REQUEST:

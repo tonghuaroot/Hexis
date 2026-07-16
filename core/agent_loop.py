@@ -54,6 +54,7 @@ class AgentEvent(str, Enum):
     CONTINUATION = "continuation"
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
+    CLAIM_FLAGGED = "claim_flagged"
 
 
 @dataclass
@@ -223,6 +224,7 @@ class AgentLoop:
         })
         # The DB message log is authoritative for the final transcript.
         result.messages = await self._get_messages()
+        await self._enforce_action_claims(result)
         await self._finish_turn(result)
 
         return result
@@ -294,6 +296,26 @@ class AgentLoop:
         tools = await self.config.registry.get_specs(self.config.tool_context)
         allowed = self.config.allowed_tool_names
         if allowed is None:
+            # Sole-front-door safety net (#41): callers that skip skill routing
+            # never see MCP tool schemas — those are reachable only through a
+            # skill's bound_tools (or the mcp.expose_unbound escape hatch).
+            if any(
+                spec.get("function", {}).get("name", "").startswith("mcp_")
+                for spec in tools
+            ):
+                expose_unbound = False
+                try:
+                    async with self.config.pool.acquire() as conn:
+                        expose_unbound = bool(await conn.fetchval(
+                            "SELECT COALESCE(get_config_bool('mcp.expose_unbound'), FALSE)"
+                        ))
+                except Exception:
+                    logger.debug("mcp.expose_unbound lookup failed; hiding unbound MCP tools", exc_info=True)
+                if not expose_unbound:
+                    tools = [
+                        spec for spec in tools
+                        if not spec.get("function", {}).get("name", "").startswith("mcp_")
+                    ]
             return tools
         return [
             spec for spec in tools
@@ -460,6 +482,7 @@ class AgentLoop:
                 if cfg.allowed_tool_names is not None and tool_name not in cfg.allowed_tool_names:
                     await self._record_tool_result(call_id, {
                         "tool_name": tool_name,
+                        "arguments": arguments,
                         "success": False,
                         "error": "tool not available in the active skill set",
                         "energy_spent": 0,
@@ -492,6 +515,7 @@ class AgentLoop:
                     if not approved:
                         await self._record_tool_result(call_id, {
                             "tool_name": tool_name,
+                            "arguments": arguments,
                             "success": False,
                             "error": "denied",
                             "energy_spent": 0,
@@ -521,6 +545,7 @@ class AgentLoop:
                 # read the authoritative running total back from it.
                 applied = await self._record_tool_result(call_id, {
                     "tool_name": tool_name,
+                    "arguments": arguments,
                     "success": result.success,
                     "output": result.output,
                     "display_output": result.display_output,
@@ -771,6 +796,123 @@ class AgentLoop:
             )
         parsed = json.loads(raw) if isinstance(raw, str) else raw
         return parsed if isinstance(parsed, dict) else {}
+
+    async def _enforce_action_claims(self, result: AgentLoopResult) -> None:
+        """Detect prose claims of actions with no matching successful tool call
+        this turn and append a visible correction (#38). The reply has already
+        streamed, so enforcement is detect + correct + record, never block.
+        Advisory: any failure here leaves the reply untouched."""
+        text = result.text or ""
+        if not text.strip() or not self._turn_id:
+            return
+        try:
+            async with self.config.pool.acquire() as conn:
+                enabled = await conn.fetchval(
+                    "SELECT COALESCE(get_config_bool('guardrails.action_claims.enabled'), TRUE)"
+                )
+                if not enabled:
+                    return
+                raw = await conn.fetchval(
+                    "SELECT detect_unsupported_action_claims($1::uuid, $2::text)",
+                    self._turn_id,
+                    text,
+                )
+            report = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            findings = report.get("flagged") or []
+            if not findings:
+                return
+
+            verifier_used = False
+            verified = await self._verify_claims_with_llm(findings, text)
+            if verified is not None:
+                findings = verified
+                verifier_used = True
+            if not findings:
+                return
+
+            summary = "; ".join(
+                f"{f.get('kind', 'action')}: \"{(f.get('sentence') or '')[:160]}\""
+                for f in findings[:5]
+            )
+            correction = (
+                "\n\n[Correction] I described actions I did not actually take this "
+                f"turn — {summary} — no matching successful tool call. Treat those "
+                "statements as unverified."
+            )
+            result.text += correction
+            self._last_text = result.text
+            await self._emit(AgentEvent.TEXT_DELTA, {"text": correction, "correction": True})
+            await self._emit(AgentEvent.CLAIM_FLAGGED, {
+                "findings": findings,
+                "verifier_used": verifier_used,
+            })
+        except Exception:
+            logger.warning(
+                "action-claim guardrail failed for turn %s; reply left unmodified",
+                self._turn_id,
+                exc_info=True,
+            )
+
+    async def _verify_claims_with_llm(
+        self, findings: list[dict[str, Any]], text: str
+    ) -> list[dict[str, Any]] | None:
+        """Config-gated LLM pass over heuristic findings. Returns the confirmed
+        (possibly extended) findings, or None when the verifier is disabled.
+        On LLM failure the heuristic findings stand (fail-open)."""
+        async with self.config.pool.acquire() as conn:
+            verifier_on = await conn.fetchval(
+                "SELECT COALESCE(get_config_bool('guardrails.action_claims.llm_verifier_enabled'), FALSE)"
+            )
+            if not verifier_on:
+                return None
+            try:
+                from core.llm_config import load_llm_config
+                from core.llm_json import chat_json
+
+                llm_config = await load_llm_config(conn, "llm.guardrails", fallback_key="llm.subconscious")
+                system = await conn.fetchval(
+                    "SELECT content FROM prompt_modules WHERE key = 'action_claim_verify'"
+                )
+            except Exception:
+                logger.warning("action-claim verifier setup failed; keeping heuristic findings", exc_info=True)
+                return findings
+        payload = {
+            "final_text": text[:12000],
+            "flagged": findings,
+            "successful_tool_calls": [
+                {"name": c.get("name"), "arguments": c.get("arguments")}
+                for c in self._tool_calls_made
+                if c.get("success")
+            ],
+        }
+        try:
+            doc, _raw = await chat_json(
+                llm_config=llm_config,
+                messages=[
+                    {"role": "system", "content": (system or "").strip()},
+                    {"role": "user", "content": json.dumps(payload)},
+                ],
+            )
+        except Exception:
+            logger.warning("action-claim LLM verifier failed; keeping heuristic findings", exc_info=True)
+            return findings
+        confirmed = doc.get("confirmed") if isinstance(doc, dict) else None
+        if isinstance(confirmed, list):
+            kept = [
+                findings[i]
+                for i in confirmed
+                if isinstance(i, int) and 0 <= i < len(findings)
+            ]
+        else:
+            kept = list(findings)
+        for extra in (doc.get("additional") or []) if isinstance(doc, dict) else []:
+            if isinstance(extra, dict) and extra.get("sentence"):
+                kept.append({
+                    "kind": extra.get("kind", "action"),
+                    "sentence": str(extra["sentence"])[:300],
+                    "source": "llm_verifier",
+                })
+        return kept
 
     async def _finish_turn(self, result: AgentLoopResult) -> None:
         """Mark the turn complete. Best-effort with a loud warning: the reply is

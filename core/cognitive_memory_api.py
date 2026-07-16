@@ -267,7 +267,7 @@ class CognitiveMemory:
         self,
         query: str,
         *,
-        memory_limit: int = 10,
+        memory_limit: int | None = None,
         include_partial: bool = True,
         include_identity: bool = True,
         include_worldview: bool = True,
@@ -289,6 +289,15 @@ class CognitiveMemory:
         - `gather_turn_context()` for identity/worldview/emotions/drives/goals (optional subsets)
         """
         import asyncio as _aio
+
+        if memory_limit is None:
+            # Budget, not knowledge limit: the default is config-owned (WS6).
+            async with self._pool.acquire() as conn:
+                memory_limit = int(
+                    await conn.fetchval(
+                        "SELECT COALESCE(get_config_int('memory.hydrate_memory_limit'), 10)"
+                    ) or 10
+                )
 
         async def _fetch_memories():
             async with self._pool.acquire() as conn:

@@ -31,6 +31,7 @@ from services.recmem import (
     run_recmem_route_step,
     run_recmem_sweep_step,
 )
+from services.extraction import run_conscious_extraction_step
 from services.summarization import run_memory_summarization_step
 from services.skill_improvement import run_skill_improvement_review_step
 from services.reconsolidation import run_reconsolidation_step
@@ -494,6 +495,32 @@ class MaintenanceWorker:
             if not result.get("skipped"):
                 logger.info("Memory summarization: %s", result)
 
+    async def _run_extraction_if_enabled(self) -> None:
+        """Sweep conscious episodes (chat turns + heartbeat episodes) into
+        selective durable memories (#37). No-op unless extraction.enabled."""
+        if not self.pool:
+            return
+        async with self.pool.acquire() as conn:
+            result = await run_conscious_extraction_step(conn)
+            if not result.get("skipped"):
+                logger.info("Conscious extraction: %s", result)
+
+    async def _run_origin_seed_if_enabled(self) -> None:
+        """Keep origin memories seeded (#40). Idempotent and config-gated in
+        the DB, so flipping origin_memories.enabled takes effect on the next
+        tick — no manual SQL, no re-consent. Advisory: a failure (e.g. the
+        embedding service being down) waits for the next tick, loudly."""
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                raw = await conn.fetchval("SELECT seed_origin_memories()")
+            result = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            if result.get("seeded"):
+                logger.info("Origin memories seeded: %s", result)
+        except Exception as exc:
+            logger.warning("Origin memory seeding failed (will retry next tick): %s", exc)
+
     async def _run_skill_improvement_if_due(self) -> None:
         if not self.pool:
             return
@@ -525,6 +552,8 @@ class MaintenanceWorker:
                     await self._run_reconsolidation_if_pending()
                     await self._run_recmem_if_enabled()
                     await self._run_memory_rest_if_enabled()
+                    await self._run_extraction_if_enabled()
+                    await self._run_origin_seed_if_enabled()
                     await self._run_skill_improvement_if_due()
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")
@@ -642,10 +671,20 @@ async def _amain(mode: str, instance: str | None = None) -> None:
         call_processor.set_tool_registry(tool_registry)
         logger.info("Tool registry initialized for consumer")
 
-        mcp_manager = await create_mcp_manager(tool_registry)
-        mcp_count = len(mcp_manager.list_servers())
-        if mcp_count > 0:
-            logger.info(f"Loaded {mcp_count} MCP server(s)")
+        # Skill-gated MCP (#41, default): servers connect lazily when a skill
+        # binding them is activated, so nothing eager-loads here. The legacy
+        # eager mode remains behind mcp.skill_gated=false.
+        async with consumer_pool.acquire() as conn:
+            skill_gated = bool(await conn.fetchval(
+                "SELECT COALESCE(get_config_bool('mcp.skill_gated'), TRUE)"
+            ))
+        if skill_gated:
+            logger.info("MCP is skill-gated; servers connect on skill activation")
+        else:
+            mcp_manager = await create_mcp_manager(tool_registry)
+            mcp_count = len(mcp_manager.list_servers())
+            if mcp_count > 0:
+                logger.info(f"Loaded {mcp_count} MCP server(s)")
     except Exception as e:
         logger.warning(f"Failed to initialize tool registry: {e}")
 
@@ -695,6 +734,11 @@ async def _amain(mode: str, instance: str | None = None) -> None:
                 await mcp_manager.shutdown()
             except Exception:
                 pass
+        try:
+            from core.tools.mcp_runtime import MCPRuntime
+            await MCPRuntime.instance().shutdown()
+        except Exception:
+            pass
         await consumer_pool.close()
 
 

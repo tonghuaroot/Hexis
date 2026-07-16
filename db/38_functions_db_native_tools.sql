@@ -1,6 +1,19 @@
 -- DB-native tool execution helpers for tools that do not need Python side effects.
 SET search_path = public, ag_catalog, "$user";
 
+-- Memory-count budgets (WS6): counts protect context and cost; relevance is
+-- governed by min_score, never by a hardcoded N.
+INSERT INTO config (key, value, description) VALUES
+    ('memory.recall_default_limit', '5'::jsonb,
+     'Default memory count for recall when the caller does not specify one'),
+    ('memory.recall_max_limit', '50'::jsonb,
+     'Ceiling on recall count — a context/cost budget, not a knowledge limit'),
+    ('memory.hydrate_memory_limit', '10'::jsonb,
+     'Default memory count for RAG hydration'),
+    ('memory.context_section_limits', '{"recent": 20, "self": 25, "relationship": 15, "contradiction": 5, "emotional_pattern": 5, "trigger": 5}'::jsonb,
+     'Per-section caps for subconscious/hydration context assembly')
+ON CONFLICT (key) DO NOTHING;
+
 CREATE OR REPLACE FUNCTION tool_success(
     p_output JSONB,
     p_display_output TEXT DEFAULT NULL
@@ -367,6 +380,11 @@ DECLARE
     type_filter memory_type[];
     has_filters BOOLEAN;
     use_hybrid BOOLEAN;
+    target_id UUID;
+    stance_value TEXT;
+    revision JSONB;
+    display TEXT;
+    min_score_value FLOAT := 0.0;
 BEGIN
     IF p_tool_name = 'remember' THEN
         content := NULLIF(btrim(COALESCE(p_args->>'content', '')), '');
@@ -378,12 +396,69 @@ BEGIN
             RETURN tool_error(format('Invalid memory type: %s', memory_type_value), 'invalid_params');
         END IF;
         importance_value := LEAST(1.0, GREATEST(0.0, COALESCE(NULLIF(p_args->>'importance', '')::float, 0.5)));
-        memory_id := create_memory(memory_type_value::memory_type, content, importance_value);
+        -- Semantic memories carry confidence + full source provenance (#33);
+        -- other types accept the first source as their attribution.
+        IF memory_type_value = 'semantic' THEN
+            memory_id := create_semantic_memory(
+                content,
+                LEAST(1.0, GREATEST(0.0, COALESCE(NULLIF(p_args->>'confidence', '')::float, 0.5))),
+                NULL,
+                NULL,
+                CASE WHEN jsonb_typeof(p_args->'sources') = 'array' THEN p_args->'sources' ELSE NULL END,
+                importance_value
+            );
+        ELSE
+            memory_id := create_memory(
+                memory_type_value::memory_type,
+                content,
+                importance_value,
+                CASE WHEN jsonb_typeof(p_args->'sources') = 'array' THEN p_args->'sources'->0 ELSE NULL END
+            );
+        END IF;
         IF jsonb_typeof(COALESCE(p_args->'concepts', '[]'::jsonb)) = 'array' THEN
             PERFORM link_memory_to_concept(memory_id, value)
             FROM jsonb_array_elements_text(p_args->'concepts') c(value);
         END IF;
-        RETURN tool_success(jsonb_build_object('memory_id', memory_id::text, 'content', left(content, 100)), format('Stored memory: %s...', left(content, 50)));
+        RETURN tool_success(jsonb_strip_nulls(jsonb_build_object(
+            'memory_id', memory_id::text,
+            'type', memory_type_value,
+            'content', left(content, 100),
+            'confidence', (SELECT NULLIF(m.metadata->>'confidence', '')::float FROM memories m WHERE m.id = memory_id),
+            'trust_level', (SELECT m.trust_level FROM memories m WHERE m.id = memory_id)
+        )), format('Stored %s memory: %s...', memory_type_value, left(content, 50)));
+    ELSIF p_tool_name = 'add_evidence' THEN
+        target_id := _db_brain_try_uuid(p_args->>'memory_id');
+        IF target_id IS NULL THEN
+            RETURN tool_error('memory_id must be a valid uuid', 'invalid_params');
+        END IF;
+        stance_value := lower(COALESCE(p_args->>'stance', ''));
+        IF stance_value NOT IN ('supports', 'contradicts') THEN
+            RETURN tool_error('stance must be supports or contradicts', 'invalid_params');
+        END IF;
+        IF jsonb_typeof(p_args->'source') <> 'object'
+           OR COALESCE(NULLIF(p_args->'source'->>'ref', ''), NULLIF(p_args->'source'->>'label', '')) IS NULL THEN
+            RETURN tool_error('source must be an object with at least a ref or label', 'invalid_params');
+        END IF;
+        revision := add_memory_evidence(target_id, stance_value, p_args->'source', NULLIF(p_args->>'note', ''), NULL, 'add_evidence');
+        IF revision->>'reason' = 'not_found' THEN
+            RETURN tool_error(format('memory not found: %s', target_id), 'invalid_params');
+        ELSIF revision->>'reason' = 'not_semantic' THEN
+            RETURN tool_error('add_evidence targets semantic memories; this memory is another type', 'invalid_params');
+        END IF;
+        display := CASE
+            WHEN COALESCE((revision->>'applied')::boolean, FALSE) THEN
+                format('Belief confidence %s -> %s (%s; independent source)',
+                       round((revision->>'prior')::numeric, 2),
+                       round((revision->>'posterior')::numeric, 2),
+                       stance_value)
+            WHEN revision->>'reason' = 'duplicate_source' THEN
+                'No change: this source is already part of the belief''s evidence'
+            WHEN revision->>'reason' = 'protected' THEN
+                'Recorded as a contradiction flag: this belief is protected and is questioned, not rewritten'
+            ELSE
+                format('No confidence change (%s); evidence recorded', revision->>'reason')
+        END;
+        RETURN tool_success(revision, display);
     ELSIF p_tool_name = 'sense_memory_availability' THEN
         query := NULLIF(btrim(COALESCE(p_args->>'query', '')), '');
         IF query IS NULL THEN
@@ -393,7 +468,18 @@ BEGIN
         RETURN tool_success(COALESCE(rows_json, '{"has_memories": false, "activation_strength": 0.0}'::jsonb), format('Memory availability: %s', COALESCE(rows_json->>'activation_strength', '0.0')));
     ELSIF p_tool_name = 'recall' THEN
         query := NULLIF(p_args->>'query', '');
-        limit_value := LEAST(GREATEST(COALESCE(NULLIF(p_args->>'limit', '')::int, 5), 1), 50);
+        -- Count is a context/cost budget, not a knowledge limit (#42/WS6):
+        -- default and ceiling are config-driven; min_score cuts the tail by
+        -- relevance instead of position.
+        limit_value := LEAST(
+            GREATEST(COALESCE(
+                NULLIF(p_args->>'limit', '')::int,
+                get_config_int('memory.recall_default_limit'),
+                5
+            ), 1),
+            COALESCE(get_config_int('memory.recall_max_limit'), 50)
+        );
+        min_score_value := GREATEST(0.0, COALESCE(NULLIF(p_args->>'min_score', '')::float, 0.0));
         IF jsonb_typeof(p_args->'memory_types') = 'array' AND jsonb_array_length(p_args->'memory_types') > 0 THEN
             SELECT ARRAY(SELECT value::memory_type FROM jsonb_array_elements_text(p_args->'memory_types') t(value)) INTO type_filter;
         END IF;
@@ -418,13 +504,16 @@ BEGIN
                 'score', COALESCE(r.score, 0.0),
                 'importance', COALESCE(r.importance, 0.0),
                 'retrieval_source', NULLIF(r.source, ''),
+                'trust', COALESCE(r.trust_level, 0.0),
+                'confidence', (SELECT NULLIF(m.metadata->>'confidence', '')::float FROM memories m WHERE m.id = r.memory_id),
                 'source_kind', NULLIF(r.source_attribution->>'kind', ''),
                 'source_label', NULLIF(r.source_attribution->>'label', ''),
                 'source_path', NULLIF(r.source_attribution->>'path', ''),
                 'source_ref', NULLIF(r.source_attribution->>'ref', '')
             ))), '[]'::jsonb)
             INTO rows_json
-            FROM recall_hybrid(query, limit_value) r;
+            FROM recall_hybrid(query, limit_value) r
+            WHERE COALESCE(r.score, 0.0) >= min_score_value;
         ELSE
             SELECT COALESCE(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
                 'memory_id', r.memory_id::text,
@@ -432,6 +521,8 @@ BEGIN
                 'type', r.memory_type::text,
                 'score', COALESCE(r.score, 0.0),
                 'importance', COALESCE(r.importance, 0.0),
+                'trust', COALESCE(r.trust_level, 0.0),
+                'confidence', (SELECT NULLIF(m.metadata->>'confidence', '')::float FROM memories m WHERE m.id = r.memory_id),
                 'source_kind', NULLIF(r.source_attribution->>'kind', ''),
                 'source_label', NULLIF(r.source_attribution->>'label', ''),
                 'source_path', NULLIF(r.source_attribution->>'path', ''),
@@ -449,7 +540,8 @@ BEGIN
                 NULLIF(p_args->>'created_before', '')::timestamptz,
                 p_args->>'concept',
                 NULL
-            ) r;
+            ) r
+            WHERE COALESCE(r.score, 0.0) >= min_score_value;
         END IF;
         PERFORM touch_memories(ARRAY(SELECT (value->>'memory_id')::uuid FROM jsonb_array_elements(rows_json) value));
         RETURN tool_success(jsonb_build_object('memories', rows_json, 'count', jsonb_array_length(rows_json), 'query', COALESCE(query, '(filters only)')), format('Found %s memories for %L', jsonb_array_length(rows_json), COALESCE(query, '(filters only)')));

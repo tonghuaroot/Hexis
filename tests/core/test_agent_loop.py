@@ -1720,3 +1720,98 @@ class TestPlanningPhases:
         assert result.plan_text == "Plan: write config file."
         assert result.phases_completed == ["plan", "execute", "verify"]
         assert result.energy_spent == 2
+
+
+# ============================================================================
+# Action-claim guardrail (#38)
+# ============================================================================
+
+
+class TestActionClaimGuardrail:
+    @patch("core.agent_loop.chat_completion")
+    async def test_unsupported_claim_gets_correction(self, mock_llm):
+        """A prose claim of a memory write with no tool call is corrected."""
+        mock_llm.return_value = _text_response(
+            "I've stored that as a memory for next time."
+        )
+        events: list[AgentEventData] = []
+
+        async def on_event(event: AgentEventData) -> None:
+            events.append(event)
+
+        config = _make_config(on_event=on_event)
+        agent = AgentLoop(config)
+        result = await agent.run("Please remember this")
+
+        assert "[Correction]" in result.text
+        assert "memory_write" in result.text
+        flagged = [e for e in events if e.event == AgentEvent.CLAIM_FLAGGED]
+        assert len(flagged) == 1
+        assert flagged[0].data["findings"][0]["kind"] == "memory_write"
+        # The correction rides TEXT_DELTA so streaming clients see it inline.
+        corrections = [
+            e for e in events
+            if e.event == AgentEvent.TEXT_DELTA and e.data.get("correction")
+        ]
+        assert len(corrections) == 1
+
+    @patch("core.agent_loop.chat_completion")
+    async def test_supported_claim_untouched(self, mock_llm):
+        """The same claim with an actual successful remember call stays clean."""
+        remember_result = ToolResult.success_result({"memory_id": "m-1"})
+        registry = _mock_registry(execute_results={"remember": remember_result})
+        mock_llm.side_effect = [
+            _tool_response("Storing.", [_tool_call("remember", {"content": "x"})]),
+            _text_response("I've stored that as a memory for next time."),
+        ]
+        config = _make_config(registry=registry)
+        agent = AgentLoop(config)
+        result = await agent.run("Please remember this")
+
+        assert "[Correction]" not in result.text
+        assert result.text == "I've stored that as a memory for next time."
+
+    @patch("core.agent_loop.chat_completion")
+    async def test_kill_switch_disables_guardrail(self, mock_llm):
+        mock_llm.return_value = _text_response(
+            "I've stored that as a memory for next time."
+        )
+        config = _make_config()
+        agent = AgentLoop(config)
+        async with _DB_POOL.acquire() as conn:
+            await conn.execute(
+                "UPDATE config SET value = 'false'::jsonb WHERE key = 'guardrails.action_claims.enabled'"
+            )
+        try:
+            result = await agent.run("Please remember this")
+            assert "[Correction]" not in result.text
+        finally:
+            async with _DB_POOL.acquire() as conn:
+                await conn.execute(
+                    "UPDATE config SET value = 'true'::jsonb WHERE key = 'guardrails.action_claims.enabled'"
+                )
+
+    @patch("core.llm_json.chat_json", new_callable=AsyncMock)
+    @patch("core.agent_loop.chat_completion")
+    async def test_llm_verifier_can_clear_findings(self, mock_llm, mock_chat_json):
+        """With the verifier enabled, an empty confirmed list clears the flag."""
+        mock_llm.return_value = _text_response(
+            "I've stored that as a memory for next time."
+        )
+        mock_chat_json.return_value = ({"confirmed": [], "additional": []}, "{}")
+        config = _make_config()
+        agent = AgentLoop(config)
+        async with _DB_POOL.acquire() as conn:
+            await conn.execute(
+                "UPDATE config SET value = 'true'::jsonb WHERE key = 'guardrails.action_claims.llm_verifier_enabled'"
+            )
+        try:
+            with patch("core.llm_config.load_llm_config", new_callable=AsyncMock) as mock_cfg:
+                mock_cfg.return_value = {"provider": "openai", "model": "test", "api_key": "k"}
+                result = await agent.run("Please remember this")
+            assert "[Correction]" not in result.text
+        finally:
+            async with _DB_POOL.acquire() as conn:
+                await conn.execute(
+                    "UPDATE config SET value = 'false'::jsonb WHERE key = 'guardrails.action_claims.llm_verifier_enabled'"
+                )

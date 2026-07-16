@@ -50,6 +50,38 @@ class InstallMethod:
 
 
 @dataclass
+class MCPBinding:
+    """A skill's binding to an MCP server (#41): the skill is the model-facing
+    capability; the server is a transport detail connected lazily at
+    activation. Credentials stay env-var NAMES only — values never leave the
+    process environment."""
+
+    server: str
+    command: str | None = None
+    args: list[str] = field(default_factory=list)
+    env_requires: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MCPBinding | None":
+        server = str(d.get("server", "")).strip()
+        if not server:
+            return None
+        raw_args = d.get("args", [])
+        if isinstance(raw_args, str):
+            raw_args = [raw_args]
+        raw_env = d.get("env_requires", [])
+        if isinstance(raw_env, str):
+            raw_env = [raw_env]
+        command = d.get("command")
+        return cls(
+            server=server,
+            command=str(command) if command else None,
+            args=[str(a) for a in raw_args],
+            env_requires=[str(v) for v in raw_env],
+        )
+
+
+@dataclass
 class SkillSpec:
     """Parsed representation of a skill document."""
 
@@ -70,14 +102,18 @@ class SkillSpec:
     source: str = ""  # File path or plugin ID that provided this skill
     enabled: bool = True  # Can be disabled via config
     provenance: dict[str, Any] = field(default_factory=dict)
+    mcp_binding: MCPBinding | None = None  # #41: MCP server this skill binds
 
     def requirements_met(
         self,
         available_tools: set[str],
         available_config: set[str] | None = None,
     ) -> bool:
-        """Check if all requirements are satisfied."""
+        """Check if all requirements are satisfied. MCP-bound tools (mcp_*)
+        exist only after activation and are never required up front."""
         for tool in self.requires_tools:
+            if tool.startswith("mcp_"):
+                continue
             if tool not in available_tools:
                 return False
         if available_config is not None:
@@ -132,6 +168,8 @@ class SkillSpec:
             reasons.append(f"OS {sys.platform} not in {self.os_support}")
 
         for tool in self.requires_tools:
+            if tool.startswith("mcp_"):
+                continue
             if tool not in available_tools:
                 reasons.append(f"missing tool: {tool}")
 
@@ -149,6 +187,81 @@ class SkillSpec:
             reasons.append(f"missing env var: {v}")
 
         return (len(reasons) == 0, reasons)
+
+    def usability(
+        self,
+        available_tools: set[str],
+        config_server_names: set[str] | None = None,
+    ) -> tuple[str, list[str], str | None]:
+        """Tri-state capability status (#39): ``usable`` | ``needs_setup`` |
+        ``unavailable``, with what's missing and the exact next step — a
+        capability question must never dead-end in a bare "no".
+
+        MCP-bound tools (``mcp_*``) are excluded from the native-tool check:
+        they exist only after activation, by design.
+        """
+        missing: list[str] = []
+        import sys
+
+        if not self.enabled:
+            return ("unavailable", ["skill disabled"], "Enable the skill in config to use it.")
+        if not self.check_os_support():
+            return (
+                "unavailable",
+                [f"OS {sys.platform} not in {self.os_support}"],
+                None,
+            )
+
+        missing_tools = [
+            t for t in self.requires_tools
+            if not t.startswith("mcp_") and t not in available_tools
+        ]
+        if missing_tools:
+            return (
+                "unavailable",
+                [f"missing tool: {t}" for t in missing_tools],
+                "These native tools are not registered in this runtime; enable them in tools config.",
+            )
+
+        if self.mcp_binding and self.mcp_binding.command is None:
+            known = config_server_names or set()
+            if self.mcp_binding.server not in known:
+                return (
+                    "unavailable",
+                    [f"mcp server not configured: {self.mcp_binding.server}"],
+                    (
+                        f"Add an MCP server named '{self.mcp_binding.server}' to the tools "
+                        "config (mcp_servers), or add a command to the skill manifest."
+                    ),
+                )
+
+        env_wanted = list(dict.fromkeys([
+            *self.requires_env,
+            *(self.mcp_binding.env_requires if self.mcp_binding else []),
+        ]))
+        import os
+        missing_env = [v for v in env_wanted if not os.environ.get(v)]
+        if missing_env:
+            return (
+                "needs_setup",
+                [f"missing env var: {v}" for v in missing_env],
+                f"Set {', '.join(missing_env)} in the service environment and restart.",
+            )
+
+        missing_bins = self.check_bins_available()
+        if missing_bins:
+            steps = [
+                f"{m.kind} install {m.package}"
+                for m in self.install_methods
+                if set(m.bins) & set(missing_bins) or not m.bins
+            ]
+            return (
+                "needs_setup",
+                [f"missing binary: {b}" for b in missing_bins],
+                f"Install with: {steps[0]}" if steps else f"Install {', '.join(missing_bins)} and retry.",
+            )
+
+        return ("usable", missing, None)
 
     def to_prompt_block(self) -> str:
         """Format this skill's full instructions (returned by `use_skill`)."""
@@ -207,6 +320,9 @@ class SkillSpec:
         if not isinstance(raw_provenance, dict):
             raw_provenance = {}
 
+        raw_mcp = metadata.get("mcp")
+        mcp_binding = MCPBinding.from_dict(raw_mcp) if isinstance(raw_mcp, dict) else None
+
         return cls(
             name=str(metadata.get("name", "")),
             description=str(metadata.get("description", "")),
@@ -222,4 +338,5 @@ class SkillSpec:
             contexts=contexts,
             source=source,
             provenance=dict(raw_provenance),
+            mcp_binding=mcp_binding,
         )

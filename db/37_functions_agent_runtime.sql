@@ -180,6 +180,7 @@ BEGIN
     call_record := jsonb_build_object(
         'id', p_tool_call_id,
         'name', p_result->>'tool_name',
+        'arguments', COALESCE(p_result->'arguments', '{}'::jsonb),
         'success', COALESCE((p_result->>'success')::boolean, false),
         'energy_spent', spent,
         'error', p_result->>'error'
@@ -255,6 +256,18 @@ BEGIN
         RAISE EXCEPTION 'agent turn not found: %', p_turn_id;
     END IF;
     PERFORM record_agent_turn_event(p_turn_id, 'loop_end', p_result);
+
+    -- Heartbeat turns join the conscious-episode substrate so the extraction
+    -- sweep covers autonomous activity too (#37). Advisory: a mirroring
+    -- failure must never break turn finalization.
+    IF row_out.mode = 'heartbeat' THEN
+        BEGIN
+            PERFORM record_heartbeat_episode_unit(row_out);
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'heartbeat episode mirroring failed for turn %: %', p_turn_id, SQLERRM;
+        END;
+    END IF;
+
     RETURN to_jsonb(row_out);
 END;
 $$;

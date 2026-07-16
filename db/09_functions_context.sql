@@ -309,12 +309,12 @@ EXCEPTION
 END;
 $$ LANGUAGE plpgsql STABLE;
 CREATE OR REPLACE FUNCTION get_subconscious_context(
-    p_recent_limit INT DEFAULT 20,
-    p_self_limit INT DEFAULT 25,
-    p_relationship_limit INT DEFAULT 15,
-    p_contradiction_limit INT DEFAULT 5,
-    p_emotional_pattern_limit INT DEFAULT 5,
-    p_trigger_limit INT DEFAULT 5,
+    p_recent_limit INT DEFAULT NULL,
+    p_self_limit INT DEFAULT NULL,
+    p_relationship_limit INT DEFAULT NULL,
+    p_contradiction_limit INT DEFAULT NULL,
+    p_emotional_pattern_limit INT DEFAULT NULL,
+    p_trigger_limit INT DEFAULT NULL,
     p_trigger_min_similarity FLOAT DEFAULT 0.75
 )
 RETURNS JSONB AS $$
@@ -322,7 +322,15 @@ DECLARE
     recent JSONB;
     seed TEXT;
     emotional_triggers JSONB := '[]'::jsonb;
+    -- Section caps are config-driven budgets (WS6); explicit args still win.
+    caps JSONB := COALESCE(get_config('memory.context_section_limits'), '{}'::jsonb);
 BEGIN
+    p_recent_limit := COALESCE(p_recent_limit, (caps->>'recent')::int, 20);
+    p_self_limit := COALESCE(p_self_limit, (caps->>'self')::int, 25);
+    p_relationship_limit := COALESCE(p_relationship_limit, (caps->>'relationship')::int, 15);
+    p_contradiction_limit := COALESCE(p_contradiction_limit, (caps->>'contradiction')::int, 5);
+    p_emotional_pattern_limit := COALESCE(p_emotional_pattern_limit, (caps->>'emotional_pattern')::int, 5);
+    p_trigger_limit := COALESCE(p_trigger_limit, (caps->>'trigger')::int, 5);
     recent := COALESCE(get_recent_context(p_recent_limit), '[]'::jsonb);
 
     SELECT string_agg(content, ' ')
