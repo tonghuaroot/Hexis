@@ -1432,11 +1432,24 @@ proposal/approval boundary when changing self-improvement.
 The active workstream (user-directed, 2026-07-16) is **`plans/db_pushdown.md`**
 — the authoritative continuation of `plans/python-to-postgres.md` (slices 0–6
 complete). Goal: Python is event triggers, loops, and I/O only; everything
-else moves into Postgres functions. Start with Tranche 1 (deleting Python
-duplicates of SQL that already exists — no new SQL needed). Progress metric:
-`python scripts/db_brain_audit.py --json`, baseline 579 findings at `df021d6`;
-every tranche must shrink it and promote completed areas to blocking audit
-tests. Take a `hexis backup` before Tranche 2+ (schema migrations).
+else moves into Postgres functions. Progress metric:
+`python scripts/db_brain_audit.py --json`; every tranche must shrink it and
+promote completed areas to blocking audit tests.
+
+**Tranche 1 is complete and CI-green** (commits `484dfda`..`7458e38`,
+migrations `0025`–`0028`): every known Python duplicate of existing SQL is
+deleted (heartbeat prompt fork, channel helpers, croniter fallback, signals/
+chat-context/personhood formatters), five tool handlers are DB-dispatch-only,
+and real cron math now lives in SQL (`cron_next_fire` — this also fixed a
+live defect where DB-native cron tasks degraded to every-minute firing).
+Golden fixtures in `tests/fixtures/prompt_render/` pin all rendered prompt
+bytes. Audit metric: 579 → 500. Per-item completion notes and discovered
+corrections live in the plan's Tranche 1 progress blocks.
+
+Next: Tranche 2 (small atomic functions — `apply_agent_config`,
+`get_agent_status`, the contact-upsert family) plus the carried-forward
+workflow-loop adoption of `apply_workflow_step_result`. Take a `hexis backup`
+before starting (schema migrations ahead).
 
 After that, in rough priority order:
 
