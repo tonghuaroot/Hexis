@@ -336,19 +336,9 @@ async def finalize_heartbeat(
         memory_id = payload.get("memory_id")
     except Exception:
         logger.debug("Failed to finalize heartbeat", exc_info=True)
-
-    await conn.execute(
-        """
-        UPDATE heartbeat_state
-        SET active_heartbeat_id = NULL,
-            active_heartbeat_number = NULL,
-            active_actions = '[]'::jsonb,
-            active_reasoning = NULL,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = 1 AND active_heartbeat_id::text = $1
-        """,
-        heartbeat_id,
-    )
+        # finalize_agentic_heartbeat releases the claim itself; only the
+        # failure path needs an explicit guarded release.
+        await conn.fetchval("SELECT release_active_heartbeat($1)", heartbeat_id)
 
     return {
         "completed": True,

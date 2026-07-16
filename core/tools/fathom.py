@@ -228,20 +228,16 @@ class IngestFathomTranscriptHandler(ToolHandler):
 
             memory_content = f"Meeting: {title}\n\n{transcript_text}"
 
-            memory_id = await pool.fetchval("""
-                INSERT INTO memories (
-                    type, content, embedding,
-                    importance, trust_level, status,
-                    source_attribution
-                )
-                VALUES (
-                    'episodic', $1,
-                    array_fill(0.0, ARRAY[embedding_dimension()])::vector,
-                    0.7, 0.8, 'active',
-                    $2::jsonb
-                )
-                RETURNING id
-            """, memory_content, source_attribution)
+            memory_id = await pool.fetchval(
+                """SELECT create_episodic_memory(
+                       p_content := $1,
+                       p_importance := 0.7,
+                       p_source_attribution := $2::jsonb,
+                       p_trust_level := 0.8
+                   )""",
+                memory_content,
+                source_attribution,
+            )
 
             # Upsert attendees as contacts
             contacts_created = 0
@@ -259,7 +255,7 @@ class IngestFathomTranscriptHandler(ToolHandler):
                     )
                     if existing:
                         await pool.execute(
-                            "UPDATE contacts SET last_touch = now() WHERE id = $1",
+                            "SELECT touch_contact($1)",
                             existing,
                         )
                         contacts_updated += 1
@@ -278,7 +274,7 @@ class IngestFathomTranscriptHandler(ToolHandler):
                     )
                     if existing:
                         await pool.execute(
-                            "UPDATE contacts SET last_touch = now() WHERE id = $1",
+                            "SELECT touch_contact($1)",
                             existing,
                         )
                         contacts_updated += 1

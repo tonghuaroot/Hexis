@@ -672,10 +672,7 @@ async def _stream_manual_heartbeat(pool: asyncpg.Pool) -> AsyncIterator[str]:
             })
         except Exception as exc:
             logger.exception("Manual heartbeat failed")
-            await conn.execute(
-                "UPDATE heartbeat_state SET active_heartbeat_id = NULL, "
-                "active_heartbeat_number = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = 1"
-            )
+            await conn.fetchval("SELECT release_active_heartbeat($1)", heartbeat_id)
             yield _sse_event("error", {"message": str(exc)})
 
 

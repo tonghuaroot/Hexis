@@ -463,7 +463,7 @@ class IngestContactsFromEmailHandler(ToolHandler):
                     )
                     if existing:
                         await conn.execute(
-                            "UPDATE contacts SET last_touch = now() WHERE id = $1",
+                            "SELECT touch_contact($1)",
                             existing,
                         )
                         updated += 1
@@ -551,7 +551,7 @@ class IngestContactsFromCalendarHandler(ToolHandler):
                         )
                         if existing:
                             await conn.execute(
-                                "UPDATE contacts SET last_touch = now() WHERE id = $1",
+                                "SELECT touch_contact($1)",
                                 existing,
                             )
                             updated += 1

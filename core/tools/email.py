@@ -997,7 +997,7 @@ class IngestEmailsHandler(ToolHandler):
                         )
                         if existing_contact:
                             await conn.execute(
-                                "UPDATE contacts SET last_touch = now() WHERE id = $1",
+                                "SELECT touch_contact($1)",
                                 existing_contact,
                             )
                             contacts_updated += 1

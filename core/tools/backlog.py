@@ -524,27 +524,17 @@ class ManageBacklogHandler(ToolHandler):
         title: str,
         item_id: str,
     ) -> None:
-        """Create an episodic memory when the user modifies the backlog."""
-        content = f"User {action_verb} backlog item: {title}"
+        """Create an episodic memory when the user modifies the backlog.
+
+        record_backlog_user_change (db/38) owns the memory shape; this wrapper
+        only delegates.
+        """
         try:
             await conn.execute(
-                """
-                INSERT INTO memories (type, content, embedding, importance, trust_level, metadata)
-                VALUES (
-                    'episodic',
-                    $1,
-                    array_fill(0.1, ARRAY[embedding_dimension()])::vector,
-                    0.6,
-                    1.0,
-                    $2::jsonb
-                )
-                """,
-                content,
-                json.dumps({
-                    "backlog_item_id": item_id,
-                    "action": action_verb,
-                    "source": "user_backlog_change",
-                }),
+                "SELECT record_backlog_user_change($1, $2, $3::uuid)",
+                action_verb,
+                title,
+                item_id,
             )
         except Exception:
             logger.debug("Failed to record user backlog change memory", exc_info=True)
