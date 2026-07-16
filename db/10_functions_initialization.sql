@@ -1371,7 +1371,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION init_from_character_card(
+CREATE OR REPLACE FUNCTION init_from_character_profile(
     p_card JSONB,
     p_user_name TEXT DEFAULT 'User'
 )
@@ -1583,6 +1583,84 @@ BEGIN
         'character', c_name,
         'status', get_init_status()
     );
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION normalize_character_card(p_card JSONB)
+RETURNS JSONB AS $$
+DECLARE
+    document JSONB := COALESCE(p_card, '{}'::jsonb);
+    card_data JSONB;
+    hexis_profile JSONB;
+    standard_profile JSONB;
+BEGIN
+    card_data := CASE
+        WHEN jsonb_typeof(document->'data') = 'object' THEN document->'data'
+        ELSE document
+    END;
+    hexis_profile := CASE
+        WHEN jsonb_typeof(card_data#>'{extensions,hexis}') = 'object'
+            THEN card_data#>'{extensions,hexis}'
+        ELSE '{}'::jsonb
+    END;
+    standard_profile := jsonb_strip_nulls(jsonb_build_object(
+        'name', card_data->'name',
+        'description', card_data->'description',
+        'personality_description', card_data->'personality'
+    ));
+
+    RETURN jsonb_build_object(
+        'document', document,
+        'data', card_data,
+        'profile', standard_profile || hexis_profile
+    );
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION store_character_card_config(p_card JSONB)
+RETURNS JSONB AS $$
+DECLARE
+    normalized JSONB := normalize_character_card(p_card);
+    document JSONB := normalized->'document';
+    profile JSONB := normalized->'profile';
+    patch JSONB;
+BEGIN
+    patch := jsonb_strip_nulls(jsonb_build_object(
+        'character_card', jsonb_strip_nulls(jsonb_build_object(
+            'spec', document->'spec',
+            'spec_version', document->'spec_version',
+            'data', normalized->'data'
+        )),
+        'agent', jsonb_strip_nulls(jsonb_build_object(
+            'name', profile->'name',
+            'pronouns', profile->'pronouns',
+            'voice', profile->'voice',
+            'description', profile->'description',
+            'purpose', profile->'purpose',
+            'personality', profile->'personality_description',
+            'personality_traits', profile->'personality_traits'
+        )),
+        'values', profile->'values',
+        'worldview', profile->'worldview',
+        'boundaries', profile->'boundaries',
+        'interests', profile->'interests'
+    ));
+    RETURN merge_init_profile(patch);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION init_from_character_card(
+    p_card JSONB,
+    p_user_name TEXT DEFAULT 'User'
+)
+RETURNS JSONB AS $$
+DECLARE
+    normalized JSONB := normalize_character_card(p_card);
+    result JSONB;
+BEGIN
+    result := init_from_character_profile(normalized->'profile', p_user_name);
+    PERFORM store_character_card_config(p_card);
+    RETURN result;
 END;
 $$ LANGUAGE plpgsql;
 

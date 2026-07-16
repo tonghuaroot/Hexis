@@ -2931,7 +2931,7 @@ async def test_large_dataset_performance(db_pool):
                 type_values.append(memory_types[i % 4])
                 content_values.append(f"Large dataset memory {i}")
                 embedding_values.append(str(embedding))
-                importance_values.append(0.1 + (i % 100) * 0.01)
+                importance_values.append(min(1.0, 0.1 + (i % 100) * 0.01))
 
             await conn.execute(
                 """
@@ -3332,7 +3332,19 @@ async def test_edge_cases_circular_relationships(db_pool):
 async def test_edge_cases_extreme_values(db_pool):
     """Test edge cases with extreme values"""
     async with db_pool.acquire() as conn:
-        # Test memory with very high importance
+        # Out-of-range importance is rejected outright (memory strength is documented as 0..1)
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await conn.fetchval("""
+                INSERT INTO memories (type, content, embedding, importance)
+                VALUES (
+                    'semantic'::memory_type,
+                    'Impossibly important memory',
+                    array_fill(0.5, ARRAY[embedding_dimension()])::vector,
+                    999999.0
+                ) RETURNING id
+            """)
+
+        # Test memory at maximum importance with an extreme access count
         high_importance_id = await conn.fetchval("""
             INSERT INTO memories (
                 type,
@@ -3344,7 +3356,7 @@ async def test_edge_cases_extreme_values(db_pool):
                 'semantic'::memory_type,
                 'Extremely important memory',
                 array_fill(0.5, ARRAY[embedding_dimension()])::vector,
-                999999.0,
+                1.0,
                 999999
             ) RETURNING id
         """)
@@ -3375,7 +3387,7 @@ async def test_edge_cases_extreme_values(db_pool):
             SELECT calculate_relevance(importance, decay_rate, created_at, last_accessed) as relevance_score FROM memories WHERE id = $1
         """, old_memory_id)
         
-        assert high_relevance > 1000, "High importance should result in high relevance"
+        assert high_relevance > old_relevance, "Fresh max-importance memory should outrank an ancient one"
         assert old_relevance < 0.01, "Very old memory should have very low relevance"
         
         # Test with zero vectors
@@ -8826,7 +8838,7 @@ async def test_update_memory_importance_trigger_on_access(db_pool):
             mem_id = await conn.fetchval(
                 """
                 INSERT INTO memories (type, content, embedding, importance, access_count)
-                VALUES ('semantic', 'imp', array_fill(0.0::float, ARRAY[embedding_dimension()])::vector, 1.0, 0)
+                VALUES ('semantic', 'imp', array_fill(0.0::float, ARRAY[embedding_dimension()])::vector, 0.5, 0)
                 RETURNING id
                 """
             )
@@ -8835,7 +8847,7 @@ async def test_update_memory_importance_trigger_on_access(db_pool):
             assert row is not None
             assert row["last_accessed"] is not None
             assert int(row["access_count"]) == 1
-            assert float(row["importance"]) > 1.0
+            assert 0.5 < float(row["importance"]) <= 1.0
         finally:
             await tr.rollback()
 

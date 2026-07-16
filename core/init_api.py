@@ -136,6 +136,28 @@ def load_character_cards() -> list[dict[str, Any]]:
     return cards
 
 
+def load_character_card_document(card: dict[str, Any]) -> dict[str, Any]:
+    """Load the complete card selected from ``load_character_cards``.
+
+    Character lists intentionally carry only display metadata. Initialization,
+    however, must preserve the complete selected card so its system prompt and
+    scenario are not silently discarded before reaching the shared DB path.
+    """
+    filename = Path(str(card.get("filename") or "")).name
+    source_dir = Path(str(card.get("source_dir") or ""))
+    if not filename.endswith(".json") or not source_dir:
+        raise ValueError("Invalid character card selection")
+
+    path = source_dir / filename
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"Unable to load character card {filename}") from exc
+    if not isinstance(document, dict) or not isinstance(document.get("data"), dict):
+        raise ValueError(f"Invalid character card {filename}: missing data object")
+    return document
+
+
 def save_character_card(
     card_data: dict[str, Any],
     filename: str,

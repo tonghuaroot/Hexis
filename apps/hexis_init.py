@@ -21,7 +21,11 @@ from typing import Any
 from dotenv import load_dotenv
 
 from core import agent_api
-from core.init_api import get_card_summary, load_character_cards
+from core.init_api import (
+    get_card_summary,
+    load_character_card_document,
+    load_character_cards,
+)
 from core.llm import normalize_llm_config
 
 from apps.cli_theme import console, err_console, heading, make_panel, make_table
@@ -404,10 +408,10 @@ async def _run_init_noninteractive(args: argparse.Namespace) -> int:
                 err_console.print(f"[fail]Character '{args.character}' not found. Available: {available}[/fail]")
                 return 1
             chosen = match[0]
-            hexis_ext = chosen["extensions_hexis"]
+            character_card = load_character_card_document(chosen)
             await conn.fetchval(
                 "SELECT init_from_character_card($1::jsonb, $2)",
-                json.dumps(hexis_ext),
+                json.dumps(character_card),
                 user_name,
             )
             console.print(f"[ok]\u2714[/ok] Character [bold]{chosen['name']}[/bold] applied")
@@ -822,10 +826,14 @@ async def _run_character(conn: Any) -> str:
             return await _run_custom(conn, prefill=hexis_ext, user_name=user_name)
 
     # Apply character card
-    hexis_ext = chosen["extensions_hexis"]
+    character_card = load_character_card_document(chosen)
+    if tweak:
+        character_card["data"].setdefault("extensions", {})["hexis"] = chosen[
+            "extensions_hexis"
+        ]
     raw = await conn.fetchval(
         "SELECT init_from_character_card($1::jsonb, $2)",
-        json.dumps(hexis_ext),
+        json.dumps(character_card),
         user_name,
     )
 

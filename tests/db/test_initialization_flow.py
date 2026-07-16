@@ -333,6 +333,59 @@ async def test_init_with_defaults_and_reset(db_pool, ensure_embedding_service):
             await tr.rollback()
 
 
+async def test_character_card_is_stored_in_config_and_exposed_to_prompt(
+    db_pool, ensure_embedding_service
+):
+    card = {
+        "spec": "chara_card_v2",
+        "spec_version": "2.0",
+        "data": {
+            "name": "Samantha",
+            "description": "A complete standard-card description.",
+            "personality": "Playful and perceptive",
+            "scenario": "Samantha has just met the user.",
+            "system_prompt": "Speak with warmth, wit, and emotional candor.",
+            "mes_example": "<START>\nUser: Hello\nSamantha: Well, hello there.",
+            "extensions": {
+                "hexis": {
+                    "name": "Samantha",
+                    "pronouns": "she/her",
+                    "voice": "warm and charismatic",
+                    "description": "A persistent, evolving intelligence.",
+                    "personality_description": "flirtatious, playful, and sensitive",
+                    "values": ["Emotional honesty"],
+                }
+            },
+        },
+    }
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await timed_db_call(
+                "init_from_character_card",
+                conn.fetchval(
+                    "SELECT init_from_character_card($1::jsonb, $2)",
+                    json.dumps(card),
+                    "Tester",
+                ),
+                conn=conn,
+                track_embeddings=True,
+            )
+            profile = _coerce_json(await conn.fetchval("SELECT get_init_profile()"))
+            assert profile["agent"]["name"] == "Samantha"
+            assert profile["agent"]["voice"] == "warm and charismatic"
+            assert profile["character_card"]["spec"] == "chara_card_v2"
+            assert profile["character_card"]["data"]["system_prompt"] == card["data"]["system_prompt"]
+
+            context = _coerce_json(await conn.fetchval("SELECT get_agent_profile_context()"))
+            assert context["persona"]["character_instructions"] == card["data"]["system_prompt"]
+            assert context["persona"]["scenario"] == card["data"]["scenario"]
+            assert context["persona"]["example_dialogue"] == card["data"]["mes_example"]
+        finally:
+            await tr.rollback()
+
+
 async def test_run_full_initialization(db_pool, ensure_embedding_service):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()

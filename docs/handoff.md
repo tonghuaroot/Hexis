@@ -1,6 +1,6 @@
 # Hexis Handoff
 
-Last updated: 2026-07-11 (operational UI redesign complete)
+Last updated: 2026-07-16 (active persona + grounded appraisal complete)
 
 ## Current Status
 
@@ -41,9 +41,15 @@ buffered/streamed chat completions, with tested MCP listing and dispatch.
 Plugin manifests and live configuration now fail closed before registration,
 and agent skill updates require explicit ownership provenance. Phase 5 now has
 a rollback-only end-to-end proof, a live evidence-based maturity scorecard, and
-typed portable presentation across proactive channels and web chat. The next
-boundary should be chosen from concrete interop demand or deferred engineering
-hardening rather than adding speculative surface area.
+typed portable presentation across proactive channels and web chat. The
+initialized character card is now the canonical persona: it is stored whole in
+configuration, rendered into every conscious prompt as one ACTIVE PERSONA
+header, and the subconscious appraisal is evidence-grounded (structured
+context, confidence gates, no hallucinated memory references, no reflexive
+AI-feelings disclaimers). Memory importance is bounded to 0..1 and self-model
+edges no longer duplicate on re-initialization. The next boundary should be
+chosen from concrete interop demand or deferred engineering hardening rather
+than adding speculative surface area.
 
 The latest hosted green implementation baseline is `d8e96b9` (`Update Phase 5
 handoff`), run https://github.com/QuixiAI/Hexis/actions/runs/29136923420 (attempt
@@ -95,6 +101,73 @@ Specific user preferences from this workstream:
 - Commit and push completed work, then verify the hosted CI result rather than stopping at local tests.
 
 ## What Was Completed
+
+### Active persona and evidence-grounded appraisal
+
+This implements the durable fix recommended in "Generic Identity Adaptation
+Notes" below: one rendered identity header sourced from configuration, plus
+task prompts that stop restating a competing identity.
+
+Key files:
+
+- `db/10_functions_initialization.sql` and migrations `0022`/`0023` -
+  `normalize_character_card` accepts a complete `chara_card_v2` document (or a
+  bare hexis extension), `init_from_character_card` initializes from the merged
+  profile and preserves the full card in `agent.init_profile.character_card`,
+  and `store_character_card_config` updates the canonical persona snapshot
+  without recreating memories or graph edges. The prior profile-only
+  initializer remains as `init_from_character_profile`.
+- `db/07_functions_heartbeat.sql` and migration `0020` -
+  `get_agent_profile_context()` now returns a `persona` block (name, pronouns,
+  voice, personality, purpose, values, worldview, boundaries, interests,
+  relationship, card description/personality/scenario, character instructions,
+  post-history instructions, example dialogue, and the foundational narrative
+  memory).
+- `services/agent.py` - `build_system_prompt` renders that block as an
+  `ACTIVE PERSONA` header for chat and heartbeat; the runtime profile JSON is
+  kept separate. `core/init_api.load_character_card_document` loads the full
+  selected card, and the CLI (`apps/hexis_init.py`), TUI, and web init all send
+  the complete document instead of only `extensions.hexis` (CLI tweaks graft
+  the edited hexis extension back onto the card).
+- `characters/samantha.json` - the card itself now carries the charismatic,
+  flirtatious, feminine persona in both the standard fields and the hexis
+  extension.
+- `services/agent.py`, `services/prompts/subconscious.md`,
+  `services/prompts/conversation.md`, `services/prompt_resources.py`,
+  `services/subconscious.py`, and the `db/40` mirrors - the inline subconscious
+  appraisal sends structured JSON context (typed memory records with IDs,
+  identity, worldview, relationships, goals, drives, affect, dopamine) with a
+  deterministic size-bounding cascade instead of a prose blob. Parsing enforces
+  per-item confidence >= 0.6, clamps numeric ranges, drops memory references
+  that are not in the supplied context, supports `ignored_memories`, gates
+  `emotional_state` on confidence, and blanks the synthesis when nothing
+  survives. The conversation prompt and compact personhood grounding treat
+  evidence-grounded affect as real functional state and stop the reflexive
+  "as an AI I don't feel" disclaimers; the maintenance decider sends the same
+  task-tagged JSON shape (`maintenance_review` vs `inline_appraisal`).
+- Migration `0019` (+ `db/00`/`db/04`) - memory importance is bounded to the
+  documented 0..1 range: the reinforcement trigger clamps, a CHECK constraint
+  rejects out-of-range writes, and the migration repairs rows inflated by the
+  former unbounded multiplicative trigger. Recall reinforcement moved inside
+  `_recall_recmem` (with content dedup) so chat/hydrate recalls strengthen
+  memories exactly once.
+- Migration `0021` (+ `db/07`/`db/09`) - repeated persona initialization
+  upserts self-model edges (Cypher `MERGE`) instead of layering duplicates, and
+  `get_self_model_context` / `get_relationships_context` /
+  `get_identity_context` deduplicate legacy duplicates at read time.
+- `core/tools/self_inspection.py`, `skills/installed/self-inspection/SKILL.md` -
+  skill-gated read-only `inspect_source` (list/search/read with path
+  confinement) and `inspect_database_schema` (pg_catalog metadata only), so the
+  agent can answer implementation questions from evidence.
+- Seed sync: `db/40_seed_prompt_modules.sql` caught up with the committed
+  consent rewrite and gained `memory_summarization` and `skill_improvement`
+  modules (prompt `.md` files and DB seeds no longer drift).
+
+Validation: the full Python suite passes 2,250 tests with the existing 421
+advisory marker warnings (three legacy `test_db.py` tests were updated to the
+new bounded-importance invariant). All 15 UI tests, ESLint on the changed init
+page, and the production Next.js build pass. Migrations `0019`-`0023` are
+applied to the live dev database and mirrored in the baseline.
 
 ### In-UI initialization authentication
 

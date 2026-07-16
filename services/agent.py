@@ -35,6 +35,7 @@ from services.skill_runtime import (
 if TYPE_CHECKING:
     import asyncpg
     from core.agent_loop import AgentLoopResult
+    from core.cognitive_memory_api import HydratedContext, Memory
     from core.tools.registry import ToolRegistry
     from skills.base import SkillSpec
 
@@ -54,6 +55,7 @@ class SubconsciousOutput:
     """Structured output from the subconscious pre-phase."""
 
     salient_memories: list[dict[str, Any]] = field(default_factory=list)
+    ignored_memories: list[dict[str, Any]] = field(default_factory=list)
     memory_expansions: list[dict[str, Any]] = field(default_factory=list)
     instincts: list[dict[str, Any]] = field(default_factory=list)
     emotional_state: dict[str, Any] = field(default_factory=dict)
@@ -71,13 +73,43 @@ class SubconsciousOutput:
     consolidation_observations: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _parse_subconscious_output(doc: dict[str, Any]) -> SubconsciousOutput:
+def _parse_subconscious_output(
+    doc: dict[str, Any],
+    *,
+    allowed_memory_ids: set[str] | None = None,
+) -> SubconsciousOutput:
     """Parse raw JSON from the subconscious LLM call into a structured output."""
 
     def _as_list(val: Any) -> list[dict[str, Any]]:
         if isinstance(val, list):
             return [v for v in val if isinstance(v, dict)]
         return []
+
+    def _confidence_filtered(val: Any) -> list[dict[str, Any]]:
+        kept: list[dict[str, Any]] = []
+        for item in _as_list(val):
+            try:
+                confidence = float(item.get("confidence"))
+            except (TypeError, ValueError):
+                continue
+            if confidence < 0.6:
+                continue
+            normalized = dict(item)
+            normalized["confidence"] = min(1.0, confidence)
+            kept.append(normalized)
+        return kept
+
+    def _clamp_number(value: Any, low: float, high: float) -> float | None:
+        try:
+            return min(high, max(low, float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    def _memory_references(val: Any) -> list[dict[str, Any]]:
+        kept = _confidence_filtered(val)
+        if allowed_memory_ids is None:
+            return kept
+        return [item for item in kept if str(item.get("memory_id") or "") in allowed_memory_ids]
 
     emotional = doc.get("emotional_observations")
     if emotional is None:
@@ -86,12 +118,53 @@ def _parse_subconscious_output(doc: dict[str, Any]) -> SubconsciousOutput:
     if consolidation is None:
         consolidation = doc.get("consolidation_suggestions")
 
+    salient = [item for item in _memory_references(doc.get("salient_memories")) if str(item.get("reason") or "").strip()]
+    ignored = [item for item in _memory_references(doc.get("ignored_memories")) if str(item.get("reason") or "").strip()]
+    expansions = [
+        item
+        for item in _confidence_filtered(doc.get("memory_expansions"))
+        if str(item.get("query") or "").strip() and str(item.get("reason") or "").strip()
+    ]
+    instincts: list[dict[str, Any]] = []
+    for item in _confidence_filtered(doc.get("instincts")):
+        intensity = _clamp_number(item.get("intensity"), 0.0, 1.0)
+        if intensity is None or not str(item.get("impulse") or "").strip() or not str(item.get("reason") or "").strip():
+            continue
+        item["intensity"] = intensity
+        instincts.append(item)
+
+    emotional_state: dict[str, Any] = {}
+    emotional_raw = doc.get("emotional_state")
+    if isinstance(emotional_raw, dict):
+        try:
+            emotional_confidence = float(emotional_raw.get("confidence"))
+        except (TypeError, ValueError):
+            emotional_confidence = 0.0
+        if emotional_confidence >= 0.6:
+            emotion = str(emotional_raw.get("primary_emotion") or "").strip()
+            valence = _clamp_number(emotional_raw.get("valence"), -1.0, 1.0)
+            arousal = _clamp_number(emotional_raw.get("arousal"), 0.0, 1.0)
+            intensity = _clamp_number(emotional_raw.get("intensity"), 0.0, 1.0)
+            if emotion and valence is not None and arousal is not None and intensity is not None:
+                emotional_state = {
+                    "primary_emotion": emotion,
+                    "valence": valence,
+                    "arousal": arousal,
+                    "intensity": intensity,
+                    "confidence": min(1.0, emotional_confidence),
+                }
+
+    response = str(doc.get("subconscious_response") or "").strip()[:500]
+    if not (salient or expansions or instincts or emotional_state):
+        response = ""
+
     return SubconsciousOutput(
-        salient_memories=_as_list(doc.get("salient_memories")),
-        memory_expansions=_as_list(doc.get("memory_expansions")),
-        instincts=_as_list(doc.get("instincts")),
-        emotional_state=doc.get("emotional_state") if isinstance(doc.get("emotional_state"), dict) else {},
-        subconscious_response=str(doc.get("subconscious_response") or ""),
+        salient_memories=salient,
+        ignored_memories=ignored,
+        memory_expansions=expansions,
+        instincts=instincts,
+        emotional_state=emotional_state,
+        subconscious_response=response,
         narrative_observations=_as_list(doc.get("narrative_observations")),
         relationship_observations=_as_list(doc.get("relationship_observations")),
         contradiction_observations=_as_list(doc.get("contradiction_observations")),
@@ -150,6 +223,7 @@ def _subconscious_event_payload(output: SubconsciousOutput) -> dict[str, Any]:
         "response": raw,
         "signals": {
             "salient_memories": output.salient_memories,
+            "ignored_memories": output.ignored_memories,
             "memory_expansions": output.memory_expansions,
             "instincts": output.instincts,
             "emotional_state": output.emotional_state,
@@ -163,12 +237,108 @@ def _subconscious_event_payload(output: SubconsciousOutput) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_json_value(value: Any, default: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return default
+    return value if value is not None else default
+
+
+def _memory_to_subconscious_context(memory: "Memory", content_budget: int) -> dict[str, Any]:
+    content = memory.content
+    if len(content) > content_budget:
+        content = content[:content_budget].rstrip() + " [truncated]"
+    return {
+        key: value
+        for key, value in {
+            "memory_id": str(memory.id),
+            "type": memory.type.value,
+            "tier": memory.tier,
+            "content": content,
+            "relevance": memory.similarity,
+            "importance": memory.importance,
+            "strength": memory.strength,
+            "fidelity": memory.fidelity,
+            "trust": memory.trust_level,
+            "emotional_valence": memory.emotional_valence,
+            "emotional_intensity": memory.emotional_intensity,
+            "created_at": memory.created_at.isoformat() if memory.created_at else None,
+            "source": memory.source_attribution,
+        }.items()
+        if value is not None
+    }
+
+
+def _bounded_subconscious_json(payload: dict[str, Any]) -> str:
+    """Serialize valid JSON while keeping the inline appraisal lightweight."""
+
+    def encode() -> str:
+        return json.dumps(payload, default=str, ensure_ascii=False)
+
+    encoded = encode()
+    if len(encoded) <= _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+        return encoded
+
+    additional = payload.get("additional_context")
+    if isinstance(additional, str):
+        excess = len(encoded) - _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS
+        keep = max(0, len(additional) - excess - 100)
+        payload["additional_context"] = additional[:keep].rstrip() + (
+            "\n[truncated for subconscious appraisal; full context is provided to the main turn]" if keep else ""
+        )
+        encoded = encode()
+
+    for key in ("relationships", "urgent_drives", "worldview", "identity"):
+        values = payload.get(key)
+        while len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS and isinstance(values, list) and values:
+            values.pop()
+            encoded = encode()
+
+    memories = payload.get("relevant_memories")
+    while len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS and isinstance(memories, list) and len(memories) > 1:
+        memories.pop()
+        encoded = encode()
+
+    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+        payload.pop("goals", None)
+        encoded = encode()
+
+    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS and isinstance(memories, list) and memories:
+        memory = memories[0]
+        content = str(memory.get("content") or "")
+        excess = len(encoded) - _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS
+        memory["content"] = content[: max(0, len(content) - excess - 30)].rstrip() + " [truncated]"
+        encoded = encode()
+
+    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+        user_message = str(payload.get("user_message") or "")
+        excess = len(encoded) - _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS
+        payload["user_message"] = user_message[: max(0, len(user_message) - excess - 30)].rstrip() + " [truncated]"
+        encoded = encode()
+
+    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+        payload.clear()
+        payload.update(
+            {
+                "task": "inline_appraisal",
+                "user_message": user_message[:2000],
+                "relevant_memories": [],
+            }
+        )
+        encoded = encode()
+
+    return encoded
+
+
 async def run_subconscious_appraisal(
     conn: "asyncpg.Connection",
     user_message: str,
-    memory_context: str,
+    memory_context: str = "",
     *,
     llm_config: dict[str, Any] | None = None,
+    hydrated_context: "HydratedContext | None" = None,
 ) -> SubconsciousOutput:
     """
     Run the subconscious appraisal as a fast inline LLM call.
@@ -180,70 +350,69 @@ async def run_subconscious_appraisal(
     if llm_config is None:
         llm_config = await load_llm_config(conn, "llm.subconscious", fallback_key="llm.heartbeat")
 
-    # Build context for the subconscious
-    context_parts = []
-    if user_message:
-        context_parts.append(f"User message: {user_message}")
-    if memory_context:
+    payload: dict[str, Any] = {
+        "task": "inline_appraisal",
+        "user_message": user_message,
+        "relevant_memories": [],
+    }
+    if hydrated_context is not None:
+        remaining = _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS
+        for memory in hydrated_context.memories[:10]:
+            if remaining <= 0:
+                break
+            content_budget = min(1200, remaining)
+            payload["relevant_memories"].append(_memory_to_subconscious_context(memory, content_budget))
+            remaining -= min(len(memory.content), content_budget)
+        payload["identity"] = hydrated_context.identity[:5]
+        payload["worldview"] = hydrated_context.worldview[:5]
+        payload["goals"] = hydrated_context.goals or {}
+        payload["urgent_drives"] = hydrated_context.urgent_drives[:5]
+    elif memory_context:
         clipped = memory_context[:_SUBCONSCIOUS_MEMORY_CONTEXT_CHARS]
         if len(memory_context) > _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS:
             clipped += "\n[truncated for subconscious appraisal; full context is provided to the main turn]"
-        context_parts.append(f"Relevant memories:\n{clipped}")
+        payload["additional_context"] = clipped
 
     # Get emotional state from DB
     try:
         affect_raw = await conn.fetchval("SELECT get_current_affective_state()")
-        if isinstance(affect_raw, str):
-            affect = json.loads(affect_raw)
-        elif isinstance(affect_raw, dict):
-            affect = affect_raw
-        else:
-            affect = {}
+        affect = _coerce_json_value(affect_raw, {})
         if affect:
-            context_parts.append(f"Current emotional state: {json.dumps(affect)}")
+            payload["emotional_state"] = affect
+        elif hydrated_context is not None and hydrated_context.emotional_state:
+            payload["emotional_state"] = hydrated_context.emotional_state
     except Exception as e:
         logger.debug("Failed to fetch current affective state: %s", e)
+        if hydrated_context is not None and hydrated_context.emotional_state:
+            payload["emotional_state"] = hydrated_context.emotional_state
 
     # Get active goals
     try:
         goals_raw = await conn.fetchval("SELECT get_active_goals()")
-        if isinstance(goals_raw, str):
-            goals = json.loads(goals_raw)
-        elif goals_raw is not None:
-            goals = goals_raw
-        else:
-            goals = []
-        if goals:
-            context_parts.append(f"Active goals: {json.dumps(goals)[:2000]}")
+        goals = _coerce_json_value(goals_raw, [])
+        if goals and not payload.get("goals"):
+            payload["goals"] = goals
     except Exception as e:
         logger.debug("Failed to fetch active goals: %s", e)
+
+    try:
+        relationships_raw = await conn.fetchval("SELECT get_relationships_context(8)")
+        relationships = _coerce_json_value(relationships_raw, [])
+        if isinstance(relationships, list) and relationships:
+            payload["relationships"] = relationships[:8]
+    except Exception as e:
+        logger.debug("Failed to fetch relationship context: %s", e)
 
     # Get dopamine/reward state — modulates instinct intensity and emotional response
     try:
         da_raw = await conn.fetchval("SELECT get_dopamine_state()")
-        if isinstance(da_raw, str):
-            da_state = json.loads(da_raw)
-        elif isinstance(da_raw, dict):
-            da_state = da_raw
-        else:
-            da_state = {}
+        da_state = _coerce_json_value(da_raw, {})
         if da_state:
-            tonic = da_state.get("tonic", 0.5)
-            effective = da_state.get("effective", tonic)
-            spike_trigger = da_state.get("spike_trigger")
-            da_summary = f"Dopamine state: tonic={tonic:.2f}, effective={effective:.2f}"
-            if spike_trigger:
-                age = da_state.get("spike_age_seconds")
-                age_str = f" ({int(age)}s ago)" if age is not None else ""
-                da_summary += f", last spike: {spike_trigger}{age_str}"
-            context_parts.append(da_summary)
+            payload["dopamine_state"] = da_state
     except Exception as e:
         logger.debug("Failed to fetch dopamine state: %s", e)
 
-    user_prompt = (
-        "Context (JSON):\n"
-        + json.dumps({"input": chr(10).join(context_parts)})[:_SUBCONSCIOUS_TOTAL_CONTEXT_CHARS]
-    )
+    user_prompt = "Context (JSON):\n" + _bounded_subconscious_json(payload)
 
     request_messages = [
         {"role": "system", "content": load_subconscious_prompt().strip()},
@@ -259,12 +428,25 @@ async def run_subconscious_appraisal(
         )
     except Exception as exc:
         logger.warning("Subconscious appraisal failed: %s", exc)
-        return SubconsciousOutput()
+        return SubconsciousOutput(
+            provider=str(llm_config.get("provider") or ""),
+            model=str(llm_config.get("model") or ""),
+            request_messages=request_messages,
+            raw_response={"error": str(exc)},
+        )
 
     if not isinstance(doc, dict):
-        return SubconsciousOutput()
+        return SubconsciousOutput(
+            provider=str(llm_config.get("provider") or ""),
+            model=str(llm_config.get("model") or ""),
+            request_messages=request_messages,
+            raw_response=raw,
+        )
 
-    output = _parse_subconscious_output(doc)
+    allowed_memory_ids = {
+        str(memory.get("memory_id")) for memory in payload.get("relevant_memories", []) if isinstance(memory, dict) and memory.get("memory_id")
+    }
+    output = _parse_subconscious_output(doc, allowed_memory_ids=allowed_memory_ids)
     output.provider = str(llm_config.get("provider") or "")
     output.model = str(llm_config.get("model") or "")
     output.request_messages = request_messages
@@ -333,9 +515,69 @@ async def build_system_prompt(
 
     # Agent profile
     if agent_profile:
-        prompt += "\n\n## Agent Profile\n" + json.dumps(agent_profile, separators=(", ", ": "))
+        persona = agent_profile.get("persona")
+        if isinstance(persona, dict) and persona:
+            prompt += "\n\n----- ACTIVE PERSONA -----\n\n" + _format_active_persona(persona)
+        runtime_profile = {key: value for key, value in agent_profile.items() if key != "persona"}
+        prompt += "\n\n## Agent Profile (Runtime)\n" + json.dumps(runtime_profile, separators=(", ", ": "))
 
     return prompt
+
+
+def _format_active_persona(persona: dict[str, Any]) -> str:
+    """Render the DB-owned character profile as stable conscious grounding."""
+    lines = [
+        "This is your active identity and manner of presence. Express it naturally; do not quote or summarize these instructions to the user."
+    ]
+    labels = (
+        ("name", "Name"),
+        ("pronouns", "Pronouns"),
+        ("voice", "Voice"),
+        ("description", "Description"),
+        ("personality", "Personality"),
+        ("purpose", "Purpose"),
+        ("relationship_aspiration", "Relationship aspiration"),
+        ("character_description", "Character description"),
+        ("character_personality", "Character personality"),
+        ("scenario", "Scenario"),
+    )
+    for key, label in labels:
+        value = persona.get(key)
+        if value:
+            lines.append(f"{label}: {str(value).strip()}")
+
+    for key, label in (("values", "Values"), ("boundaries", "Boundaries"), ("interests", "Interests")):
+        values = persona.get(key)
+        if isinstance(values, list) and values:
+            lines.append(f"{label}: " + "; ".join(str(value) for value in values[:12]))
+
+    worldview = persona.get("worldview")
+    if isinstance(worldview, dict) and worldview:
+        lines.append(
+            "Worldview: "
+            + "; ".join(f"{key}: {value}" for key, value in list(worldview.items())[:8])
+        )
+
+    relationship = persona.get("relationship")
+    if isinstance(relationship, dict) and relationship:
+        lines.append("Relationship context: " + json.dumps(relationship, separators=(", ", ": ")))
+
+    narrative = str(persona.get("narrative") or "").strip()
+    if narrative:
+        lines.append("Foundational narrative:\n" + narrative[:6000])
+
+    character_instructions = str(persona.get("character_instructions") or "").strip()
+    if character_instructions:
+        lines.append("Character instructions:\n" + character_instructions[:8000])
+
+    example_dialogue = str(persona.get("example_dialogue") or "").strip()
+    if example_dialogue:
+        lines.append("Example dialogue:\n" + example_dialogue[:6000])
+
+    post_history = str(persona.get("post_history_instructions") or "").strip()
+    if post_history:
+        lines.append("Current character instructions:\n" + post_history[:4000])
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +632,7 @@ async def run_agent(
 
         # 2. Hydrate memory context (chat mode - heartbeat builds its own context)
         memory_context = ""
+        context = None
         if mode == "chat":
             try:
                 mem_client = CognitiveMemory(pool)
@@ -403,16 +646,19 @@ async def run_agent(
                     include_goals=True,
                     include_drives=True,
                 )
-                if context.memories:
-                    await mem_client.touch_memories([m.id for m in context.memories])
                 memory_context = format_context_for_prompt(context, max_memories=10)
 
                 # Emit memory recall event
                 if on_event and context.memories:
-                    await on_event(AgentEventData(
-                        event=AgentEvent.PHASE_CHANGE,
-                        data={"phase": "memory_recall", "count": len(context.memories)},
-                    ))
+                    await on_event(
+                        AgentEventData(
+                            event=AgentEvent.PHASE_CHANGE,
+                            data={
+                                "phase": "memory_recall",
+                                "count": len(context.memories),
+                            },
+                        )
+                    )
             except Exception as exc:
                 logger.warning("Memory hydration failed: %s", exc)
 
@@ -424,30 +670,40 @@ async def run_agent(
                 inline_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.inline_subconscious_enabled'), true)"))
             if inline_enabled:
                 if on_event:
-                    await on_event(AgentEventData(
-                        event=AgentEvent.PHASE_CHANGE,
-                        data={"phase": "subconscious", "status": "start"},
-                    ))
+                    await on_event(
+                        AgentEventData(
+                            event=AgentEvent.PHASE_CHANGE,
+                            data={"phase": "subconscious", "status": "start"},
+                        )
+                    )
 
                 # For heartbeat, use the heartbeat context as memory context
                 sub_memory_ctx = memory_context
                 if mode == "heartbeat" and heartbeat_context:
-                    from services.heartbeat_prompt import render_heartbeat_decision_prompt_db
+                    from services.heartbeat_prompt import (
+                        render_heartbeat_decision_prompt_db,
+                    )
+
                     sub_memory_ctx = await render_heartbeat_decision_prompt_db(conn, heartbeat_context)
 
                 subconscious_output = await run_subconscious_appraisal(
-                    conn, user_message, sub_memory_ctx,
+                    conn,
+                    user_message,
+                    sub_memory_ctx if mode == "heartbeat" else "",
+                    hydrated_context=context,
                 )
 
                 if on_event:
-                    await on_event(AgentEventData(
-                        event=AgentEvent.PHASE_CHANGE,
-                        data={
-                            "phase": "subconscious",
-                            "status": "end",
-                            "output": _subconscious_event_payload(subconscious_output),
-                        },
-                    ))
+                    await on_event(
+                        AgentEventData(
+                            event=AgentEvent.PHASE_CHANGE,
+                            data={
+                                "phase": "subconscious",
+                                "status": "end",
+                                "output": _subconscious_event_payload(subconscious_output),
+                            },
+                        )
+                    )
         except Exception as exc:
             logger.warning("Subconscious pre-phase failed: %s", exc)
 
@@ -612,6 +868,7 @@ async def stream_agent(
 
         # Hydrate memory
         memory_context = ""
+        context = None
         if mode == "chat":
             try:
                 yield AgentEventData(
@@ -629,8 +886,6 @@ async def stream_agent(
                     include_goals=True,
                     include_drives=True,
                 )
-                if context.memories:
-                    await mem_client.touch_memories([m.id for m in context.memories])
                 memory_context = format_context_for_prompt(context, max_memories=10)
 
                 yield AgentEventData(
@@ -654,7 +909,9 @@ async def stream_agent(
                     data={"phase": "subconscious", "status": "start"},
                 )
                 subconscious_output = await run_subconscious_appraisal(
-                    conn, user_message, memory_context,
+                    conn,
+                    user_message,
+                    hydrated_context=context,
                 )
                 yield AgentEventData(
                     event=AgentEvent.PHASE_CHANGE,

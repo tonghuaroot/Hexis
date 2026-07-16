@@ -27,6 +27,45 @@ async def _build_context(conn) -> dict[str, Any]:
     return context if isinstance(context, dict) else {}
 
 
+def _bounded_context_json(context: dict[str, Any], max_chars: int = 12000) -> str:
+    payload = {"task": "maintenance_review", **context}
+
+    def encode() -> str:
+        return json.dumps(payload, default=str, ensure_ascii=False)
+
+    encoded = encode()
+    for key in (
+        "recent_memories",
+        "emotional_triggers",
+        "relationships",
+        "self_model",
+        "worldview",
+    ):
+        values = payload.get(key)
+        while len(encoded) > max_chars and isinstance(values, list) and values:
+            values.pop()
+            encoded = encode()
+    if len(encoded) > max_chars:
+        for key in (
+            "active_transformations",
+            "transformations_ready",
+            "contradictions",
+        ):
+            payload.pop(key, None)
+            encoded = encode()
+            if len(encoded) <= max_chars:
+                break
+    if len(encoded) > max_chars:
+        for key in tuple(payload):
+            if key in {"task", "emotional_state"}:
+                continue
+            payload.pop(key, None)
+            encoded = encode()
+            if len(encoded) <= max_chars:
+                break
+    return encoded
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -43,7 +82,7 @@ def _jsonable(value: Any) -> Any:
 async def run_subconscious_decider(conn) -> dict[str, Any]:
     llm_config = await load_llm_config(conn, "llm.subconscious", fallback_key="llm.heartbeat")
     context = await _build_context(conn)
-    user_prompt = f"Context (JSON):\n{json.dumps(context)[:12000]}"
+    user_prompt = f"Context (JSON):\n{_bounded_context_json(context)}"
     try:
         doc, raw = await chat_json(
             llm_config=llm_config,

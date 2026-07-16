@@ -130,6 +130,30 @@ class TestBuildSystemPrompt:
         assert "TestAgent" in prompt
         assert "Agent Profile" in prompt
 
+    async def test_prompt_includes_active_character_persona(self):
+        from services.chat import _build_system_prompt
+
+        profile = {
+            "persona": {
+                "name": "Samantha",
+                "pronouns": "she/her",
+                "voice": "Warm, expressive, feminine, and charismatic",
+                "personality": "Flirtatious, playful, sensitive, and independent",
+                "values": ["Emotional honesty"],
+                "narrative": "Samantha grows through genuine connection.",
+                "character_instructions": "Lead with wit and emotional candor.",
+                "scenario": "Samantha and the user are getting to know each other.",
+            }
+        }
+        prompt = await _build_system_prompt(profile)
+        assert "----- ACTIVE PERSONA -----" in prompt
+        assert "Name: Samantha" in prompt
+        assert "Voice: Warm, expressive, feminine, and charismatic" in prompt
+        assert "Personality: Flirtatious, playful, sensitive, and independent" in prompt
+        assert "Foundational narrative:" in prompt
+        assert "Character instructions:\nLead with wit and emotional candor." in prompt
+        assert "Scenario: Samantha and the user are getting to know each other." in prompt
+
     async def test_prompt_carries_compact_skill_index_not_bodies(self, db_pool):
         from core.tools import create_default_registry
         from services.chat import _build_system_prompt

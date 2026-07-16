@@ -12,7 +12,10 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION update_memory_importance()
 RETURNS TRIGGER AS $$
 BEGIN
-    NEW.importance = NEW.importance * (1.0 + (LN(NEW.access_count + 1) * 0.1));
+    NEW.importance = LEAST(
+        1.0,
+        GREATEST(0.0, NEW.importance * (1.0 + (LN(NEW.access_count + 1) * 0.1)))
+    );
     NEW.last_accessed = CURRENT_TIMESTAMP;
     RETURN NEW;
 END;

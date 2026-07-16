@@ -665,15 +665,12 @@ export default function Home() {
         `/api/init/characters?load=${encodeURIComponent(selectedCharacter.filename)}`
       );
       if (!res.ok) throw new Error("Failed to load character");
-      const payload = await res.json() as {
-        card?: { data?: { extensions?: { hexis?: Record<string, unknown> } } };
-      };
+      const payload = await res.json() as { card?: Record<string, unknown> };
       if (!payload.card) throw new Error("No card data returned");
-      const hexisExt = payload.card.data?.extensions?.hexis ?? {};
 
       // Apply via init_from_character_card
       await postJson("/api/init/character-card", {
-        card: hexisExt,
+        card: payload.card,
         user_name: userName || "User",
         character_filename: selectedCharacter.filename,
         portrait: selectedCharacter.image,

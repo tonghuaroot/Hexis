@@ -145,6 +145,22 @@ class HydratedContext:
     subgraph: dict[str, Any] | None = None
 
 
+def _deduplicate_memories(memories: Iterable[Memory]) -> list[Memory]:
+    """Keep the highest-ranked occurrence of the same memory or exact content."""
+    deduplicated: list[Memory] = []
+    seen_ids: set[UUID] = set()
+    seen_content: set[tuple[str, str]] = set()
+    for memory in memories:
+        normalized = " ".join(memory.content.split()).casefold()
+        content_key = (memory.type.value, normalized)
+        if memory.id in seen_ids or content_key in seen_content:
+            continue
+        seen_ids.add(memory.id)
+        seen_content.add(content_key)
+        deduplicated.append(memory)
+    return deduplicated
+
+
 @dataclass(frozen=True)
 class MemoryInput:
     content: str
@@ -275,7 +291,16 @@ class CognitiveMemory:
 
         async def _fetch_memories():
             async with self._pool.acquire() as conn:
-                return await self._recall_recmem(conn, query, memory_limit, session_id=session_id)
+                recalled = await self._recall_recmem(conn, query, memory_limit, session_id=session_id)
+                relevant_worldview = []
+                if include_worldview:
+                    relevant_worldview = await self._recall_memories(
+                        conn,
+                        query,
+                        max(10, memory_limit),
+                        [MemoryType.WORLDVIEW],
+                    )
+                return _deduplicate_memories([*relevant_worldview[:3], *recalled])[:memory_limit]
 
         async def _fetch_partial():
             if not include_partial:
@@ -322,9 +347,9 @@ class CognitiveMemory:
             partial_activations=partial,
             identity=list(identity) if isinstance(identity, list) else [],
             worldview=list(worldview) if isinstance(worldview, list) else [],
-            emotional_state=dict(emotional_state) if isinstance(emotional_state, dict) else None,
+            emotional_state=(dict(emotional_state) if isinstance(emotional_state, dict) else None),
             goals=dict(goals) if isinstance(goals, dict) else None,
-            urgent_drives=list(urgent_drives) if isinstance(urgent_drives, list) else [],
+            urgent_drives=(list(urgent_drives) if isinstance(urgent_drives, list) else []),
             subgraph=subgraph if isinstance(subgraph, dict) else None,
         )
 
@@ -493,8 +518,8 @@ class CognitiveMemory:
                 type=MemoryType(row["type"]),
                 content=row["content"],
                 importance=float(row["importance"]),
-                trust_level=float(row["trust_level"]) if row["trust_level"] is not None else None,
-                source_attribution=_coerce_json(row["source_attribution"]) if row["source_attribution"] is not None else None,
+                trust_level=(float(row["trust_level"]) if row["trust_level"] is not None else None),
+                source_attribution=(_coerce_json(row["source_attribution"]) if row["source_attribution"] is not None else None),
                 created_at=row["created_at"],
                 emotional_valence=row["emotional_valence"],
             )
@@ -741,7 +766,11 @@ class CognitiveMemory:
             items: list[dict[str, Any]] = []
             mem_list = list(memories)
             for m in mem_list:
-                item: dict[str, Any] = {"type": m.type.value, "content": m.content, "importance": m.importance}
+                item: dict[str, Any] = {
+                    "type": m.type.value,
+                    "content": m.content,
+                    "importance": m.importance,
+                }
                 if m.source_attribution is not None:
                     item["source_attribution"] = m.source_attribution
                 if m.trust_level is not None:
@@ -857,7 +886,13 @@ class CognitiveMemory:
             await conn.executemany(
                 "SELECT discover_relationship($1::uuid, $2::uuid, $3::graph_edge_type, $4::float, 'api', NULL, $5::text)",
                 [
-                    (r.from_id, r.to_id, r.relationship_type.value, r.confidence, r.context)
+                    (
+                        r.from_id,
+                        r.to_id,
+                        r.relationship_type.value,
+                        r.confidence,
+                        r.context,
+                    )
                     for r in rel_list
                 ],
             )
@@ -883,7 +918,12 @@ class CognitiveMemory:
 
     async def link_concept(self, memory_id: UUID, concept: str, *, strength: float = 1.0) -> UUID:
         async with self._pool.acquire() as conn:
-            return await conn.fetchval("SELECT link_memory_to_concept($1::uuid, $2::text, $3::float)", memory_id, concept, strength)
+            return await conn.fetchval(
+                "SELECT link_memory_to_concept($1::uuid, $2::text, $3::float)",
+                memory_id,
+                concept,
+                strength,
+            )
 
     async def find_by_concept(self, concept: str, *, limit: int = 10) -> list[Memory]:
         """Find memories linked to a concept via graph traversal.
@@ -1287,8 +1327,8 @@ class CognitiveMemory:
                     importance=float(row["importance"]),
                     similarity=float(row["score"]),
                     source=row["source"],
-                    trust_level=float(row["trust_level"]) if row["trust_level"] is not None else None,
-                    source_attribution=_coerce_json(row["source_attribution"]) if row["source_attribution"] is not None else None,
+                    trust_level=(float(row["trust_level"]) if row["trust_level"] is not None else None),
+                    source_attribution=(_coerce_json(row["source_attribution"]) if row["source_attribution"] is not None else None),
                     created_at=row["created_at"],
                     emotional_valence=row["emotional_valence"],
                 )
@@ -1340,24 +1380,26 @@ class CognitiveMemory:
                     type=MemoryType(raw_type),
                     content=row["content"],
                     importance=0.3,
-                    similarity=float(row["score"]) if row["score"] is not None else None,
+                    similarity=(float(row["score"]) if row["score"] is not None else None),
                     source="recmem",
-                    trust_level=float(row["trust_level"]) if row["trust_level"] is not None else None,
-                    source_attribution=_coerce_json(row["source_attribution"]) if row["source_attribution"] is not None else None,
+                    trust_level=(float(row["trust_level"]) if row["trust_level"] is not None else None),
+                    source_attribution=(_coerce_json(row["source_attribution"]) if row["source_attribution"] is not None else None),
                     created_at=row["created_at"],
                     tier=row["tier"],
                     source_unit_ids=list(row["source_unit_ids"] or []),
-                    strength=float(row["strength"]) if row["strength"] is not None else None,
-                    fidelity=float(row["fidelity"]) if row["fidelity"] is not None else None,
-                    emotional_intensity=float(row["emotional_intensity"]) if row["emotional_intensity"] is not None else None,
+                    strength=(float(row["strength"]) if row["strength"] is not None else None),
+                    fidelity=(float(row["fidelity"]) if row["fidelity"] is not None else None),
+                    emotional_intensity=(float(row["emotional_intensity"]) if row["emotional_intensity"] is not None else None),
                 )
             )
+
+        memories = _deduplicate_memories(memories)
 
         # Reinforce-on-recall: recalling a memory strengthens it (resets its decay
         # clock -- the up-ladder). Only episodic/semantic tiers are `memories`
         # rows; subconscious item_ids are raw units. The chat/hydrate path did not
         # reinforce before this. Advisory -- never fail recall on it.
-        recalled_ids = [r["item_id"] for r in rows if r["tier"] in ("episodic", "semantic")]
+        recalled_ids = [memory.id for memory in memories if memory.tier in ("episodic", "semantic")]
         if recalled_ids:
             try:
                 await conn.execute("SELECT touch_memories($1::uuid[])", recalled_ids)
@@ -1374,7 +1416,7 @@ class CognitiveMemory:
                     cluster_id=row["cluster_id"],
                     cluster_name=row["cluster_name"],
                     keywords=list(row["keywords"] or []),
-                    emotional_signature=_coerce_json(row["emotional_signature"]) if row["emotional_signature"] is not None else None,
+                    emotional_signature=(_coerce_json(row["emotional_signature"]) if row["emotional_signature"] is not None else None),
                     cluster_similarity=float(row["cluster_similarity"]),
                     best_memory_similarity=float(row["best_memory_similarity"]),
                 )
@@ -1415,14 +1457,14 @@ class CognitiveMemory:
             type=MemoryType(row["type"]),
             content=row["content"],
             importance=float(row["importance"]),
-            trust_level=float(row["trust_level"]) if "trust_level" in row and row["trust_level"] is not None else None,
-            source_attribution=_coerce_json(row["source_attribution"])
-            if "source_attribution" in row and row["source_attribution"] is not None
-            else None,
+            trust_level=(float(row["trust_level"]) if "trust_level" in row and row["trust_level"] is not None else None),
+            source_attribution=(
+                _coerce_json(row["source_attribution"]) if "source_attribution" in row and row["source_attribution"] is not None else None
+            ),
             created_at=row["created_at"] if "created_at" in row else None,
-            emotional_valence=row["emotional_valence"] if "emotional_valence" in row else None,
+            emotional_valence=(row["emotional_valence"] if "emotional_valence" in row else None),
             tier=row["tier"] if "tier" in row else None,
-            source_unit_ids=list(row["source_unit_ids"] or []) if "source_unit_ids" in row else None,
+            source_unit_ids=(list(row["source_unit_ids"] or []) if "source_unit_ids" in row else None),
             valid_until=row["valid_until"] if "valid_until" in row else None,
         )
 

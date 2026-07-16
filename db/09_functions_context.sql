@@ -204,20 +204,32 @@ DECLARE
     result JSONB := '[]'::jsonb;
 BEGIN
     BEGIN
-        SELECT COALESCE(jsonb_agg(sub.obj), '[]'::jsonb)
+        SELECT COALESCE(jsonb_agg(sub.obj ORDER BY sub.strength DESC, sub.kind, sub.concept), '[]'::jsonb)
         INTO result
         FROM (
-            SELECT jsonb_build_object(
-                'type', replace(kind::text, '"', ''),
-                'concept', replace(concept::text, '"', ''),
-                'strength', (strength::text)::float
-            ) as obj
-            FROM ag_catalog.cypher('memory_graph', $q$
-                MATCH (s:SelfNode)-[r:ASSOCIATED]->(c)
-                RETURN r.kind as kind, c.name as concept, r.strength as strength
-                ORDER BY r.strength DESC
-                LIMIT 15
-            $q$) as (kind ag_catalog.agtype, concept ag_catalog.agtype, strength ag_catalog.agtype)
+            SELECT DISTINCT ON (kind_text, concept_text)
+                jsonb_build_object(
+                    'type', kind_text,
+                    'concept', concept_text,
+                    'strength', strength_float
+                ) as obj,
+                kind_text AS kind,
+                concept_text AS concept,
+                strength_float AS strength
+            FROM (
+                SELECT
+                    replace(kind::text, '"', '') AS kind_text,
+                    replace(concept::text, '"', '') AS concept_text,
+                    (strength::text)::float AS strength_float
+                FROM ag_catalog.cypher('memory_graph', $q$
+                    MATCH (s:SelfNode)-[r:ASSOCIATED]->(c)
+                    RETURN r.kind as kind, c.name as concept, r.strength as strength
+                    ORDER BY r.strength DESC
+                    LIMIT 100
+                $q$) as (kind ag_catalog.agtype, concept ag_catalog.agtype, strength ag_catalog.agtype)
+            ) raw
+            ORDER BY kind_text, concept_text, strength_float DESC
+            LIMIT 15
         ) sub;
     EXCEPTION WHEN OTHERS THEN result := '[]'::jsonb; END;
 

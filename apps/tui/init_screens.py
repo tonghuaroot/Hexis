@@ -821,11 +821,13 @@ class CharacterGalleryScreen(Screen):
             if row_idx is not None and row_idx < len(state.character_cards):
                 card = state.character_cards[row_idx]
                 state.chosen_card = card
-                hexis_ext = card.get("extensions_hexis", {})
+                from core.init_api import load_character_card_document
+
+                character_card = load_character_card_document(card)
                 try:
                     await conn.fetchval(
                         "SELECT init_from_character_card($1::jsonb, $2)",
-                        json.dumps(hexis_ext),
+                        json.dumps(character_card),
                         state.user_name,
                     )
                 except Exception as e:

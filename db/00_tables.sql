@@ -202,7 +202,7 @@ CREATE TABLE memories (
     valid_from TIMESTAMPTZ,
     valid_until TIMESTAMPTZ,
     superseded_by UUID REFERENCES memories(id) ON DELETE SET NULL,
-    importance FLOAT DEFAULT 0.5,
+    importance FLOAT DEFAULT 0.5 CONSTRAINT memories_importance_range CHECK (importance BETWEEN 0 AND 1),
     source_attribution JSONB NOT NULL DEFAULT '{}'::jsonb,
     trust_level FLOAT NOT NULL DEFAULT 0.5 CHECK (trust_level >= 0 AND trust_level <= 1),
     trust_updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,

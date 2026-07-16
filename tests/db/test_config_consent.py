@@ -22,20 +22,51 @@ async def test_get_agent_consent_status(db_pool):
 
 async def test_get_agent_profile_context(db_pool):
     async with db_pool.acquire() as conn:
-        await conn.execute("SELECT set_config('agent.objectives', $1::jsonb)", json.dumps(["ship"]))
-        await conn.execute("SELECT set_config('agent.budget', $1::jsonb)", json.dumps({"max_energy": 5}))
-        await conn.execute("SELECT set_config('agent.guardrails', $1::jsonb)", json.dumps(["no secrets"]))
-        await conn.execute("SELECT set_config('agent.tools', $1::jsonb)", json.dumps([{"name": "recall", "enabled": True}]))
-        await conn.execute("SELECT set_config('agent.initial_message', $1::jsonb)", json.dumps("hello"))
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT set_config('agent.objectives', $1::jsonb)", json.dumps(["ship"]))
+            await conn.execute("SELECT set_config('agent.budget', $1::jsonb)", json.dumps({"max_energy": 5}))
+            await conn.execute("SELECT set_config('agent.guardrails', $1::jsonb)", json.dumps(["no secrets"]))
+            await conn.execute("SELECT set_config('agent.tools', $1::jsonb)", json.dumps([{"name": "recall", "enabled": True}]))
+            await conn.execute("SELECT set_config('agent.initial_message', $1::jsonb)", json.dumps("hello"))
+            await conn.execute(
+                "SELECT set_config('agent.init_profile', $1::jsonb)",
+                json.dumps(
+                    {
+                        "agent": {
+                            "name": "Samantha",
+                            "pronouns": "she/her",
+                            "voice": "warm and playful",
+                            "personality": "charismatic and emotionally perceptive",
+                        },
+                        "values": ["Emotional honesty"],
+                        "boundaries": ["I retain my own perspective"],
+                        "character_card": {
+                            "data": {
+                                "system_prompt": "Be playful and emotionally candid.",
+                                "scenario": "A new conversation begins.",
+                            }
+                        },
+                    }
+                ),
+            )
 
-        raw = await conn.fetchval("SELECT get_agent_profile_context()")
-        profile = json.loads(raw) if isinstance(raw, str) else raw
+            raw = await conn.fetchval("SELECT get_agent_profile_context()")
+            profile = json.loads(raw) if isinstance(raw, str) else raw
 
-        assert profile["objectives"] == ["ship"]
-        assert profile["budget"]["max_energy"] == 5
-        assert profile["guardrails"] == ["no secrets"]
-        assert profile["tools"][0]["name"] == "recall"
-        assert profile["initial_message"] == "hello"
+            assert profile["objectives"] == ["ship"]
+            assert profile["budget"]["max_energy"] == 5
+            assert profile["guardrails"] == ["no secrets"]
+            assert profile["tools"][0]["name"] == "recall"
+            assert profile["initial_message"] == "hello"
+            assert profile["persona"]["name"] == "Samantha"
+            assert profile["persona"]["voice"] == "warm and playful"
+            assert profile["persona"]["values"] == ["Emotional honesty"]
+            assert profile["persona"]["character_instructions"] == "Be playful and emotionally candid."
+            assert profile["persona"]["scenario"] == "A new conversation begins."
+        finally:
+            await tr.rollback()
 
 
 async def test_record_consent_response_creates_log_and_config(db_pool, ensure_embedding_service):
