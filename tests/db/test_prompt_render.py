@@ -1,13 +1,17 @@
-"""Parity tests: SQL prompt renderers vs the Python formatters they replace.
+"""The SQL prompt renderers are the single source of prompt text.
 
-The DB-owned render_* functions (db/39_functions_prompt_render.sql) must produce
-the same prompt text as services/heartbeat_prompt.py so the heartbeat/decision
-prompt can be assembled entirely in the DB (Phase 3) without behavior change.
+The DB-owned render_* functions (db/39_functions_prompt_render.sql) are pinned
+by golden fixtures in tests/fixtures/prompt_render/ — the byte-exact output
+the deleted Python formatters used to produce. A failing golden means the
+rendered prompt changed; regenerate deliberately and review the diff.
+Remaining parity tests (chat memory context, personhood) compare against
+Python formatters that still exist pending their own pushdown.
 """
 from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -18,11 +22,15 @@ from core.cognitive_memory_api import (
     PartialActivation,
     format_context_for_prompt,
 )
-from services.agent import SubconsciousOutput, format_subconscious_signals
-from services.heartbeat_prompt import build_heartbeat_decision_prompt
 from services.prompt_resources import compose_personhood_prompt
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
+
+_GOLDEN_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "prompt_render"
+
+
+def _golden(name: str) -> str:
+    return (_GOLDEN_DIR / f"{name}.txt").read_text(encoding="utf-8")
 
 
 # A context exercising every formatter + edge cases (avoids the two known,
@@ -105,18 +113,18 @@ async def _render_sql(conn, ctx: dict) -> str:
     )
 
 
-async def test_heartbeat_prompt_rich_context_parity(db_pool):
-    """SQL renderer matches Python byte-for-byte on a fully-populated context."""
+async def test_heartbeat_prompt_rich_context_golden(db_pool):
+    """SQL renderer matches the pinned golden on a fully-populated context."""
     async with db_pool.acquire() as conn:
-        assert await _render_sql(conn, _RICH) == build_heartbeat_decision_prompt(_RICH)
+        assert await _render_sql(conn, _RICH) == _golden("heartbeat_rich")
 
 
 @pytest.mark.parametrize("name", list(_EDGE_CASES))
-async def test_heartbeat_prompt_edge_case_parity(db_pool, name):
-    """Empty/null/absent-key defaults render identically to the Python formatter."""
+async def test_heartbeat_prompt_edge_case_golden(db_pool, name):
+    """Empty/null/absent-key defaults render exactly the pinned goldens."""
     ctx = _EDGE_CASES[name]
     async with db_pool.acquire() as conn:
-        assert await _render_sql(conn, ctx) == build_heartbeat_decision_prompt(ctx), name
+        assert await _render_sql(conn, ctx) == _golden(f"heartbeat_{name}"), name
 
 
 # ---------------------------------------------------------------------------
@@ -172,15 +180,8 @@ async def test_chat_memory_context_parity(db_pool, name):
 
 
 # ---------------------------------------------------------------------------
-# Subconscious signals: render_subconscious_signals vs format_subconscious_signals
+# Subconscious signals: render_subconscious_signals golden output
 # ---------------------------------------------------------------------------
-
-
-def _mk_sub(j: dict) -> SubconsciousOutput:
-    return SubconsciousOutput(
-        salient_memories=j.get("salient_memories", []), memory_expansions=j.get("memory_expansions", []),
-        instincts=j.get("instincts", []), emotional_state=j.get("emotional_state", {}),
-        subconscious_response=j.get("subconscious_response", ""))
 
 
 _SUB_CASES = {
@@ -195,11 +196,11 @@ _SUB_CASES = {
 
 
 @pytest.mark.parametrize("name", list(_SUB_CASES))
-async def test_subconscious_signals_parity(db_pool, name):
+async def test_subconscious_signals_golden(db_pool, name):
     j = _SUB_CASES[name]
     async with db_pool.acquire() as conn:
         sql = await conn.fetchval("SELECT render_subconscious_signals($1::jsonb)", json.dumps(j))
-    assert sql == format_subconscious_signals(_mk_sub(j)), name
+    assert sql == _golden(f"subconscious_{name}"), name
 
 
 # ---------------------------------------------------------------------------

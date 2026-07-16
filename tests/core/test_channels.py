@@ -425,59 +425,59 @@ class TestChannelConversation:
             await conn.execute("DELETE FROM channel_messages WHERE session_id = $1", row["id"])
         await conn.execute("DELETE FROM channel_sessions WHERE sender_id = $1", sender_id)
 
+    @staticmethod
+    async def _prepare_turn(conn, sender_id: str, channel_id: str, message_id: str, content: str = "Hello") -> dict:
+        """Run the DB-owned turn preparation (prepare_channel_turn, db/34)."""
+        raw = await conn.fetchval(
+            "SELECT prepare_channel_turn($1::jsonb)",
+            json.dumps({
+                "channel_type": "test",
+                "channel_id": channel_id,
+                "sender_id": sender_id,
+                "sender_name": "TestBot",
+                "content": content,
+                "message_id": message_id,
+            }),
+        )
+        return json.loads(raw) if isinstance(raw, str) else raw
+
     async def test_session_creation(self, db_pool):
         """Test that a session is created for a new sender."""
-        from channels.conversation import _get_or_create_session
-        from channels.base import ChannelMessage
-
         sender_id = f"{self._TEST_PREFIX}create_{id(self)}"
-        msg = ChannelMessage(
-            channel_type="test",
-            channel_id="test-channel-1",
-            sender_id=sender_id,
-            sender_name="TestBot",
-            content="Hello",
-            message_id="test-msg-1",
-        )
 
         async with db_pool.acquire() as conn:
             try:
-                session_id, history = await _get_or_create_session(conn, msg)
-                assert session_id is not None
-                assert history == []
+                turn = await self._prepare_turn(conn, sender_id, "test-channel-1", "test-msg-1")
+                assert turn["allowed"] is True
+                assert turn["session_id"] is not None
+                assert turn["history"] == []
 
                 # Second call returns same session
-                session_id2, _ = await _get_or_create_session(conn, msg)
-                assert session_id2 == session_id
+                turn2 = await self._prepare_turn(conn, sender_id, "test-channel-1", "test-msg-1b")
+                assert turn2["session_id"] == turn["session_id"]
             finally:
                 await self._cleanup(conn, sender_id)
 
     async def test_session_history_update(self, db_pool):
-        """Test session history is stored and retrieved."""
-        from channels.conversation import _get_or_create_session, _update_session
-        from channels.base import ChannelMessage
-
+        """Test session history is stored by finalize and retrieved by prepare."""
         sender_id = f"{self._TEST_PREFIX}hist_{id(self)}"
-        msg = ChannelMessage(
-            channel_type="test",
-            channel_id="test-channel-2",
-            sender_id=sender_id,
-            sender_name="TestBot",
-            content="Hello",
-            message_id="test-msg-2",
-        )
 
         async with db_pool.acquire() as conn:
             try:
-                session_id, _ = await _get_or_create_session(conn, msg)
+                turn = await self._prepare_turn(conn, sender_id, "test-channel-2", "test-msg-2")
 
                 history = [
                     {"role": "user", "content": "Hello"},
                     {"role": "assistant", "content": "Hi there!"},
                 ]
-                await _update_session(conn, session_id, history)
+                await conn.fetchval(
+                    "SELECT finalize_channel_turn($1::uuid, $2, $3, $4::jsonb)",
+                    turn["session_id"], "Hello", "Hi there!",
+                    json.dumps({"history": history}),
+                )
 
-                _, retrieved = await _get_or_create_session(conn, msg)
+                turn2 = await self._prepare_turn(conn, sender_id, "test-channel-2", "test-msg-2b")
+                retrieved = turn2["history"]
                 assert len(retrieved) == 2
                 assert retrieved[0]["role"] == "user"
                 assert retrieved[1]["content"] == "Hi there!"
@@ -485,32 +485,23 @@ class TestChannelConversation:
                 await self._cleanup(conn, sender_id)
 
     async def test_message_logging(self, db_pool):
-        """Test that messages are logged to channel_messages."""
-        from channels.conversation import _get_or_create_session, _log_message
-        from channels.base import ChannelMessage
-
+        """Test that the DB turn lifecycle logs inbound and outbound messages."""
         sender_id = f"{self._TEST_PREFIX}log_{id(self)}"
-        msg = ChannelMessage(
-            channel_type="test",
-            channel_id="test-channel-3",
-            sender_id=sender_id,
-            sender_name="TestBot",
-            content="Hello",
-            message_id="test-msg-3",
-        )
 
         async with db_pool.acquire() as conn:
             try:
-                session_id, _ = await _get_or_create_session(conn, msg)
-
-                await _log_message(conn, session_id, "inbound", "Hello", platform_message_id="test-msg-3")
-                await _log_message(conn, session_id, "outbound", "Hi there!")
-
-                count = await conn.fetchval(
-                    "SELECT COUNT(*) FROM channel_messages WHERE session_id = $1::uuid",
-                    session_id,
+                turn = await self._prepare_turn(conn, sender_id, "test-channel-3", "test-msg-3")
+                await conn.fetchval(
+                    "SELECT finalize_channel_turn($1::uuid, $2, $3, $4::jsonb)",
+                    turn["session_id"], "Hello", "Hi there!",
+                    json.dumps({"history": [], "platform_message_id": "test-msg-3-out"}),
                 )
-                assert count == 2
+
+                rows = await conn.fetch(
+                    "SELECT direction FROM channel_messages WHERE session_id = $1::uuid ORDER BY created_at",
+                    turn["session_id"],
+                )
+                assert [r["direction"] for r in rows] == ["inbound", "outbound"]
             finally:
                 await self._cleanup(conn, sender_id)
 

@@ -63,65 +63,15 @@ async def run_scheduled_tasks(conn, limit: int = 25) -> dict[str, Any] | None:
 
 
 async def recompute_cron_next_runs(conn, task_ids: list[str]) -> int:
-    """Ask Postgres to recompute cron next-run placeholders."""
+    """Ask Postgres to recompute cron next-run placeholders.
+
+    recompute_cron_next_runs (db/36) owns the cron math; the former Python
+    croniter fallback was deleted (migrations guarantee the function exists).
+    """
     if not task_ids:
         return 0
-    try:
-        raw = await conn.fetchval("SELECT recompute_cron_next_runs($1::uuid[])", task_ids)
-        if isinstance(raw, int):
-            return raw
-        if raw is not None and not hasattr(raw, "mock_calls"):
-            return int(raw)
-    except Exception as e:
-        logger.debug("DB cron recompute unavailable; falling back to compatibility path: %s", e)
-
-    from datetime import datetime, timezone as tz
-
-    updated = 0
-    for task_id in task_ids:
-        try:
-            row = await conn.fetchrow(
-                "SELECT schedule, timezone FROM scheduled_tasks WHERE id = $1::uuid",
-                task_id,
-            )
-            if not row:
-                continue
-            schedule = _coerce_json(row["schedule"])
-            cron_expr = schedule.get("cron", "")
-            if not cron_expr:
-                continue
-            task_tz = row["timezone"] or "UTC"
-            try:
-                import pytz
-                local_tz = pytz.timezone(task_tz)
-            except Exception:
-                local_tz = tz.utc
-            try:
-                from croniter import croniter
-                now = datetime.now(tz.utc)
-                cron = croniter(cron_expr, now.astimezone(local_tz))
-                next_dt = cron.get_next(datetime)
-                if next_dt.tzinfo is None:
-                    next_dt = local_tz.localize(next_dt)
-                next_utc = next_dt.astimezone(tz.utc)
-            except Exception:
-                from datetime import timedelta
-                next_utc = datetime.now(tz.utc) + timedelta(minutes=1)
-            schedule["_next_run"] = next_utc.isoformat()
-            await conn.execute(
-                """UPDATE scheduled_tasks
-                   SET next_run_at = $2,
-                       schedule = $3::jsonb,
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE id = $1::uuid""",
-                task_id,
-                next_utc,
-                json.dumps(schedule),
-            )
-            updated += 1
-        except Exception as e:
-            logger.warning("Failed to recompute cron next_run for %s: %s", task_id, e)
-    return updated
+    raw = await conn.fetchval("SELECT recompute_cron_next_runs($1::uuid[])", task_ids)
+    return int(raw or 0)
 
 
 async def apply_external_call_result(

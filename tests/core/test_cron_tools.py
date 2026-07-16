@@ -391,45 +391,64 @@ class TestDeliveryValidation:
 # ---------------------------------------------------------------------------
 
 class TestRecomputeCronNextRuns:
-    @pytest.mark.asyncio
-    async def test_recompute_updates_schedule(self):
+    """The DB owns cron next-run math (recompute_cron_next_runs, db/36); the
+    Python wrapper only delegates. The former croniter fallback was deleted."""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_recompute_updates_schedule(self, db_pool):
         from core.state import recompute_cron_next_runs
 
-        mock_conn = AsyncMock()
-        mock_conn.fetchrow = AsyncMock(return_value={
-            "schedule": json.dumps({"cron": "0 9 * * *", "_next_run": ""}),
-            "timezone": "UTC",
-        })
-        mock_conn.execute = AsyncMock()
-
-        updated = await recompute_cron_next_runs(mock_conn, ["00000000-0000-0000-0000-000000000001"])
-
-        assert updated == 1
-        mock_conn.execute.assert_called_once()
-        call_args = mock_conn.execute.call_args
-        # Args: (sql, task_id, next_utc_datetime, schedule_json_str)
-        schedule_json_str = call_args[0][3]
-        updated_schedule = json.loads(schedule_json_str)
-        assert updated_schedule["_next_run"] != ""
-        assert "T" in updated_schedule["_next_run"]
+        async with db_pool.acquire() as conn:
+            task_id = await conn.fetchval(
+                """SELECT create_scheduled_task(
+                       'recompute-test', 'cron', $1::jsonb, 'queue_user_message',
+                       '{"message": "hi"}'::jsonb, 'UTC')""",
+                json.dumps({"cron": "0 9 * * *", "_next_run": "2000-01-01T00:00:00+00:00"}),
+            )
+            try:
+                await conn.execute(
+                    "UPDATE scheduled_tasks SET next_run_at = '2000-01-01T00:00:00+00:00' WHERE id = $1",
+                    task_id,
+                )
+                updated = await recompute_cron_next_runs(conn, [str(task_id)])
+                assert updated == 1
+                next_run = await conn.fetchval(
+                    "SELECT next_run_at FROM scheduled_tasks WHERE id = $1", task_id
+                )
+                assert next_run is not None
+                assert next_run.year >= 2026
+            finally:
+                await conn.execute("DELETE FROM scheduled_tasks WHERE id = $1", task_id)
 
     @pytest.mark.asyncio
-    async def test_recompute_empty_ids(self):
+    async def test_recompute_empty_ids_skips_db(self):
         from core.state import recompute_cron_next_runs
 
         mock_conn = AsyncMock()
         updated = await recompute_cron_next_runs(mock_conn, [])
         assert updated == 0
+        mock_conn.fetchval.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_recompute_missing_task(self):
+    async def test_recompute_delegates_to_sql(self):
         from core.state import recompute_cron_next_runs
 
         mock_conn = AsyncMock()
-        mock_conn.fetchrow = AsyncMock(return_value=None)
+        mock_conn.fetchval = AsyncMock(return_value=3)
+        updated = await recompute_cron_next_runs(mock_conn, ["a", "b", "c"])
+        assert updated == 3
+        sql = mock_conn.fetchval.call_args[0][0]
+        assert "recompute_cron_next_runs" in sql
 
-        updated = await recompute_cron_next_runs(mock_conn, ["nonexistent"])
-        assert updated == 0
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_recompute_missing_task(self, db_pool):
+        from core.state import recompute_cron_next_runs
+
+        async with db_pool.acquire() as conn:
+            updated = await recompute_cron_next_runs(
+                conn, ["00000000-0000-0000-0000-00000000dead"]
+            )
+            assert updated == 0
 
 
 # ---------------------------------------------------------------------------

@@ -173,42 +173,27 @@ def _parse_subconscious_output(
     )
 
 
-def format_subconscious_signals(output: SubconsciousOutput) -> str:
-    """Format subconscious output for injection into the user message context."""
-    parts: list[str] = ["## Subconscious Signals"]
+async def render_subconscious_signals_db(conn: "asyncpg.Connection", output: SubconsciousOutput) -> str:
+    """Render the '## Subconscious Signals' block via the DB-owned renderer.
 
-    if output.instincts:
-        for inst in output.instincts[:3]:
-            impulse = inst.get("impulse", "unknown")
-            intensity = inst.get("intensity", 0)
-            reason = inst.get("reason", "")
-            parts.append(f"- Instinct: {impulse} ({intensity:.1f}) — {reason}")
-
-    if output.emotional_state:
-        es = output.emotional_state
-        emotion = es.get("primary_emotion", "neutral")
-        valence = es.get("valence", 0)
-        arousal = es.get("arousal", 0)
-        parts.append(f"- Emotional state: {emotion} (valence: {valence}, arousal: {arousal})")
-
-    if output.memory_expansions:
-        queries = [me.get("query", "") for me in output.memory_expansions[:3] if me.get("query")]
-        if queries:
-            parts.append(f"- Suggested memory searches: {', '.join(repr(q) for q in queries)}")
-
-    if output.salient_memories:
-        for sm in output.salient_memories[:3]:
-            mid = sm.get("memory_id", "?")
-            reason = sm.get("reason", "")
-            parts.append(f"- Salient memory: [{mid}] ({reason})")
-
-    if output.subconscious_response:
-        parts.append(f"- Gut reaction: {output.subconscious_response[:200]}")
-
-    # Only return content if we have actual signals beyond the header
-    if len(parts) <= 1:
+    render_subconscious_signals (db/39) is the single source of the prompt
+    text; Python only supplies the signals JSON. Empty output short-circuits
+    to '' without a round-trip.
+    """
+    if not (
+        output.instincts
+        or output.emotional_state
+        or output.memory_expansions
+        or output.salient_memories
+        or output.subconscious_response
+    ):
         return ""
-    return "\n".join(parts)
+    signals = _subconscious_event_payload(output)["signals"]
+    raw = await conn.fetchval(
+        "SELECT render_subconscious_signals($1::jsonb)",
+        json.dumps(signals, default=str),
+    )
+    return str(raw or "")
 
 
 def _subconscious_event_payload(output: SubconsciousOutput) -> dict[str, Any]:
@@ -664,6 +649,7 @@ async def run_agent(
 
         # 3. Run subconscious pre-phase
         subconscious_output = SubconsciousOutput()
+        sub_signals = ""
         try:
             inline_enabled = True
             if mode == "chat":
@@ -692,6 +678,7 @@ async def run_agent(
                     sub_memory_ctx if mode == "heartbeat" else "",
                     hydrated_context=context,
                 )
+                sub_signals = await render_subconscious_signals_db(conn, subconscious_output)
 
                 if on_event:
                     await on_event(
@@ -747,8 +734,7 @@ async def run_agent(
     # 5. Build enriched user message
     enriched_parts: list[str] = []
 
-    # Add subconscious signals
-    sub_signals = format_subconscious_signals(subconscious_output)
+    # Add subconscious signals (rendered by the DB inside the conn scope)
     if sub_signals:
         enriched_parts.append(sub_signals)
 
@@ -901,6 +887,7 @@ async def stream_agent(
 
         # Run subconscious
         subconscious_output = SubconsciousOutput()
+        sub_signals = ""
         try:
             inline_enabled = bool(await conn.fetchval("SELECT COALESCE(get_config_bool('chat.inline_subconscious_enabled'), true)"))
             if inline_enabled:
@@ -913,6 +900,7 @@ async def stream_agent(
                     user_message,
                     hydrated_context=context,
                 )
+                sub_signals = await render_subconscious_signals_db(conn, subconscious_output)
                 yield AgentEventData(
                     event=AgentEvent.PHASE_CHANGE,
                     data={
@@ -943,9 +931,8 @@ async def stream_agent(
         available_skills=skill_selection.available,
     )
 
-    # Build enriched user message
+    # Build enriched user message (signals were rendered by the DB in-scope)
     enriched_parts: list[str] = []
-    sub_signals = format_subconscious_signals(subconscious_output)
     if sub_signals:
         enriched_parts.append(sub_signals)
     if memory_context:

@@ -796,26 +796,29 @@ class TestChannelEnergy:
         await conn.execute("DELETE FROM channel_sessions WHERE sender_id = $1", sender_id)
 
     async def test_default_free_energy(self, db_pool):
-        """Default energy cost is 0 (free), so messages should always be allowed."""
-        from channels.conversation import _check_channel_energy
-        from channels.base import ChannelMessage
+        """Default energy cost is 0 (free), so messages should always be allowed.
 
+        The DB owns the energy/rate-limit policy (prepare_channel_turn, db/34).
+        """
         sender_id = f"{self._TEST_PREFIX}free_{id(self)}"
-        msg = ChannelMessage(
-            channel_type="test_free",
-            channel_id="ch1",
-            sender_id=sender_id,
-            sender_name="User",
-            content="Hello",
-            message_id="m1",
-        )
 
         async with db_pool.acquire() as conn:
             try:
-                allowed, cost, rejection = await _check_channel_energy(conn, msg)
-                assert allowed is True
-                assert cost == 0.0
-                assert rejection is None
+                raw = await conn.fetchval(
+                    "SELECT prepare_channel_turn($1::jsonb)",
+                    json.dumps({
+                        "channel_type": "test_free",
+                        "channel_id": "ch1",
+                        "sender_id": sender_id,
+                        "sender_name": "User",
+                        "content": "Hello",
+                        "message_id": "m1",
+                    }),
+                )
+                turn = json.loads(raw) if isinstance(raw, str) else raw
+                assert turn["allowed"] is True
+                assert turn["cost"] == 0.0
+                assert "rejection" not in turn
             finally:
                 await self._cleanup(conn, sender_id)
 
