@@ -146,7 +146,8 @@ async def test_next_step_returns_db_owned_message_log(db_pool):
             roles = [m["role"] for m in step2["messages"]]
             assert roles == ["system", "user", "assistant", "tool"]
             assert step2["messages"][2]["tool_calls"][0]["id"] == "c1"
-            assert step2["messages"][3]["content"] == "result-text"
+            # Budgeted turns carry the energy footer on every tool result (#44).
+            assert step2["messages"][3]["content"] == "result-text\n\n[energy: 1/10 spent]"
 
             # append_agent_message adds a user turn (continuation / plan / verify).
             appended = _coerce_json(

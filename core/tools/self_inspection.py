@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -527,5 +528,127 @@ class InspectDatabaseSchemaHandler(ToolHandler):
         )
 
 
+class InspectConfigHandler(ToolHandler):
+    """Read the agent's own (allowlisted, redacted) configuration."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="inspect_config",
+            description=(
+                "Read your own configuration — the settings that govern your "
+                "cognition: memory formation (extraction.*), belief revision "
+                "(belief.*), heartbeat cadence (heartbeat.*), retention, guardrails, "
+                "and more. Only allowlisted, non-secret keys are visible; values "
+                "with secret-like names are redacted. Use this to understand why "
+                "your own behavior is what it is."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prefix": {
+                        "type": "string",
+                        "description": "Optional key prefix filter, e.g. 'extraction.' or 'belief.'.",
+                    },
+                },
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT},
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
+        pool = context.registry.pool if context.registry else None
+        if pool is None:
+            return ToolResult.error_result(
+                "Database pool not available.", ToolErrorType.MISSING_CONFIG
+            )
+        prefix = str(arguments.get("prefix") or "") or None
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT inspect_agent_config($1::text)", prefix)
+        settings = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return ToolResult.success_result(
+            {"settings": settings, "count": len(settings)},
+            f"{len(settings)} setting(s)" + (f" under '{prefix}'" if prefix else ""),
+        )
+
+
+class ReviewRecentActionsHandler(ToolHandler):
+    """The agent's verbatim action log."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="review_recent_actions",
+            description=(
+                "Your verbatim action log: the tool calls you actually made "
+                "(successes and failures, with energy and timing), straight from "
+                "the audit trail. Use it to check what you actually did rather "
+                "than what you remember doing — memory is selective; this is not."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "hours": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 168,
+                        "default": 24,
+                        "description": "Look-back window in hours.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 30,
+                        "description": "Maximum actions to return (newest first).",
+                    },
+                    "context": {
+                        "type": "string",
+                        "enum": ["chat", "heartbeat", "mcp"],
+                        "description": "Optional filter by execution context.",
+                    },
+                },
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT},
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
+        pool = context.registry.pool if context.registry else None
+        if pool is None:
+            return ToolResult.error_result(
+                "Database pool not available.", ToolErrorType.MISSING_CONFIG
+            )
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT get_recent_actions($1::int, $2::int, $3::text)",
+                int(arguments.get("hours") or 24),
+                int(arguments.get("limit") or 30),
+                str(arguments.get("context") or "") or None,
+            )
+        report = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        summary = report.get("summary") or {}
+        return ToolResult.success_result(
+            report,
+            format(
+                f"{summary.get('total', 0)} action(s) in the last "
+                f"{summary.get('window_hours', '?')}h, {summary.get('failures', 0)} failed"
+            ),
+        )
+
+
 def create_self_inspection_tools() -> list[ToolHandler]:
-    return [InspectSourceHandler(), InspectDatabaseSchemaHandler()]
+    return [
+        InspectSourceHandler(),
+        InspectDatabaseSchemaHandler(),
+        InspectConfigHandler(),
+        ReviewRecentActionsHandler(),
+    ]

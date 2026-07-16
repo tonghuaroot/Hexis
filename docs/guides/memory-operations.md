@@ -62,6 +62,11 @@ sources are merged without moving confidence, and every change is recorded in
 SELECT * FROM belief_revision_audit WHERE memory_id = '<id>' ORDER BY created_at;
 ```
 
+The agent-facing mirror of that audit is the `belief_history` tool: given a
+memory id it returns the belief's current state, truth profile, revision
+history, evidence links, and contradicting sources — the full answer to "why
+do I believe this?".
+
 ### Recall (Retrieve)
 
 Recall uses vector similarity search augmented with precomputed neighborhoods and temporal context:

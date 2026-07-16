@@ -545,6 +545,20 @@ BEGIN
         END IF;
         PERFORM touch_memories(ARRAY(SELECT (value->>'memory_id')::uuid FROM jsonb_array_elements(rows_json) value));
         RETURN tool_success(jsonb_build_object('memories', rows_json, 'count', jsonb_array_length(rows_json), 'query', COALESCE(query, '(filters only)')), format('Found %s memories for %L', jsonb_array_length(rows_json), COALESCE(query, '(filters only)')));
+    ELSIF p_tool_name = 'belief_history' THEN
+        target_id := _db_brain_try_uuid(p_args->>'memory_id');
+        IF target_id IS NULL THEN
+            RETURN tool_error('memory_id must be a valid uuid', 'invalid_params');
+        END IF;
+        revision := get_belief_history(target_id, COALESCE(NULLIF(p_args->>'limit', '')::int, 20));
+        IF revision->>'error' = 'not_found' THEN
+            RETURN tool_error(format('memory not found: %s', target_id), 'invalid_params');
+        END IF;
+        display := format('Belief at confidence %s after %s revision(s); %s evidence link(s)',
+            COALESCE(revision#>>'{memory,confidence}', 'n/a'),
+            jsonb_array_length(COALESCE(revision->'revisions', '[]'::jsonb)),
+            jsonb_array_length(COALESCE(revision->'evidence', '[]'::jsonb)));
+        RETURN tool_success(revision, display);
     END IF;
     RETURN tool_error(format('Unsupported memory tool: %s', p_tool_name), 'invalid_params');
 EXCEPTION WHEN OTHERS THEN

@@ -1,0 +1,170 @@
+-- Self-state mirrors (#43/#45/#46): read paths exposing the agent's own
+-- introspective ledgers — the belief-revision audit, its configuration, and
+-- the ground-truth action log — as agent-facing tools. The pattern these fix:
+-- mechanism built, mirror forgotten. No new machinery here, only reads.
+SET search_path = public, ag_catalog, "$user";
+
+INSERT INTO config (key, value, description) VALUES
+    ('inspection.config_prefixes',
+     '["agent.", "heartbeat.", "maintenance.", "memory.", "retention.", "extraction.", "origin_memories.", "belief.", "guardrails.", "inspection.", "mcp.", "recmem.", "llm."]'::jsonb,
+     'Config key prefixes the agent may read via inspect_config (values with secret-like names are redacted regardless)')
+ON CONFLICT (key) DO NOTHING;
+
+-- Why do I believe this? One call returns the belief's current state, its
+-- truth profile, the audited revision history, incident evidence edges, and
+-- contradicting sources (#43 — completes the self-explanation bar of #40).
+CREATE OR REPLACE FUNCTION get_belief_history(
+    p_memory_id UUID,
+    p_limit INT DEFAULT 20
+) RETURNS JSONB AS $$
+DECLARE
+    mem memories%ROWTYPE;
+    lim INT := LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100);
+    revisions JSONB;
+    evidence JSONB;
+BEGIN
+    SELECT * INTO mem FROM memories WHERE id = p_memory_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('error', 'not_found');
+    END IF;
+
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+               'stance', a.stance,
+               'prior', a.prior_confidence,
+               'posterior', a.posterior_confidence,
+               'applied', a.applied,
+               'reason', a.reason,
+               'evidence_kind', a.evidence->>'kind',
+               'evidence_ref', a.evidence->>'ref',
+               'policy_context', a.policy_context,
+               'at', a.created_at
+           ) ORDER BY a.created_at DESC), '[]'::jsonb)
+    INTO revisions
+    FROM (
+        SELECT * FROM belief_revision_audit
+        WHERE memory_id = p_memory_id
+        ORDER BY created_at DESC
+        LIMIT lim
+    ) a;
+
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+               'evidence_memory_id', e.src_id,
+               'relation', e.rel_type,
+               'weight', e.weight,
+               'excerpt', left(m.content, 200)
+           )), '[]'::jsonb)
+    INTO evidence
+    FROM memory_edges e
+    LEFT JOIN memories m ON m.id::text = e.src_id
+    WHERE e.dst_type = 'memory'
+      AND e.dst_id = p_memory_id::text
+      AND e.rel_type IN ('SUPPORTS', 'CONTRADICTS');
+
+    RETURN jsonb_strip_nulls(jsonb_build_object(
+        'memory', jsonb_build_object(
+            'id', mem.id::text,
+            'type', mem.type::text,
+            'content', mem.content,
+            'confidence', NULLIF(mem.metadata->>'confidence', '')::float,
+            'trust_level', mem.trust_level,
+            'protected', COALESCE((mem.metadata->>'protected')::boolean, FALSE)
+        ),
+        'note', CASE WHEN mem.type <> 'semantic'
+                     THEN 'Not a semantic belief: only semantic memories carry revisable confidence; history below may be empty.'
+                     END,
+        'profile', CASE WHEN mem.type = 'semantic'
+                        THEN get_memory_truth_profile(p_memory_id) END,
+        'revisions', revisions,
+        'evidence', evidence,
+        'contradicting_sources', COALESCE(mem.metadata->'contradicting_sources', '[]'::jsonb)
+    ));
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- The agent's own settings (#45). Defense in depth: a data-driven prefix
+-- allowlist (inspection.config_prefixes), hard exclusions for the keys that
+-- hold or can hold literal secrets ('tools', oauth.*, token.*) regardless of
+-- allowlist, and name-based value redaction. NOTE: this redaction set is
+-- deliberately broader than config-import's sensitive-key filter, which
+-- misses 'oauth'.
+CREATE OR REPLACE FUNCTION inspect_agent_config(
+    p_prefix TEXT DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+    allowed TEXT[];
+    result JSONB;
+BEGIN
+    SELECT COALESCE(array_agg(value), ARRAY[]::TEXT[])
+    INTO allowed
+    FROM jsonb_array_elements_text(
+        COALESCE(get_config('inspection.config_prefixes'), '[]'::jsonb)
+    ) AS t(value);
+
+    SELECT COALESCE(jsonb_object_agg(c.key,
+               CASE WHEN lower(c.key) ~ '(password|secret|token|api_key|credential|key_env)'
+                    THEN '"[redacted]"'::jsonb
+                    ELSE c.value
+               END ORDER BY c.key), '{}'::jsonb)
+    INTO result
+    FROM config c
+    WHERE c.key LIKE ANY (SELECT p || '%' FROM unnest(allowed) AS p)
+      AND (p_prefix IS NULL OR c.key LIKE p_prefix || '%')
+      -- Hard exclusions: these hold (or may hold) literal secret values.
+      AND c.key <> 'tools'
+      AND c.key NOT LIKE 'oauth.%'
+      AND c.key NOT LIKE 'token.%';
+
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- The verbatim action log (#46): what the agent actually did, failures
+-- included — the ground truth its selective memories summarize. Metadata
+-- only; the stored output blobs (up to ~10KB each) never leave the table.
+-- Known v1 limitation: approval-denied calls bypass the audit hook (they
+-- never reach registry.execute) and appear only in agent_turns runtime state.
+CREATE OR REPLACE FUNCTION get_recent_actions(
+    p_hours INT DEFAULT 24,
+    p_limit INT DEFAULT 30,
+    p_context TEXT DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+    hours INT := LEAST(GREATEST(COALESCE(p_hours, 24), 1), 168);
+    lim INT := LEAST(GREATEST(COALESCE(p_limit, 30), 1), 100);
+    actions JSONB;
+    summary JSONB;
+BEGIN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+               'tool', t.tool_name,
+               'context', t.tool_context,
+               'success', t.success,
+               'error', t.error,
+               'error_type', t.error_type,
+               'energy_spent', t.energy_spent,
+               'duration_seconds', round(COALESCE(t.duration_seconds, 0)::numeric, 2),
+               'at', t.created_at
+           ) ORDER BY t.created_at DESC), '[]'::jsonb)
+    INTO actions
+    FROM (
+        SELECT * FROM tool_executions
+        WHERE created_at >= CURRENT_TIMESTAMP - make_interval(hours => hours)
+          AND (p_context IS NULL OR tool_context = p_context)
+        ORDER BY created_at DESC
+        LIMIT lim
+    ) t;
+
+    SELECT jsonb_build_object(
+               'total', count(*),
+               'failures', count(*) FILTER (WHERE NOT success),
+               'energy_total', COALESCE(sum(energy_spent), 0),
+               'window_hours', hours,
+               'truncated_to', lim
+           )
+    INTO summary
+    FROM tool_executions
+    WHERE created_at >= CURRENT_TIMESTAMP - make_interval(hours => hours)
+      AND (p_context IS NULL OR tool_context = p_context);
+
+    RETURN jsonb_build_object('actions', actions, 'summary', summary);
+END;
+$$ LANGUAGE plpgsql STABLE;

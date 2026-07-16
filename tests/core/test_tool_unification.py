@@ -784,3 +784,46 @@ class TestChannelPoolPassing:
 
         source = inspect.getsource(stream_channel_message)
         assert "pool=pool" in source
+
+
+class TestToolEnergyCostsBlock:
+    async def test_heartbeat_prompt_derives_costs_from_toolspecs(self, db_pool):
+        from core.tools import create_default_registry
+        from services.agent import build_system_prompt
+
+        registry = create_default_registry(db_pool)
+        prompt = await build_system_prompt(
+            "heartbeat",
+            registry,
+            None,
+            allowed_tool_names={"recall", "remember", "slow_ingest"},
+        )
+        assert "## Tool Energy Costs" in prompt
+        recall_cost = registry.get_spec("recall").energy_cost
+        assert f"**{recall_cost}**: recall" in prompt
+        # No hardcoded ranges left in the base prompt.
+        assert "(0-2 energy)" not in prompt
+        # The footer contract is explained.
+        assert "[energy: spent/budget spent]" in prompt
+
+    async def test_chat_prompt_has_no_costs_block(self, db_pool):
+        from core.tools import create_default_registry
+        from services.agent import build_system_prompt
+
+        registry = create_default_registry(db_pool)
+        prompt = await build_system_prompt(
+            "chat",
+            registry,
+            None,
+            allowed_tool_names={"recall", "remember"},
+        )
+        assert "## Tool Energy Costs" not in prompt
+
+    async def test_unknown_tool_names_are_skipped(self, db_pool):
+        from core.tools import create_default_registry
+        from services.agent import _format_tool_costs
+
+        registry = create_default_registry(db_pool)
+        block = _format_tool_costs(registry, {"mcp_github_create_issue", "recall"})
+        assert "recall" in block
+        assert "mcp_github_create_issue" not in block

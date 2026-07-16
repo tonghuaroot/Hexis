@@ -108,3 +108,16 @@ class TestProvenanceTooling:
         assert spec.parameters["required"] == ["memory_id", "stance", "source"]
         assert spec.is_read_only is False
         assert "prior" in spec.description
+
+
+class TestBeliefHistoryTool:
+    def test_belief_history_handler_registered(self):
+        from core.tools.memory import BeliefHistoryHandler, create_memory_tools
+
+        names = [handler.spec.name for handler in create_memory_tools()]
+        assert "belief_history" in names
+        spec = BeliefHistoryHandler().spec
+        assert spec.is_read_only is True
+        assert spec.energy_cost == 0
+        assert spec.parameters["required"] == ["memory_id"]
+        assert "why" in spec.description.lower()

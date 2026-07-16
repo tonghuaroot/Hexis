@@ -82,6 +82,7 @@ SELECT set_config('agent.name', '"MyAgent"'::jsonb);
 | `guardrails.action_claims.enabled` | bool | Detect unsupported action claims in final text and append a visible `[Correction]` (default `true`) |
 | `guardrails.action_claims.llm_verifier_enabled` | bool | Confirm/extend heuristic findings with an LLM pass (default `false`) |
 | `inspection.retention_hint_enabled` | bool | Append a retention reminder to `inspect_source` read results (default `true`) |
+| `inspection.config_prefixes` | array | Config key prefixes the agent may read via `inspect_config` (secret-named values redacted; `tools`/`oauth.*`/`token.*` always excluded) |
 
 ## Belief Revision
 

@@ -65,12 +65,9 @@ Between checks and outreach, you can do useful background work:
 
 ## Energy Tips
 
-- recall, remember, reflect are cheap (0-2 energy)
-- web_search, web_fetch cost more (2-3 energy)
-- manage_goals, manage_backlog are moderate (1-3 energy)
-- Shell commands, file operations cost more (2-5 energy)
-- Reaching out (messaging, email) is expensive (5-7 energy)
-- If energy is low, prioritize cheap introspective actions or checkpoint and rest
+- Exact costs for this heartbeat's tools are listed in the **Tool Energy Costs** section below — introspection is cheap, outward-facing actions are expensive.
+- Every tool result ends with `[energy: spent/budget spent]` — check it before committing to expensive actions.
+- If energy is low, prioritize cheap introspective actions or checkpoint and rest.
 
 ## Guidelines
 

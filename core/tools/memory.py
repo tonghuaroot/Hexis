@@ -517,6 +517,58 @@ class AddEvidenceHandler(ToolHandler):
         )
 
 
+class BeliefHistoryHandler(ToolHandler):
+    """Explain why a belief is held: revision history, evidence, sources."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="belief_history",
+            description=(
+                "Explain why you believe something: given a semantic memory's id "
+                "(from recall), returns its current confidence and trust, its truth "
+                "profile (sources, reinforcement, worldview alignment), the full "
+                "audited revision history (what evidence moved confidence, when, "
+                "and by how much), linked supporting/contradicting evidence, and "
+                "any contradicting sources. Use this when asked why you believe "
+                "something or what changed your mind."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "UUID of the memory to explain (from recall).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20,
+                        "description": "Maximum revision entries to return (newest first).",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        db_result = await _try_db_memory_tool("belief_history", arguments, context)
+        if db_result is not None:
+            return db_result
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
+
+
 class SenseMemoryAvailabilityHandler(ToolHandler):
     """Quick feeling-of-knowing check before full recall."""
 
@@ -1307,6 +1359,7 @@ def create_memory_tools() -> list[ToolHandler]:
         SearchHistoryHandler(),
         RememberHandler(),
         AddEvidenceHandler(),
+        BeliefHistoryHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
         ExploreSubgraphHandler(),

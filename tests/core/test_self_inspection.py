@@ -112,3 +112,32 @@ async def test_retention_hint_config_gate(db_pool):
             await conn.execute(
                 "UPDATE config SET value = 'true'::jsonb WHERE key = 'inspection.retention_hint_enabled'"
             )
+
+
+async def test_self_state_mirror_tools_registered(db_pool):
+    """inspect_config and review_recent_actions are read-only, free, and live (#45/#46)."""
+    from core.tools.self_inspection import (
+        InspectConfigHandler,
+        ReviewRecentActionsHandler,
+        create_self_inspection_tools,
+    )
+
+    names = [h.spec.name for h in create_self_inspection_tools()]
+    assert "inspect_config" in names
+    assert "review_recent_actions" in names
+    for handler_cls in (InspectConfigHandler, ReviewRecentActionsHandler):
+        spec = handler_cls().spec
+        assert spec.is_read_only is True
+        assert spec.energy_cost == 0
+
+    registry = create_default_registry(db_pool)
+    context = ToolExecutionContext(
+        tool_context=ToolContext.CHAT, call_id="mirror-test", registry=registry
+    )
+    config_result = await InspectConfigHandler().execute({"prefix": "belief."}, context)
+    assert config_result.success
+    assert config_result.output["settings"]["belief.revision_enabled"] is True
+
+    actions_result = await ReviewRecentActionsHandler().execute({"hours": 1}, context)
+    assert actions_result.success
+    assert "summary" in actions_result.output

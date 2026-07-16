@@ -444,6 +444,29 @@ async def run_subconscious_appraisal(
 # ---------------------------------------------------------------------------
 
 
+def _format_tool_costs(registry: "ToolRegistry", allowed_tool_names: set[str]) -> str:
+    """Compact per-cost grouping of the turn's allowed tools, from ToolSpec
+    energy costs. Names with no registered spec (e.g. MCP tools before skill
+    activation) are skipped."""
+    by_cost: dict[int, list[str]] = {}
+    for name in sorted(allowed_tool_names):
+        spec = registry.get_spec(name)
+        if spec is None:
+            continue
+        by_cost.setdefault(spec.energy_cost, []).append(name)
+    if not by_cost:
+        return ""
+    lines = ["## Tool Energy Costs", ""]
+    for cost in sorted(by_cost):
+        lines.append(f"- **{cost}**: {', '.join(by_cost[cost])}")
+    lines.append("")
+    lines.append(
+        "Each tool result ends with `[energy: spent/budget spent]` — check it "
+        "before expensive actions; when the budget is exhausted the heartbeat ends."
+    )
+    return "\n".join(lines)
+
+
 async def build_system_prompt(
     mode: Literal["chat", "heartbeat"],
     registry: "ToolRegistry | None",
@@ -454,6 +477,7 @@ async def build_system_prompt(
     is_group: bool = False,
     active_skills: list["SkillSpec"] | None = None,
     available_skills: list["SkillSpec"] | None = None,
+    allowed_tool_names: set[str] | None = None,
 ) -> str:
     """Build the system prompt for either chat or heartbeat mode."""
 
@@ -485,6 +509,13 @@ async def build_system_prompt(
                 available = []
                 logger.debug("Failed to load skill catalog for prompt", exc_info=True)
         prompt += "\n\n" + format_skills_prompt(active_skills or [], available or [])
+
+    # Energy costs, derived from the actual ToolSpecs of this turn's allowed
+    # tools (#44) — never hardcoded prose. Heartbeat only: chat is unbudgeted.
+    if mode == "heartbeat" and registry is not None and allowed_tool_names:
+        costs_block = _format_tool_costs(registry, allowed_tool_names)
+        if costs_block:
+            prompt += "\n\n" + costs_block
 
     # Personhood modules
     personhood_kind = "group" if (mode == "chat" and is_group) else ("conversation" if mode == "chat" else "heartbeat")
@@ -729,6 +760,7 @@ async def run_agent(
         is_group=is_group,
         active_skills=skill_selection.skills,
         available_skills=skill_selection.available,
+        allowed_tool_names=set(skill_selection.allowed_tool_names),
     )
 
     # 5. Build enriched user message
@@ -929,6 +961,7 @@ async def stream_agent(
         is_group=is_group,
         active_skills=skill_selection.skills,
         available_skills=skill_selection.available,
+        allowed_tool_names=set(skill_selection.allowed_tool_names),
     )
 
     # Build enriched user message (signals were rendered by the DB in-scope)

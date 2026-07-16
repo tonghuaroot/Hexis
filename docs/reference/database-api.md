@@ -49,6 +49,14 @@ All creation functions generate embeddings via `get_embedding()` and create grap
 |----------|-------------|
 | `detect_unsupported_action_claims(turn_id, text)` | Flag prose claims of actions with no matching successful tool call in the turn (patterns live in `action_claim_patterns`) |
 
+## Self-State Mirrors
+
+| Function | Description |
+|----------|-------------|
+| `get_belief_history(memory_id, limit)` | The full story of a belief: state, truth profile, audited revisions newest-first, evidence edges, contradicting sources |
+| `inspect_agent_config(prefix)` | Allowlisted, redacted view of the agent's own config (`inspection.config_prefixes`; hard-excludes `tools`, `oauth.*`, `token.*`) |
+| `get_recent_actions(hours, limit, context)` | Windowed verbatim action log from `tool_executions` (metadata only, failures included) |
+
 ## Memory Retrieval
 
 | Function | Description |

@@ -15,7 +15,8 @@ Complete catalog of Hexis tools organized by category.
 
 | Category | Factory Function | Tools |
 |----------|-----------------|-------|
-| Memory | `create_memory_tools()` | recall, search_history, remember, add_evidence, sense_memory_availability, explore_concept, get_procedures, get_strategies, queue_user_message, + type-specific creators |
+| Memory | `create_memory_tools()` | recall, search_history, remember, add_evidence, belief_history, sense_memory_availability, explore_concept, get_procedures, get_strategies, queue_user_message, + type-specific creators |
+| Self-Inspection | `create_self_inspection_tools()` | inspect_source, inspect_database_schema, inspect_config, review_recent_actions |
 | Web | `create_web_tools()` | web_search, web_fetch, web_summarize |
 | Filesystem | `create_filesystem_tools()` | read_file, write_file, edit_file, glob, grep, list_directory |
 | Shell | `create_shell_tools()` | shell, safe_shell, run_script |
@@ -43,7 +44,7 @@ Complete catalog of Hexis tools organized by category.
 
 | Cost | Tools |
 |------|-------|
-| **0** | search_history, sense_memory_availability, queue_user_message, get_contact, list_council_personas, manage_sessions (list/get) |
+| **0** | search_history, sense_memory_availability, belief_history, inspect_config, review_recent_actions, queue_user_message, get_contact, list_council_personas, manage_sessions (list/get) |
 | **1** | recall, remember, add_evidence, explore_concept, get_procedures, get_strategies, read_file, glob, grep, list_directory, manage_goals, manage_backlog, manage_schedule, search_contacts, query_usage, hubspot_*, youtube_*, humanize_text, backup_retention, config_export |
 | **2** | web_search, web_fetch, calendar_events, email_list, email_read, email_search, fast_ingest, write_file, edit_file, safe_shell, todoist_create, todoist_complete, asana_create, twitter_search, brave_search, fathom_transcripts, merge_contacts, workflow, post_process_output, config_import |
 | **3** | shell, run_script, code_execution, calendar_create, calendar_update, calendar_delete, hybrid_ingest, url_ingest, generate_image, firecrawl_scrape, ingest_contacts_*, database_backup, aggregate_signals |
@@ -69,6 +70,17 @@ Complete catalog of Hexis tools organized by category.
   manifest-bound tools.
 - `inspect_source` read results include a retention reminder (inspection is
   in-context only; nothing is remembered without an explicit write).
+- `belief_history` explains why a belief is held: current confidence/trust,
+  truth profile, the audited revision history, evidence links, and
+  contradicting sources — one call answers "what changed my mind?".
+- `inspect_config` reads the agent's own settings (allowlisted prefixes via
+  `inspection.config_prefixes`; `tools`/`oauth.*`/`token.*` always excluded;
+  secret-named values redacted).
+- `review_recent_actions` is the verbatim tool audit log (successes and
+  failures with energy/timing; never the stored output blobs).
+- In energy-budgeted turns, every tool result ends with an
+  `[energy: spent/budget spent]` footer, and the heartbeat system prompt
+  carries a Tool Energy Costs table derived from the live ToolSpec costs.
 
 ## Context Permissions
 

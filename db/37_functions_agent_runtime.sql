@@ -169,6 +169,7 @@ DECLARE
     turn agent_turns%ROWTYPE;
     spent INT := COALESCE(NULLIF(p_result->>'energy_spent', '')::int, 0);
     total_spent INT;
+    energy_budget INT;
     call_record JSONB;
     runtime JSONB;
 BEGIN
@@ -177,6 +178,7 @@ BEGIN
         RAISE EXCEPTION 'agent turn not found: %', p_turn_id;
     END IF;
     total_spent := COALESCE(NULLIF(turn.runtime_state->>'energy_spent', '')::int, 0) + spent;
+    energy_budget := NULLIF(turn.runtime_state->>'energy_budget', '')::int;
     call_record := jsonb_build_object(
         'id', p_tool_call_id,
         'name', p_result->>'tool_name',
@@ -192,7 +194,13 @@ BEGIN
     SET messages = COALESCE(messages, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
             'role', 'tool',
             'tool_call_id', p_tool_call_id,
+            -- Budgeted turns see their remaining energy on every result (#44):
+            -- the budget is a constraint the model must reason under, so it
+            -- must be visible, not just enforced.
             'content', COALESCE(p_result->>'model_output', p_result->>'display_output', p_result->>'error', '')
+                || CASE WHEN energy_budget IS NOT NULL
+                        THEN E'\n\n[energy: ' || total_spent || '/' || energy_budget || ' spent]'
+                        ELSE '' END
         )),
         runtime_state = runtime,
         updated_at = CURRENT_TIMESTAMP
