@@ -56,7 +56,7 @@ graph TD
 
 2. **Episodic Memory** -- events with temporal context, actions, results, and emotional valence. Forms the agent's autobiographical timeline.
 
-3. **Semantic Memory** -- facts with confidence scores, source tracking, and contradiction management. The agent's knowledge base.
+3. **Semantic Memory** -- facts with confidence scores, structured source provenance, and evidence-based belief revision. New evidence moves a belief's confidence through a calibrated, audited policy (`add_evidence` / `revise_memory_confidence`): independent corroboration closes a fraction of the remaining doubt, contradiction erodes it symmetrically, and known sources never double-count. Every change is explainable from `belief_revision_audit`. The agent's knowledge base.
 
 4. **Procedural Memory** -- step-by-step procedures with success rate tracking. How the agent knows how to do things.
 
@@ -77,7 +77,9 @@ and consolidated memories. It provides a free lexical fallback for exact names
 and phrases even before a turn has an embedding or while an embedding provider
 is unavailable.
 
-**Memory decay** reduces importance over time with importance-weighted persistence. Permanent memories (from important ingestion) are exempt.
+**Memory decay** reduces importance over time with importance-weighted persistence. Permanent memories (from important ingestion) are exempt, as are **protected memories** (`metadata.protected`) — notably the origin memories seeded at consent, whose trust is pinned and which contradicting evidence can question but never silently rewrite.
+
+**Memory formation is layered**: explicit writes (`remember`), document ingestion, and the **conscious-episode extraction** sweep — a maintenance job that reviews recent chat turns and heartbeat episodes and selectively promotes salient facts into durable memory (an importance floor gates the LLM pass; routine content yields nothing; near-duplicates corroborate existing beliefs instead of piling up).
 
 ### Retrieval Model
 
@@ -97,7 +99,7 @@ Three performance tiers:
 
 ### Worldview Integration
 
-Beliefs (stored as worldview memories) filter and weight other memories. When new information contradicts existing beliefs, `CONTRADICTS` graph edges are created and the coherence drive is nudged upward to surface the tension.
+Beliefs (stored as worldview memories) filter and weight other memories. When new information contradicts existing beliefs, `CONTRADICTS` graph edges are created and the coherence drive is nudged upward to surface the tension. For semantic beliefs, contradiction also revises confidence through the audited belief-revision policy — except protected memories, where the contradiction is flagged for review but never applied.
 
 ## Key Design Decisions
 
@@ -111,6 +113,9 @@ Beliefs (stored as worldview memories) filter and weight other memories. When ne
 - Tables: `db/*_tables_memory.sql`
 - Functions: `db/*_functions_memory.sql`
 - Neighborhoods: `db/*_functions_maintenance.sql`
+- Belief revision: `db/59_belief_revision.sql` (policy + `belief_revision_audit`)
+- Origin memories: `db/60_origin_memories.sql`
+- Conscious-episode extraction: `db/61_functions_conscious_extraction.sql`, `services/extraction.py`
 - Python client: `core/cognitive_memory_api.py`
 
 ## Related

@@ -25,7 +25,7 @@ The chat loop automatically:
 
 1. **Enriches your prompt** with relevant memories from the agent's brain (RAG-style)
 2. **Gives the agent tools** via function calling -- memory operations, web search, file access, and more
-3. **Forms new memories** from the conversation (the agent remembers what you discuss)
+3. **Forms new memories** from the conversation -- explicitly via the `remember` tool during the turn, and selectively afterward: a background sweep reviews recent turns and promotes salient facts (identity, relationships, commitments, preferences) into durable memory
 
 ## Chat Options
 
@@ -55,8 +55,9 @@ hexis chat -q
 During chat, you may see:
 
 - **Memory recall indicators** -- shows which memories were retrieved for context
-- **Tool calls** -- shows when the agent uses tools (recall, remember, web_search, etc.)
+- **Tool calls** -- shows when the agent uses tools (recall, remember, add_evidence, web_search, etc.)
 - **Memory formation** -- indicates new memories being created from the conversation
+- **`[Correction]` notes** -- if the agent claimed an action (stored, sent, scheduled) that no tool call actually performed, a correction is appended automatically
 
 ## Verify Memories Were Created
 

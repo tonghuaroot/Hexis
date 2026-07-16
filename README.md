@@ -15,6 +15,9 @@ This is both an engineering project and a philosophical experiment. For the phil
 ## What It Does
 
 - **Multi-layered memory** -- Episodic, semantic, procedural, strategic, and working memory with vector similarity search and graph relationships (Apache AGE)
+- **Evidence-based beliefs** -- Semantic memories carry source provenance and confidence that revises as corroborating or contradicting evidence accrues, with every change audited; the agent can say how much a document moved its confidence and why
+- **Conscious-episode memory formation** -- A subconscious sweep selectively turns salient conversation turns and heartbeat episodes into durable memories, so the agent remembers what mattered without being told to
+- **Truthful action language** -- Claims like "I've stored that" are checked against the turn's actual tool calls; unsupported claims get a visible correction
 - **Autonomous heartbeat** -- The agent wakes on its own, reviews goals, reflects on experience, and reaches out when it has something to say
 - **Energy-budgeted actions** -- Every action has a cost; autonomy is intentional, not unbounded
 - **Identity and worldview** -- Persistent values, beliefs with confidence scores, boundaries, and emotional state
@@ -22,7 +25,7 @@ This is both an engineering project and a philosophical experiment. For the phil
 - **80+ configurable tools** -- Memory, web, filesystem, shell, calendar, email, messaging, browser, code execution, ingestion, and 30+ external integrations
 - **Messaging channels** -- Discord, Telegram, Slack, Signal, WhatsApp, iMessage, Matrix
 - **11 preset character cards** -- chara_card_v2 format with portraits, or bring your own
-- **Skills marketplace** -- 12 built-in skills with a declarative SKILL.md format for community extensions
+- **Skills as the capability catalog** -- 17 built-in skills in a declarative SKILL.md format; skills can bind MCP servers (lazily connected on activation), and the agent answers "can I do X?" from the catalog with the exact setup step when something is one flag away
 - **Consent, boundaries, and termination** -- The agent can refuse requests, and can choose to end its own existence
 
 ## Quick Start

@@ -65,7 +65,7 @@ Streaming chat via SSE. The primary conversation endpoint.
 | `done` | `{"assistant": "full_text"}` | Completion signal |
 | `error` | `{"message": "string"}` | Error occurred |
 
-**Log kinds**: `tool_call`, `tool_result`, `memory_recall`, `memory_write`
+**Log kinds**: `tool_call`, `tool_result`, `memory_recall`, `memory_write`, `claim_flagged` (consistency check: the reply claimed an action with no matching successful tool call; a visible `[Correction]` is appended to the token stream)
 
 ### GET /v1/models
 

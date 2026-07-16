@@ -80,7 +80,8 @@ After `hexis init` completes:
 2. An embedding model is available (Ollama or configured service)
 3. The agent has identity, personality (Big Five traits), values, and worldview stored as memories
 4. A consent certificate is recorded
-5. `agent.is_configured` is set to `true`, unlocking heartbeat and chat
+5. The agent's origin story (curated claims from its founding documents) is seeded as protected, recallable memories with document provenance
+6. `agent.is_configured` is set to `true`, unlocking heartbeat and chat
 
 ## Verify
 

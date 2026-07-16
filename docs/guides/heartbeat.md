@@ -30,7 +30,7 @@ The heartbeat follows an OODA loop:
 3. **Orient** -- Review goals, gather context (memories, clusters, identity, worldview)
 4. **Decide** -- LLM call with action budget and context
 5. **Act** -- Execute chosen actions within energy budget
-6. **Record** -- Store heartbeat as episodic memory
+6. **Record** -- Store heartbeat as episodic memory; the turn also mirrors into `subconscious_units` for the conscious-episode extraction sweep, and its final text passes the action-claim guardrail (unsupported "I did X" claims get a visible `[Correction]`)
 7. **Wait** -- Sleep until next heartbeat
 
 ### Energy Budget

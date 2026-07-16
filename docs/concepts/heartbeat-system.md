@@ -33,7 +33,7 @@ Without a heartbeat, an AI agent is purely reactive -- it only does things when 
 3. **Orient** -- Review active goals, gather context (memories, clusters, identity, worldview, emotional state)
 4. **Decide** -- LLM call with full context and action budget
 5. **Act** -- Execute chosen actions within energy budget
-6. **Record** -- Store heartbeat as episodic memory
+6. **Record** -- Store heartbeat as episodic memory; the finished turn also mirrors into the conscious-episode substrate (`subconscious_units`), where the maintenance worker's extraction sweep can selectively promote salient facts to durable memory
 7. **Wait** -- Sleep until next heartbeat
 
 ### Energy as Constraint

@@ -32,7 +32,12 @@ Ingestion is tiered and emotionally aware:
 2. **Appraises** the content (importance, relevance, emotional valence)
 3. **Extracts** semantic knowledge based on the chosen mode
 
-Content is deduplicated by content hash -- re-ingesting the same content is automatically skipped.
+Content is deduplicated at two levels. Whole documents are receipt-tracked by
+content hash — re-ingesting an identical document is skipped. Individual
+extracted facts route through the memory dedup policy: a fact that near-matches
+an existing memory **corroborates** it (the document is merged as a source, the
+belief's confidence rises through the audited revision policy, and a `SUPPORTS`
+edge links the reading encounter to the belief) instead of being re-stored.
 
 ## Standard Modes
 
@@ -124,7 +129,7 @@ hexis ingest process --content-hash <hash>
 
 **"I ingested a big folder and nothing happened"** -- `auto` mode may have chosen `archive` for large files. Run `hexis ingest status --pending` to check, then `hexis ingest process --all-archived`.
 
-**Duplicate content skipped** -- Ingestion receipts are content-hash based. If you need to re-ingest, either change the content or process the archived items.
+**Duplicate content skipped** -- Ingestion receipts are content-hash based. If you need to re-ingest, either change the content or process the archived items. Note that near-duplicate *facts* are not lost — they corroborate the matched memory (source merged, confidence revised, audited in `belief_revision_audit`).
 
 ## Related
 

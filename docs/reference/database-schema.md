@@ -26,9 +26,38 @@ Primary long-term memory store. All durable knowledge, boundaries, goals, worldv
 | `importance` | FLOAT | 0.0-1.0 |
 | `trust_level` | FLOAT | 0.0-1.0 |
 | `status` | TEXT | active, archived, decayed |
-| `metadata` | JSONB | Type-specific metadata |
+| `metadata` | JSONB | Type-specific metadata; `metadata.protected=true` pins trust and exempts the memory from retention fade (contradicting evidence is flagged, never applied) |
 | `created_at` | TIMESTAMPTZ | Creation time |
 | `last_accessed_at` | TIMESTAMPTZ | Last retrieval |
+
+### belief_revision_audit
+
+Immutable audit of every confidence revision (policy `residual_v1`).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `audit_id` | UUID | Primary key |
+| `memory_id` | UUID | Revised memory (no FK: audits outlive deletions) |
+| `stance` | TEXT | supports, contradicts |
+| `evidence` | JSONB | Normalized evidence source |
+| `prior_confidence` / `posterior_confidence` | FLOAT | Before/after |
+| `prior_trust` / `posterior_trust` | FLOAT | Before/after |
+| `applied` | BOOLEAN | Whether confidence moved |
+| `reason` | TEXT | applied, duplicate_source, protected, disabled, not_semantic |
+| `record` | JSONB | Full revision record |
+| `record_digest_v1` | TEXT | SHA-256 of the record |
+
+### action_claim_patterns
+
+Data-driven patterns for the action-claim guardrail (tunable live).
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `claim_kind` | TEXT | memory_write, goal_backlog, scheduled, external_send, source_inspection |
+| `pattern` | TEXT | POSIX regex, evaluated per sentence |
+| `satisfied_by_tools` | TEXT[] | LIKE patterns over tool names (e.g. `mcp\_%`) |
+| `require_arg_key` | TEXT | Argument that must be echoed in the sentence (e.g. `path`) |
+| `enabled` | BOOLEAN | Pattern active |
 
 ### working_memory (UNLOGGED)
 

@@ -62,14 +62,27 @@ Events with temporal context, actions, results, and emotional valence.
 
 ## Semantic Memory
 
-Facts with confidence scores, source tracking, and contradiction management.
+Facts with confidence scores, source tracking, and evidence-based belief revision.
 
 **Key metadata fields**:
-- `confidence` -- 0.0-1.0 confidence in the fact
-- `sources` -- array of source references
-- `contradictions` -- tracked contradicting memories
+- `confidence` -- 0.0-1.0 confidence in the fact, revised as evidence accrues
+- `source_references` -- array of normalized sources (`{kind, ref, label, author, trust, content_hash}`)
+- `contradicting_sources` -- contradicting evidence, kept separate so it never inflates support
+- `protected` -- when `true`, trust is pinned, retention fade is skipped, and contradicting evidence is flagged (CONTRADICTS edge + audit) rather than applied
 
-**Graph**: `SUPPORTS` and `CONTRADICTS` edges link related facts.
+**Belief revision**: new evidence moves confidence through the DB-owned
+`residual_v1` policy (`revise_memory_confidence` / the `add_evidence` tool) —
+independent supporting sources close a fraction of the *remaining* doubt,
+contradictions erode symmetrically with a floor, and known sources never
+double-count. Every change is recorded in `belief_revision_audit` with prior
+and posterior values. `trust_level` is *computed* from confidence plus the
+source set (`sync_memory_trust`), not supplied directly.
+
+**Origin memories**: a protected sub-class — curated origin-story claims
+seeded at consent with `origin_document` provenance, so the agent can recall
+and cite where it came from.
+
+**Graph**: `SUPPORTS` and `CONTRADICTS` edges link evidence to beliefs.
 
 ## Procedural Memory
 
@@ -116,8 +129,18 @@ SELECT * FROM search_working_memory('current context');
 ## Creation Examples
 
 ```sql
--- Semantic memory
+-- Semantic memory (minimal; category/sources/importance/attribution/trust default)
 SELECT create_semantic_memory('Python requires 3.10+', 0.95);
+
+-- Semantic memory with provenance (trust is computed from the sources)
+SELECT create_semantic_memory(
+    'Eric prefers concise answers',
+    0.7,
+    ARRAY['preference'],
+    NULL,
+    '[{"kind": "user_testimony", "ref": "conversation:2026-07-16", "trust": 0.75}]'::jsonb,
+    0.6
+);
 
 -- Episodic memory with metadata
 SELECT create_episodic_memory(
@@ -133,12 +156,17 @@ SELECT add_to_working_memory('Currently discussing deployment options', 'convers
 
 ## Lifecycle
 
-1. **Creation** -- memory inserted with embedding
+1. **Creation** -- memory inserted with embedding: explicit (`remember`),
+   ingested (documents), or extracted (the maintenance worker's
+   conscious-episode sweep turns salient chat turns and heartbeat episodes
+   into durable memories)
 2. **Activation** -- accessed via recall, activation tracked
-3. **Consolidation** -- maintenance worker links related memories
-4. **Decay** -- importance decreases over time (unless permanent)
-5. **Archival** -- low-importance memories archived
-6. **Removal** -- archived memories eventually pruned
+3. **Revision** -- semantic confidence moves as corroborating/contradicting
+   evidence accrues (audited in `belief_revision_audit`)
+4. **Consolidation** -- maintenance worker links related memories
+5. **Decay** -- importance decreases over time (unless permanent or protected)
+6. **Archival** -- low-importance memories archived
+7. **Removal** -- archived memories eventually pruned
 
 ## Related
 

@@ -90,7 +90,13 @@ hexis tools add-mcp my-tools python --args "-m" "my_mcp_server"
 hexis tools remove-mcp fs-server
 ```
 
-MCP servers are started automatically by the heartbeat worker.
+MCP servers are **skill-gated** (config `mcp.skill_gated`, default `true`):
+they connect lazily when the agent activates a skill bound to them, not at
+worker startup. A configured server that no skill manifest binds appears in
+the catalog as an implicit `mcp-<server>` skill exposing its tools. Set
+`mcp.skill_gated=false` to restore legacy eager startup connection;
+`mcp.expose_unbound=true` exposes `mcp_*` schemas to turns that skip skill
+routing. See [MCP Integration](mcp-integration.md).
 
 ## Storage
 

@@ -101,6 +101,11 @@ The maintenance worker handles subconscious upkeep:
 - **Neighborhood recomputation** -- refreshes stale precomputed neighbors
 - **Embedding cache pruning** -- cleans old cached embeddings
 - **Outbox/inbox bridging** -- publishes outbox messages to RabbitMQ, ingests inbox messages
+- **Conscious-episode extraction** -- sweeps recent chat turns and heartbeat episodes (`subconscious_units`) and selectively promotes salient facts into durable memories; one LLM call per batch, importance floor `extraction.min_importance`, duplicates corroborate existing beliefs. Gated by `extraction.enabled` (default on)
+- **Origin-memory seeding** -- idempotently keeps the protected origin-story memories seeded (`origin_memories.enabled`, default on); a flipped flag takes effect on the next tick
+
+Note: the workers no longer eagerly connect MCP servers at startup — MCP is
+skill-gated by default (`mcp.skill_gated`) and connects on skill activation.
 
 ### Pausing
 

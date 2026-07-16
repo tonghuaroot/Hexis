@@ -43,6 +43,25 @@ Or directly via SQL:
 SELECT create_semantic_memory('User prefers dark mode', 0.9);
 ```
 
+The agent-facing `remember` tool also accepts optional provenance — a
+`sources` array (`{kind, ref, label, author, trust}`) and a `confidence`
+score. Semantic memories record every source and derive their trust from
+them, which is what makes a belief revisable later.
+
+### Add Evidence (Revise a Belief)
+
+When new information bears on a belief that already exists, don't create a
+duplicate — attach evidence. The `add_evidence` tool takes a `memory_id`
+(from recall), a stance (`supports` or `contradicts`), and a source, then
+revises the belief's confidence through the audited revision policy and
+returns the prior and posterior values ("confidence 0.50 → 0.66"). Duplicate
+sources are merged without moving confidence, and every change is recorded in
+`belief_revision_audit`:
+
+```sql
+SELECT * FROM belief_revision_audit WHERE memory_id = '<id>' ORDER BY created_at;
+```
+
 ### Recall (Retrieve)
 
 Recall uses vector similarity search augmented with precomputed neighborhoods and temporal context:
@@ -59,6 +78,12 @@ async with CognitiveMemory.connect(DSN) as mem:
 ```sql
 SELECT * FROM fast_recall('UI preferences', 5);
 ```
+
+Recall results include each memory's `trust` and `confidence`, so the agent
+can weigh what it believes. The agent-facing tool also accepts `min_score` (a
+relevance floor — drop weak matches instead of padding to the count), and its
+default/maximum counts are config-driven budgets (`memory.recall_default_limit`,
+`memory.recall_max_limit`).
 
 ### Search History (Exact Cross-Session Retrieval)
 

@@ -17,12 +17,37 @@ The application layer should treat these SQL functions as its public contract. A
 |----------|-------------|
 | `create_memory(type, content, importance, trust_level, metadata)` | Create any memory type |
 | `create_episodic_memory(content, importance, trust_level, metadata)` | Create episodic memory |
-| `create_semantic_memory(content, confidence)` | Create semantic memory |
+| `create_semantic_memory(content, confidence, category[], related_concepts[], source_references, importance, source_attribution, trust_level)` | Create semantic memory; trust is computed from confidence + sources when not pinned |
 | `create_procedural_memory(content, steps, prerequisites)` | Create procedural memory |
 | `create_strategic_memory(content, pattern, evidence)` | Create strategic memory |
 | `add_to_working_memory(content, context)` | Add to working memory buffer |
 
 All creation functions generate embeddings via `get_embedding()` and create graph nodes.
+
+## Belief Revision
+
+| Function | Description |
+|----------|-------------|
+| `revise_memory_confidence(memory_id, evidence, stance, context)` | Calibrated confidence update (residual_v1 policy); independence-aware; every call writes a `belief_revision_audit` row |
+| `add_memory_evidence(memory_id, stance, source, note, evidence_memory_id, context)` | Revision + source merge + SUPPORTS/CONTRADICTS edge from an evidence node; returns prior/posterior |
+| `sync_memory_trust(memory_id)` | Recompute semantic trust from confidence + sources; early-returns for `metadata.protected` memories (pinned trust) |
+
+## Origin Memories & Conscious Extraction
+
+| Function | Description |
+|----------|-------------|
+| `origin_memory_claims()` | Curated origin-story claims (from the LetterFromClaude/philosophy prompt modules) |
+| `seed_origin_memories()` | Idempotently seed the claims as protected semantic memories (config-gated) |
+| `record_heartbeat_episode_unit(agent_turns)` | Mirror a finished heartbeat turn into `subconscious_units` |
+| `claim_conscious_extraction_batch(limit)` | Claim pending conscious episodes above the importance floor |
+| `apply_conscious_extraction(unit_ids, extractions)` | Persist extracted facts (route through dedup: duplicates corroborate) |
+| `fail_conscious_extraction(unit_ids, error)` | Retry bookkeeping (3 attempts, then parked) |
+
+## Truthfulness Guardrail
+
+| Function | Description |
+|----------|-------------|
+| `detect_unsupported_action_claims(turn_id, text)` | Flag prose claims of actions with no matching successful tool call in the turn (patterns live in `action_claim_patterns`) |
 
 ## Memory Retrieval
 

@@ -11,6 +11,14 @@ section: guides
 
 Skills are declarative, composable workflows that bundle tool sequences, prompts, and configuration into reusable packages.
 
+Skills are also the agent's **capability catalog**: the model sees skill
+discovery tools plus the tools bound by active skills, and it answers "can I
+do X?" from `list_skills`. Each catalog entry carries a tri-state status —
+`usable`, `needs_setup` (with the exact next step, e.g. "Set
+GITHUB_PERSONAL_ACCESS_TOKEN in the service environment"), or `unavailable` —
+so skills with unmet requirements are listed with what's missing, never
+silently hidden.
+
 ## Quick Start
 
 ```bash
@@ -18,10 +26,11 @@ hexis skills list                    # list installed skills
 hexis skills info daily-briefing     # show skill details
 ```
 
-## Built-in Skills (12)
+## Built-in Skills (17)
 
 | Skill | Category | Description |
 |-------|----------|-------------|
+| `core-memory` | system | Core memory recall/remember workflow (active by default) |
 | `daily-briefing` | productivity | Morning summary of calendar, email, goals, priorities |
 | `meeting-prep` | productivity | Pre-meeting research, attendee context, agenda prep |
 | `email-digest` | communication | Summarize and triage unread email |
@@ -32,6 +41,10 @@ hexis skills info daily-briefing     # show skill details
 | `cost-report` | system | Usage and cost analysis across LLM providers |
 | `knowledge-ingest` | knowledge | Guided knowledge ingestion with mode selection |
 | `self-reflection` | system | Guided self-reflection and worldview review |
+| `self-inspection` | system | Browse own source tree and live schema |
+| `skill-authoring` | system | Author and revise agent-owned skills |
+| `memory-exchange` | system | Export/import memories between agents |
+| `github-issues` | productivity | GitHub issues via a skill-bound MCP server |
 | `image-gen` | creative | Image generation with prompt refinement |
 | `humanizer` | communication | Detect and rewrite AI-patterned text |
 
@@ -54,8 +67,10 @@ name: my-skill
 description: What this skill does
 category: research          # research | productivity | communication | knowledge | analytics | creative | system | other
 contexts: [chat, heartbeat] # where the skill can run
-requires_tools: [web_search, recall]
-requires_config: [TAVILY_API_KEY]
+requires:
+  tools: [web_search, recall]
+  config: [tavily]          # provider names whose credentials must be configured
+bound_tools: [web_search, recall, remember]
 ---
 
 ## Instructions
@@ -71,9 +86,31 @@ Markdown instructions the agent follows when executing this skill.
 | `description` | Yes | One-line description |
 | `category` | Yes | Skill category |
 | `contexts` | Yes | Where it can run: `chat`, `heartbeat`, or both |
-| `requires_tools` | No | Tools the skill needs |
-| `requires_config` | No | Config keys required |
+| `requires.tools` | No | Native tools that must exist for the skill to load (`mcp_*` entries are ignored here — MCP tools exist only after activation) |
+| `requires.config` | No | Provider config required (e.g. `tavily`) |
+| `requires.env` / `requires.bins` | No | Environment variables / binaries the skill needs (drive the `needs_setup` status) |
+| `bound_tools` | No | Tools this skill exposes to the model while active; supports globs like `mcp_github_*` |
+| `mcp` | No | MCP server binding — see below |
 | `provenance` | No | Ownership metadata reserved for managed agent-authored skills |
+
+### Binding an MCP server
+
+A skill can declare an MCP server as its transport. The server connects
+lazily when the skill is activated, and only `bound_tools` become callable:
+
+```yaml
+mcp:
+  server: github
+  command: npx
+  args: ["-y", "@modelcontextprotocol/server-github"]
+  env_requires: [GITHUB_PERSONAL_ACCESS_TOKEN]   # env var NAMES only, never values
+bound_tools: [mcp_github_create_issue, mcp_github_search_issues]
+```
+
+If `command` is omitted, the binding resolves against a server of that name in
+the tools config (`hexis tools add-mcp`). See
+[MCP Integration](mcp-integration.md) for the full model and
+`skills/installed/github-issues/SKILL.md` for the reference implementation.
 
 ## Custom Skills
 
@@ -102,7 +139,9 @@ name: weekly-review
 description: Weekly review of goals, accomplishments, and plans
 category: productivity
 contexts: [chat, heartbeat]
-requires_tools: [recall, manage_goals]
+requires:
+  tools: [recall, manage_goals]
+bound_tools: [recall, manage_goals, remember]
 ---
 
 ## Instructions
