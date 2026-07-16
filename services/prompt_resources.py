@@ -302,27 +302,8 @@ def compose_compact_personhood_prompt(kind: PromptKind) -> str:
         raise ValueError(f"Unknown kind: {kind}") from exc
 
 
-def compose_personhood_prompt(kind: PromptKind) -> str:
-    """
-    Returns a composed personhood prompt addendum for a given context.
-
-    This is intentionally additive: callers should prepend their own task-specific
-    instructions (JSON schemas, tool rules, etc.) and then include this addendum.
-    """
-    lib = load_personhood_library()
-
-    if kind == "heartbeat":
-        keys = ["core_identity", "affective_system", "reflection_protocols"]
-    elif kind == "reflect":
-        keys = ["core_identity", "self_model_maintenance", "value_system", "narrative_identity", "relational_system"]
-    elif kind == "conversation":
-        keys = ["core_identity", "relational_system", "affective_system", "conversational_presence"]
-    elif kind == "ingest":
-        keys = ["core_identity", "affective_system", "value_system"]
-    elif kind == "group":
-        keys = ["core_identity", "conversational_presence"]
-    else:
-        raise ValueError(f"Unknown kind: {kind}")
-
-    existing = [k for k in keys if k in lib.modules]
-    return lib.compose(existing)
+# The full per-kind personhood composition is DB-owned: compose_personhood
+# (db/39) selects the seeded personhood.<slug> modules per kind. The former
+# Python composer was deleted; golden fixtures pin the composed output.
+# parse_personhood_modules stays: scripts/gen_prompt_seed.py uses it to seed
+# the DB modules from services/prompts/personhood.md.

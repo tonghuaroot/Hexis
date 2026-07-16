@@ -441,12 +441,6 @@ class TestSlowIngestPrompt:
         prompt = load_rlm_slow_ingest_prompt()
         assert "conscious reading" in prompt.lower() or "REPL" in prompt
 
-    def test_personhood_ingest_kind(self):
-        from services.prompt_resources import compose_personhood_prompt
-
-        # Should not raise
-        result = compose_personhood_prompt("ingest")
-        assert isinstance(result, str)
 
 
 # ---------------------------------------------------------------------------

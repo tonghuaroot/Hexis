@@ -4,8 +4,6 @@ The DB-owned render_* functions (db/39_functions_prompt_render.sql) are pinned
 by golden fixtures in tests/fixtures/prompt_render/ — the byte-exact output
 the deleted Python formatters used to produce. A failing golden means the
 rendered prompt changed; regenerate deliberately and review the diff.
-Remaining parity tests (chat memory context, personhood) compare against
-Python formatters that still exist pending their own pushdown.
 """
 from __future__ import annotations
 
@@ -14,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from services.prompt_resources import compose_personhood_prompt
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
 
@@ -201,15 +198,15 @@ async def test_subconscious_signals_golden(db_pool, name):
 
 
 # ---------------------------------------------------------------------------
-# Personhood composition: compose_personhood vs compose_personhood_prompt
+# Personhood composition: compose_personhood golden output
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("kind", ["heartbeat", "reflect", "conversation", "ingest", "group"])
-async def test_compose_personhood_parity(db_pool, kind):
-    """The DB composer selects + joins the same personhood sub-modules per kind
-    as services.prompt_resources.compose_personhood_prompt (seeded from
-    personhood.md by scripts/gen_prompt_seed.py)."""
+async def test_compose_personhood_golden(db_pool, kind):
+    """compose_personhood (db/39) selects + joins the seeded personhood
+    sub-modules per kind (seeded from personhood.md by
+    scripts/gen_prompt_seed.py). The Python composer was deleted."""
     async with db_pool.acquire() as conn:
         sql = await conn.fetchval("SELECT compose_personhood($1)", kind)
-    assert sql == compose_personhood_prompt(kind), kind
+    assert sql == _golden(f"personhood_{kind}"), kind

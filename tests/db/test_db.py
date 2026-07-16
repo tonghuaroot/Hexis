@@ -9563,31 +9563,36 @@ async def test_self_model_helpers_roundtrip(db_pool):
         assert any(isinstance(x, dict) and x.get("kind") == "capable_of" and x.get("concept") == concept for x in (sm or []))
 
 
-async def test_prompt_resources_load_and_compose():
-    from services.prompt_resources import load_personhood_library, compose_personhood_prompt
+async def test_prompt_resources_load_and_compose(db_pool):
+    from services.prompt_resources import load_personhood_library
 
+    # The markdown library is the seed SOURCE (scripts/gen_prompt_seed.py).
     lib = load_personhood_library()
     assert isinstance(lib.raw_markdown, str) and len(lib.raw_markdown) > 100
-    # Expect at least core modules to parse.
     assert "core_identity" in lib.modules
 
-    hb = compose_personhood_prompt("heartbeat")
+    # Composition is DB-owned (compose_personhood, db/39).
+    async with db_pool.acquire() as conn:
+        hb = await conn.fetchval("SELECT compose_personhood('heartbeat')")
+        conv = await conn.fetchval("SELECT compose_personhood('conversation')")
     assert "WHO YOU ARE" in hb or "Core Identity" in hb
-
-    conv = compose_personhood_prompt("conversation")
     assert "CONVERSATIONAL PRESENCE" in conv or "Conversational Presence" in conv
 
 
-async def test_worker_heartbeat_system_prompt_includes_personhood_modules():
-    from services.prompt_resources import load_heartbeat_prompt, compose_personhood_prompt
+async def test_worker_heartbeat_system_prompt_includes_personhood_modules(db_pool):
+    from services.prompt_resources import load_heartbeat_prompt
+
+    async with db_pool.acquire() as conn:
+        personhood = await conn.fetchval("SELECT compose_personhood('heartbeat')")
 
     system_prompt = (
         load_heartbeat_prompt().strip()
         + "\n\n"
         + "----- PERSONHOOD MODULES (for grounding; use context fields like self_model/narrative) -----\n\n"
-        + compose_personhood_prompt("heartbeat")
+        + personhood
     )
     assert "PERSONHOOD MODULES" in system_prompt
+    assert len(personhood) > 100
 
 
 async def test_find_connected_concepts_returns_concept(db_pool, ensure_embedding_service):

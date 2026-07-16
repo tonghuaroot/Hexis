@@ -120,9 +120,17 @@ Highest value per unit effort; every item below is drift risk today.
 > cron.py went 810 → 209 lines (croniter helpers + fallback deleted); its
 > tests now pin the SQL semantics directly, including a nine-case
 > next-fire table.
-> Still open in Tranche 1: 1.7 (personhood). Also queued from 1.6 discovery:
-> workflow loop adoption of `apply_workflow_step_result` +
-> `finalize_workflow_execution` (Tranche-D note above).
+> 1.7 done: `compose_personhood_prompt` (the runtime composer duplicating
+> db/39 `compose_personhood`) is deleted; composition is DB-only, pinned by
+> `personhood_*` goldens. `parse_personhood_modules` stays as build-time
+> tooling — `scripts/gen_prompt_seed.py` uses it to seed the DB modules from
+> `services/prompts/personhood.md`, which remains the authoring source.
+>
+> **TRANCHE 1 COMPLETE.** Audit: 579 → 500 (policy_state_machine 150→140,
+> direct_domain_sql 151→130, workflow_or_schedule_logic 123→79,
+> config_branching 92→89, prompt_assembly 63→62). Carried forward:
+> workflow-loop adoption of `apply_workflow_step_result` +
+> `finalize_workflow_execution` (from the 1.6 discovery note above).
 
 | # | Python | SQL twin (exists) | Notes | Effort |
 |---|--------|-------------------|-------|--------|
