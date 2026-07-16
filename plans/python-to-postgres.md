@@ -12,6 +12,14 @@ Chosen defaults:
 - Prefer DB-side HTTP via existing `pgsql-http` for non-streaming LLM/provider calls where feasible.
 - Do not use PL/Python or PLV8 in the first pass; use PL/pgSQL, SQL, `pgsql-http`, `pg_cron`, `pg_jsonschema`, pgvector, and AGE.
 
+> **Status (2026-07-16): Slices 0–6 are complete and this document is now a
+> historical record of that phase. The migration continues in
+> `plans/db_pushdown.md`, which is the authoritative plan for all remaining
+> Python-to-Postgres work (derived from a fresh whole-codebase audit) and
+> carries this document's conventions forward — parity tests before each
+> move, delegation-proving wrapper tests, the tool-thinning priority order,
+> and `scripts/db_brain_audit.py` as the progress metric.**
+
 ## Implementation Status
 
 Last updated: 2026-05-23

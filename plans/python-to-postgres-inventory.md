@@ -1,5 +1,10 @@
 # Python-To-Postgres Migration Inventory
 
+> **Superseded (2026-07-16):** this Slice 0 inventory is retained for
+> history. The current, whole-codebase audit and prioritized work plan live
+> in `plans/db_pushdown.md`. Most rows below were completed by slices 1–6
+> (see `plans/python-to-postgres.md`).
+
 This inventory tracks Python logic that should move into PostgreSQL under the DB-brain migration. The target boundary is aggressive: Postgres owns state, policy, lifecycle, routing, ranking, validation, retries, prompt assembly, and result shaping; Python owns UI, streaming transport, provider SDK calls, filesystem/process/browser I/O, and dumb side-effect execution.
 
 ## Highest-Priority Logic To Move

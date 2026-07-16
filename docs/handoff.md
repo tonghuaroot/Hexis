@@ -1429,7 +1429,16 @@ protected-state behavior, preserve the official-client journeys when changing
 API framing, preserve the no-embedding search contracts, and preserve the
 proposal/approval boundary when changing self-improvement.
 
-Next highest-leverage options, in rough priority order:
+The active workstream (user-directed, 2026-07-16) is **`plans/db_pushdown.md`**
+— the authoritative continuation of `plans/python-to-postgres.md` (slices 0–6
+complete). Goal: Python is event triggers, loops, and I/O only; everything
+else moves into Postgres functions. Start with Tranche 1 (deleting Python
+duplicates of SQL that already exists — no new SQL needed). Progress metric:
+`python scripts/db_brain_audit.py --json`, baseline 579 findings at `df021d6`;
+every tranche must shrink it and promote completed areas to blocking audit
+tests. Take a `hexis backup` before Tranche 2+ (schema migrations).
+
+After that, in rough priority order:
 
 1. Optional interop extension: streamable HTTP MCP transport, driven by a
    specific client requirement rather than added speculatively.

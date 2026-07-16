@@ -1,11 +1,55 @@
 # DB Pushdown Plan — move Python business logic into Postgres
 
+**This is the authoritative continuation of `plans/python-to-postgres.md`**
+(slices 0–6, complete: runtime tables, prompt store, chat/channel/agent-loop
+lifecycle, RecMem/subconscious application, tool catalog/policy/workflow/
+scheduling, and DB-native tool dispatchers). The tranches below are
+effectively its Slice 7+, derived from a fresh whole-codebase audit. The
+Slice 0 inventory (`plans/python-to-postgres-inventory.md`) is superseded by
+this document.
+
 **Goal:** Python should be event triggers, loops, and I/O only (LLM/HTTP calls, file
 parsing, transport, CLI/UI). Everything else — selection, scoring, thresholds, state
 transitions, JSON shaping, multi-query read-modify-write — lives in `db/*.sql`.
 
 **Source:** 7-way parallel audit of core/, services/, apps/, channels/, core/tools/
-(~60k lines of Python) cross-referenced against all 56 `db/*.sql` files (2026-07-16).
+(~60k lines of Python) cross-referenced against all 56 `db/*.sql` files (2026-07-16,
+at the tree that became `e42426e` — line references include the active-persona/
+appraisal work; the digest-standard commit `df021d6` added `db/57`, so new SQL
+files start at `db/58`).
+
+## Progress metric
+
+`scripts/db_brain_audit.py` (built by the prior plan's Slice 0) is the
+measurable definition of done. Baseline at `df021d6` (2026-07-16):
+
+```
+python scripts/db_brain_audit.py --json   # 579 findings
+  direct_domain_sql: 151
+  policy_state_machine: 150
+  workflow_or_schedule_logic: 123
+  config_branching: 92
+  prompt_assembly: 63
+```
+
+Every tranche's completion notes MUST state the new counts. Per the prior
+plan's convention, once an area is migrated its audit rule is promoted from
+advisory to blocking (a test that fails if Python reintroduces moved domain
+logic), so the count can only go down.
+
+## Conventions carried forward from `plans/python-to-postgres.md`
+
+- **Parity tests before each move**: compare old Python output to the new SQL
+  output on representative fixtures, then delete the Python (parity tests
+  become golden-output tests against SQL).
+- **Wrapper tests prove delegation**: remaining Python entrypoints must be
+  shown to call SQL rather than re-implement it.
+- **Each item independently shippable**: migration `db/migrations/NNNN_*.sql`
+  + baseline mirror + tests + hosted CI green per item or small group.
+- **Public Python entrypoints stay stable**; they become thin wrappers.
+- **Tool-thinning priority order**: memory/goals/backlog/contacts/schedule →
+  email/calendar ingestion → channel/messaging → web/search/browser →
+  filesystem/shell/code-execution policy.
 
 **Headline:** the architecture is already mostly right — the agent loop, heartbeat,
 channel turns, tool policy, and prompt rendering all have SQL owners. The debt is
@@ -60,7 +104,7 @@ Highest value per unit effort; every item below is drift risk today.
 | 2.1 | `apply_agent_config(p_config jsonb)` | `core/agent_api.py:254-360` — ~18 sequential `set_config` calls + pause toggles inside a Python txn (~107 lines) | M |
 | 2.2 | `get_agent_status() RETURNS jsonb` | `core/agent_api.py:92-109` — 4 round-trips + Python AND-policy for "configured" | S |
 | 2.3 | `upsert_contact(name,email,source)` + `upsert_contacts_from_attendees(jsonb)` + `enrich_attendees_with_crm(jsonb)` | The worst N+1 in the codebase: contact upsert loop duplicated ×5 (`contacts.py:417-483,512-571`, `email.py:928-1013`, `fathom.py:246-290`, `calendar.py:636-680`) | M |
-| 2.4 | `hmx_content_hash_v1(text)` / `hmx_normalize_v1(text)` (pgcrypto) | `core/digest.py:89-95` + the same regex already inlined 3× in SQL (db/48:464,878) and in Python dry-run dedup. One definition, used by export + import + dedup. Pin UTF-8 byte-parity with a fixture test. | S |
+| 2.4 | ~~`hmx_content_hash_v1(text)` / `hmx_normalize_v1(text)`~~ **SHIPPED** in `db/57_functions_hmx_digest.sql` + migration `0024` (byte-parity proven by `tests/db/test_hmx_digest_sql.py`). **Remaining:** adopt at the 2 inline-normalization sites in `db/48` (`_transient_normalized_content` import/trigger dedup) and the Python dry-run dedup query. `core/digest.py` stays as the portable reference implementation. | S |
 | 2.5 | `spend_energy(p_cost float)` (conditional debit) + `mark_user_contact()` | Inline energy debit / last_user_contact UPDATEs (`channels/conversation.py`, `core/rabbitmq_bridge.py:141`) | S |
 | 2.6 | `boost_memory_confidence(id, boost)`, `find_worldview_by_hint(text, threshold)`, `decay_rate_for_intensity(intensity, permanent)` (config-driven bands) | `services/ingest.py:1533-1548, 2331-2348, 215-222` magic numbers + inline UPDATEs; feeds Tranche 3.1 | S |
 | 2.7 | `mood_label(valence, arousal)` | `core/cli_api.py:717-744` nested threshold ladder; co-locate with `update_mood()` (db/13) | S |
