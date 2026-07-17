@@ -476,6 +476,17 @@ class MaintenanceWorker:
                 if sweep_result.get("processed", 0):
                     logger.info("RecMem sweep step: %s", sweep_result)
 
+            # Scene consolidation (#73): sessions gone quiet become one
+            # episode_create task covering the whole conversation.
+            if bool(await conn.fetchval("SELECT should_run_scene_consolidation()")):
+                scene_result = await conn.fetchval("SELECT enqueue_scene_consolidations()")
+                scene_doc = json.loads(scene_result) if isinstance(scene_result, str) else (scene_result or {})
+                await conn.fetchval(
+                    "SELECT mark_scene_consolidation_run($1::jsonb)", json.dumps(scene_doc)
+                )
+                if scene_doc.get("enqueued"):
+                    logger.info("Scene consolidation: %s", scene_doc)
+
             task_batch_size = int(await conn.fetchval("SELECT COALESCE(get_config_int('memory.recmem_task_batch_size'), 3)") or 3)
             for _ in range(max(task_batch_size, 1)):
                 result = await run_recmem_consolidation_step(conn)

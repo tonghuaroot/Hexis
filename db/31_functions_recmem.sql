@@ -851,6 +851,8 @@ DECLARE
     unit_id UUID;
     source_attr JSONB;
     queue_max INT := COALESCE(get_config_int('memory.recmem_queue_max'), 5000);
+    span_from TIMESTAMPTZ;
+    span_to TIMESTAMPTZ;
 BEGIN
     SELECT * INTO task
     FROM recmem_consolidation_tasks
@@ -860,6 +862,13 @@ BEGIN
     IF NOT FOUND THEN
         RETURN jsonb_build_object('task_id', p_task_id, 'status', 'missing');
     END IF;
+
+    -- Scene metadata (#73): the memory carries when the experience happened
+    -- (the units' time span), not just when consolidation ran — timeline
+    -- queries and retention grouping key off lived time.
+    SELECT min(turn_at), max(turn_at) INTO span_from, span_to
+    FROM subconscious_units
+    WHERE id = ANY(task.source_unit_ids);
 
     source_attr := jsonb_build_object(
         'kind', 'recmem',
@@ -884,7 +893,14 @@ BEGIN
             COALESCE(NULLIF(item->>'importance', '')::float, 0.6),
             source_attr,
             0.9,
-            jsonb_build_object('recmem', jsonb_build_object('task_id', task.id, 'source_unit_ids', task.source_unit_ids))
+            jsonb_build_object('recmem', jsonb_strip_nulls(jsonb_build_object(
+                'task_id', task.id,
+                'source_unit_ids', task.source_unit_ids,
+                'reason', task.task_payload->>'reason',
+                'session_id', task.task_payload->>'session_id',
+                'occurred_from', span_from,
+                'occurred_to', span_to
+            )))
         );
         created_ids := created_ids || memory_id;
 

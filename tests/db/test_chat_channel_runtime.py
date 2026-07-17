@@ -33,8 +33,11 @@ async def test_record_chat_turn_memory_always_uses_recmem(db_pool):
     async with db_pool.acquire() as conn:
         await _stub_get_embedding(conn)
 
+        # Direct promotion is a 0.95 safety valve now (#73) — signal phrases
+        # (0.8) route through scene consolidation, so promotion needs explicit
+        # exceptional importance.
         raw = await conn.fetchval(
-            "SELECT record_chat_turn_memory($1, $2, $3, $4, '{}'::jsonb)",
+            "SELECT record_chat_turn_memory($1, $2, $3, $4, '{\"importance\": 0.96}'::jsonb)",
             "remember this important preference",
             "noted",
             str(uuid4()),

@@ -1245,3 +1245,55 @@ Create `plans/recmem_epistemics.md` for deferred work:
 12. Phase 0 metrics and quality eval captured before any flip.
 
 This slice removes synchronous embedding and synchronous long-term-memory writes from the hot path, gives every downstream operation durable state, supports redaction from day one, and yields retrieval-quality signal during dual-write. Worker consolidation and RecMem retrieval ship in later phases behind quality gates.
+
+---
+
+# Revision 5 — The Lifecycle (2026-07-17)
+
+Rev 4 built the substrate; Rev 5 gives it a metabolism. Diagnosis from live use:
+64 turns/day became ~46 near-verbatim episodic memories (per-turn direct
+promotion at importance≥0.8 preempted consolidation; recurrence needed 5
+similar turns before creating anything), timeline recall cost verbatim-
+transcript prices, the journal had zero entries, and the retention substrate
+(db/47) shipped dark. RecMem accumulated but never digested. Issues #73–#76.
+
+## The grain hierarchy
+
+```
+turn (subconscious_units, kept forever, verbatim)
+  → scene (episodic memory, consolidated at session close)      [#73]
+    → day (journal entry, her deliberate practice)              [#75]
+      → gist (retention merges aged low-strength scenes,        [#74]
+              fidelity-tracked, lessons distilled upward)
+```
+
+Recall serves the cheapest grain that answers the question, with drill-down
+(`open_memory`) to verbatim when exact words matter (#76). Cost per question
+becomes proportional to the grain needed, not the amount lived — that is the
+"unlimited context window" property, implemented as compression plus paging.
+
+## Changes from Rev 4
+
+1. **Session boundaries are the consolidation trigger** (db/63). A session
+   idle past `memory.scene_idle_seconds` (30 min) enqueues ONE
+   `episode_create` task covering its unconsumed units, time-ordered. The
+   Rev-4 recurrence router remains for cross-session merge and sessionless
+   units; the sweep remains for stragglers.
+2. **Scenes carry lived time**: `metadata.recmem.occurred_from/occurred_to`
+   plus `session_id`, stamped in `apply_recmem_episode_create`.
+3. **Direct promotion is a safety valve, not the main path**:
+   `memory.direct_promotion_min_importance` (default 0.95) replaces the
+   hardcoded 0.8 that made every "i like…" turn its own episodic memory.
+4. **Retention runs** (`retention.enabled` default true): aged low-strength
+   scenes merge into gists via the existing IN_EPISODE grouping, full text
+   preserved in `metadata.consolidation.full_content` through the grace
+   window, lessons distilled upward. Capacity pruning stays off (capacity=0).
+5. **The journal is the day grain** — deliberately written by the agent
+   (heartbeat awareness line + practice prompt), never by a cron.
+6. **Graded retrieval surface**: browse mode returns previews with a loud
+   truncation/paging signal; hydration renders scenes before raw turns;
+   `get_memory_story`/`open_memory` re-hydrate the verbatim units (or the
+   pre-gist full text) behind any memory.
+7. **Deferred**: fusing fast_recall and recmem_recall_context into one scorer
+   (association/temporal terms into the recmem tiers) — the seam map lives in
+   issue #76's exploration notes.

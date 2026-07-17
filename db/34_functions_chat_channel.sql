@@ -6,7 +6,9 @@ SET search_path = public, ag_catalog, "$user";
 -- whoever is on the line.
 INSERT INTO config (key, value, description) VALUES
     ('memory.conversation_turn_trust', '0.8'::jsonb,
-     'Default source trust for conversation turns (chat/channel) when the caller supplies none')
+     'Default source trust for conversation turns (chat/channel) when the caller supplies none'),
+    ('memory.direct_promotion_min_importance', '0.95'::jsonb,
+     'Importance floor for promoting a single turn straight to episodic memory; scenes (#73) are the normal path')
 ON CONFLICT (key) DO NOTHING;
 
 CREATE OR REPLACE FUNCTION _db_brain_try_uuid(p_value TEXT)
@@ -141,7 +143,10 @@ BEGIN
     );
     raw_unit_id := _db_brain_try_uuid(raw->>'unit_id');
 
-    IF importance >= 0.8 THEN
+    -- Direct promotion is a safety valve for truly exceptional single turns
+    -- (#73): scene consolidation at session boundaries is the normal path to
+    -- episodic memory, so the bar sits above the signal-phrase bump (0.8).
+    IF importance >= COALESCE(get_config_float('memory.direct_promotion_min_importance'), 0.95) THEN
         promoted_memory_id := create_episodic_memory(
             content,
             NULL,
