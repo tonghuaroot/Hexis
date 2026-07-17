@@ -326,6 +326,40 @@ async def doctor_payload(
                 "detail": f"{exc}",
             })
 
+        # 2b. Canonical schema (#77): a stale ag_catalog twin silently outranks
+        # its migrated public version for every runtime connection.
+        try:
+            shadow_count = await conn.fetchval(
+                """
+                SELECT count(*) FROM pg_proc p
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'ag_catalog'
+                  AND EXISTS (
+                      SELECT 1 FROM pg_proc p2
+                      JOIN pg_namespace n2 ON n2.oid = p2.pronamespace
+                      WHERE n2.nspname = 'public' AND p2.proname = p.proname
+                  )
+                """
+            )
+            if shadow_count:
+                checks.append({
+                    "label": "Schema canonical",
+                    "status": "FAIL",
+                    "detail": (
+                        f"{shadow_count} stale ag_catalog function(s) shadow their public "
+                        "versions — workers run old code. Fix: `hexis migrate` (the runner "
+                        "evicts strays on every apply)."
+                    ),
+                })
+            else:
+                checks.append({
+                    "label": "Schema canonical",
+                    "status": "OK",
+                    "detail": "no shadowed functions; public resolves first",
+                })
+        except Exception as exc:
+            checks.append({"label": "Schema canonical", "status": "WARN", "detail": str(exc)})
+
         # 3. RabbitMQ (check config, not connectivity -- avoids dependency)
         try:
             rmq_url = await conn.fetchval(

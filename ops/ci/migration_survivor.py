@@ -83,6 +83,26 @@ async def main() -> None:
         if await apply_pending_migrations(conn) != []:
             raise AssertionError("migration runner is not idempotent")
 
+        # Canonical schema (#77): after any apply, no ag_catalog function may
+        # shadow a public twin — the runner's postcondition must have evicted
+        # every stray.
+        shadow_count = await conn.fetchval(
+            """
+            SELECT count(*) FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'ag_catalog'
+              AND EXISTS (
+                  SELECT 1 FROM pg_proc p2
+                  JOIN pg_namespace n2 ON n2.oid = p2.pronamespace
+                  WHERE n2.nspname = 'public' AND p2.proname = p.proname
+              )
+            """
+        )
+        if shadow_count:
+            raise AssertionError(
+                f"{shadow_count} ag_catalog function(s) shadow public after migrate (#77)"
+            )
+
         if await conn.fetchval("SELECT 'staged'::memory_status::text") != "staged":
             raise AssertionError("HMX memory_status enum delta is not usable")
         if await conn.fetchval("SELECT 'SUPERSEDES'::graph_edge_type::text") != "SUPERSEDES":

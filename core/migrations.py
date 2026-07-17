@@ -157,6 +157,37 @@ async def apply_pending_migrations(
                 int((time.monotonic() - start) * 1000),
             )
             applied.append(version)
+
+        # Postcondition (#77): the schema this runner just wrote must be the
+        # schema connections resolve. Stale ag_catalog twins shadowed public
+        # for months once — detect and evict them loudly on every run.
+        # Inline catalog SQL (no dependency on any migration having run).
+        strays = await conn.fetch(
+            """
+            SELECT p.proname,
+                   pg_get_function_identity_arguments(p.oid) AS args,
+                   p.prokind
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'ag_catalog'
+              AND EXISTS (
+                  SELECT 1 FROM pg_proc p2
+                  JOIN pg_namespace n2 ON n2.oid = p2.pronamespace
+                  WHERE n2.nspname = 'public' AND p2.proname = p.proname
+              )
+            """
+        )
+        for stray in strays:
+            kind = "PROCEDURE" if stray["prokind"] == "p" else "FUNCTION"
+            await conn.execute(
+                f'DROP {kind} IF EXISTS ag_catalog."{stray["proname"]}"({stray["args"]})'
+            )
+            logger.error(
+                "schema guard: evicted stray ag_catalog.%s(%s) — it shadowed the "
+                "migrated public version for every runtime connection (#77)",
+                stray["proname"],
+                stray["args"],
+            )
     finally:
         await conn.execute("SELECT pg_advisory_unlock($1)", _ADVISORY_LOCK_KEY)
     return applied
