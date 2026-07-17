@@ -159,14 +159,21 @@ CREATE OR REPLACE FUNCTION search_cross_session_history(
     source_attribution JSONB,
     metadata JSONB
 ) AS $$
+DECLARE
+    -- Browse mode (#68): a time window with no keywords means "everything in
+    -- the window, newest first" — '*' and '' count as no keywords. Without a
+    -- window either, there is nothing to anchor on and we return empty.
+    browse_mode BOOLEAN :=
+        NULLIF(trim(COALESCE(p_query, '')), '') IS NULL
+        OR trim(COALESCE(p_query, '')) = '*';
 BEGIN
-    IF NULLIF(trim(COALESCE(p_query, '')), '') IS NULL THEN
+    IF browse_mode AND p_created_after IS NULL AND p_created_before IS NULL THEN
         RETURN;
     END IF;
 
     RETURN QUERY
     WITH query_doc AS (
-        SELECT websearch_to_tsquery('english', p_query) AS query
+        SELECT websearch_to_tsquery('english', CASE WHEN browse_mode THEN '' ELSE p_query END) AS query
     ),
     turn_hits AS (
         SELECT
@@ -178,19 +185,19 @@ BEGIN
             s.assistant_text,
             NULL::TEXT AS memory_type,
             s.turn_at AS occurred_at,
-            ts_rank_cd(to_tsvector('english', s.content), q.query, 32)::FLOAT AS rank,
+            CASE WHEN browse_mode THEN 0.0 ELSE ts_rank_cd(to_tsvector('english', s.content), q.query, 32) END::FLOAT AS rank,
             ARRAY[s.id]::UUID[] AS source_unit_ids,
             s.source_attribution,
             s.metadata
         FROM subconscious_units s
         CROSS JOIN query_doc q
         WHERE 'turn' = ANY(COALESCE(p_sources, ARRAY['turn', 'memory']::TEXT[]))
-          AND numnode(q.query) > 0
+          AND (browse_mode OR numnode(q.query) > 0)
           AND s.status = 'active'
           AND (p_exclude_session_id IS NULL OR s.session_id IS DISTINCT FROM p_exclude_session_id)
           AND (p_created_after IS NULL OR s.turn_at >= p_created_after)
           AND (p_created_before IS NULL OR s.turn_at < p_created_before)
-          AND to_tsvector('english', s.content) @@ q.query
+          AND (browse_mode OR to_tsvector('english', s.content) @@ q.query)
         ORDER BY rank DESC, occurred_at DESC, item_id
         LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100)
     ),
@@ -211,7 +218,7 @@ BEGIN
             NULL::TEXT AS assistant_text,
             m.type::TEXT AS memory_type,
             m.created_at AS occurred_at,
-            ts_rank_cd(to_tsvector('english', m.content), q.query, 32)::FLOAT AS rank,
+            CASE WHEN browse_mode THEN 0.0 ELSE ts_rank_cd(to_tsvector('english', m.content), q.query, 32) END::FLOAT AS rank,
             COALESCE(
                 (
                     SELECT array_agg(msu.subconscious_unit_id ORDER BY msu.created_at, msu.subconscious_unit_id)
@@ -225,12 +232,12 @@ BEGIN
         FROM memories m
         CROSS JOIN query_doc q
         WHERE 'memory' = ANY(COALESCE(p_sources, ARRAY['turn', 'memory']::TEXT[]))
-          AND numnode(q.query) > 0
+          AND (browse_mode OR numnode(q.query) > 0)
           AND m.status = 'active'
           AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
           AND (p_created_after IS NULL OR m.created_at >= p_created_after)
           AND (p_created_before IS NULL OR m.created_at < p_created_before)
-          AND to_tsvector('english', m.content) @@ q.query
+          AND (browse_mode OR to_tsvector('english', m.content) @@ q.query)
         ORDER BY rank DESC, occurred_at DESC, item_id
         LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100)
     )

@@ -40,7 +40,7 @@ from core.cognitive_memory_api import CognitiveMemory
 from core.gateway import EventSource, Gateway
 from core.tools import create_default_registry
 from services.agent import stream_agent
-from services.chat import _remember_conversation
+from services.chat import _conversation_source_identity, _remember_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,10 @@ class ChatRequest(BaseModel):
     message: str
     history: list[dict[str, Any]] | None = None
     prompt_addenda: list[str] | None = None
+    # Client-held session identity (#71): pass the session_id from a prior
+    # turn's `done` event to keep one conversation as one session; omit and
+    # the server mints one (returned in `done`).
+    session_id: str | None = None
 
 
 class OpenAIChatMessage(BaseModel):
@@ -412,7 +416,12 @@ async def _openai_agent_events(
         yield event
 
 
-async def _remember_openai_chat(user_message: str, assistant_message: str) -> None:
+async def _remember_openai_chat(
+    user_message: str,
+    assistant_message: str,
+    session_id: str | None = None,
+    history: list[dict[str, Any]] | None = None,
+) -> None:
     pool = _pool
     if pool is None or not assistant_message:
         return
@@ -421,6 +430,10 @@ async def _remember_openai_chat(user_message: str, assistant_message: str) -> No
             CognitiveMemory(pool),
             user_message=user_message,
             assistant_message=assistant_message,
+            session_id=session_id,
+            source_identity=_conversation_source_identity(
+                session_id, history, user_message, assistant_message
+            ),
         )
     except Exception:
         logger.exception("OpenAI-compatible chat memory formation failed")
@@ -909,7 +922,7 @@ async def _collect_openai_chat_completion(
 
     full_text = "".join(parts)
     if not error:
-        await _remember_openai_chat(user_message, full_text)
+        await _remember_openai_chat(user_message, full_text, session_id=session_id, history=history)
     return full_text, error, finish_reason
 
 
@@ -975,7 +988,7 @@ async def _stream_openai_chat_completion(
             }
         )
     else:
-        await _remember_openai_chat(user_message, "".join(parts))
+        await _remember_openai_chat(user_message, "".join(parts), session_id=session_id, history=history)
         yield _openai_sse_data(_chunk({}, finish_reason))
     yield _openai_sse_data("[DONE]")
 
@@ -1004,7 +1017,16 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
     dsn = _dsn()
     user_message = req.message
     history = req.history or []
-    session_id = str(uuid.uuid4())
+    # Honor a client-held session (#71); mint one otherwise and hand it back
+    # in the `done` event so the next request can continue the same session.
+    session_id = None
+    if req.session_id:
+        try:
+            session_id = str(uuid.UUID(req.session_id))
+        except (ValueError, AttributeError, TypeError):
+            session_id = None
+    if session_id is None:
+        session_id = str(uuid.uuid4())
 
     # Record chat event for audit trail (record-and-dispatch mode)
     try:
@@ -1132,6 +1154,10 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     mem_client,
                     user_message=user_message,
                     assistant_message=full_text,
+                    session_id=session_id,
+                    source_identity=_conversation_source_identity(
+                        session_id, history, user_message, full_text
+                    ),
                 )
                 yield _sse_event("log", {
                     "id": str(uuid.uuid4()),
@@ -1142,7 +1168,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
             except Exception as e:
                 logger.error("Memory formation failed: %s", e)
 
-        done_payload: dict[str, Any] = {"assistant": full_text}
+        done_payload: dict[str, Any] = {"assistant": full_text, "session_id": session_id}
         if full_text:
             done_payload["presentation"] = presentation_from_text(full_text).to_dict()
         yield _sse_event("done", done_payload)

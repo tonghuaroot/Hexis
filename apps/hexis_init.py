@@ -1081,6 +1081,44 @@ async def _run_consent(conn: Any, llm_config: dict[str, Any], *, interactive: bo
 # Main flow
 # ---------------------------------------------------------------------------
 
+def _host_timezone_name() -> str:
+    """The host's IANA zone name (e.g. America/Los_Angeles), best effort."""
+    tz_name = (os.environ.get("TZ") or "").strip().lstrip(":")
+    if tz_name:
+        return tz_name
+    try:
+        localtime = Path("/etc/localtime")
+        if localtime.is_symlink():
+            target = os.readlink(localtime)
+            if "zoneinfo/" in target:
+                return target.split("zoneinfo/")[-1].lstrip("/")
+        etc_tz = Path("/etc/timezone")
+        if etc_tz.is_file():
+            return etc_tz.read_text().strip()
+    except Exception:
+        pass
+    return ""
+
+
+async def _set_local_timezone(conn: Any) -> None:
+    """Seed agent.timezone from the machine running init, once."""
+    try:
+        existing = await conn.fetchval("SELECT get_config_text('agent.timezone')")
+        if existing and existing.strip() and existing.strip() != "UTC":
+            return
+        tz_name = _host_timezone_name()
+        if not tz_name:
+            return
+        # Validate against the DB before storing: get_temporal_context falls
+        # back to UTC on a bad name, but a silently broken value helps nobody.
+        await conn.fetchval("SELECT CURRENT_TIMESTAMP AT TIME ZONE $1", tz_name)
+        await conn.execute(
+            "SELECT set_config('agent.timezone', to_jsonb($1::text))", tz_name
+        )
+    except Exception:
+        pass
+
+
 async def _run_init(dsn: str, *, wait_seconds: int) -> int:
     import asyncpg
 
@@ -1111,6 +1149,10 @@ async def _run_init(dsn: str, *, wait_seconds: int) -> int:
         consented = await _run_consent(conn, llm_config)
         if not consented:
             return 1
+
+        # Temporal home (#72): the agent lives in its person's timezone, not
+        # UTC — derived from the host running init, config-overridable later.
+        await _set_local_timezone(conn)
 
         # Get agent name from profile
         raw = await conn.fetchval("SELECT get_init_profile()")

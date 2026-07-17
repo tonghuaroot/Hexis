@@ -199,7 +199,7 @@ async def test_search_history_maps_typed_results_and_sql_filters():
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
-        ({"query": ""}, "must not be empty"),
+        ({"query": ""}, "query keywords, or a created_after"),
         ({"query": "detail", "sources": ["other"]}, "invalid: other"),
         ({"query": "detail", "sources": []}, "at least one source"),
         (

@@ -162,17 +162,20 @@ class SearchHistoryHandler(ToolHandler):
             description=(
                 "Search exact words, names, phrases, and operators across stored "
                 "conversation turns and consolidated memories using Postgres full-text "
-                "search. This is cross-session and does not require embeddings."
+                "search. This is cross-session and does not require embeddings. "
+                "For a pure timeline ('what happened yesterday?'), pass created_after/"
+                "created_before with an empty query — a time window alone returns "
+                "everything in it, newest first."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "minLength": 1,
                         "description": (
                             "Postgres web-search query. Supports quoted phrases, OR, "
-                            "and minus-prefixed exclusions."
+                            "and minus-prefixed exclusions. Leave empty to browse a "
+                            "time window chronologically."
                         ),
                     },
                     "limit": {
@@ -226,11 +229,6 @@ class SearchHistoryHandler(ToolHandler):
             )
 
         query = str(arguments.get("query") or "").strip()
-        if not query:
-            return ToolResult.error_result(
-                "History search query must not be empty",
-                ToolErrorType.INVALID_PARAMS,
-            )
 
         try:
             created_after = _history_search_datetime(
@@ -244,6 +242,12 @@ class SearchHistoryHandler(ToolHandler):
         if created_after and created_before and created_after >= created_before:
             return ToolResult.error_result(
                 "created_after must be earlier than created_before",
+                ToolErrorType.INVALID_PARAMS,
+            )
+        if not query.strip("* ") and created_after is None and created_before is None:
+            return ToolResult.error_result(
+                "Provide query keywords, or a created_after/created_before window "
+                "to browse a time range chronologically",
                 ToolErrorType.INVALID_PARAMS,
             )
 

@@ -118,7 +118,12 @@ async def test_openai_client_buffered_completion_preserves_history_and_controls(
     ]
     assert captured["max_tokens"] == 123
     assert captured["temperature"] == 0.2
-    remember.assert_awaited_once_with("Introduce yourself.", "Hello from Hexis.")
+    remember.assert_awaited_once()
+    call = remember.await_args
+    assert call.args == ("Introduce yourself.", "Hello from Hexis.")
+    # Session threading (#71): the minted session id reaches memory formation.
+    assert call.kwargs["session_id"] == captured["session_id"]
+    assert call.kwargs["history"] == captured["history"]
 
 
 async def test_openai_client_streams_role_text_finish_and_done(http_client):

@@ -198,6 +198,11 @@ BEGIN
         'timezone', tz,
         'born_on', CASE WHEN born IS NOT NULL
                         THEN to_char(born AT TIME ZONE tz, 'FMMonth DD, YYYY') END,
+        -- Calendar day-of-life (#72): "day 7" reconciles with date arithmetic
+        -- at a glance; floored elapsed days ("5 day(s) ago" on the 7th
+        -- calendar day) read as a contradiction the agent then distrusts.
+        'day_of_life', CASE WHEN born IS NOT NULL
+                            THEN ((now_local::date - (born AT TIME ZONE tz)::date) + 1) END,
         'age_days', CASE WHEN born IS NOT NULL
                          THEN GREATEST(0, EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - born))::bigint / 86400) END
     ));

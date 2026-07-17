@@ -258,3 +258,25 @@ async def test_negative_search_claims_require_a_search(db_pool):
             assert backed["flagged"] == []
         finally:
             await tr.rollback()
+
+
+async def test_correction_claim_requires_revision_not_just_any_write(db_pool):
+    """#67: 'I've corrected that in my memory' passed because an unrelated
+    remember succeeded — correction claims are only satisfied by add_evidence."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            claim = "I've corrected that attribution in my memory."
+
+            turn_id = await _start_turn(conn)
+            await _apply_call(conn, turn_id, "remember", {"content": "a new unrelated note"})
+            report = await _detect(conn, turn_id, claim)
+            assert "memory_correction" in _kinds(report)
+
+            turn_id = await _start_turn(conn)
+            await _apply_call(conn, turn_id, "add_evidence", {"memory_id": "x", "stance": "contradicts"})
+            report = await _detect(conn, turn_id, claim)
+            assert "memory_correction" not in _kinds(report)
+        finally:
+            await tr.rollback()

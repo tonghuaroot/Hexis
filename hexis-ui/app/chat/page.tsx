@@ -54,8 +54,27 @@ const promptAddendaOptions = [
 ];
 
 const SESSION_KEY = "hexis-chat-messages";
+const SESSION_ID_KEY = "hexis-chat-session-id";
 const MAX_ACTIVITY_EVENTS = 60;
 const ACTIVITY_TTL_MS = 30 * 60 * 1000;
+
+function loadSessionId(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return sessionStorage.getItem(SESSION_ID_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveSessionId(id: string) {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.setItem(SESSION_ID_KEY, id);
+  } catch {
+    // ignore quota errors
+  }
+}
 
 function loadSession(): ChatMessage[] {
   if (typeof window === "undefined") return [];
@@ -264,6 +283,7 @@ export default function ChatPage() {
           message: userMessage.content,
           history: historyPayload,
           prompt_addenda: promptAddenda,
+          session_id: loadSessionId(),
         }),
       });
       if (!res.ok || !res.body) {
@@ -392,6 +412,9 @@ export default function ChatPage() {
           }
           if (eventType === "done") {
             setAssistantPresentation(assistantMessage.id, payload.presentation);
+            if (typeof payload.session_id === "string" && payload.session_id) {
+              saveSessionId(payload.session_id);
+            }
           }
         }
       }

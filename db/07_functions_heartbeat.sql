@@ -226,6 +226,28 @@ BEGIN
     RETURN TRUE;
 END;
 $$ LANGUAGE plpgsql STABLE;
+-- Character-card {{user}}/{{char}} macros resolve at render time (#70): cards
+-- ship with the substitution convention, and an unresolved "{{user}}" in the
+-- live prompt reads as template debris to the model. Render-time (not import-
+-- time) so a later name change takes effect everywhere.
+CREATE OR REPLACE FUNCTION _resolve_card_macros(
+    p_value JSONB,
+    p_char_name TEXT,
+    p_user_name TEXT
+) RETURNS JSONB AS $$
+DECLARE
+    txt TEXT;
+BEGIN
+    IF p_value IS NULL OR jsonb_typeof(p_value) <> 'string' THEN
+        RETURN p_value;
+    END IF;
+    txt := p_value #>> '{}';
+    txt := regexp_replace(txt, '\{\{char\}\}', COALESCE(NULLIF(p_char_name, ''), 'the character'), 'gi');
+    txt := regexp_replace(txt, '\{\{user\}\}', COALESCE(NULLIF(p_user_name, ''), 'the person you''re speaking with'), 'gi');
+    RETURN to_jsonb(txt);
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
 CREATE OR REPLACE FUNCTION get_agent_profile_context()
 RETURNS JSONB AS $$
 DECLARE
@@ -234,9 +256,15 @@ DECLARE
     card_data JSONB;
     narrative TEXT;
     persona JSONB;
+    char_name TEXT;
+    user_name TEXT;
 BEGIN
     agent := COALESCE(init_profile->'agent', '{}'::jsonb);
     card_data := COALESCE(init_profile#>'{character_card,data}', '{}'::jsonb);
+    char_name := COALESCE(NULLIF(agent->>'name', ''), NULLIF(card_data->>'name', ''));
+    user_name := COALESCE(
+        NULLIF(init_profile#>>'{relationship,name}', ''),
+        NULLIF(init_profile#>>'{user,name}', ''));
     SELECT m.content
     INTO narrative
     FROM memories m
@@ -261,12 +289,12 @@ BEGIN
         'interests', init_profile->'interests',
         'relationship', init_profile->'relationship',
         'relationship_aspiration', init_profile->'relationship_aspiration',
-        'character_description', card_data->'description',
-        'character_personality', card_data->'personality',
-        'scenario', card_data->'scenario',
-        'character_instructions', card_data->'system_prompt',
-        'post_history_instructions', card_data->'post_history_instructions',
-        'example_dialogue', card_data->'mes_example',
+        'character_description', _resolve_card_macros(card_data->'description', char_name, user_name),
+        'character_personality', _resolve_card_macros(card_data->'personality', char_name, user_name),
+        'scenario', _resolve_card_macros(card_data->'scenario', char_name, user_name),
+        'character_instructions', _resolve_card_macros(card_data->'system_prompt', char_name, user_name),
+        'post_history_instructions', _resolve_card_macros(card_data->'post_history_instructions', char_name, user_name),
+        'example_dialogue', _resolve_card_macros(card_data->'mes_example', char_name, user_name),
         'narrative', to_jsonb(narrative)
     ));
 

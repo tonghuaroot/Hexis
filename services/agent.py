@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, TYPE_CHECKING
 
@@ -215,6 +216,42 @@ def _subconscious_event_payload(output: SubconsciousOutput) -> dict[str, Any]:
             "subconscious_response": output.subconscious_response,
         },
     }
+
+
+def _subconscious_trace_events(output: SubconsciousOutput) -> list[AgentEventData]:
+    """LLM_REQUEST/LLM_RESPONSE trace events for the appraisal call (#69):
+    the subconscious was invisible in the SSE debug stream — the conscious
+    loop traced its calls while the appraisal's prompt and raw response never
+    left the process."""
+    if not output.request_messages:
+        return []
+    call_id = str(uuid.uuid4())
+    raw = output.raw_response
+    if not isinstance(raw, (str, int, float, bool, dict, list, type(None))):
+        model_dump = getattr(raw, "model_dump", None)
+        raw = model_dump() if callable(model_dump) else repr(raw)
+    return [
+        AgentEventData(
+            event=AgentEvent.LLM_REQUEST,
+            data={
+                "id": call_id,
+                "phase": "subconscious",
+                "provider": output.provider,
+                "model": output.model,
+                "messages": output.request_messages,
+            },
+        ),
+        AgentEventData(
+            event=AgentEvent.LLM_RESPONSE,
+            data={
+                "id": call_id,
+                "phase": "subconscious",
+                "provider": output.provider,
+                "model": output.model,
+                "content": raw,
+            },
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +557,12 @@ async def build_system_prompt(
                     f"Current date and time: {temporal['now']} "
                     f"({temporal.get('timezone', 'UTC')})."
                 )
-                if temporal.get("born_on") and temporal.get("age_days") is not None:
+                if temporal.get("born_on") and temporal.get("day_of_life") is not None:
+                    now_line += (
+                        f" You first came online on {temporal['born_on']} — "
+                        f"today is day {temporal['day_of_life']} of your life."
+                    )
+                elif temporal.get("born_on") and temporal.get("age_days") is not None:
                     now_line += (
                         f" You first came online on {temporal['born_on']} — "
                         f"{temporal['age_days']} day(s) ago."
@@ -596,7 +638,10 @@ def _format_active_persona(persona: dict[str, Any]) -> str:
         ("relationship_aspiration", "Relationship aspiration"),
         ("character_description", "Character description"),
         ("character_personality", "Character personality"),
-        ("scenario", "Scenario"),
+        # The card scenario describes the first meeting; framed as origin
+        # rather than the present (#70) — the agent has continuity now, and a
+        # prompt that says "has just been initialized" every session fights it.
+        ("scenario", "How your story began (long since; you have lived and remembered much since then)"),
     )
     for key, label in labels:
         value = persona.get(key)
@@ -753,6 +798,8 @@ async def run_agent(
                 sub_signals = await render_subconscious_signals_db(conn, subconscious_output)
 
                 if on_event:
+                    for trace_event in _subconscious_trace_events(subconscious_output):
+                        await on_event(trace_event)
                     await on_event(
                         AgentEventData(
                             event=AgentEvent.PHASE_CHANGE,
@@ -974,6 +1021,8 @@ async def stream_agent(
                     hydrated_context=context,
                 )
                 sub_signals = await render_subconscious_signals_db(conn, subconscious_output)
+                for trace_event in _subconscious_trace_events(subconscious_output):
+                    yield trace_event
                 yield AgentEventData(
                     event=AgentEvent.PHASE_CHANGE,
                     data={

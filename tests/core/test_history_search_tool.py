@@ -72,7 +72,7 @@ async def test_search_history_tool_maps_results_and_excludes_current_uuid_sessio
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        ({"query": ""}, "must not be empty"),
+        ({"query": ""}, "query keywords, or a created_after"),
         (
             {
                 "query": "detail",

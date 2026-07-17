@@ -152,12 +152,15 @@ async def process_channel_message(
         # Run the conversation turn
         from services.chat import chat_turn
 
+        # The channel_sessions UUID from prepare_channel_turn (#71): the old
+        # "channel:type:id:sender" string failed the UUID parse downstream, so
+        # every unit landed with session_id NULL.
         result = await chat_turn(
             user_message=user_content,
             history=history,
             llm_config=llm_config,
             dsn=dsn,
-            session_id=f"channel:{msg.channel_type}:{msg.channel_id}:{msg.sender_id}",
+            session_id=session_id,
             pool=pool,
             user_label=msg.sender_name,
         )
@@ -263,7 +266,7 @@ async def stream_channel_message(
             history=history,
             llm_config=llm_config,
             dsn=dsn,
-            session_id=f"channel:{msg.channel_type}:{msg.channel_id}:{msg.sender_id}",
+            session_id=session_id,
             pool=pool,
             user_label=msg.sender_name,
         ):

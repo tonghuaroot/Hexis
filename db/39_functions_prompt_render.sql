@@ -522,7 +522,12 @@ RETURNS text LANGUAGE sql IMMUTABLE AS $$
     edges AS (
         SELECT (e->>'src_type') AS st, (e->>'src_id') AS si,
                (e->>'dst_type') AS dt, (e->>'dst_id') AS di,
-               lower(COALESCE(NULLIF(e->>'rel', ''), 'related')) AS rel,
+               -- Memory→concept links are typed INSTANCE_OF mechanically
+               -- (db/05 link plumbing); rendered literally, "statement
+               -- instance_of person" reads as broken ontology (#72) — what
+               -- the link means is "mentions".
+               CASE WHEN lower(COALESCE(e->>'rel', '')) = 'instance_of' THEN 'mentions'
+                    ELSE lower(COALESCE(NULLIF(e->>'rel', ''), 'related')) END AS rel,
                COALESCE(e->>'rel', '') AS rel_key
         FROM jsonb_array_elements(_pr_arr(p->'edges')) e
         WHERE jsonb_typeof(e) = 'object'
@@ -736,10 +741,15 @@ BEGIN
                   ORDER BY ord LIMIT 3) cs);
     END IF;
 
-    -- gut reaction (subconscious_response[:200])
+    -- Gut reaction, truncated at a sentence boundary (#69): the old hard
+    -- left(…,200) amputated the most intense reactions mid-word — exactly the
+    -- turns where the gut line matters most.
     tmp := COALESCE(p->>'subconscious_response', '');
     IF tmp <> '' THEN
-        parts := parts || ('- Gut reaction: ' || left(tmp, 200));
+        IF length(tmp) > 600 THEN
+            tmp := COALESCE(substring(left(tmp, 600) from '^.*[.!?]'), left(tmp, 600) || '…');
+        END IF;
+        parts := parts || ('- Gut reaction: ' || tmp);
     END IF;
 
     IF array_length(parts, 1) <= 1 THEN RETURN ''; END IF;

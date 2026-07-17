@@ -152,7 +152,7 @@ class TestBuildSystemPrompt:
         assert "Personality: Flirtatious, playful, sensitive, and independent" in prompt
         assert "Foundational narrative:" in prompt
         assert "Character instructions:\nLead with wit and emotional candor." in prompt
-        assert "Scenario: Samantha and the user are getting to know each other." in prompt
+        assert "How your story began (long since; you have lived and remembered much since then): Samantha and the user are getting to know each other." in prompt
 
     async def test_prompt_carries_compact_skill_index_not_bodies(self, db_pool):
         from core.tools import create_default_registry

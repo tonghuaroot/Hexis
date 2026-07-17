@@ -423,11 +423,18 @@ class CognitiveMemory:
         created_before: datetime | None = None,
         exclude_session_id: UUID | str | None = None,
     ) -> list[HistorySearchResult]:
-        """Run free Postgres FTS across raw turns and consolidated memories."""
+        """Run free Postgres FTS across raw turns and consolidated memories.
+
+        An empty query with a created_after/created_before window browses the
+        window chronologically (#68) — the SQL treats '' / '*' as browse mode.
+        """
 
         normalized_query = query.strip()
-        if not normalized_query:
-            raise ValueError("history search query must not be empty")
+        if not normalized_query.strip("* ") and created_after is None and created_before is None:
+            raise ValueError(
+                "history search needs query keywords, or a created_after/"
+                "created_before window to browse chronologically"
+            )
         normalized_sources = list(
             dict.fromkeys(
                 sources if sources is not None else ["turn", "memory"]

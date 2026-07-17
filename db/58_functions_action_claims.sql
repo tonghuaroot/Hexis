@@ -56,7 +56,15 @@ FROM (VALUES
      '\mI (''ve |have )?((just|also|already|now|then) )?(read|inspected|examined|traced|reviewed|verified) [^.!?]*(\.(py|sql|md|ts|tsx|js|jsx|json|ya?ml|toml|sh|go|rs)\M|lines? [0-9])',
      ARRAY['inspect_source','read_file','grep','glob','list_directory'],
      'path',
-     'claims of having read specific source files/lines')
+     'claims of having read specific source files/lines'),
+    -- Correction claims (#67): "I''ve corrected that in my memory" is only
+    -- supported by a revision-class action — storing an unrelated new note
+    -- with remember is an addition, not a correction.
+    ('memory_correction',
+     '\mI(''ve| have)? ?((just|also|already|now|then) )?(corrected|revised|updated|amended|fixed|reattributed|retracted) [^.!?]*(attribut|belief|record|memor|confidence|the fact)',
+     ARRAY['add_evidence'],
+     NULL,
+     'memory-correction claims require a belief revision, not just any memory write')
 ) AS v(claim_kind, pattern, satisfied_by_tools, require_arg_key, notes)
 WHERE NOT EXISTS (
     SELECT 1 FROM action_claim_patterns p
