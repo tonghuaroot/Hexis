@@ -34,7 +34,7 @@ async def _prepare(conn: asyncpg.Connection) -> None:
         await conn.execute("LOAD 'age'")
     except Exception:
         pass
-    await conn.execute("SET search_path = ag_catalog, public")
+    await conn.execute("SET search_path = public, ag_catalog")
 
 
 async def _insert_sentinel(conn: asyncpg.Connection, content: str) -> None:

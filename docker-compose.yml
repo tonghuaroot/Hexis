@@ -20,11 +20,13 @@ services:
       start_period: 30s
     ports:
       - "${HEXIS_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PORT:-43815}:5432"
-    # Need to modify search_path for AGE to work seamlessly
+    # public FIRST: Hexis functions live in public and must shadow nothing;
+    # ag_catalog stays on the path so AGE (cypher, agtype) works unqualified.
+    # (ag_catalog-first caused stale shadow copies — migration 0043.)
     command:
       - postgres
       - -c
-      - search_path=ag_catalog,public
+      - search_path=public,ag_catalog
       # AGE tuning (see docs/optimize.md): a Cypher query compiles to many
       # per-row agtype expressions, so PostgreSQL's JIT usually costs more to
       # compile than it saves -> turn it off. Lower random_page_cost so the

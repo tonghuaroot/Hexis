@@ -193,7 +193,9 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
     except Exception:
         pass
     try:
-        await conn.execute("SET search_path = ag_catalog, public;")
+        # public FIRST (migration 0043): Hexis functions live in public;
+        # ag_catalog stays on the path for AGE's cypher/agtype.
+        await conn.execute("SET search_path = public, ag_catalog;")
     except Exception:
         pass
 

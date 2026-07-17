@@ -73,7 +73,7 @@ async def _connect(dsn: str, wait_seconds: int) -> asyncpg.Connection:
         try:
             conn = await asyncpg.connect(dsn, ssl=False, command_timeout=60.0)
             await conn.execute("LOAD 'age'")
-            await conn.execute('SET search_path = ag_catalog, public, "$user"')
+            await conn.execute('SET search_path = public, ag_catalog, "$user"')
             return conn
         except Exception as exc:  # pragma: no cover - exact driver errors vary
             last_error = exc
