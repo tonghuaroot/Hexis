@@ -101,9 +101,16 @@ async def test_apply_summary_compacts_and_distills(db_pool):
 
 
 async def test_run_memory_rest_noop_when_disabled(db_pool):
+    """retention.enabled defaults ON now (#74) — the kill switch still works."""
     async with db_pool.acquire() as conn:
-        assert _j(await conn.fetchval("SELECT run_memory_rest()")).get("skipped") is True
-        assert _j(await conn.fetchval("SELECT run_retention_gc()")).get("skipped") is True
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT set_config('retention.enabled', 'false'::jsonb)")
+            assert _j(await conn.fetchval("SELECT run_memory_rest()")).get("skipped") is True
+            assert _j(await conn.fetchval("SELECT run_retention_gc()")).get("skipped") is True
+        finally:
+            await tr.rollback()
 
 
 async def test_retention_dry_run_is_truthful_but_non_mutating(db_pool):
@@ -122,12 +129,13 @@ async def test_retention_dry_run_is_truthful_but_non_mutating(db_pool):
                     "INSERT INTO memory_edges (src_type, src_id, rel_type, dst_type, dst_id) "
                     "VALUES ('memory', $1, 'IN_EPISODE', 'episode', 'ep-dryt')", str(mid))
 
+            enabled_before = await conn.fetchval("SELECT get_config_bool('retention.enabled')")
             diff = _j(await conn.fetchval("SELECT retention_dry_run()"))
             assert diff["dry_run"] is True
             assert diff["rest"]["consolidated"] >= 1            # it WOULD consolidate the group
 
-            # ...but the database is untouched:
-            assert await conn.fetchval("SELECT get_config_bool('retention.enabled')") is False
+            # ...but the database is untouched (flag restored to whatever it was):
+            assert await conn.fetchval("SELECT get_config_bool('retention.enabled')") == enabled_before
             assert await conn.fetchval(
                 "SELECT count(*) FROM memories WHERE content LIKE 'dry group%' AND status='active'") == 3
             assert await conn.fetchval(
@@ -147,3 +155,40 @@ async def test_retention_status_snapshot(db_pool):
         assert "mass" in st["episodic"] and "capacity" in st["episodic"]
         assert "candidate_groups" in st["consolidation"]
         assert "protected" in st["documents"] and "approvals_pending" in st["documents"]
+
+
+async def test_aged_scene_memories_become_consolidation_candidates(db_pool):
+    """RecMem Rev 5: scene memories (#73) feed the retention ladder (#74) —
+    once aged, idle, and weak, a session's scenes group by IN_EPISODE and
+    run_memory_rest gists them."""
+    async with db_pool.acquire() as conn:
+        await conn.execute("LOAD 'age'")
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT set_config('retention.enabled', 'true'::jsonb)")
+            scene_meta = json.dumps({
+                "recmem": {
+                    "reason": "session_boundary",
+                    "session_id": "ccccccc1-0000-4000-8000-000000000001",
+                }
+            })
+            # Same insert window -> the auto-episode trigger groups all three
+            # into one episodes row (IN_EPISODE), the grouping retention uses.
+            ids = [
+                await _mk(conn, f"scene: quiet evening chat {i}", age_days=45, metadata=scene_meta)
+                for i in range(3)
+            ]
+            await conn.execute(
+                "UPDATE memories SET last_reinforced = now() - INTERVAL '45 days' WHERE id = ANY($1::uuid[])",
+                ids,
+            )
+            result = _j(await conn.fetchval("SELECT run_memory_rest()"))
+            assert result["consolidated"] >= 1
+
+            rows = await conn.fetch(
+                "SELECT status, superseded_by FROM memories WHERE id = ANY($1::uuid[])", ids
+            )
+            assert all(r["status"] == "archived" and r["superseded_by"] is not None for r in rows)
+        finally:
+            await tr.rollback()

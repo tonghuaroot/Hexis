@@ -648,10 +648,13 @@ INSERT INTO config (key, value, description) VALUES
     ('llm.summarization', 'null'::jsonb, 'Optional LLM override for memory-consolidation summarization/distillation')
 ON CONFLICT (key) DO NOTHING;
 -- Memory retention / compression-native consolidation (docs/memory_retention_design.md).
--- Ships DARK: the whole fade ladder (consolidate -> summarize -> archive -> prune)
--- is a no-op until retention.enabled is set true.
+-- ON by default (#74, RecMem Rev 5): forgetting-to-gist is what keeps unlimited
+-- accumulation navigable. The fade ladder (consolidate -> summarize -> archive
+-- -> prune) is heavily guarded — 30-day minimum age, protected classes, a
+-- conscious veto queue, a 14-day undo window, capacity pruning off — and this
+-- flag remains the kill switch.
 INSERT INTO config (key, value, description) VALUES
-    ('retention.enabled', 'false'::jsonb, 'Master switch for rest-cycle memory consolidation + pruning (ships off)'),
+    ('retention.enabled', 'true'::jsonb, 'Master switch for rest-cycle memory consolidation + pruning (kill switch)'),
     ('retention.min_age_days', '30'::jsonb, 'Episodic memories younger than this are never consolidated'),
     ('retention.min_idle_days', '21'::jsonb, 'Skip memories reinforced within this window'),
     ('retention.consolidate_max_strength', '0.4'::jsonb, 'Only consolidate memories whose computed strength has fallen below this'),
