@@ -284,7 +284,9 @@ class CognitiveMemory:
         Hydrate a query with relevant context for RAG prompt augmentation.
 
         This uses:
-        - `fast_recall(query, limit)` for relevant memories
+        - `recmem_recall_context(query, limit)` for relevant memories (episodes,
+          semantic facts, and recent raw turns — the chat hot path's ranker)
+        - `fast_recall(query, limit)` for worldview-typed memories only
         - `find_partial_activations(query)` for tip-of-tongue clusters (optional)
         - `gather_turn_context()` for identity/worldview/emotions/drives/goals (optional subsets)
         """

@@ -109,6 +109,24 @@ async def test_recmem_consolidation_worker_create_and_refine(db_pool, monkeypatc
             assert create_result["memory_ids"]
             assert await conn.fetchval("SELECT route_status FROM subconscious_units WHERE id = $1", source_unit) == "episode_created"
 
+            # semantic_refine is retired (#57): episode_create chains nothing.
+            refine_queued = await conn.fetchval(
+                "SELECT COUNT(*) FROM recmem_consolidation_tasks WHERE task_type = 'semantic_refine'"
+            )
+            assert refine_queued == 0
+
+            # A legacy semantic_refine task (queued before retirement) still drains.
+            episode_id = create_result["memory_ids"][0]
+            await conn.execute(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, target_memory_id, source_unit_ids
+                )
+                VALUES ('semantic_refine', $1::uuid, ARRAY[$2]::uuid[])
+                """,
+                episode_id,
+                source_unit,
+            )
             refine_result = await recmem.run_recmem_consolidation_step(conn)
             assert refine_result["memory_ids"]
             facts = await conn.fetchval(

@@ -1,18 +1,32 @@
 -- RecMem: recurrence-based memory consolidation.
 
+-- Turns are labeled with the real names when configured (#56): "User:" as a
+-- speaker label leaks into extracted memories ("The user is becoming a
+-- leader") and splits one person across two identities in recall.
 CREATE OR REPLACE FUNCTION format_recmem_turn(
     p_user_text TEXT,
     p_assistant_text TEXT
 ) RETURNS TEXT AS $$
+DECLARE
+    user_label TEXT := COALESCE(
+        NULLIF(get_config_text('agent.user_name'), ''),
+        NULLIF(get_init_profile()#>>'{user,name}', ''),
+        'User');
+    agent_label TEXT := COALESCE(
+        NULLIF(get_config_text('agent.name'), ''),
+        NULLIF(get_init_profile()#>>'{agent,name}', ''),
+        'Assistant');
 BEGIN
     RETURN format(
-        'User: %s%sAssistant: %s',
+        '%s: %s%s%s: %s',
+        user_label,
         COALESCE(p_user_text, ''),
         E'\n\n',
+        agent_label,
         COALESCE(p_assistant_text, '')
     );
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+$$ LANGUAGE plpgsql STABLE;
 
 CREATE OR REPLACE FUNCTION normalize_recmem_text(
     p_text TEXT
@@ -793,31 +807,10 @@ BEGIN
         updated_at = CURRENT_TIMESTAMP
     WHERE id = ANY(task.source_unit_ids);
 
-    IF _recmem_pending_queue_depth() >= queue_max THEN
-        INSERT INTO recmem_consolidation_tasks (
-            task_type,
-            trigger_unit_id,
-            target_memory_id,
-            source_unit_ids,
-            status,
-            completed_at,
-            dropped_reason,
-            task_payload
-        )
-        VALUES (
-            'semantic_refine',
-            task.trigger_unit_id,
-            task.target_memory_id,
-            task.source_unit_ids,
-            'dropped',
-            CURRENT_TIMESTAMP,
-            'queue_full_semantic_refine_dropped',
-            jsonb_build_object('reason', 'episode_merge')
-        );
-    ELSE
-        INSERT INTO recmem_consolidation_tasks (task_type, trigger_unit_id, target_memory_id, source_unit_ids, task_payload)
-        VALUES ('semantic_refine', task.trigger_unit_id, task.target_memory_id, task.source_unit_ids, jsonb_build_object('reason', 'episode_merge'));
-    END IF;
+    -- semantic_refine retired (#57): conscious extraction (db/61) is the sole
+    -- semantic-fact minter — it carries provenance and routes through the
+    -- belief-revision policy; recmem's refinement minted unattributed
+    -- near-duplicates. The handler remains only to drain legacy queued tasks.
 
     UPDATE recmem_consolidation_tasks
     SET status = 'completed',
@@ -885,31 +878,7 @@ BEGIN
             PERFORM link_memory_to_source_unit(memory_id, unit_id, 'source');
         END LOOP;
 
-        IF _recmem_pending_queue_depth() >= queue_max THEN
-            INSERT INTO recmem_consolidation_tasks (
-                task_type,
-                trigger_unit_id,
-                target_memory_id,
-                source_unit_ids,
-                status,
-                completed_at,
-                dropped_reason,
-                task_payload
-            )
-            VALUES (
-                'semantic_refine',
-                task.trigger_unit_id,
-                memory_id,
-                task.source_unit_ids,
-                'dropped',
-                CURRENT_TIMESTAMP,
-                'queue_full_semantic_refine_dropped',
-                jsonb_build_object('reason', 'episode_create')
-            );
-        ELSE
-            INSERT INTO recmem_consolidation_tasks (task_type, trigger_unit_id, target_memory_id, source_unit_ids, task_payload)
-            VALUES ('semantic_refine', task.trigger_unit_id, memory_id, task.source_unit_ids, jsonb_build_object('reason', 'episode_create'));
-        END IF;
+        -- semantic_refine retired (#57): see apply_recmem_episode_merge.
     END LOOP;
 
     IF cardinality(created_ids) = 0 THEN
@@ -1056,8 +1025,15 @@ DECLARE
     query_embedding vector;
     strength_weight FLOAT;
     intensity_weight FLOAT;
+    recency_weight FLOAT;
+    recency_halflife FLOAT;
 BEGIN
     query_embedding := (get_embedding(ARRAY[ensure_embedding_prefix(p_query, 'search_query')]))[1];
+    -- Ranking parity with fast_recall (#57 unification, first step): the chat
+    -- hot path honors the same recency half-life and trust signals, so recall
+    -- improvements land in BOTH rankers.
+    recency_weight := COALESCE(get_config_float('memory.recency_weight'), 0.1);
+    recency_halflife := GREATEST(COALESCE(get_config_float('memory.recency_halflife_days'), 7.0), 0.01);
     -- How much computed memory strength (recency/reinforcement/decay) reshapes
     -- the pure-cosine recall score: 0 = pure similarity (old behavior),
     -- 0.5 = gentle default, 1 = score fully scaled by strength.
@@ -1122,7 +1098,10 @@ BEGIN
                     calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced),
                     intensity_weight * current_emotional_intensity(
                         (m.metadata->'emotional_context'->>'intensity')::float,
-                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced))))::float AS score,
+                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)))
+             + recency_weight * exp(-ln(2.0) * GREATEST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - m.created_at)), 0)
+                                    / (86400.0 * recency_halflife))
+             + COALESCE(m.trust_level, 0.5) * 0.1)::float AS score,
             COALESCE(array_agg(msu.subconscious_unit_id) FILTER (WHERE msu.subconscious_unit_id IS NOT NULL), '{}'::uuid[]) AS source_unit_ids,
             m.source_attribution,
             m.created_at,
@@ -1153,7 +1132,10 @@ BEGIN
                     calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced),
                     intensity_weight * current_emotional_intensity(
                         (m.metadata->'emotional_context'->>'intensity')::float,
-                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced))))::float AS score,
+                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)))
+             + recency_weight * exp(-ln(2.0) * GREATEST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - m.created_at)), 0)
+                                    / (86400.0 * recency_halflife))
+             + COALESCE(m.trust_level, 0.5) * 0.1)::float AS score,
             COALESCE(array_agg(msu.subconscious_unit_id) FILTER (WHERE msu.subconscious_unit_id IS NOT NULL), '{}'::uuid[]) AS source_unit_ids,
             m.source_attribution,
             m.created_at,

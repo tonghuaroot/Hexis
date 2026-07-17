@@ -551,3 +551,89 @@ async def test_recmem_sweep_schedule_state(db_pool):
             await tr.rollback()
 
 
+
+
+async def test_recmem_episode_apply_queues_no_semantic_refine(db_pool):
+    """semantic_refine is retired (#57): episode create/merge must not queue it."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn, axis=1)
+
+            merge_unit = await _insert_embedded_unit(conn, "no-refine-merge", axis=1, route_status="merge_queued")
+            target_mem = await _insert_memory(conn, "existing episode", axis=1)
+            merge_task = await conn.fetchval(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, trigger_unit_id, target_memory_id, source_unit_ids
+                )
+                VALUES ('episode_merge', $1, $2, ARRAY[$1]::uuid[])
+                RETURNING id
+                """,
+                merge_unit,
+                target_mem,
+            )
+            merge_result = _json(await conn.fetchval(
+                "SELECT apply_recmem_episode_merge($1::uuid, 'merged episode text', true)",
+                merge_task,
+            ))
+            assert merge_result["merged"] is True
+
+            create_unit = await _insert_embedded_unit(conn, "no-refine-create", axis=2, route_status="create_queued")
+            create_task = await conn.fetchval(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, trigger_unit_id, source_unit_ids
+                )
+                VALUES ('episode_create', $1, ARRAY[$1]::uuid[])
+                RETURNING id
+                """,
+                create_unit,
+            )
+            create_result = _json(await conn.fetchval(
+                "SELECT apply_recmem_episode_create($1::uuid, $2::jsonb)",
+                create_task,
+                json.dumps([{"content": "fresh episode", "importance": 0.7}]),
+            ))
+            assert create_result["memory_ids"]
+
+            refine_count = await conn.fetchval(
+                "SELECT count(*) FROM recmem_consolidation_tasks WHERE task_type = 'semantic_refine'"
+            )
+            assert refine_count == 0
+        finally:
+            await tr.rollback()
+
+
+async def test_recmem_recall_context_recency_and_trust(db_pool):
+    """The chat ranker honors the same recency + trust signals as fast_recall (#57)."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn, axis=4)
+
+            fresh_epi = await _insert_memory(conn, "recency fresh episode", axis=4)
+            stale_epi = await _insert_memory(conn, "recency stale episode", axis=4)
+            await conn.execute(
+                """
+                UPDATE memories
+                SET created_at = CURRENT_TIMESTAMP - INTERVAL '60 days',
+                    last_reinforced = CURRENT_TIMESTAMP - INTERVAL '60 days'
+                WHERE id = $1
+                """,
+                stale_epi,
+            )
+
+            trusted_sem = await _insert_memory(conn, "trust high fact", mem_type="semantic", axis=4)
+            doubted_sem = await _insert_memory(conn, "trust low fact", mem_type="semantic", axis=4)
+            await conn.execute("UPDATE memories SET trust_level = 0.2 WHERE id = $1", doubted_sem)
+
+            rows = await conn.fetch("SELECT * FROM recmem_recall_context('recency and trust probe', 5, 5, 10)")
+            scores = {row["item_id"]: row["score"] for row in rows}
+
+            assert scores[fresh_epi] > scores[stale_epi]
+            assert scores[trusted_sem] > scores[doubted_sem]
+        finally:
+            await tr.rollback()

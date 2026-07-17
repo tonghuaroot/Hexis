@@ -74,22 +74,6 @@ CREATE INDEX IF NOT EXISTS idx_recmem_tasks_status_type
     ON recmem_consolidation_tasks (status, task_type, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_memory_source_units_source
     ON memory_source_units (subconscious_unit_id);
-CREATE INDEX IF NOT EXISTS idx_recmem_rollout_events_created_type
-    ON recmem_rollout_events (created_at DESC, event_type);
-CREATE INDEX IF NOT EXISTS idx_recmem_rollout_events_session
-    ON recmem_rollout_events (session_id, created_at DESC)
-    WHERE session_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_recmem_retrieval_comparisons_created
-    ON recmem_retrieval_comparisons (created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_recmem_retrieval_comparisons_session
-    ON recmem_retrieval_comparisons (session_id, created_at DESC)
-    WHERE session_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_recmem_eval_items_set_category
-    ON recmem_eval_items (eval_set_id, category);
-CREATE INDEX IF NOT EXISTS idx_recmem_eval_runs_set_started
-    ON recmem_eval_runs (eval_set_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_recmem_eval_results_run_category
-    ON recmem_eval_results (run_id, category);
 CREATE INDEX idx_clusters_centroid ON clusters USING hnsw (centroid_embedding vector_cosine_ops);
 CREATE INDEX idx_clusters_type ON clusters (cluster_type);
 CREATE INDEX idx_episodes_time_range ON episodes USING GIST (time_range);

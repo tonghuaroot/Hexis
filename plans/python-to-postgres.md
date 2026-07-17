@@ -212,7 +212,6 @@ Use `pg_cron` for DB-owned recurring maintenance jobs:
 - heartbeat due checks where appropriate
 - maintenance
 - queue cleanup
-- eval/rollout health snapshots
 
 Move outbox routing into DB:
 
@@ -229,17 +228,14 @@ RecMem is already close to the target. Finish the migration by moving remaining 
 - task context loading
 - LLM output normalization
 - prompt construction
-- eval-set execution
-- rollout phase matrix
-- readiness gate application
+- ~~eval-set execution / rollout phase matrix / readiness gate application~~ — retired (#57, migration 0039)
 
 Add SQL functions:
 
 - `load_recmem_task_context(p_task_id uuid) returns jsonb`
 - `normalize_recmem_episode_output(p_output jsonb) returns jsonb`
 - `normalize_recmem_fact_output(p_output jsonb) returns jsonb`
-- `run_recmem_eval_set(p_eval_set text, p_label text, p_limit int) returns jsonb`
-- `apply_recmem_rollout_phase(p_phase int, p_eval_run_id uuid, p_force boolean) returns jsonb`
+- ~~`run_recmem_eval_set` / `apply_recmem_rollout_phase`~~ — retired (#57): the rollout/eval apparatus was removed in migration 0039; RecMem is fully rolled out, so there is nothing to push down.
 
 Move subconscious dopamine/RPE logic into DB:
 
