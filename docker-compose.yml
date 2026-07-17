@@ -131,6 +131,11 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       HEXIS_LLM_CONSCIOUS_API_KEY: ${HEXIS_LLM_CONSCIOUS_API_KEY:-}
       HEXIS_LLM_SUBCONSCIOUS_API_KEY: ${HEXIS_LLM_SUBCONSCIOUS_API_KEY:-}
+    volumes:
+      # OAuth credential store (openai-codex, anthropic, ...): token refresh
+      # writes back, so this is read-write; the store's .lock files serialize
+      # host/container access. Also exposes user skills (~/.hexis/skills).
+      - ~/.hexis:/root/.hexis
     networks:
       - private
       - public
@@ -166,6 +171,11 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       HEXIS_LLM_CONSCIOUS_API_KEY: ${HEXIS_LLM_CONSCIOUS_API_KEY:-}
       HEXIS_LLM_SUBCONSCIOUS_API_KEY: ${HEXIS_LLM_SUBCONSCIOUS_API_KEY:-}
+    volumes:
+      # OAuth credential store (openai-codex, anthropic, ...): token refresh
+      # writes back, so this is read-write; the store's .lock files serialize
+      # host/container access. Also exposes user skills (~/.hexis/skills).
+      - ~/.hexis:/root/.hexis
     networks:
       - private
       - public
@@ -205,6 +215,11 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       HEXIS_LLM_CONSCIOUS_API_KEY: ${HEXIS_LLM_CONSCIOUS_API_KEY:-}
       HEXIS_LLM_SUBCONSCIOUS_API_KEY: ${HEXIS_LLM_SUBCONSCIOUS_API_KEY:-}
+    volumes:
+      # OAuth credential store (openai-codex, anthropic, ...): token refresh
+      # writes back, so this is read-write; the store's .lock files serialize
+      # host/container access. Also exposes user skills (~/.hexis/skills).
+      - ~/.hexis:/root/.hexis
     networks:
       - private
       - public
@@ -254,6 +269,11 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       HEXIS_LLM_CONSCIOUS_API_KEY: ${HEXIS_LLM_CONSCIOUS_API_KEY:-}
       HEXIS_LLM_SUBCONSCIOUS_API_KEY: ${HEXIS_LLM_SUBCONSCIOUS_API_KEY:-}
+    volumes:
+      # OAuth credential store (openai-codex, anthropic, ...): token refresh
+      # writes back, so this is read-write; the store's .lock files serialize
+      # host/container access. Also exposes user skills (~/.hexis/skills).
+      - ~/.hexis:/root/.hexis
     networks:
       - private
       - public

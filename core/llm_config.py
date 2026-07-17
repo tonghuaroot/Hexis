@@ -129,17 +129,22 @@ async def load_llm_config(
     default_model: str = DEFAULT_LLM_MODEL,
     fallback_key: str | None = None,
 ) -> dict[str, Any]:
-    cfg = await conn.fetchval("SELECT get_config($1)", key)
+    async def _fetch(config_key: str) -> dict[str, Any] | None:
+        raw = await conn.fetchval("SELECT get_config($1)", config_key)
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = None
+        # A JSON-null or empty row means "no override configured" (the seeds
+        # use 'null'::jsonb for optional overrides) — treat it as absent so
+        # fallback_key applies, instead of silently defaulting the provider.
+        return raw if isinstance(raw, dict) and raw else None
+
+    cfg = await _fetch(key)
     if cfg is None and fallback_key:
-        cfg = await conn.fetchval("SELECT get_config($1)", fallback_key)
-
-    if isinstance(cfg, str):
-        try:
-            cfg = json.loads(cfg)
-        except Exception:
-            cfg = None
-
-    if not isinstance(cfg, dict):
+        cfg = await _fetch(fallback_key)
+    if cfg is None:
         cfg = {}
 
     identity = configured_llm_identity(

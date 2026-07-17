@@ -10,6 +10,9 @@ COPY README.md /app/README.md
 COPY apps /app/apps
 COPY core /app/core
 COPY services /app/services
+COPY channels /app/channels
+COPY plugins /app/plugins
+COPY skills /app/skills
 
 RUN pip install --no-cache-dir .
 
