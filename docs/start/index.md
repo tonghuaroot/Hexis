@@ -15,6 +15,7 @@ Get from zero to a running Hexis agent with persistent memory, identity, and opt
 
 | Page | Description |
 |------|-------------|
+| [What is Hexis?](what-is-hexis.md) | Plain-language what/why, and how it compares |
 | [Quickstart](quickstart.md) | 3-command setup for the impatient |
 | [Prerequisites](prerequisites.md) | What you need before installing |
 | [Installation](installation.md) | pip install, source checkout, .env setup |

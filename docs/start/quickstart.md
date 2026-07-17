@@ -13,9 +13,10 @@ Get a running agent in 3 commands.
 
 ## Prerequisites
 
-- [Docker Desktop](https://docs.docker.com/get-docker/)
-- [Ollama](https://ollama.com/download) (for embeddings)
+- [Docker Desktop](https://docs.docker.com/get-docker/) -- installed **and running**
+- [Ollama](https://ollama.com/download) -- installed **and running** (`ollama serve` if it isn't); it serves the ~300M-parameter local embedding model that `hexis init` pulls
 - Python 3.10+
+- For the default command below: a **ChatGPT Plus/Pro subscription** (browser OAuth, no API key). Without one, pick any provider from [Other Providers](#other-providers) instead.
 
 ## 3-Command Setup
 
@@ -25,7 +26,11 @@ hexis init --character hexis --provider openai-codex --model gpt-5.2
 hexis chat
 ```
 
-This uses ChatGPT Plus/Pro OAuth (no API key needed). `hexis init` opens a browser window for login, starts Docker, pulls the embedding model, configures the character, and runs consent -- all in one command.
+`hexis init` opens a browser window for login, starts the containers, pulls the embedding model, configures the character, and runs consent (the agent's recorded agreement to operate) -- all in one command.
+
+**What success looks like:** init finishes with consent recorded; `hexis chat` greets you in character; `hexis status` reports a configured agent. Tell it your name, open a *new* chat, and ask -- it remembers.
+
+**If it breaks:** `hexis doctor` diagnoses the usual suspects (Docker daemon down, Ollama unreachable, login incomplete). Then see [Troubleshooting](../operations/troubleshooting.md).
 
 ## Other Providers
 

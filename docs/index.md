@@ -26,7 +26,9 @@ Hexis is a Postgres-native cognitive architecture that wraps any LLM with persis
 | Task | Page |
 |------|------|
 | Get a running agent in 3 commands | [Quickstart](start/quickstart.md) |
-| Understand what Hexis is | [Concepts overview](concepts/index.md) |
+| Understand what Hexis is | [What is Hexis?](start/what-is-hexis.md) |
+| Get a quick answer | [FAQ](faq.md) |
+| Understand the architecture | [Concepts overview](concepts/index.md) |
 | Choose a character for my agent | [Character cards](guides/character-cards.md) |
 | Ingest documents into memory | [Ingestion guide](guides/ingestion.md) |
 | Enable autonomous heartbeat | [Heartbeat guide](guides/heartbeat.md) |

@@ -21,12 +21,18 @@ What you need before installing Hexis.
 
 ## Verify Installation
 
+Installed is not enough — Docker's daemon and Ollama's server must both be **running** when you start `hexis init`:
+
 ```bash
 docker --version          # Docker version 20.10+
+docker info               # daemon is running (errors if not — start Docker Desktop)
 docker compose version    # Docker Compose v2+
 ollama --version          # ollama version 0.x.x
+ollama list               # server is running (errors if not — run: ollama serve)
 python3 --version         # Python 3.10+
 ```
+
+`hexis init` pulls a ~300M-parameter embedding model through Ollama on first run — a small download, but it needs the server up.
 
 ## LLM Provider
 

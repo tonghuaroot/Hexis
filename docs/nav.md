@@ -8,6 +8,8 @@ section: root
 
 ## Getting Started
 - [Overview](start/index.md)
+- [What is Hexis?](start/what-is-hexis.md)
+- [FAQ](faq.md)
 - [Quickstart](start/quickstart.md)
 - [Prerequisites](start/prerequisites.md)
 - [Installation](start/installation.md)
