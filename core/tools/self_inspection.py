@@ -92,7 +92,8 @@ class InspectSourceHandler(ToolHandler):
             name="inspect_source",
             description=(
                 "Browse Hexis's own checked-out source tree. List source files, read a bounded line range, "
-                "or search source text. This tool is read-only and cannot leave the Hexis repository."
+                "or search — the query matches both file paths and file contents, so a document is findable "
+                "by name. Read-only, scoped to the Hexis repository."
             ),
             parameters={
                 "type": "object",
@@ -249,6 +250,17 @@ class InspectSourceHandler(ToolHandler):
         files_searched = 0
         for candidate in _iter_source_files(path, pattern):
             files_searched += 1
+            relative = str(candidate.relative_to(_SOURCE_ROOT))
+            # Filenames are matches too (#49): "philosophy" must find
+            # philosophy.md even when the document only says "philosophical".
+            if needle in relative.casefold():
+                matches.append({
+                    "path": relative,
+                    "line": 0,
+                    "text": "[filename match]",
+                })
+                if len(matches) >= limit:
+                    break
             try:
                 lines = candidate.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:

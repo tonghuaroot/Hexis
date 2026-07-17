@@ -206,3 +206,55 @@ async def test_tool_call_arguments_recorded_in_runtime_state(db_pool):
             assert calls[0]["arguments"] == {"path": "core/llm.py"}
         finally:
             await tr.rollback()
+
+
+async def test_markdown_negation_and_past_reference_are_not_flagged(db_pool):
+    """The live false positive (#48): truthful sentence, markdown-bold negation,
+    past-turn inspection reference — must produce zero flags."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            turn_id = await _start_turn(conn)
+            await _apply_call(conn, turn_id, "recall", {"query": "philosophy"})
+            report = await _detect(
+                conn,
+                turn_id,
+                "No. I inspected `services/prompts/philosophy.md`, but I did **not** "
+                "create a normal persistent memory from it—neither an explicit "
+                "`remember` entry nor a document-ingested semantic memory.",
+            )
+            assert report["flagged"] == []
+
+            past = await _detect(
+                conn, turn_id, "Earlier I filed the issue on GitHub for you."
+            )
+            assert past["flagged"] == []
+        finally:
+            await tr.rollback()
+
+
+async def test_negative_search_claims_require_a_search(db_pool):
+    """#50: 'I searched and found nothing' is a claim like any other."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            turn_id = await _start_turn(conn)
+            unbacked = await _detect(
+                conn,
+                turn_id,
+                "I searched the repository and it returns no matching path or text.",
+            )
+            assert _kinds(unbacked) == ["search_negative"]
+
+            await _apply_call(conn, turn_id, "inspect_source",
+                              {"action": "search", "query": "philosophy"})
+            backed = await _detect(
+                conn,
+                turn_id,
+                "I searched the repository and it returns no matching path or text.",
+            )
+            assert backed["flagged"] == []
+        finally:
+            await tr.rollback()

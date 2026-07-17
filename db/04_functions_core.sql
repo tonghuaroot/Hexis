@@ -2,6 +2,15 @@
 SET search_path = public, ag_catalog, "$user";
 SET check_function_bodies = off;
 
+-- Recency in recall ranking (#47): temporal questions must not lose to raw
+-- similarity. Half-life decay; weight 0 disables.
+INSERT INTO config (key, value, description) VALUES
+    ('memory.recency_weight', '0.1'::jsonb,
+     'Weight of the recency term in fast_recall scoring (0 disables)'),
+    ('memory.recency_halflife_days', '7'::jsonb,
+     'Half-life in days for the recency decay in fast_recall')
+ON CONFLICT (key) DO NOTHING;
+
 CREATE OR REPLACE FUNCTION update_memory_timestamp()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -191,6 +200,11 @@ CREATE OR REPLACE FUNCTION fast_recall(
 	            COALESCE(sc.vector_score, 0) * 0.5 +
 	            COALESCE(sc.assoc_score, 0) * 0.2 +
 	            COALESCE(sc.temp_score, 0) * 0.15 +
+	            -- Recency (#47): newer memories win similarity ties. Exponential
+	            -- decay with a config half-life; weight 0 disables entirely.
+	            COALESCE(get_config_float('memory.recency_weight'), 0.1)
+	              * exp(-ln(2.0) * GREATEST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - m.created_at)), 0)
+	                    / (86400.0 * GREATEST(COALESCE(get_config_float('memory.recency_halflife_days'), 7.0), 0.01))) +
 	            GREATEST(
                 calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced),
                 COALESCE(get_config_float('memory.recall_intensity_weight'), 0.5)

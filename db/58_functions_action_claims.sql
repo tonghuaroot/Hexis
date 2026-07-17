@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS action_claim_patterns (
     pattern TEXT NOT NULL,               -- POSIX regex, evaluated per sentence, case-insensitive
     satisfied_by_tools TEXT[] NOT NULL,  -- LIKE patterns over tool names (backslash escapes _)
     require_arg_key TEXT,                -- when set, a file token in the sentence must match this call argument
+    -- Patterns that inherently describe negative results ("I searched and
+    -- found nothing") opt OUT of the negation suppression (#50).
+    match_negated BOOLEAN NOT NULL DEFAULT FALSE,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -60,6 +63,23 @@ WHERE NOT EXISTS (
     WHERE p.claim_kind = v.claim_kind AND p.pattern = v.pattern
 );
 
+-- Negative search-result claims (#50): a false "nothing found" kills the
+-- follow-up, so these are flagged when no search-capable tool ran this turn.
+INSERT INTO action_claim_patterns (claim_kind, pattern, satisfied_by_tools, require_arg_key, match_negated, notes)
+SELECT v.claim_kind, v.pattern, v.satisfied_by_tools, v.require_arg_key, v.match_negated, v.notes
+FROM (VALUES
+    ('search_negative',
+     '\m(search(ed)?|scan(ned)?|looked|checked|recall(ed)?|queried)\M[^.!?]*(returns? no|no match(es|ing)?|found no|found nothing|nothing (matching|found|like)|not (present|found)|does ?not exist|doesn''t exist|no such (file|path|memory|record)|came up empty)',
+     ARRAY['inspect_source','recall','search_history','grep','glob','list_directory','sense_memory_availability','inspect_database_schema','explore_concept'],
+     NULL,
+     TRUE,
+     'negative search-result claims require an actual search this turn')
+) AS v(claim_kind, pattern, satisfied_by_tools, require_arg_key, match_negated, notes)
+WHERE NOT EXISTS (
+    SELECT 1 FROM action_claim_patterns p
+    WHERE p.claim_kind = v.claim_kind AND p.pattern = v.pattern
+);
+
 INSERT INTO config (key, value, description) VALUES
     ('guardrails.action_claims.enabled', 'true'::jsonb,
      'Detect unsupported action claims in final assistant text and append a visible correction'),
@@ -82,6 +102,8 @@ DECLARE
     calls JSONB;
     flagged JSONB := '[]'::jsonb;
     sentence TEXT;
+    norm TEXT;
+    is_negated BOOLEAN;
     checked INT := 0;
     pat RECORD;
     satisfied BOOLEAN;
@@ -117,23 +139,35 @@ BEGIN
         WHERE length(trim(s2)) > 8
     LOOP
         checked := checked + 1;
-        -- Futurity / negation / hypothetical / question suppression: false
-        -- negatives are acceptable for an advisory check, false accusations are not.
-        CONTINUE WHEN sentence ~ '\?'
-            OR sentence ~* '\m(will|would|could|should|can|cannot|going to|about to|let me|want(ed)? to|plan(ning|ned)? to|intend to|try(ing)? to|need to|didn''t|did not|couldn''t|could not|can''t|haven''t|hasn''t|have not|has not|not yet|never|unable|failed|failing|if|unless|whether|once|before I|when I|instead of)\M'
-            OR position('[Correction]' in sentence) > 0
+        -- Markdown emphasis defeated literal matching ("did **not**", `path`),
+        -- producing a live false positive (#48): match against a normalized
+        -- copy, report the original.
+        norm := regexp_replace(sentence, '[*_`~]+', '', 'g');
+
+        -- Futurity / hypothetical / question / past-reference suppression:
+        -- false negatives are acceptable for an advisory check, false
+        -- accusations are not. Claims about PREVIOUS turns are out of scope.
+        CONTINUE WHEN norm ~ '\?'
+            OR norm ~* '\m(will|would|could|should|cannot|can(?!''t)|going to|about to|let me|want(ed)? to|plan(ning|ned)? to|intend to|try(ing)? to|need to|if|unless|whether|once|before I|when I|instead of)\M'
+            OR norm ~* '\m(earlier|previously|previous (turn|message|conversation|session|exchange)|prior turn|last (turn|time|session)|already|at the time|back then|originally|yesterday)\M'
+            OR position('[Correction]' in norm) > 0
             OR left(sentence, 1) = '>';
+
+        -- Negation suppression is per-pattern (#50): patterns that describe
+        -- negative results (match_negated) must still see negated sentences.
+        is_negated := norm ~* '\m(didn''t|did not|couldn''t|could not|can''t|cannot|haven''t|hasn''t|have not|has not|do(es)? not|don''t|doesn''t|not yet|never|unable|failed|failing|no longer)\M';
 
         sentence_flagged := FALSE;
         FOR pat IN SELECT * FROM action_claim_patterns WHERE enabled ORDER BY id LOOP
             EXIT WHEN sentence_flagged;
-            CONTINUE WHEN sentence !~* pat.pattern;
+            CONTINUE WHEN is_negated AND NOT pat.match_negated;
+            CONTINUE WHEN norm !~* pat.pattern;
 
             satisfied := FALSE;
             IF pat.require_arg_key IS NOT NULL THEN
                 file_tokens := ARRAY(
                     SELECT DISTINCT m[1]
-                    FROM regexp_matches(sentence, '([A-Za-z0-9_./-]+\.(?:py|sql|md|ts|tsx|js|jsx|json|ya?ml|toml|sh|go|rs))', 'g') AS m
+                    FROM regexp_matches(norm, '([A-Za-z0-9_./-]+\.(?:py|sql|md|ts|tsx|js|jsx|json|ya?ml|toml|sh|go|rs))', 'g') AS m
                 );
             END IF;
 

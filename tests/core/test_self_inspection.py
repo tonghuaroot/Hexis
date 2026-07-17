@@ -141,3 +141,18 @@ async def test_self_state_mirror_tools_registered(db_pool):
     actions_result = await ReviewRecentActionsHandler().execute({"hours": 1}, context)
     assert actions_result.success
     assert "summary" in actions_result.output
+
+
+async def test_search_matches_filenames_not_just_content():
+    """#49: 'philosophy' must find philosophy.md even though the document only
+    ever says 'philosophical'."""
+    handler = InspectSourceHandler()
+    context = ToolExecutionContext(tool_context=ToolContext.CHAT, call_id="fn-search")
+    result = await handler.execute(
+        {"action": "search", "path": "services/prompts", "query": "philosophy",
+         "file_pattern": "*.md", "limit": 20},
+        context,
+    )
+    assert result.success
+    paths = {m["path"] for m in result.output["matches"]}
+    assert "services/prompts/philosophy.md" in paths

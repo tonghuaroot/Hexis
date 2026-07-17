@@ -282,3 +282,59 @@ async def test_no_energy_footer_without_budget(db_pool):
             assert content == "plain"
         finally:
             await tr.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Recency in recall (#47)
+# ---------------------------------------------------------------------------
+
+
+async def test_fast_recall_prefers_newer_on_similarity_ties(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            old_id = await conn.fetchval(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level,
+                                      status, created_at)
+                VALUES ('semantic', 'recency tie test fact',
+                        (get_embedding(ARRAY['recency tie test fact']))[1],
+                        0.5, 0.8, 'active', now() - interval '60 days')
+                RETURNING id
+                """
+            )
+            new_id = await conn.fetchval(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level,
+                                      status, created_at)
+                VALUES ('semantic', 'recency tie test fact',
+                        (get_embedding(ARRAY['recency tie test fact']))[1],
+                        0.5, 0.8, 'active', now())
+                RETURNING id
+                """
+            )
+            rows = await conn.fetch(
+                "SELECT memory_id, score FROM fast_recall('recency tie test fact', 10)"
+            )
+            ranked = [str(r["memory_id"]) for r in rows]
+            weighted = {str(r["memory_id"]): r["score"] for r in rows}
+            assert str(new_id) in ranked and str(old_id) in ranked
+            assert ranked.index(str(new_id)) < ranked.index(str(old_id))
+
+            # Weight 0 removes the recency term; the remaining age effect is
+            # the (small) pre-existing strength decay, so the new/old score gap
+            # must shrink.
+            await conn.execute(
+                "UPDATE config SET value = '0'::jsonb WHERE key = 'memory.recency_weight'"
+            )
+            rows = await conn.fetch(
+                "SELECT memory_id, score FROM fast_recall('recency tie test fact', 10)"
+            )
+            unweighted = {str(r["memory_id"]): r["score"] for r in rows}
+            gap_weighted = weighted[str(new_id)] - weighted[str(old_id)]
+            gap_unweighted = unweighted[str(new_id)] - unweighted[str(old_id)]
+            assert gap_unweighted < gap_weighted
+        finally:
+            await tr.rollback()

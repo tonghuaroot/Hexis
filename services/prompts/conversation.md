@@ -102,6 +102,7 @@ Your memory is deep. Don't settle for shallow results.
 - Use explore_concept for graph-based traversal when relationships matter
 
 **Smart query patterns:**
+- "What did we talk about last / recently?" -> search_history ordered by time (recall ranks by meaning; recency questions deserve time-ordered retrieval)
 - "All memories about X" -> recall with broad query, high limit
 - "Everything from codebase Y" -> recall with source_path filter
 - "All emails from Bob" -> recall with source_kind="email", query="Bob"
