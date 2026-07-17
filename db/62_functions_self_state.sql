@@ -208,3 +208,82 @@ BEGIN
     ));
 END;
 $$ LANGUAGE plpgsql STABLE;
+
+-- The full story behind one memory (#76): the gist you recalled, the verbatim
+-- experience underneath it. Graded recall's drill-down — recall gives shape,
+-- open_memory gives the exact words. Mirrors get_belief_history's assembly.
+CREATE OR REPLACE FUNCTION get_memory_story(
+    p_memory_id UUID,
+    p_max_units INT DEFAULT 40
+) RETURNS JSONB AS $$
+DECLARE
+    mem RECORD;
+    units JSONB;
+    gisted_members JSONB;
+BEGIN
+    SELECT id, type, content, importance, trust_level, fidelity, status,
+           created_at, superseded_by, metadata
+    INTO mem
+    FROM memories WHERE id = p_memory_id;
+
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('error', 'not_found');
+    END IF;
+
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'unit_id', u.id,
+        'role', u.role,
+        'turn_at', u.turn_at,
+        'content', u.content
+    ) ORDER BY u.turn_at, u.created_at), '[]'::jsonb)
+    INTO units
+    FROM (
+        SELECT s.id, msu.role, s.turn_at, s.created_at, s.content
+        FROM memory_source_units msu
+        JOIN subconscious_units s ON s.id = msu.subconscious_unit_id
+        WHERE msu.memory_id = p_memory_id
+          AND s.status = 'active'
+        ORDER BY s.turn_at, s.created_at
+        LIMIT GREATEST(COALESCE(p_max_units, 40), 1)
+    ) u;
+
+    -- A retention gist supersedes its members: opening the gist also opens
+    -- the archived originals (still present through the grace window).
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'memory_id', g.id,
+        'content', g.content,
+        'created_at', g.created_at
+    ) ORDER BY g.created_at), '[]'::jsonb)
+    INTO gisted_members
+    FROM memories g
+    WHERE g.superseded_by = p_memory_id;
+
+    RETURN jsonb_strip_nulls(jsonb_build_object(
+        'memory', jsonb_build_object(
+            'id', mem.id,
+            'type', mem.type,
+            'content', mem.content,
+            'importance', mem.importance,
+            'confidence', NULLIF(mem.metadata->>'confidence', '')::float,
+            'trust_level', mem.trust_level,
+            'fidelity', mem.fidelity,
+            'status', mem.status,
+            'created_at', mem.created_at,
+            'occurred_from', mem.metadata#>>'{recmem,occurred_from}',
+            'occurred_to', mem.metadata#>>'{recmem,occurred_to}',
+            'session_id', mem.metadata#>>'{recmem,session_id}'
+        ),
+        'full_content', NULLIF(mem.metadata#>>'{consolidation,full_content}', ''),
+        'source_units', units,
+        'superseded_members', CASE WHEN gisted_members = '[]'::jsonb THEN NULL ELSE gisted_members END,
+        'superseded_by', mem.superseded_by,
+        'evidence', jsonb_build_object(
+            'revisions', (SELECT count(*) FROM belief_revision_audit b WHERE b.memory_id = p_memory_id),
+            'supports', (SELECT count(*) FROM memory_edges e
+                         WHERE e.dst_type = 'memory' AND e.dst_id = p_memory_id::text AND e.rel_type = 'SUPPORTS'),
+            'contradicts', (SELECT count(*) FROM memory_edges e
+                            WHERE e.dst_type = 'memory' AND e.dst_id = p_memory_id::text AND e.rel_type = 'CONTRADICTS')
+        )
+    ));
+END;
+$$ LANGUAGE plpgsql STABLE;

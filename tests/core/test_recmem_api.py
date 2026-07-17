@@ -41,6 +41,12 @@ class _Conn:
         self.fetchval_calls.append((query, args))
         return self.fetchval_result
 
+    async def fetchrow(self, query, *args):
+        # The recmem per-tier budget config read (#76) — serve the defaults.
+        if "recmem_sub_limit" in query:
+            return {"sub": 10, "epi": 5, "sem": 10}
+        return None
+
     async def fetch(self, query, *args):
         self.fetch_calls.append((query, args))
         return self.fetch_rows

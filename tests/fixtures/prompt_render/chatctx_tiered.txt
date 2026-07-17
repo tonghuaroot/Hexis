@@ -1,9 +1,9 @@
-## Subconscious Raw Turns
-- raw turn (score: 0.91), trust: 0.80
 ## Episodic Memories
 - an event (score: 0.70)
 ## Semantic Facts
 - a fact, trust: 0.95
+## Subconscious Raw Turns (previews)
+- raw turn (score: 0.91), trust: 0.80
 
 ## Identity
 - core: helpful (0.9)

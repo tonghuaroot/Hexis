@@ -561,6 +561,25 @@ BEGIN
             jsonb_array_length(COALESCE(revision->'revisions', '[]'::jsonb)),
             jsonb_array_length(COALESCE(revision->'evidence', '[]'::jsonb)));
         RETURN tool_success(revision, display);
+    ELSIF p_tool_name = 'open_memory' THEN
+        -- Graded recall's drill-down (#76): the verbatim experience behind a
+        -- gist — source units time-ordered, pre-summary full text, members a
+        -- retention gist superseded.
+        target_id := _db_brain_try_uuid(p_args->>'memory_id');
+        IF target_id IS NULL THEN
+            RETURN tool_error('memory_id must be a valid uuid', 'invalid_params');
+        END IF;
+        revision := get_memory_story(target_id, COALESCE(NULLIF(p_args->>'max_units', '')::int, 40));
+        IF revision->>'error' = 'not_found' THEN
+            RETURN tool_error(format('memory not found: %s', target_id), 'invalid_params');
+        END IF;
+        display := format('Opened memory: %s source unit(s)%s%s',
+            jsonb_array_length(COALESCE(revision->'source_units', '[]'::jsonb)),
+            CASE WHEN revision ? 'full_content' THEN ', pre-gist full text preserved' ELSE '' END,
+            CASE WHEN revision ? 'superseded_members'
+                 THEN format(', %s gisted member(s)', jsonb_array_length(revision->'superseded_members'))
+                 ELSE '' END);
+        RETURN tool_success(revision, display);
     END IF;
     RETURN tool_error(format('Unsupported memory tool: %s', p_tool_name), 'invalid_params');
 EXCEPTION WHEN OTHERS THEN

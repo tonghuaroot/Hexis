@@ -567,13 +567,24 @@ BEGIN
     IF jsonb_array_length(memories) > 0 THEN
         any_tier := EXISTS (SELECT 1 FROM jsonb_array_elements(memories) x WHERE NULLIF(x->>'tier', '') IS NOT NULL);
         IF any_tier THEN
-            FOREACH tier_name IN ARRAY ARRAY['subconscious', 'episodic', 'semantic', '__none__'] LOOP
+            -- Gist-first (#76): consolidated scenes and distilled facts lead;
+            -- raw turns close the section as previews — open_memory or a
+            -- keyword search fetch the verbatim moment when it matters.
+            FOREACH tier_name IN ARRAY ARRAY['episodic', 'semantic', '__none__', 'subconscious'] LOOP
                 tier_title := CASE tier_name
-                    WHEN 'subconscious' THEN '## Subconscious Raw Turns'
+                    WHEN 'subconscious' THEN '## Subconscious Raw Turns (previews)'
                     WHEN 'episodic' THEN '## Episodic Memories'
                     WHEN 'semantic' THEN '## Semantic Facts'
                     ELSE '## Relevant Memories' END;
-                SELECT string_agg(_pr_mem_line(m, false, low_viv, cue), E'\n' ORDER BY ord)
+                SELECT string_agg(
+                    _pr_mem_line(
+                        CASE WHEN tier_name = 'subconscious'
+                                  AND length(COALESCE(capped.m->>'content', '')) > 300
+                             THEN jsonb_set(capped.m, '{content}',
+                                            to_jsonb(left(capped.m->>'content', 300) || ' …'))
+                             ELSE capped.m END,
+                        false, low_viv, cue),
+                    E'\n' ORDER BY ord)
                 INTO grp
                 FROM (SELECT m, ord FROM jsonb_array_elements(memories) WITH ORDINALITY AS t(m, ord)
                       ORDER BY ord LIMIT p_max_memories) capped

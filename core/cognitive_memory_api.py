@@ -1370,6 +1370,15 @@ class CognitiveMemory:
         sem_limit: int | None = None,
         session_id: UUID | str | None = None,
     ) -> list[Memory]:
+        # Per-tier budgets are config-owned (#76): memory.recmem_sub/epi/sem_limit
+        # seed the ceilings; the caller's overall limit still scales below them.
+        cfg = await conn.fetchrow(
+            """
+            SELECT COALESCE(get_config_int('memory.recmem_sub_limit'), 10) AS sub,
+                   COALESCE(get_config_int('memory.recmem_epi_limit'), 5) AS epi,
+                   COALESCE(get_config_int('memory.recmem_sem_limit'), 10) AS sem
+            """
+        )
         rows = await conn.fetch(
             """
             SELECT *
@@ -1382,9 +1391,9 @@ class CognitiveMemory:
             )
             """,
             query,
-            int(sub_limit if sub_limit is not None else min(max(limit, 1), 10)),
-            int(epi_limit if epi_limit is not None else max(1, min(limit, 5))),
-            int(sem_limit if sem_limit is not None else max(1, min(limit * 2, 10))),
+            int(sub_limit if sub_limit is not None else min(max(limit, 1), cfg["sub"])),
+            int(epi_limit if epi_limit is not None else max(1, min(limit, cfg["epi"]))),
+            int(sem_limit if sem_limit is not None else max(1, min(limit * 2, cfg["sem"]))),
             _uuid_text_or_none(session_id),
         )
 

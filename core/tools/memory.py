@@ -181,8 +181,12 @@ class SearchHistoryHandler(ToolHandler):
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 50,
+                        "maximum": 200,
                         "default": 20,
+                        "description": (
+                            "Up to 50 for keyword search; time-window browsing "
+                            "(no keywords) allows up to 200 preview-grain rows."
+                        ),
                     },
                     "sources": {
                         "type": "array",
@@ -262,9 +266,13 @@ class SearchHistoryHandler(ToolHandler):
             from core.cognitive_memory_api import CognitiveMemory
 
             raw_sources = arguments.get("sources")
+            # Browse mode (keyword-less window) affords a higher ceiling —
+            # rows come back preview-grain (#76).
+            is_browse = not query.strip("* ")
+            limit_used = min(max(int(arguments.get("limit", 20)), 1), 200 if is_browse else 50)
             results = await CognitiveMemory(pool).search_history(
                 query,
-                limit=min(max(int(arguments.get("limit", 20)), 1), 50),
+                limit=limit_used,
                 sources=[
                     str(value)
                     for value in (
@@ -312,9 +320,24 @@ class SearchHistoryHandler(ToolHandler):
                     for result in results
                 ],
                 "count": len(results),
+                "limit": limit_used,
+                # Loud truncation (#76): a full page means the window holds
+                # more — silence here once read as "the morning was blank."
+                "truncated": len(results) >= limit_used,
+                **(
+                    {
+                        "note": (
+                            "window truncated — older entries exist; page with "
+                            f"created_before={min(r.occurred_at for r in results).isoformat()}"
+                        )
+                    }
+                    if results and len(results) >= limit_used
+                    else {}
+                ),
                 "excluded_session_id": exclude_session_id,
             },
-            f"Found {len(results)} history result(s)",
+            f"Found {len(results)} history result(s)"
+            + (" (page full — more exist in this window)" if len(results) >= limit_used else ""),
         )
 
 
@@ -565,6 +588,58 @@ class BeliefHistoryHandler(ToolHandler):
         context: ToolExecutionContext,
     ) -> ToolResult:
         db_result = await _try_db_memory_tool("belief_history", arguments, context)
+        if db_result is not None:
+            return db_result
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
+
+
+class OpenMemoryHandler(ToolHandler):
+    """Graded recall's drill-down: the verbatim experience behind a memory."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="open_memory",
+            description=(
+                "Open a memory to its verbatim grain: given a memory's id (from "
+                "recall or search_history), returns the exact source turns behind "
+                "it time-ordered, the pre-summary full text if it has been gisted, "
+                "and any archived originals a consolidation superseded. Recall "
+                "gives you the shape of a memory; open_memory gives you the exact "
+                "words — reach for it when precise wording, quotes, or the full "
+                "moment matter."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "UUID of the memory to open.",
+                    },
+                    "max_units": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 40,
+                        "description": "Maximum verbatim source turns to return.",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=1,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        db_result = await _try_db_memory_tool("open_memory", arguments, context)
         if db_result is not None:
             return db_result
         return ToolResult.error_result(
@@ -1364,6 +1439,7 @@ def create_memory_tools() -> list[ToolHandler]:
         RememberHandler(),
         AddEvidenceHandler(),
         BeliefHistoryHandler(),
+        OpenMemoryHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
         ExploreSubgraphHandler(),

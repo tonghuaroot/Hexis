@@ -150,3 +150,95 @@ async def test_temporal_context_day_of_life(db_pool):
             assert ctx["age_days"] == 6
         finally:
             await tr.rollback()
+
+
+async def test_browse_mode_returns_previews_with_higher_cap(db_pool):
+    """#76: keyword-less window rows come back preview-grain; memories full."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            long_text = "a rambling turn " * 40  # ~640 chars
+            await conn.fetchval(
+                "SELECT recmem_ingest_turn($1, 'ok', NULL, 'preview-probe-1')",
+                long_text,
+            )
+            await conn.execute(
+                "UPDATE subconscious_units SET turn_at = CURRENT_TIMESTAMP - INTERVAL '1 hour' WHERE source_identity = 'preview-probe-1'"
+            )
+            rows = await conn.fetch(
+                """
+                SELECT content FROM search_cross_session_history(
+                    '', 250, ARRAY['turn'],
+                    CURRENT_TIMESTAMP - INTERVAL '2 hours', CURRENT_TIMESTAMP)
+                """
+            )
+            probe = next(r for r in rows if "a rambling turn" in r["content"])
+            assert probe["content"].endswith(" …")
+            assert len(probe["content"]) < 300
+
+            # Keyword mode returns the verbatim content.
+            kw = await conn.fetch(
+                "SELECT content FROM search_cross_session_history('rambling', 10)"
+            )
+            assert any(len(r["content"]) > 500 for r in kw)
+        finally:
+            await tr.rollback()
+
+
+async def test_open_memory_returns_verbatim_units(db_pool):
+    """#76: open_memory re-hydrates the exact turns behind a memory."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            unit_result = _json(await conn.fetchval(
+                "SELECT recmem_ingest_turn('the exact words matter here', 'indeed they do', NULL, 'open-probe-1')"
+            ))
+            mem_id = await conn.fetchval(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level, status)
+                VALUES ('episodic', 'A short scene about exact words.',
+                        array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.6, 0.9, 'active')
+                RETURNING id
+                """
+            )
+            await conn.fetchval(
+                "SELECT link_memory_to_source_unit($1::uuid, $2::uuid, 'source')",
+                mem_id, unit_result["unit_id"],
+            )
+            result = _json(await conn.fetchval(
+                "SELECT execute_memory_tool('open_memory', jsonb_build_object('memory_id', $1::text))",
+                str(mem_id),
+            ))
+            units = result["output"]["source_units"]
+            assert len(units) == 1
+            assert "the exact words matter here" in units[0]["content"]
+            assert "source unit(s)" in result["display_output"]
+        finally:
+            await tr.rollback()
+
+
+async def test_open_memory_surfaces_pre_gist_full_content(db_pool):
+    """#76: a gisted memory opens to its preserved full text."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            mem_id = await conn.fetchval(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level, status, metadata, fidelity)
+                VALUES ('episodic', 'The gist.', array_fill(0.1, ARRAY[embedding_dimension()])::vector,
+                        0.5, 0.9, 'active',
+                        '{"consolidation": {"full_content": "The long original story, word for word."}}'::jsonb,
+                        0.7)
+                RETURNING id
+                """
+            )
+            result = _json(await conn.fetchval(
+                "SELECT get_memory_story($1::uuid)", mem_id
+            ))
+            assert result["full_content"] == "The long original story, word for word."
+            assert result["memory"]["fidelity"] == 0.7
+        finally:
+            await tr.rollback()

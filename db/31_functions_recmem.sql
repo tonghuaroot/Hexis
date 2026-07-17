@@ -1,5 +1,10 @@
 -- RecMem: recurrence-based memory consolidation.
 
+INSERT INTO config (key, value, description) VALUES
+    ('memory.history_browse_max', '200'::jsonb,
+     'Row ceiling for keyword-less time-window browsing in search_history (preview-grain rows)')
+ON CONFLICT (key) DO NOTHING;
+
 -- Turns are labeled with the real names when configured (#56): "User:" as a
 -- speaker label leaks into extracted memories ("The user is becoming a
 -- leader") and splits one person across two identities in recall.
@@ -166,6 +171,12 @@ DECLARE
     browse_mode BOOLEAN :=
         NULLIF(trim(COALESCE(p_query, '')), '') IS NULL
         OR trim(COALESCE(p_query, '')) = '*';
+    -- Preview-grain rows are cheap, so browse affords a higher ceiling (#76).
+    browse_cap INT := CASE
+        WHEN NULLIF(trim(COALESCE(p_query, '')), '') IS NULL
+          OR trim(COALESCE(p_query, '')) = '*'
+        THEN GREATEST(COALESCE(get_config_int('memory.history_browse_max'), 200), 1)
+        ELSE 100 END;
 BEGIN
     IF browse_mode AND p_created_after IS NULL AND p_created_before IS NULL THEN
         RETURN;
@@ -180,9 +191,15 @@ BEGIN
             'turn'::TEXT AS source_kind,
             s.id AS item_id,
             s.session_id,
-            s.content,
-            s.user_text,
-            s.assistant_text,
+            -- Browse grain (#76): a timeline scan reads previews, not
+            -- transcripts — open_memory / a keyword search fetch verbatim.
+            CASE WHEN browse_mode AND length(s.content) > 280
+                 THEN left(s.content, 280) || ' …'
+                 ELSE s.content END AS content,
+            -- The content preview IS the browse surface: the raw halves stay
+            -- home, or a 200-row page still weighs a megabyte.
+            CASE WHEN browse_mode THEN NULL ELSE s.user_text END AS user_text,
+            CASE WHEN browse_mode THEN NULL ELSE s.assistant_text END AS assistant_text,
             NULL::TEXT AS memory_type,
             s.turn_at AS occurred_at,
             CASE WHEN browse_mode THEN 0.0 ELSE ts_rank_cd(to_tsvector('english', s.content), q.query, 32) END::FLOAT AS rank,
@@ -199,7 +216,7 @@ BEGIN
           AND (p_created_before IS NULL OR s.turn_at < p_created_before)
           AND (browse_mode OR to_tsvector('english', s.content) @@ q.query)
         ORDER BY rank DESC, occurred_at DESC, item_id
-        LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100)
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap)
     ),
     memory_hits AS (
         SELECT
@@ -239,7 +256,7 @@ BEGIN
           AND (p_created_before IS NULL OR m.created_at < p_created_before)
           AND (browse_mode OR to_tsvector('english', m.content) @@ q.query)
         ORDER BY rank DESC, occurred_at DESC, item_id
-        LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100)
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap)
     )
     SELECT hits.*
     FROM (
@@ -248,7 +265,7 @@ BEGIN
         SELECT * FROM memory_hits
     ) hits
     ORDER BY hits.rank DESC, hits.occurred_at DESC, hits.source_kind, hits.item_id
-    LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), 100);
+    LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap);
 END;
 $$ LANGUAGE plpgsql STABLE;
 
