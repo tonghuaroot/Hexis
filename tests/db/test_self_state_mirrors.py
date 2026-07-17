@@ -338,3 +338,60 @@ async def test_fast_recall_prefers_newer_on_similarity_ties(db_pool):
             assert gap_unweighted < gap_weighted
         finally:
             await tr.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Temporal grounding (#55) and speaker naming (#56)
+# ---------------------------------------------------------------------------
+
+
+async def test_temporal_context_reports_now_and_age(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level,
+                                      status, metadata, created_at)
+                VALUES ('episodic', 'I came online today.',
+                        array_fill(0.1, ARRAY[embedding_dimension()])::vector,
+                        0.9, 0.95, 'active', '{"type": "initialization"}'::jsonb,
+                        now() - interval '5 days')
+                """
+            )
+            ctx = _coerce_json(await conn.fetchval("SELECT get_temporal_context()"))
+            assert ctx["now"]
+            assert ctx["timezone"]
+            assert ctx["age_days"] == 5
+            assert ctx["born_on"]
+        finally:
+            await tr.rollback()
+
+
+async def test_recmem_turns_use_configured_names(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO config (key, value, description)
+                VALUES ('agent.user_name', '"Eric"'::jsonb, 'test')
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """
+            )
+            formatted = await conn.fetchval(
+                "SELECT format_recmem_turn('hello', 'hi there')"
+            )
+            assert formatted.startswith("Eric: hello")
+        finally:
+            await tr.rollback()
+
+
+async def test_promises_clear_the_importance_floor(db_pool):
+    async with db_pool.acquire() as conn:
+        importance = await conn.fetchval(
+            "SELECT estimate_conversation_importance('do you promise?', 'I promise I will tell you mine too.')"
+        )
+        assert importance >= 0.8

@@ -358,6 +358,19 @@ async def run_subconscious_appraisal(
             clipped += "\n[truncated for subconscious appraisal; full context is provided to the main turn]"
         payload["additional_context"] = clipped
 
+    # The appraisal must see the character's identity and values (#59): when
+    # hydration left them empty (or was absent), fall back to the DB context.
+    if not payload.get("identity") or not payload.get("worldview"):
+        try:
+            ctx_raw = await conn.fetchval("SELECT gather_turn_context()")
+            ctx = _coerce_json_value(ctx_raw, {})
+            if not payload.get("identity"):
+                payload["identity"] = (ctx.get("identity") or [])[:5]
+            if not payload.get("worldview"):
+                payload["worldview"] = (ctx.get("worldview") or [])[:5]
+        except Exception as e:
+            logger.debug("Identity/worldview fallback failed: %s", e)
+
     # Get emotional state from DB
     try:
         affect_raw = await conn.fetchval("SELECT get_current_affective_state()")
@@ -494,6 +507,27 @@ async def build_system_prompt(
     if mode == "heartbeat" and has_backlog_tasks:
         task_mode_prompt = load_heartbeat_task_mode_prompt().strip()
         prompt += "\n\n" + task_mode_prompt
+
+    # Temporal grounding (#55): the conscious mind always knows the current
+    # date/time and its own age — computable ground truth, never guessed.
+    if registry is not None and getattr(registry, "pool", None) is not None:
+        try:
+            async with registry.pool.acquire() as conn:
+                raw = await conn.fetchval("SELECT get_temporal_context()")
+            temporal = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            if isinstance(temporal, dict) and temporal.get("now"):
+                now_line = (
+                    f"Current date and time: {temporal['now']} "
+                    f"({temporal.get('timezone', 'UTC')})."
+                )
+                if temporal.get("born_on") and temporal.get("age_days") is not None:
+                    now_line += (
+                        f" You first came online on {temporal['born_on']} — "
+                        f"{temporal['age_days']} day(s) ago."
+                    )
+                prompt += "\n\n## Now\n" + now_line
+        except Exception:
+            logger.debug("Temporal context unavailable for prompt", exc_info=True)
 
     # Skill-first capability surface. Tool schemas ride the structured
     # tool-calling API and full skill instructions come from `use_skill` on

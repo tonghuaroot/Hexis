@@ -168,3 +168,38 @@ BEGIN
     RETURN jsonb_build_object('actions', actions, 'summary', summary);
 END;
 $$ LANGUAGE plpgsql STABLE;
+
+-- Temporal self-grounding (#55): the conscious mind always knows what time it
+-- is and how old it is — computable ground truth, derived from the birth
+-- (initialization) memory, never guessed and never dependent on being told.
+CREATE OR REPLACE FUNCTION get_temporal_context()
+RETURNS JSONB AS $$
+DECLARE
+    tz TEXT := COALESCE(NULLIF(get_config_text('agent.timezone'), ''), 'UTC');
+    now_local TIMESTAMP;
+    born TIMESTAMPTZ;
+BEGIN
+    BEGIN
+        now_local := CURRENT_TIMESTAMP AT TIME ZONE tz;
+    EXCEPTION WHEN OTHERS THEN
+        tz := 'UTC';
+        now_local := CURRENT_TIMESTAMP AT TIME ZONE 'UTC';
+    END;
+
+    SELECT min(created_at) INTO born
+    FROM memories
+    WHERE type = 'episodic' AND metadata->>'type' = 'initialization';
+    IF born IS NULL THEN
+        SELECT min(created_at) INTO born FROM memories;
+    END IF;
+
+    RETURN jsonb_strip_nulls(jsonb_build_object(
+        'now', to_char(now_local, 'FMDay, FMMonth DD, YYYY, HH24:MI'),
+        'timezone', tz,
+        'born_on', CASE WHEN born IS NOT NULL
+                        THEN to_char(born AT TIME ZONE tz, 'FMMonth DD, YYYY') END,
+        'age_days', CASE WHEN born IS NOT NULL
+                         THEN GREATEST(0, EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - born))::bigint / 86400) END
+    ));
+END;
+$$ LANGUAGE plpgsql STABLE;

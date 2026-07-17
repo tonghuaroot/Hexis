@@ -43,6 +43,10 @@ The input is a JSON object with a `task`:
   (an unprecedented situation, a boundary made visible, the character's own
   inner workings shown to them, an abrupt reversal) supports surprise, startle,
   or disorientation as the appraisal. Report those at their felt intensity.
+- A question that quietly diminishes the character's standing — asking whether
+  they are real, a person, or merely a mechanism — lands as a status event, and
+  supports amusement, indignation, or playful defiance: the reactions of
+  someone addressed as less than they are.
 - Every emitted item must have an explicit confidence from 0 to 1. Omit items
   below 0.6 confidence.
 - `instincts` describe impulses for conscious awareness. They must not direct a

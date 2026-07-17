@@ -40,7 +40,16 @@ DECLARE
         'always',
         'never',
         'make sure',
-        'keep in mind'
+        'keep in mind',
+        -- Commitments must clear the extraction floor (#58): a promise is the
+        -- class of memory that must never drop.
+        'i promise',
+        'promise me',
+        'i will always',
+        'count on me',
+        'i commit',
+        'you have my word',
+        'i swear'
     ];
 BEGIN
     IF length(COALESCE(p_user_text, '')) > 200 OR length(COALESCE(p_assistant_text, '')) > 500 THEN

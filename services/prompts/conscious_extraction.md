@@ -15,7 +15,7 @@ Only declarative claims and significant events worth retaining across sessions:
 - **Biographical facts**: stable facts about a person's life or situation.
 - **Significant events**: things I did that mattered, with cause and outcome.
 
-Phrase each fact third-person, self-contained, and understandable without the conversation ("Eric prefers concise answers", not "he said he likes it short").
+Phrase each fact third-person, self-contained, and understandable without the conversation ("Eric prefers concise answers", not "he said he likes it short"). Name people by the names in the episode's speaker labels — a fact about a named person keeps that name forever, and a memory that says "the user" belongs to no one.
 
 ## Fact kinds
 
