@@ -166,3 +166,25 @@ async def test_load_available_skills_include_unmet_keeps_broken_skills():
     met_only = load_available_skills(registry, ToolContext.CHAT)
     everything = load_available_skills(registry, ToolContext.CHAT, include_unmet=True)
     assert len(everything) >= len(met_only)
+
+
+def test_prompt_instructed_tools_are_bound_in_default_chat_skills():
+    """#66: every epistemics tool the conversation prompt instructs must be
+    reachable through skill bindings — the prompt taught add_evidence and
+    belief_history while no skill bound them, so chat never offered them."""
+    from pathlib import Path
+
+    from services.skill_runtime import DEFAULT_SKILL_NAMES, skill_bound_tools
+    from skills.loader import load_skills_from_dir
+
+    repo_skills = Path(__file__).resolve().parents[2] / "skills" / "installed"
+    by_name = {s.name: s for s in load_skills_from_dir(repo_skills)}
+
+    core_memory = skill_bound_tools(by_name["core-memory"])
+    assert "add_evidence" in core_memory
+    assert "belief_history" in core_memory
+    assert "core-memory" in DEFAULT_SKILL_NAMES
+
+    self_inspection = skill_bound_tools(by_name["self-inspection"])
+    assert "inspect_config" in self_inspection
+    assert "review_recent_actions" in self_inspection

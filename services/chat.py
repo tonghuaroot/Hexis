@@ -54,16 +54,20 @@ async def _remember_conversation(
     assistant_message: str,
     session_id: str | None = None,
     source_identity: str | None = None,
+    user_label: str | None = None,
     background_dsn: str | None = None,
 ) -> None:
     if not user_message and not assistant_message:
         return
+    context: dict[str, Any] = {"metadata": {"type": "conversation"}}
+    if user_label and user_label.strip():
+        context["user_label"] = user_label.strip()
     await mem_client.record_chat_turn_memory(
         user_message,
         assistant_message,
         session_id=session_id,
         source_identity=source_identity,
-        context={"metadata": {"type": "conversation"}},
+        context=context,
     )
 
 
@@ -112,6 +116,7 @@ async def chat_turn(
     max_tool_iterations: int = 5,
     session_id: str | None = None,
     pool: Any | None = None,
+    user_label: str | None = None,
     is_group: bool = False,
 ) -> dict[str, Any]:
     dsn = dsn or db_dsn_from_env()
@@ -154,6 +159,7 @@ async def chat_turn(
                 user_message=user_message,
                 assistant_message=assistant_text,
                 session_id=session_id,
+                user_label=user_label,
                 source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
                 background_dsn=dsn,
             )
@@ -164,6 +170,7 @@ async def chat_turn(
                     user_message=user_message,
                     assistant_message=assistant_text,
                     session_id=session_id,
+                    user_label=user_label,
                     source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
                     background_dsn=dsn,
                 )
@@ -204,6 +211,7 @@ async def chat_turn(
                 user_message=user_message,
                 assistant_message=assistant_text,
                 session_id=session_id,
+                user_label=user_label,
                 source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
                 background_dsn=dsn,
             )
@@ -227,6 +235,7 @@ async def stream_chat_turn(
     max_tool_iterations: int = 5,
     session_id: str | None = None,
     pool: Any | None = None,
+    user_label: str | None = None,
     is_group: bool = False,
 ) -> AsyncIterator[str]:
     """
@@ -276,6 +285,7 @@ async def stream_chat_turn(
                     user_message=user_message,
                     assistant_message=full_text,
                     session_id=session_id,
+                    user_label=user_label,
                     source_identity=_conversation_source_identity(session_id, history, user_message, full_text),
                     background_dsn=dsn,
                 )

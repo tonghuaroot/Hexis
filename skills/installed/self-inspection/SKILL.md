@@ -5,7 +5,7 @@ category: system
 requires:
   tools: [inspect_source, inspect_database_schema]
 contexts: [heartbeat, chat]
-bound_tools: [inspect_source, inspect_database_schema]
+bound_tools: [inspect_source, inspect_database_schema, inspect_config, review_recent_actions]
 ---
 
 # Self Inspection

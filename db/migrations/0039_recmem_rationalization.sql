@@ -207,6 +207,11 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- DROP-first: later baselines change this function's OUT row (0040 adds
+-- confidence), and CREATE OR REPLACE cannot change a return type when this
+-- migration replays onto a fresh database built from that newer baseline.
+DROP FUNCTION IF EXISTS recmem_recall_context(TEXT, INT, INT, INT, UUID);
+
 CREATE OR REPLACE FUNCTION recmem_recall_context(
     p_query TEXT,
     p_k_sub INT DEFAULT 10,

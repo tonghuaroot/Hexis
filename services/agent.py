@@ -568,8 +568,15 @@ async def build_system_prompt(
         persona = agent_profile.get("persona")
         if isinstance(persona, dict) and persona:
             prompt += "\n\n----- ACTIVE PERSONA -----\n\n" + _format_active_persona(persona)
-        runtime_profile = {key: value for key, value in agent_profile.items() if key != "persona"}
-        prompt += "\n\n## Agent Profile (Runtime)\n" + json.dumps(runtime_profile, separators=(", ", ": "))
+        # The offered tool list is the source of truth for capabilities (#66);
+        # the profile's stale tool inventory and empty fields are noise.
+        runtime_profile = {
+            key: value
+            for key, value in agent_profile.items()
+            if key not in ("persona", "tools") and value not in (None, "", [], {})
+        }
+        if runtime_profile:
+            prompt += "\n\n## Agent Profile (Runtime)\n" + json.dumps(runtime_profile, separators=(", ", ": "))
 
     return prompt
 

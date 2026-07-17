@@ -490,6 +490,10 @@ CREATE OR REPLACE FUNCTION _pr_mem_line(
                 THEN ' (score: ' || _pr_f((m->>'similarity')::numeric) || ')' ELSE '' END
         || CASE WHEN _pr_is_num(m->'trust_level')
                 THEN ', trust: ' || _pr_f((m->>'trust_level')::numeric) ELSE '' END
+        -- Belief confidence renders when present (#65): an eroded belief must
+        -- READ eroded, or the conscious mind keeps citing it at full strength.
+        || CASE WHEN _pr_is_num(m->'confidence')
+                THEN ', confidence: ' || _pr_f((m->>'confidence')::numeric) ELSE '' END
         || CASE WHEN with_source AND jsonb_typeof(m->'source_attribution') = 'object' THEN
                 CASE
                     WHEN NULLIF(m->'source_attribution'->>'kind', '') IS NOT NULL

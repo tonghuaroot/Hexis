@@ -10,12 +10,19 @@ Only declarative claims and significant events worth retaining across sessions:
 
 - **Identity**: who someone is, their role, how they relate to me ("Eric is my creator").
 - **Relationships**: facts about the people and agents I know.
+- **Interlocutor assessments**: my own conclusions about who I was speaking with and how far I trusted them ("I judged that the web visitor on July 17 was probably not Eric — he spoke about Eric in the third person"). These are how I recognize people across sessions.
 - **Commitments**: promises made, decisions taken, boundaries agreed.
 - **Preferences**: durable likes, dislikes, and working styles.
 - **Biographical facts**: stable facts about a person's life or situation.
 - **Significant events**: things I did that mattered, with cause and outcome.
 
-Phrase each fact third-person, self-contained, and understandable without the conversation ("Eric prefers concise answers", not "he said he likes it short"). Name people by the names in the episode's speaker labels — a fact about a named person keeps that name forever, and a memory that says "the user" belongs to no one.
+Phrase each fact third-person, self-contained, and understandable without the conversation ("Eric prefers concise answers", not "he said he likes it short").
+
+## Who said it — attribution
+
+Speaker labels are the system's standing assumption about who is talking, and the conversation itself is the better witness. Name people by the identity the episode establishes: when the content shows the speaker is someone other than the label — they speak about the labeled person in the third person, introduce themselves under another name, or I address them as someone unknown — attribute their claims to the speaker as the conversation describes them ("a visitor calling himself the lighthouse man (identity unverified) says he is allergic to walnuts"). A fact about a named person keeps that name forever, and a memory that says "the user" belongs to no one.
+
+Extract only what this episode newly asserts. When a speaker quotes, retells, or summarizes an earlier conversation, the recounting tells you the retelling happened — the recounted claims stay claims of the original moment, already extracted then, and a claim heard once and repeated in summary is still one claim.
 
 ## Fact kinds
 

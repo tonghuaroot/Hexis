@@ -3,12 +3,18 @@
 -- Turns are labeled with the real names when configured (#56): "User:" as a
 -- speaker label leaks into extracted memories ("The user is becoming a
 -- leader") and splits one person across two identities in recall.
+-- The label is the system's standing ASSUMPTION, not verified identity (#61):
+-- channels that know who is talking (platform sender names) pass p_user_label;
+-- the owner-name default covers the single-user paths, and the extraction
+-- prompt treats either as overridable by the conversation's own evidence.
 CREATE OR REPLACE FUNCTION format_recmem_turn(
     p_user_text TEXT,
-    p_assistant_text TEXT
+    p_assistant_text TEXT,
+    p_user_label TEXT DEFAULT NULL
 ) RETURNS TEXT AS $$
 DECLARE
     user_label TEXT := COALESCE(
+        NULLIF(trim(COALESCE(p_user_label, '')), ''),
         NULLIF(get_config_text('agent.user_name'), ''),
         NULLIF(get_init_profile()#>>'{user,name}', ''),
         'User');
@@ -74,7 +80,8 @@ CREATE OR REPLACE FUNCTION recmem_ingest_turn(
     p_turn_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     p_importance FLOAT DEFAULT 0.3,
     p_source_attribution JSONB DEFAULT NULL,
-    p_metadata JSONB DEFAULT '{}'::jsonb
+    p_metadata JSONB DEFAULT '{}'::jsonb,
+    p_user_label TEXT DEFAULT NULL
 ) RETURNS JSONB AS $$
 DECLARE
     unit_content TEXT;
@@ -86,7 +93,7 @@ BEGIN
         RETURN jsonb_build_object('status', 'empty');
     END IF;
 
-    unit_content := format_recmem_turn(p_user_text, p_assistant_text);
+    unit_content := format_recmem_turn(p_user_text, p_assistant_text, p_user_label);
     idem := compute_recmem_idempotency_key(p_user_text, p_assistant_text, p_session_id, p_source_identity);
 
     INSERT INTO subconscious_units (
@@ -1019,7 +1026,8 @@ CREATE OR REPLACE FUNCTION recmem_recall_context(
     trust_level FLOAT,
     fidelity FLOAT,
     strength FLOAT,
-    emotional_intensity FLOAT
+    emotional_intensity FLOAT,
+    confidence FLOAT
 ) AS $$
 DECLARE
     query_embedding vector;
@@ -1056,7 +1064,8 @@ BEGIN
             s.trust_level,
             1.0::float AS fidelity,
             1.0::float AS strength,
-            NULL::float AS emotional_intensity
+            NULL::float AS emotional_intensity,
+            NULL::float AS confidence
         FROM subconscious_units s
         WHERE s.status = 'active'
           AND s.embedding_status = 'embedded'
@@ -1077,7 +1086,8 @@ BEGIN
             s.trust_level,
             1.0::float AS fidelity,
             1.0::float AS strength,
-            NULL::float AS emotional_intensity
+            NULL::float AS emotional_intensity,
+            NULL::float AS confidence
         FROM subconscious_units s
         WHERE p_session_id IS NOT NULL
           AND s.session_id = p_session_id
@@ -1110,7 +1120,8 @@ BEGIN
             calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)::float AS strength,
             (current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
                 (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
-             * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0)))::float AS emotional_intensity
+             * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0)))::float AS emotional_intensity,
+            (m.metadata->>'confidence')::float AS confidence
         FROM memories m
         LEFT JOIN memory_source_units msu ON msu.memory_id = m.id
         WHERE m.status = 'active'
@@ -1144,7 +1155,8 @@ BEGIN
             calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced)::float AS strength,
             (current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
                 (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
-             * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0)))::float AS emotional_intensity
+             * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0)))::float AS emotional_intensity,
+            (m.metadata->>'confidence')::float AS confidence
         FROM memories m
         LEFT JOIN memory_source_units msu ON msu.memory_id = m.id
         WHERE m.status = 'active'

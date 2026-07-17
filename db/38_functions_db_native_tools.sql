@@ -443,7 +443,7 @@ BEGIN
         IF revision->>'reason' = 'not_found' THEN
             RETURN tool_error(format('memory not found: %s', target_id), 'invalid_params');
         ELSIF revision->>'reason' = 'not_semantic' THEN
-            RETURN tool_error('add_evidence targets semantic memories; this memory is another type', 'invalid_params');
+            RETURN tool_error('add_evidence targets semantic memories; this memory is another type. Episodic records are the immutable audit trail — recall with memory_types=[''semantic''] to find the revisable belief that was built on this episode, and attach the evidence there.', 'invalid_params');
         END IF;
         display := CASE
             WHEN COALESCE((revision->>'applied')::boolean, FALSE) THEN
@@ -534,11 +534,13 @@ BEGIN
                 limit_value,
                 type_filter,
                 COALESCE(NULLIF(p_args->>'min_importance', '')::float, 0.0),
-                p_args->>'source_path',
-                p_args->>'source_kind',
+                -- Empty strings are absent filters, not filters that match
+                -- nothing: models routinely fill optional params with "".
+                NULLIF(p_args->>'source_path', ''),
+                NULLIF(p_args->>'source_kind', ''),
                 NULLIF(p_args->>'created_after', '')::timestamptz,
                 NULLIF(p_args->>'created_before', '')::timestamptz,
-                p_args->>'concept',
+                NULLIF(p_args->>'concept', ''),
                 NULL
             ) r
             WHERE COALESCE(r.score, 0.0) >= min_score_value;

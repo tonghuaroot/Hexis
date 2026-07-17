@@ -1,6 +1,14 @@
 -- DB-owned chat and channel turn lifecycle.
 SET search_path = public, ag_catalog, "$user";
 
+-- Conversational testimony trust (#61): the default for a chat turn's source
+-- attribution. Near-certain trust belongs to verified provenance, not to
+-- whoever is on the line.
+INSERT INTO config (key, value, description) VALUES
+    ('memory.conversation_turn_trust', '0.8'::jsonb,
+     'Default source trust for conversation turns (chat/channel) when the caller supplies none')
+ON CONFLICT (key) DO NOTHING;
+
 CREATE OR REPLACE FUNCTION _db_brain_try_uuid(p_value TEXT)
 RETURNS UUID
 LANGUAGE plpgsql
@@ -93,7 +101,11 @@ BEGIN
         RETURN jsonb_build_object('skipped', true, 'reason', 'empty_turn');
     END IF;
 
-    content := format_recmem_turn(COALESCE(p_user_text, ''), COALESCE(p_assistant_text, ''));
+    content := format_recmem_turn(
+        COALESCE(p_user_text, ''),
+        COALESCE(p_assistant_text, ''),
+        NULLIF(p_context->>'user_label', '')
+    );
     importance := COALESCE(
         NULLIF(p_context->>'importance', '')::FLOAT,
         estimate_conversation_importance(p_user_text, p_assistant_text)
@@ -106,7 +118,12 @@ BEGIN
             'ref', COALESCE(p_source_identity, 'conversation_turn'),
             'label', COALESCE(p_context #>> '{source_attribution_label}', 'conversation turn'),
             'observed_at', CURRENT_TIMESTAMP,
-            'trust', COALESCE(NULLIF(p_context #>> '{trust}', '')::FLOAT, 0.95)
+            -- Conversational testimony enters at a config-owned default (#61):
+            -- 0.95 belongs to verified provenance, not to whoever dialed in.
+            'trust', COALESCE(
+                NULLIF(p_context #>> '{trust}', '')::FLOAT,
+                get_config_float('memory.conversation_turn_trust'),
+                0.8)
         )
     );
     session_uuid := _db_brain_try_uuid(p_session_id);
@@ -119,7 +136,8 @@ BEGIN
         CURRENT_TIMESTAMP,
         importance,
         source_attribution,
-        metadata
+        metadata,
+        NULLIF(p_context->>'user_label', '')
     );
     raw_unit_id := _db_brain_try_uuid(raw->>'unit_id');
 
@@ -249,7 +267,13 @@ DECLARE
     digest TEXT;
     source_identity TEXT;
     result JSONB;
+    session_sender TEXT;
 BEGIN
+    -- The channel session knows who was speaking (#61) — compacted turns keep
+    -- the platform sender name instead of falling back to the owner label.
+    SELECT NULLIF(trim(COALESCE(sender_name, '')), '') INTO session_sender
+    FROM channel_sessions WHERE id = p_session_id;
+
     WHILE idx < jsonb_array_length(COALESCE(p_trimmed_history, '[]'::jsonb)) LOOP
         item := p_trimmed_history->idx;
         next_item := p_trimmed_history->(idx + 1);
@@ -287,6 +311,7 @@ BEGIN
                 jsonb_build_object(
                     'importance', estimate_conversation_importance(user_text, assistant_text, 0.3),
                     'metadata', jsonb_build_object('type', 'conversation', 'source', 'compaction_flush'),
+                    'user_label', session_sender,
                     'source_attribution', jsonb_build_object(
                         'kind', 'compaction_flush',
                         'ref', p_session_id,

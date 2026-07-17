@@ -159,6 +159,7 @@ async def process_channel_message(
             dsn=dsn,
             session_id=f"channel:{msg.channel_type}:{msg.channel_id}:{msg.sender_id}",
             pool=pool,
+            user_label=msg.sender_name,
         )
 
         assistant_text = result.get("assistant", "")
@@ -264,6 +265,7 @@ async def stream_channel_message(
             dsn=dsn,
             session_id=f"channel:{msg.channel_type}:{msg.channel_id}:{msg.sender_id}",
             pool=pool,
+            user_label=msg.sender_name,
         ):
             collected.append(token)
             await coalescer.push(token)

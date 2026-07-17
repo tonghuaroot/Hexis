@@ -85,6 +85,9 @@ class Memory:
     # SIGNED felt emotional intensity: >0 = warm/positive, <0 = painful/negative,
     # magnitude = how vivid the feeling is NOW (embered / healed / re-kindled).
     emotional_intensity: float | None = None
+    # Belief confidence [0..1] from metadata (semantic beliefs); rendered so the
+    # conscious mind can see how eroded or corroborated a belief currently is.
+    confidence: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1402,6 +1405,7 @@ class CognitiveMemory:
                     strength=(float(row["strength"]) if row["strength"] is not None else None),
                     fidelity=(float(row["fidelity"]) if row["fidelity"] is not None else None),
                     emotional_intensity=(float(row["emotional_intensity"]) if row["emotional_intensity"] is not None else None),
+                    confidence=(float(row["confidence"]) if row["confidence"] is not None else None),
                 )
             )
 
@@ -1692,6 +1696,7 @@ def hydrated_context_to_render_json(context: HydratedContext) -> dict[str, Any]:
             "strength": m.strength,
             "fidelity": m.fidelity,
             "emotional_intensity": m.emotional_intensity,
+            "confidence": m.confidence,
         }
         return {k: v for k, v in out.items() if v is not None}
 

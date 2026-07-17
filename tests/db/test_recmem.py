@@ -637,3 +637,69 @@ async def test_recmem_recall_context_recency_and_trust(db_pool):
             assert scores[trusted_sem] > scores[doubted_sem]
         finally:
             await tr.rollback()
+
+
+async def test_recmem_turn_label_override_and_trust_default(db_pool):
+    """Channels pass the platform sender name (#61); default turn trust is config-owned."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            labeled = await conn.fetchval(
+                "SELECT format_recmem_turn('hello there', 'hi', 'Bob (discord)')"
+            )
+            assert labeled.startswith("Bob (discord): hello there")
+
+            result = _json(await conn.fetchval(
+                """
+                SELECT record_chat_turn_memory(
+                    'my favorite color is teal', 'noted', NULL, 'label-test-1',
+                    '{"user_label": "Visitor Val"}'::jsonb
+                )
+                """
+            ))
+            unit = await conn.fetchrow(
+                "SELECT content, source_attribution FROM subconscious_units WHERE id = $1::uuid",
+                result["raw_unit_id"],
+            )
+            assert unit["content"].startswith("Visitor Val: my favorite color is teal")
+            attribution = _json(unit["source_attribution"])
+            assert attribution["trust"] == 0.8
+
+            recall_cols = await conn.fetch(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'recmem_recall_context'
+                """
+            )
+            row = await conn.fetchrow(
+                "SELECT * FROM recmem_recall_context('teal color', 3, 3, 3)"
+            )
+            assert row is None or "confidence" in row.keys()
+        finally:
+            await tr.rollback()
+
+
+async def test_recall_tool_treats_empty_string_filters_as_absent(db_pool):
+    """Models fill optional params with "" — an empty filter must not silently
+    exclude everything (found live: a semantic-only recall for existing beliefs
+    returned zero rows because source_kind/source_path/concept arrived as "")."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn, axis=5)
+            await _insert_memory(conn, "empty-filter probe fact", mem_type="semantic", axis=5)
+            result = _json(await conn.fetchval(
+                """
+                SELECT execute_memory_tool('recall', '{
+                    "query": "empty-filter probe fact", "limit": 10, "min_score": 0,
+                    "memory_types": ["semantic"],
+                    "created_after": "", "created_before": "",
+                    "source_kind": "", "source_path": "", "concept": ""
+                }'::jsonb)
+                """
+            ))
+            assert result["output"]["count"] >= 1
+        finally:
+            await tr.rollback()
