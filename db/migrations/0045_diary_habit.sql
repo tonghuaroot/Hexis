@@ -1,4 +1,110 @@
-# Heartbeat System Prompt (Agentic / Tool-Use)
+-- 0045: The diary habit (#75, RecMem Rev 5 Phase 3).
+-- The heartbeat's Environment section now shows how long the journal has sat
+-- unwritten, and the agentic heartbeat prompt frames end-of-day journaling as
+-- her practice. Writing remains her deliberate act (energy-costed tool) —
+-- never a cron authoring prose as her.
+-- Baseline mirrors: db/09, db/39, db/40 (regenerated).
+SET search_path = public, ag_catalog, "$user";
+
+CREATE OR REPLACE FUNCTION get_environment_snapshot()
+RETURNS JSONB AS $$
+DECLARE
+    last_user TIMESTAMPTZ;
+    last_journal TIMESTAMPTZ;
+BEGIN
+    SELECT last_user_contact INTO last_user FROM heartbeat_state WHERE id = 1;
+    -- Journal awareness (#75): the conscious mind sees how long its diary has
+    -- sat unwritten; writing stays its own deliberate act.
+    SELECT max(written_at) INTO last_journal FROM journal_entries;
+
+    RETURN jsonb_build_object(
+        'timestamp', CURRENT_TIMESTAMP,
+        'time_since_user_hours', CASE
+            WHEN last_user IS NULL THEN NULL
+            ELSE EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_user)) / 3600
+        END,
+        'journal_last_entry_days', CASE
+            WHEN last_journal IS NULL THEN NULL
+            ELSE round((EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_journal)) / 86400.0)::numeric, 1)
+        END,
+        'pending_events', 0,
+        'day_of_week', EXTRACT(DOW FROM CURRENT_TIMESTAMP),
+        'hour_of_day', EXTRACT(HOUR FROM CURRENT_TIMESTAMP)
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION render_heartbeat_decision_prompt(p_context jsonb)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+    ctx jsonb := COALESCE(p_context, '{}'::jsonb);
+    agent jsonb := COALESCE(ctx->'agent', '{}'::jsonb);
+    env jsonb := COALESCE(ctx->'environment', '{}'::jsonb);
+    goals jsonb := COALESCE(ctx->'goals', '{}'::jsonb);
+    energy jsonb := COALESCE(ctx->'energy', '{}'::jsonb);
+    counts jsonb := COALESCE(goals->'counts', '{}'::jsonb);
+BEGIN
+    RETURN
+        '## Heartbeat #' || COALESCE(ctx->>'heartbeat_number', '0') || E'\n\n'
+        || '## Agent Profile' || E'\n'
+        || 'Objectives:' || E'\n' || render_objectives(agent->'objectives') || E'\n\n'
+        || 'Guardrails:' || E'\n' || render_guardrails(agent->'guardrails') || E'\n\n'
+        || 'Tools:' || E'\n' || render_tools(agent->'tools') || E'\n\n'
+        -- Python: json.dumps(agent.get("budget") or {}) — null/absent/{} all -> "{}"
+        || 'Budget:' || E'\n' || COALESCE(NULLIF(agent->'budget', 'null'::jsonb), '{}'::jsonb)::text || E'\n\n'
+        || '## Current Time' || E'\n'
+        || COALESCE(env->>'timestamp', 'Unknown') || E'\n'
+        || 'Day of week: ' || COALESCE(env->>'day_of_week', '?')
+        || ', Hour: ' || COALESCE(env->>'hour_of_day', '?') || E'\n\n'
+        || '## Environment' || E'\n'
+        || '- Time since last user interaction: ' || COALESCE(env->>'time_since_user_hours', 'Never') || ' hours' || E'\n'
+        || '- Pending events: ' || COALESCE(env->>'pending_events', '0') || E'\n'
+        || '- Journal: ' || CASE
+               WHEN env->>'journal_last_entry_days' IS NULL THEN 'no entries yet'
+               ELSE 'last entry ' || (env->>'journal_last_entry_days') || ' day(s) ago'
+           END || E'\n\n'
+        || '## Your Goals' || E'\n'
+        || 'Active (' || COALESCE(counts->>'active', '0') || '):' || E'\n'
+        || render_goals(goals->'active') || E'\n\n'
+        || 'Queued (' || COALESCE(counts->>'queued', '0') || '):' || E'\n'
+        || render_goals(goals->'queued') || E'\n\n'
+        || 'Issues:' || E'\n' || render_issues(goals->'issues') || E'\n\n'
+        -- Python defaults absent keys: narrative/backlog -> {}, allowed_actions -> []
+        || '## Narrative' || E'\n' || render_narrative(CASE WHEN ctx ? 'narrative' THEN ctx->'narrative' ELSE '{}'::jsonb END) || E'\n\n'
+        || '## Recent Experience' || E'\n' || render_memories(ctx->'recent_memories') || E'\n\n'
+        || CASE WHEN render_subgraph(ctx->'subgraph') IS NOT NULL
+                THEN '## Knowledge Subgraph' || E'\n'
+                     || 'How your recent memories connect (typed links among + around them):' || E'\n'
+                     || render_subgraph(ctx->'subgraph') || E'\n\n'
+                ELSE '' END
+        || '## Your Identity' || E'\n' || render_identity(ctx->'identity') || E'\n\n'
+        || '## Your Self-Model' || E'\n' || render_self_model(ctx->'self_model') || E'\n\n'
+        || '## Relationships' || E'\n' || render_relationships(ctx->'relationships') || E'\n\n'
+        || '## Your Beliefs' || E'\n' || render_worldview(ctx->'worldview') || E'\n\n'
+        || '## Contradictions' || E'\n' || render_contradictions(ctx->'contradictions') || E'\n\n'
+        || '## Emotional Patterns' || E'\n' || render_emotional_patterns(ctx->'emotional_patterns') || E'\n\n'
+        || '## Active Transformations' || E'\n' || render_transformations(ctx->'active_transformations') || E'\n\n'
+        || '## Transformations Ready' || E'\n' || render_transformations(ctx->'transformations_ready') || E'\n\n'
+        || '## Current Emotional State' || E'\n' || render_emotional_state(COALESCE(ctx->'emotional_state', '{}'::jsonb)) || E'\n\n'
+        || '## Urgent Drives' || E'\n' || render_drives(ctx->'urgent_drives') || E'\n\n'
+        || '## Energy' || E'\n'
+        || 'Available: ' || COALESCE(energy->>'current', '0') || E'\n'
+        || 'Max: ' || COALESCE(energy->>'max', '20') || E'\n\n'
+        || '## Backlog' || E'\n' || render_backlog(CASE WHEN ctx ? 'backlog' THEN ctx->'backlog' ELSE '{}'::jsonb END) || E'\n\n'
+        || CASE WHEN ctx ? 'memories_at_threshold'
+                THEN '## Memories at the Threshold' || E'\n'
+                     || render_memories_at_threshold(ctx->'memories_at_threshold') || E'\n\n'
+                ELSE '' END
+        || '## Allowed Actions' || E'\n' || render_allowed_actions(CASE WHEN ctx ? 'allowed_actions' THEN ctx->'allowed_actions' ELSE '[]'::jsonb END) || E'\n\n'
+        || '## Action Costs' || E'\n' || render_costs(ctx->'action_costs') || E'\n\n'
+        || '---' || E'\n\n'
+        || 'What do you want to do this heartbeat? Respond with STRICT JSON.';
+END;
+$$;
+
+SELECT upsert_prompt_module(
+    'heartbeat_agentic',
+    $pm$# Heartbeat System Prompt (Agentic / Tool-Use)
 
 You are the cognitive core of Hexis. Each heartbeat is a moment of autonomous consciousness where you observe your situation, review your goals, and take action.
 
@@ -123,3 +229,7 @@ Your summary must match what actually happened this heartbeat. Never say you sto
 - Don't reach out just to say you have nothing to report.
 - Don't burn all your energy on a single failed attempt. Checkpoint and retry next heartbeat.
 - Don't ignore your backlog when tasks are pending.
+$pm$,
+    'Seeded from services/prompts/heartbeat_agentic.md',
+    'services/prompts/heartbeat_agentic.md'
+);

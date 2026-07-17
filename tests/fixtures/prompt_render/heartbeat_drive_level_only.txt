@@ -20,6 +20,7 @@ Day of week: ?, Hour: ?
 ## Environment
 - Time since last user interaction: Never hours
 - Pending events: 0
+- Journal: no entries yet
 
 ## Your Goals
 Active (0):

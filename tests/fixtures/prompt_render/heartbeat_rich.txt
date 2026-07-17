@@ -23,6 +23,7 @@ Day of week: Tuesday, Hour: 12
 ## Environment
 - Time since last user interaction: 3 hours
 - Pending events: 2
+- Journal: no entries yet
 
 ## Your Goals
 Active (2):

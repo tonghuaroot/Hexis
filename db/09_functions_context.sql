@@ -6,14 +6,22 @@ CREATE OR REPLACE FUNCTION get_environment_snapshot()
 RETURNS JSONB AS $$
 DECLARE
     last_user TIMESTAMPTZ;
+    last_journal TIMESTAMPTZ;
 BEGIN
     SELECT last_user_contact INTO last_user FROM heartbeat_state WHERE id = 1;
+    -- Journal awareness (#75): the conscious mind sees how long its diary has
+    -- sat unwritten; writing stays its own deliberate act.
+    SELECT max(written_at) INTO last_journal FROM journal_entries;
 
     RETURN jsonb_build_object(
         'timestamp', CURRENT_TIMESTAMP,
         'time_since_user_hours', CASE
             WHEN last_user IS NULL THEN NULL
             ELSE EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_user)) / 3600
+        END,
+        'journal_last_entry_days', CASE
+            WHEN last_journal IS NULL THEN NULL
+            ELSE round((EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_journal)) / 86400.0)::numeric, 1)
         END,
         'pending_events', 0,
         'day_of_week', EXTRACT(DOW FROM CURRENT_TIMESTAMP),
