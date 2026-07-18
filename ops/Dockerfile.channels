@@ -22,4 +22,7 @@ RUN pip install --no-cache-dir . && \
     "slack-sdk>=3.27.0" \
     "matrix-nio>=0.24.0"
 
+# Build stamp (#93): regenerated exactly when the code layers change.
+RUN date -u +%Y%m%dT%H%M%SZ > /app/.build_id
+
 CMD ["hexis-channels"]

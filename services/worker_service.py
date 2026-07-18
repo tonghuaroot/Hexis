@@ -667,6 +667,12 @@ async def _amain(mode: str, instance: str | None = None) -> None:
     consumer_pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
     from core.usage import set_usage_pool
     set_usage_pool(consumer_pool)
+    try:
+        from core.agent_api import record_build_change
+        async with consumer_pool.acquire() as conn:
+            await record_build_change(conn, "worker")
+    except Exception:
+        logger.debug("build-change journaling failed", exc_info=True)
     bridge = RabbitMQBridge(consumer_pool)
     await bridge.ensure_ready()
 

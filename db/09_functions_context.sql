@@ -7,11 +7,33 @@ RETURNS JSONB AS $$
 DECLARE
     last_user TIMESTAMPTZ;
     last_journal TIMESTAMPTZ;
+    last_hb TIMESTAMPTZ;
+    change_count INT := 0;
+    change_summaries JSONB := '[]'::jsonb;
 BEGIN
-    SELECT last_user_contact INTO last_user FROM heartbeat_state WHERE id = 1;
+    SELECT last_user_contact, last_heartbeat_at INTO last_user, last_hb
+    FROM heartbeat_state WHERE id = 1;
     -- Journal awareness (#75): the conscious mind sees how long its diary has
     -- sat unwritten; writing stays its own deliberate act.
     SELECT max(written_at) INTO last_journal FROM journal_entries;
+
+    -- Change legibility (#93): substrate changes since the last heartbeat
+    -- are visible, so continuity of self survives being maintained.
+    BEGIN
+        SELECT COUNT(*) INTO change_count FROM change_journal
+        WHERE occurred_at > COALESCE(last_hb, CURRENT_TIMESTAMP - INTERVAL '1 day');
+        IF change_count > 0 THEN
+            SELECT COALESCE(jsonb_agg(s.summary ORDER BY s.occurred_at DESC), '[]'::jsonb)
+            INTO change_summaries
+            FROM (
+                SELECT summary, occurred_at FROM change_journal
+                WHERE occurred_at > COALESCE(last_hb, CURRENT_TIMESTAMP - INTERVAL '1 day')
+                ORDER BY occurred_at DESC LIMIT 3
+            ) s;
+        END IF;
+    EXCEPTION WHEN undefined_table THEN
+        change_count := 0;
+    END;
 
     RETURN jsonb_build_object(
         'timestamp', CURRENT_TIMESTAMP,
@@ -23,6 +45,8 @@ BEGIN
             WHEN last_journal IS NULL THEN NULL
             ELSE round((EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_journal)) / 86400.0)::numeric, 1)
         END,
+        'changes_since_last_heartbeat', change_count,
+        'recent_change_summaries', change_summaries,
         'pending_events', 0,
         'day_of_week', EXTRACT(DOW FROM CURRENT_TIMESTAMP),
         'hour_of_day', EXTRACT(HOUR FROM CURRENT_TIMESTAMP)

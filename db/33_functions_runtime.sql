@@ -10,6 +10,8 @@ CREATE OR REPLACE FUNCTION upsert_prompt_module(
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
+DECLARE
+    existing_content TEXT;
 BEGIN
     IF NULLIF(btrim(p_key), '') IS NULL THEN
         RAISE EXCEPTION 'prompt module key is required';
@@ -17,6 +19,8 @@ BEGIN
     IF p_content IS NULL THEN
         RAISE EXCEPTION 'prompt module content is required';
     END IF;
+
+    SELECT content INTO existing_content FROM prompt_modules WHERE key = p_key;
 
     INSERT INTO prompt_modules (key, content, description, source_path, metadata, updated_at)
     VALUES (p_key, p_content, p_description, p_source_path, COALESCE(p_metadata, '{}'::jsonb), CURRENT_TIMESTAMP)
@@ -26,6 +30,21 @@ BEGIN
         source_path = EXCLUDED.source_path,
         metadata = EXCLUDED.metadata,
         updated_at = CURRENT_TIMESTAMP;
+
+    -- Change legibility (#93): an existing module whose text actually changed
+    -- is a change to how the agent is instructed — journal it. Guarded:
+    -- record_change arrives later in the baseline order (fresh seeding, which
+    -- is genesis rather than change, skips journaling naturally).
+    IF existing_content IS NOT NULL AND existing_content <> p_content THEN
+        BEGIN
+            PERFORM record_change(
+                'prompt_module',
+                'Prompt module ' || p_key || ' changed',
+                jsonb_build_object('key', p_key));
+        EXCEPTION WHEN undefined_function THEN
+            NULL;
+        END;
+    END IF;
 
     RETURN jsonb_build_object('key', p_key, 'status', 'upserted');
 END;

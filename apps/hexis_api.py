@@ -73,6 +73,12 @@ async def lifespan(app: FastAPI):
     _pool = await asyncpg.create_pool(dsn, min_size=_min, max_size=_max)
     from core.usage import set_usage_pool
     set_usage_pool(_pool)
+    try:
+        from core.agent_api import record_build_change
+        async with _pool.acquire() as conn:
+            await record_build_change(conn, "api")
+    except Exception:
+        logger.debug("build-change journaling failed", exc_info=True)
     logger.info("Hexis API started (pool created)")
     try:
         yield

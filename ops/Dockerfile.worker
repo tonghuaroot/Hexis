@@ -16,4 +16,8 @@ COPY skills /app/skills
 
 RUN pip install --no-cache-dir .
 
+# Build stamp (#93): regenerated exactly when the code layers above change
+# (cache-hit otherwise), so startup can journal "my running code changed".
+RUN date -u +%Y%m%dT%H%M%SZ > /app/.build_id
+
 CMD ["hexis-worker"]

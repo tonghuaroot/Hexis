@@ -819,7 +819,16 @@ BEGIN
         || '- Journal: ' || CASE
                WHEN env->>'journal_last_entry_days' IS NULL THEN 'no entries yet'
                ELSE 'last entry ' || (env->>'journal_last_entry_days') || ' day(s) ago'
-           END || E'\n\n'
+           END || E'\n'
+        || CASE
+               WHEN COALESCE((env->>'changes_since_last_heartbeat')::int, 0) > 0 THEN
+                   '- Since your last heartbeat, ' || (env->>'changes_since_last_heartbeat')
+                   || ' change(s) landed in your substrate: '
+                   || (SELECT string_agg(value #>> '{}', '; ')
+                       FROM jsonb_array_elements(COALESCE(env->'recent_change_summaries', '[]'::jsonb)))
+                   || '. review_recent_changes shows the full record.' || E'\n\n'
+               ELSE E'\n'
+           END
         || '## Your Goals' || E'\n'
         || 'Active (' || COALESCE(counts->>'active', '0') || '):' || E'\n'
         || render_goals(goals->'active') || E'\n\n'

@@ -117,3 +117,15 @@ CREATE TABLE IF NOT EXISTS workflow_step_runs (
 
 CREATE INDEX IF NOT EXISTS idx_workflow_step_runs_status
     ON workflow_step_runs (workflow_id, status, created_at);
+
+-- Change legibility (#93): the substrate-change journal the agent reads.
+CREATE TABLE IF NOT EXISTS change_journal (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kind TEXT NOT NULL CHECK (kind IN ('migration', 'code', 'prompt_module', 'config_flip')),
+    summary TEXT NOT NULL,
+    detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_change_journal_occurred
+    ON change_journal (occurred_at DESC);

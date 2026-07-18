@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 import asyncpg
+
+logger = logging.getLogger(__name__)
 
 
 def db_dsn_from_env(instance: str | None = None) -> str:
@@ -401,3 +405,46 @@ def set_agent_configured_sync(dsn: str | None, *, configured: bool) -> None:
     from core.sync_utils import run_sync
 
     return run_sync(set_agent_configured(dsn, configured=configured))
+
+
+def read_build_id() -> str | None:
+    """The image build stamp (#93): env override first, then the stamp file
+    the Dockerfile writes after its code layers."""
+    stamp = (os.getenv("HEXIS_BUILD_ID") or "").strip()
+    if stamp:
+        return stamp
+    try:
+        return Path("/app/.build_id").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+async def record_build_change(conn, service: str) -> None:
+    """Journal a 'my running code changed' entry (#93) when this service's
+    build stamp differs from the last one it ran under. Advisory: never
+    blocks startup."""
+    build_id = read_build_id()
+    if not build_id:
+        return
+    try:
+        previous = await conn.fetchval(
+            "SELECT get_state($1)->>'build_id'", f"runtime_build.{service}"
+        )
+        if previous == build_id:
+            return
+        await conn.execute(
+            "SELECT set_state($1, $2::jsonb)",
+            f"runtime_build.{service}",
+            json.dumps({"build_id": build_id}),
+        )
+        summary = (
+            f"My running code changed: {service} now runs build {build_id}"
+            + (f" (was {previous})" if previous else " (first recorded build)")
+        )
+        await conn.execute(
+            "SELECT record_change('code', $1, $2::jsonb)",
+            summary,
+            json.dumps({"service": service, "build_id": build_id, "previous": previous}),
+        )
+    except Exception:
+        logger.debug("build-change journaling unavailable", exc_info=True)

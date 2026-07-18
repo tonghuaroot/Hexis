@@ -21,6 +21,7 @@ no ``$$`` blocks). Every other migration runs atomically inside one transaction.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import time
@@ -80,6 +81,19 @@ def _list_migration_files(migrations_dir: Path) -> list[Path]:
     return sorted(
         (p for p in migrations_dir.glob("*.sql") if p.is_file()), key=lambda p: p.name
     )
+
+
+def _migration_summary(sql: str) -> str:
+    """First header-comment line of a migration — its own one-line story."""
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("--"):
+            text = stripped.lstrip("-").strip()
+            if text:
+                return text[:200]
+        elif stripped and not stripped.upper().startswith("SET "):
+            break
+    return "schema migration"
 
 
 def _is_no_transaction(sql: str) -> bool:
@@ -163,6 +177,18 @@ async def apply_pending_migrations(
                 version,
                 int((time.monotonic() - start) * 1000),
             )
+            # Change legibility (#93): each applied migration lands in the
+            # agent-readable journal, summarized by its own header comment.
+            # Advisory — the journal function first exists partway through
+            # the migration series, and its absence must never fail an apply.
+            try:
+                await conn.execute(
+                    "SELECT record_change('migration', $1, $2::jsonb)",
+                    f"{version}: {_migration_summary(sql)}",
+                    json.dumps({"version": version, "checksum": checksum}),
+                )
+            except Exception:
+                logger.debug("change_journal unavailable for %s", version, exc_info=True)
             applied.append(version)
 
         # Postcondition (#77): the schema this runner just wrote must be the

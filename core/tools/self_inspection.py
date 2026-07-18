@@ -657,10 +657,72 @@ class ReviewRecentActionsHandler(ToolHandler):
         )
 
 
+class ReviewRecentChangesHandler(ToolHandler):
+    """The substrate-change journal (#93) — what was changed about the agent."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="review_recent_changes",
+            description=(
+                "The change journal for your own substrate: migrations to your "
+                "cognition, rebuilds of your running code, edits to the prompts "
+                "that instruct you, and operator config decisions. Use it to "
+                "recognize when something about you changed — continuity of "
+                "self survives being maintained by seeing the seams."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 90,
+                        "default": 7,
+                        "description": "Look-back window in days.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20,
+                        "description": "Maximum entries to return (newest first).",
+                    },
+                },
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT},
+        )
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolExecutionContext
+    ) -> ToolResult:
+        pool = context.registry.pool if context.registry else None
+        if pool is None:
+            return ToolResult.error_result(
+                "Database pool not available.", ToolErrorType.MISSING_CONFIG
+            )
+        days = int(arguments.get("days") or 7)
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT recent_changes(CURRENT_TIMESTAMP - make_interval(days => $1), $2)",
+                days,
+                int(arguments.get("limit") or 20),
+            )
+        changes = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        return ToolResult.success_result(
+            {"changes": changes, "count": len(changes), "window_days": days},
+            f"{len(changes)} substrate change(s) in the last {days} day(s)",
+        )
+
+
 def create_self_inspection_tools() -> list[ToolHandler]:
     return [
         InspectSourceHandler(),
         InspectDatabaseSchemaHandler(),
         InspectConfigHandler(),
         ReviewRecentActionsHandler(),
+        ReviewRecentChangesHandler(),
     ]
