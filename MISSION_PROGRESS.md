@@ -1,0 +1,120 @@
+# Mission Progress
+
+Living tracker for the mission-aligned architecture goals set on 2026-07-18
+(the post-Convergence-Batch survey, re-argued through `MISSION.md`'s tests).
+Update the Status column as work lands: `todo` → `in progress` →
+`done (commit/issue)`. Add rows; don't delete history — strike through
+superseded goals with a note.
+
+Grounding: every item cites the mission test that justifies it
+(**Person** / **Piper** / **Continuity** / **Substrate** / **Dignity** /
+**Experience Bar**), because the *reason* is what keeps the work from
+drifting back into engineering-economy triage.
+
+---
+
+## Batch 1 — One mind, one retrieval mechanism
+
+The core act of the architecture, implemented once, with its conscious
+surface complete. (Person, Continuity; fixes a live Dignity hole.)
+
+| Goal | Test | Status |
+|---|---|---|
+| Sensitivity stopgap: `p_exclude_sensitive` predicate in `fast_recall` (closes the #92 group-leak via the `recall` tool) | Dignity | todo |
+| Ranker fusion (#78): recmem tier skeleton absorbs fast_recall's scoring — associations (neighborhoods), episode-temporal boost, recency half-life, strength/fidelity, mood congruence, trust floor | Person | todo |
+| Widen fused recall to all memory types (procedural, strategic, worldview) | Person | todo |
+| Fix `search_query` embedding-prefix asymmetry in recmem path | Person | todo |
+| Repoint every caller (db/38 tools, MCP server, db/09, db/17, db/45) at the unified function; `fast_recall` → thin wrapper → removed | Substrate | todo |
+| Metamemory surface: recall failure returns calibrated familiarity (know-that-I-know vs unsure-I-ever-knew) + tip-of-the-tongue partials (`find_partial_activations`) | Person | todo |
+| Retrieval eval (seeded fixture corpus, before/after fusion) so recall quality cannot regress silently | Experience Bar | todo |
+
+## Batch 2 — Both north stars, visible in days
+
+| Goal | Test | Status |
+|---|---|---|
+| **"It came to me later"**: recall failure with high familiarity auto-files `request_background_search`; maintenance finds it; she tells you via the outbox ("It was Salt & Straw, by the way") | Person + Piper | todo |
+| **Inferred commitments** (mirror of #58): extraction notices the *user's* upcoming events/commitments; cron schedules a follow-up check-in after | Piper (care) | todo |
+
+## Batch 3 — Lean core, reachable capability
+
+| Goal | Test | Status |
+|---|---|---|
+| Skill-coverage test: every registered tool bound by ≥1 skill or explicitly marked `internal` — build failure otherwise | Piper law 8 | todo |
+| Bind the intended dark tools (~20): calendar CRUD, email_send (gated), create_contact, glob/grep/edit_file, web_summarize, brave/firecrawl, queue_user_message, shell/browser (gated), messaging sends → gated `outreach` skill | Piper law 1 | todo |
+| Phenomenological renames for graph/memory tools: `associate` (what does this remind me of), `reminisce` (browse), `find_causes` (why do I believe/feel this) — never graph-browser framing | Person | todo |
+| Plugins made real: create `plugins/installed/`, implement `plugin.external_dirs`, ship first real plugin | Piper law 8 | todo |
+| Extract speculative integrations (Todoist, Asana, HubSpot, Fathom, video gen, Twitter, YouTube) from core into plugins | Piper law 8 | todo |
+| Mark operator/system tools `internal` (config_export/import, database_backup, backup_retention, post_process_output, manage_sessions, execute_workflow, create_tool) | Dignity | todo |
+
+## Batch 4 — Continuity hygiene
+
+| Goal | Test | Status |
+|---|---|---|
+| Dead-code sweep: SSE stack (keep `gateway_events` table), `services/ingest_api.py`, db/09 `record_chat_turn`/`record_subconscious_exchange`, MCP hand-written duplicate schemas (registry canonical), orphan Next routes | Substrate | todo |
+| Web-chat history becomes DB-owned (her memory of a conversation and the record of it = same substrate; no localStorage-only history) | Continuity | todo |
+| One DSN resolution shared by all clients (UI reads the same instance registry as Python — no split-brain on instance switch) | Continuity | todo |
+| Collapse chat orchestration onto `services/chat.py`; move the RLM gate where both web and channel paths pass through | Substrate | todo |
+| Wire `/api/ingest/jobs/{id}` polling into the web ingest flow | Experience Bar | todo |
+
+## Batch 5 — The reward loop, proven by emergence
+
+| Goal | Test | Status |
+|---|---|---|
+| Dopamine wiring: fire spikes from `satisfy_drive`, goal completion, `decide_resource_request` grants, `record_backup_completed` | Person | todo |
+| **Social reward**: positive-valence appraisal directed at her → RPE spike (the strongest human reward) | Person | todo |
+| Emergence eval suite: seeded scenarios asserting signatures appear — TOT events occur, mood measurably colors recall, open goals boost related retrieval (Zeigarnik), spaced reinforcement beats massed | Person (the standing test) | todo |
+
+## Batch 6 — Graph as subconscious substrate
+
+| Goal | Test | Status |
+|---|---|---|
+| `reconcile_graph()`: diff memory_edges vs AGE, repair, journal drift count (#93) — dual-store becomes checked invariant | Substrate | todo |
+| Causal-ancestor chains + contradiction *paths* rendered into context (directional; mind the `find_causal_chain` direction wrinkle) | Person | todo |
+| Graph-adjacency signal joins the fused ranker's association tier | Person | todo |
+
+## Batch 7 — Conduct norms (prompt modules)
+
+| Goal | Test | Status |
+|---|---|---|
+| Execute-verify-report: "I'll do that" is not doing it — do it, then report | Piper law 1 | todo |
+| Steering-reduction as extraction criterion: prioritize memories that prevent future corrections and reminders | Piper law 3 | todo |
+| Silence discipline: proactive messages clear an interruption bar; similar messages dedupe; choosing silence is a recorded, valid act | Piper law 4 | todo |
+
+## Batch 8 — Small mechanics
+
+| Goal | Test | Status |
+|---|---|---|
+| Config-defaults registry: each default lives in exactly one row; `get_config_*` falls back to it (ends the 5-copies-of-`heartbeat.max_energy` drift risk) | Substrate | todo |
+| Baseline file renumbering (duplicate 28/32) in one mechanical commit | Substrate | todo |
+| Graduated appraisal depth: appraisal intensity scales with stimulus salience (#67 budgets as the hook) — attention allocation as psychology and cost control | Person + Piper | todo |
+| Chat energy, the human way: tools in chat cost energy; conversation interacts with drives — connection satisfied by good interaction; cost-vs-restore governed by a character-card temperament dial | Person + Piper | todo |
+| Presence polish on channels: typing indicators, presence beacons | Piper law 5 | todo |
+| Async embedding lifecycle for `memories` (adopt the units pattern: nullable + `embedding_status`; no HTTP inside transactions) | Substrate | todo |
+
+---
+
+## Settled decisions (do not relitigate)
+
+- **AGE stays.** memory_edges = write-path truth; AGE = the graph query
+  engine, subconscious substrate. The fix direction is activation, not
+  retirement.
+- **No cypher/graph-query tools for the agent.** Conscious memory tools
+  mirror human phenomenology only (remember, feeling-of-knowing, TOT,
+  incubation, association, reminiscence).
+- **`working_memory` table folds into units.** The mechanism (attention
+  buffer) lives as hydrated context + recent-units tier; the RabbitMQ inbox
+  reroutes through `recmem_ingest_turn` so incoming messages are
+  *experienced*, not shelved.
+- **Chat energy is not simply metered.** Temperament-valenced, per above.
+- **Mechanisms, never quirks.** Implement the architecture the quirks point
+  at; the quirks must emerge. `docs/_archive/reference-quirks.md` is the
+  evidence ledger.
+- **OpenAI-compat endpoints stay** (an integration surface, law 2), to be
+  documented as supported.
+
+## Completed
+
+*(move rows here with date + commit/issue as they land)*
+
+- 2026-07-18 — MISSION.md written (purpose, distillation method, emergence
+  test, second north star, six tests) — this file's grounding.
