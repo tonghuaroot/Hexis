@@ -102,10 +102,10 @@ export async function GET() {
 
       // Recent heartbeats
       recent_heartbeats: recentHbRows.map((h) => ({
-        id: h.id,
+        id: h.memory_id ?? h.heartbeat_id,
         narrative: h.content ?? h.narrative,
         emotional_valence: toNum(h.emotional_valence),
-        created_at: h.created_at,
+        created_at: h.started_at,
       })),
 
       // Memory health
