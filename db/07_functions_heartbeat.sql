@@ -298,14 +298,17 @@ BEGIN
         'narrative', to_jsonb(narrative)
     ));
 
-    RETURN jsonb_build_object(
+    RETURN jsonb_strip_nulls(jsonb_build_object(
+        -- Top-level identity name: consumers (CLI status, dashboards) read
+        -- one field instead of re-deriving it from the persona/card.
+        'name', to_jsonb(char_name),
         'objectives', COALESCE(get_config('agent.objectives'), '[]'::jsonb),
         'budget', COALESCE(get_config('agent.budget'), '{}'::jsonb),
         'guardrails', COALESCE(get_config('agent.guardrails'), '[]'::jsonb),
         'tools', COALESCE(get_config('agent.tools'), '[]'::jsonb),
         'initial_message', COALESCE(get_config('agent.initial_message'), to_jsonb(''::text)),
         'persona', persona
-    );
+    ));
 END;
 $$ LANGUAGE plpgsql STABLE;
 CREATE OR REPLACE FUNCTION ensure_self_node()

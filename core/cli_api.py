@@ -380,7 +380,7 @@ async def doctor_payload(
                 name = "unknown"
                 if profile:
                     p = json.loads(profile) if isinstance(profile, str) else profile
-                    name = p.get("name") or p.get("identity", {}).get("name") or "unnamed"
+                    name = p.get("name") or p.get("persona", {}).get("name") or "unnamed"
                 checks.append({
                     "label": "Agent configured",
                     "status": "OK",
@@ -651,7 +651,7 @@ async def status_payload_rich(
             profile = await conn.fetchval("SELECT get_agent_profile_context()")
             if profile:
                 p = json.loads(profile) if isinstance(profile, str) else profile
-                payload["identity"] = p.get("name") or p.get("identity", {}).get("name") or "unnamed"
+                payload["identity"] = p.get("name") or p.get("persona", {}).get("name") or "unnamed"
             else:
                 payload["identity"] = None
         except Exception:
