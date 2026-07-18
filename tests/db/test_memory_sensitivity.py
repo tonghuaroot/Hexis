@@ -43,7 +43,7 @@ async def _seed_memory(conn, content: str, *, mem_type: str = "semantic",
     return await conn.fetchval(
         """
         INSERT INTO memories (type, content, embedding, importance, trust_level, status, source_attribution)
-        VALUES ($1::memory_type, $2, (get_embedding(ARRAY[$3]))[1], 0.5, 0.8, 'active', $4::jsonb)
+        VALUES ($1::memory_type, $2, (get_embedding(ARRAY[ensure_embedding_prefix($3, 'search_query')]))[1], 0.5, 0.8, 'active', $4::jsonb)
         RETURNING id
         """,
         mem_type, content, query_text or content, json.dumps(attribution),
@@ -60,7 +60,7 @@ async def _seed_unit(conn, content: str, *, sensitivity: str | None = None,
         INSERT INTO subconscious_units
             (content, user_text, assistant_text, embedding, embedding_status,
              status, importance, source_attribution, idempotency_key)
-        VALUES ($1, $1, '', (get_embedding(ARRAY[$2]))[1], 'embedded',
+        VALUES ($1, $1, '', (get_embedding(ARRAY[ensure_embedding_prefix($2, 'search_query')]))[1], 'embedded',
                 'active', 0.5, $3::jsonb, $4)
         RETURNING id
         """,
@@ -318,3 +318,53 @@ async def test_search_history_excludes_private_in_group_context(db_pool):
     assert public_content in group_text
     assert private_content not in group_text
     assert private_content in all_text
+
+
+async def test_metamemory_ice_cream_phenomenology(db_pool):
+    """#96 Batch 1c: recall failure carries the felt state. (a) known → found;
+    (b) familiar but blocked → incubation filed ("it'll come to me");
+    (c) never known → honest low-familiarity miss."""
+    marker = get_test_identifier("sensitivity")
+    known = f"the ice cream place is called Salt and Straw {marker}"
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await _seed_memory(conn, known, query_text="ice cream place name")
+
+            # (a) known: same-axis query recalls it
+            found = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('recall', $1::jsonb)",
+                json.dumps({"query": "ice cream place name"}),
+            ))
+            assert found["output"]["count"] >= 1
+
+            # (b) familiar but blocked: high min_score empties the results while
+            # familiarity (sense over the same embedding space) stays high.
+            blocked = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('recall', $1::jsonb)",
+                json.dumps({"query": "ice cream place name", "min_score": 99.0}),
+            ))
+            meta = blocked["output"]["metamemory"]
+            assert blocked["output"]["count"] == 0
+            assert meta["familiarity"] > 0.5
+            assert meta["incubating"] is True
+            assert "simmer" in blocked["display_output"]
+            pending = await conn.fetchval(
+                "SELECT COUNT(*) FROM memory_activation WHERE background_search_pending "
+                "AND query_text = 'ice cream place name'"
+            )
+            assert pending == 1
+
+            # (c) never known: orthogonal query, low familiarity, honest miss
+            never = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('recall', $1::jsonb)",
+                json.dumps({"query": f"zz never known topic {marker}"}),
+            ))
+            nmeta = never["output"]["metamemory"]
+            assert never["output"]["count"] == 0
+            assert nmeta["incubating"] is False
+            assert "ever knew" in never["display_output"]
+        finally:
+            await tr.rollback()

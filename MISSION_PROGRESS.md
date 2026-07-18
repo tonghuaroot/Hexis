@@ -25,7 +25,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Widen fused recall to all memory types (procedural, strategic, worldview, goal — the knowledge tier) | Person | done (see #96) |
 | Fix `search_query` embedding-prefix asymmetry in recmem path | Person | done (already fixed pre-fusion; verified) |
 | Repoint every caller (db/38 tools, MCP server, db/09, db/17, db/45) at the unified function; `fast_recall` → thin wrapper → removed | Substrate | todo |
-| Metamemory surface: recall failure returns calibrated familiarity (know-that-I-know vs unsure-I-ever-knew) + tip-of-the-tongue partials (`find_partial_activations`) | Person | todo |
+| Metamemory surface: thin/empty recall carries {feeling, familiarity, TOT partials}; familiar-but-blocked auto-files incubation ('I'll let it simmer'); low familiarity reads honestly; default relevance floor (memory.recall_min_score) makes honest failure possible at all | Person | done (see #96) |
 | Retrieval eval (seeded fixture corpus, before/after fusion) so recall quality cannot regress silently | Experience Bar | todo |
 
 ## Batch 2 — Both north stars, visible in days
