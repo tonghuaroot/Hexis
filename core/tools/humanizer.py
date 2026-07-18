@@ -164,6 +164,7 @@ class PostProcessOutputHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="post_process_output",
+            internal=True,  # operator/system machinery (#99)
             description=(
                 "Apply configured output post-processing transformations to text. "
                 "Runs the humanizer and any other configured processors. "

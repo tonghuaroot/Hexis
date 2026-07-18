@@ -5,7 +5,7 @@ category: knowledge
 requires:
   tools: [url_ingest, remember]
 contexts: [heartbeat, chat]
-bound_tools: [url_ingest, fast_ingest, slow_ingest, hybrid_ingest, remember, recall]
+bound_tools: [url_ingest, fast_ingest, slow_ingest, hybrid_ingest, remember, recall, git_ingest]
 ---
 
 # Knowledge Base Ingestion

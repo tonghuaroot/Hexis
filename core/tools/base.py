@@ -101,6 +101,9 @@ class ToolSpec:
     is_read_only: bool = True
     supports_parallel: bool = True
     optional: bool = False  # Requires explicit allowlist inclusion
+    # Operator/system machinery, deliberately unbound by skills (#99): the
+    # coverage test requires every non-internal tool to be reachable.
+    internal: bool = False
     allowed_contexts: set[ToolContext] = field(
         default_factory=lambda: {ToolContext.HEARTBEAT, ToolContext.CHAT, ToolContext.MCP}
     )

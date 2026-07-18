@@ -38,6 +38,7 @@ class DatabaseBackupHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="database_backup",
+            internal=True,  # operator/system machinery (#99)
             description=(
                 "Create a compressed PostgreSQL database backup. "
                 "Runs pg_dump and compresses with gzip. "
@@ -172,6 +173,7 @@ class BackupRetentionHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="backup_retention",
+            internal=True,  # operator/system machinery (#99)
             description=(
                 "Clean up old database backups beyond the retention period. "
                 "Deletes backups older than the configured retention days."
@@ -285,6 +287,7 @@ class ConfigExportHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="config_export",
+            internal=True,  # operator/system machinery (#99)
             description=(
                 "Export all configuration entries from the config table to a JSON file. "
                 "Useful for disaster recovery and migrating to a new instance."
@@ -358,6 +361,7 @@ class ConfigImportHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="config_import",
+            internal=True,  # operator/system machinery (#99)
             description=(
                 "Import configuration entries from a JSON export file into the config table. "
                 "Merges with existing config (upsert). Does NOT import secret values."

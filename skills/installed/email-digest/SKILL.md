@@ -7,7 +7,7 @@ requires:
   config: [gmail]
   env: [GOOGLE_CREDENTIALS_JSON]
 contexts: [heartbeat]
-bound_tools: [email_list, email_read, email_search, ingest_emails, recall, remember]
+bound_tools: [email_list, email_read, email_search, ingest_emails, recall, remember, email_send, email_send_sendgrid]
 ---
 
 # Email Digest Workflow

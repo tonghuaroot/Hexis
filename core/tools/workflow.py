@@ -199,6 +199,7 @@ class WorkflowHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="execute_workflow",
+            internal=True,  # operator/system machinery (#99)
             description=(
                 "Execute a multi-step workflow: define steps with tool calls, "
                 "dependencies between steps, and error handling. Steps run in "

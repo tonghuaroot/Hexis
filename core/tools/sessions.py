@@ -202,6 +202,7 @@ class ManageSessionsHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="manage_sessions",
+            internal=True,  # operator/system machinery (#99)
             description=(
                 "Spawn, list, inspect, or cancel background sub-agent sessions. "
                 "Sub-agents run autonomously with their own energy budget to handle "

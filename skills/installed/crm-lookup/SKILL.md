@@ -5,7 +5,7 @@ category: productivity
 requires:
   tools: [search_contacts, get_contact]
 contexts: [heartbeat, chat]
-bound_tools: [search_contacts, get_contact, update_contact, merge_contacts]
+bound_tools: [search_contacts, get_contact, update_contact, merge_contacts, create_contact, ingest_contacts_email, ingest_contacts_calendar]
 ---
 
 # CRM Contact Management

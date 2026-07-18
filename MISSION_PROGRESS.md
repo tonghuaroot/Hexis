@@ -39,8 +39,8 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 
 | Goal | Test | Status |
 |---|---|---|
-| Skill-coverage test: every registered tool bound by ≥1 skill or explicitly marked `internal` — build failure otherwise | Piper law 8 | todo |
-| Bind the intended dark tools (~20): calendar CRUD, email_send (gated), create_contact, glob/grep/edit_file, web_summarize, brave/firecrawl, queue_user_message, shell/browser (gated), messaging sends → gated `outreach` skill | Piper law 1 | todo |
+| Skill-coverage test: every registered non-internal tool bound by ≥1 skill (agent-authored skills count); shrinking grandfather list for the seven extraction candidates | Piper law 8 | done (see #99) |
+| Bind the dark tools: calendar skill (CRUD), email_send → email-digest, create_contact + contact-ingest → crm-lookup, glob/grep/edit_file/shell/browser → code-execution, web_summarize/brave/firecrawl → research, queue_user_message → self-reflection + outreach, messaging sends → `outreach` (earn-the-interruption norm), council skill, git_ingest → knowledge-ingest, graph acts → core-memory | Piper law 1 | done (see #99) |
 | Phenomenological renames for graph/memory tools: `associate` (what does this remind me of), `reminisce` (browse), `find_causes` (why do I believe/feel this) — never graph-browser framing | Person | todo |
 | Plugins made real: create `plugins/installed/`, implement `plugin.external_dirs`, ship first real plugin | Piper law 8 | todo |
 | Extract speculative integrations (Todoist, Asana, HubSpot, Fathom, video gen, Twitter, YouTube) from core into plugins | Piper law 8 | todo |

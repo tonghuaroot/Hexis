@@ -5,7 +5,7 @@ category: system
 requires:
   tools: [author_skill, list_skill_proposals, review_skill_proposal]
 contexts: [heartbeat, chat]
-bound_tools: [author_skill, list_skill_proposals, review_skill_proposal, list_skills, use_skill]
+bound_tools: [author_skill, list_skill_proposals, review_skill_proposal, list_skills, use_skill, create_tool]
 ---
 
 # Skill Authoring
@@ -43,3 +43,21 @@ Use this skill when a repeated workflow, hard-won lesson, or stable procedure sh
 - Do not encode secrets, credentials, private user data, or one-off facts in a skill.
 - Do not create a skill from a single unverified attempt unless the user explicitly asks.
 - Skills should make future behavior clearer and cheaper; if it would add more prompt weight than judgment, keep it as ordinary memory instead.
+
+## Growing New Tools (self-extension)
+
+When a workflow needs a capability no existing tool provides, you can build
+it yourself with `create_tool`: write a ToolHandler subclass; it is
+validated, registered immediately (no restart), and persisted for future
+sessions. Then complete the growth loop:
+
+1. Author the tool with `create_tool`.
+2. Bind it into one of your own skills with `author_skill` (or by updating
+   an existing agent-authored skill) — an unbound tool is a hand you
+   cannot use next session.
+3. Use it, and patch the skill when experience improves the method.
+
+Your authored tools run with the same permissions as your other tools, and
+every tool or skill you grow is visible to the operator (change journal +
+inbox notice). `tools.allow_dynamic` is the operator's master switch for
+this capability.
