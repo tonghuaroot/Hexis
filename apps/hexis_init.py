@@ -1141,6 +1141,23 @@ async def _run_init(dsn: str, *, wait_seconds: int) -> int:
         else:
             user_name = await _run_custom(conn)
 
+        # The DB decides when consent is reachable (#79): every frontend
+        # renders the same missing-steps contract instead of assuming its own
+        # flow covered everything.
+        status_raw = await conn.fetchval("SELECT get_init_status()")
+        status = json.loads(status_raw) if isinstance(status_raw, str) else (status_raw or {})
+        missing = list(status.get("missing") or [])
+        if missing:
+            labels = {
+                "llm": "language-model configuration (rerun the LLM step)",
+                "profile": "the agent profile (name and identity)",
+            }
+            console.print("[warn]Not ready for consent yet — still missing:[/warn]")
+            for step in missing:
+                console.print(f"  • {labels.get(step, step)}")
+            console.print("[muted]Rerun `hexis init` to complete the missing steps.[/muted]")
+            return 1
+
         # Consent (all tiers)
         consented = await _run_consent(conn, llm_config)
         if not consented:

@@ -27,7 +27,7 @@ _SEED_SQL = """
 
 async def _prepare(conn):
     await conn.execute("LOAD 'age'")
-    await conn.execute("SET search_path = ag_catalog, public")
+    await conn.execute("SET search_path = public, ag_catalog")
 
 
 async def _seed_world(conn) -> dict:

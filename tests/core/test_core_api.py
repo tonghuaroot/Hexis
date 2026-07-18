@@ -152,7 +152,7 @@ async def test_api_connect_memories_creates_graph_edge(cognitive_memory_client, 
     try:
         await cognitive_memory_client.connect_memories(a, b, RelationshipType.ASSOCIATED, confidence=0.9, context=ctx)
         async with db_pool.acquire() as conn:
-            await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+            await conn.execute("SET LOCAL search_path = public, ag_catalog;")
             n = await conn.fetchval(
                 f"""
                 SELECT COUNT(*) FROM cypher('memory_graph', $$
@@ -186,7 +186,7 @@ async def test_api_remember_batch_raw_success_creates_graph_nodes(cognitive_memo
 
             # Verify graph nodes exist
             await conn.execute("LOAD 'age';")
-            await conn.execute("SET search_path = ag_catalog, public;")
+            await conn.execute("SET search_path = public, ag_catalog;")
             for mid in ids:
                 node_count = await conn.fetchval(
                     f"""
@@ -200,7 +200,7 @@ async def test_api_remember_batch_raw_success_creates_graph_nodes(cognitive_memo
     finally:
         async with db_pool.acquire() as conn:
             await conn.execute("LOAD 'age';")
-            await conn.execute("SET search_path = ag_catalog, public;")
+            await conn.execute("SET search_path = public, ag_catalog;")
             for mid in ids:
                 await conn.execute(
                     f"""

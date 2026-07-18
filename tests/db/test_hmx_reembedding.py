@@ -90,7 +90,9 @@ async def _stub_get_embedding(conn, axis: int = 2, *, fail: bool = False):
 
 async def _prepare(conn):
     await conn.execute("LOAD 'age'")
-    await conn.execute('SET search_path = ag_catalog, public, "$user"')
+    # public FIRST (#77): the schema guard rejects functions created into
+    # ag_catalog when a public twin exists — this stub used to land there.
+    await conn.execute('SET search_path = public, ag_catalog, "$user"')
 
 
 async def _make_target_bootstrap_only(conn):

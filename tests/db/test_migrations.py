@@ -77,7 +77,7 @@ async def test_migrate_existing_database_preserves_data():
             for path in sorted(_DB_ROOT.glob("*.sql"), key=lambda p: p.name):
                 await conn.execute(path.read_text(encoding="utf-8"))
             await conn.execute("LOAD 'age'")
-            await conn.execute("SET search_path = ag_catalog, public")
+            await conn.execute("SET search_path = public, ag_catalog")
 
             await conn.execute(
                 "INSERT INTO memories (type, content, embedding, importance, trust_level, status) "

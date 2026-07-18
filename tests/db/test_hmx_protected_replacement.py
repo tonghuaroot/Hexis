@@ -48,7 +48,7 @@ class InvalidLineageTrustAnchors(VerifiedTrustAnchors):
 
 async def _prepare(conn):
     await conn.execute("LOAD 'age'")
-    await conn.execute('SET search_path = ag_catalog, public, "$user"')
+    await conn.execute('SET search_path = public, ag_catalog, "$user"')
 
 
 async def _seed_worldview(conn) -> str:

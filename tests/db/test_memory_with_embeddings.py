@@ -51,7 +51,7 @@ async def test_create_memory_with_embedding(db_pool):
             assert source_attribution["kind"] == "unattributed"
 
             await conn.execute("LOAD 'age';")
-            await conn.execute("SET search_path = ag_catalog, public;")
+            await conn.execute("SET search_path = public, ag_catalog;")
             node_count = await conn.fetchval(
                 f"""
                 SELECT COUNT(*) FROM cypher('memory_graph', $$

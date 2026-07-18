@@ -299,7 +299,7 @@ async def setup_db(db_pool):
     """Setup the database before each test."""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
     yield
 
 

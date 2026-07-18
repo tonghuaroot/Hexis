@@ -73,7 +73,7 @@ async def test_remember_batch_and_link_concepts(mem_client, db_pool):
         # Verify concept was linked in graph
         async with db_pool.acquire() as conn:
             await conn.execute("LOAD 'age';")
-            await conn.execute("SET search_path = ag_catalog, public;")
+            await conn.execute("SET search_path = public, ag_catalog;")
             edge_count = await conn.fetchval(f"""
                 SELECT COUNT(*) FROM cypher('memory_graph', $$
                     MATCH (m:MemoryNode {{memory_id: '{ids[0]}'}})-[:INSTANCE_OF]->(c:ConceptNode {{name: 'C_{test_id}'}})

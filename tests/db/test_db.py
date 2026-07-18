@@ -34,7 +34,7 @@ LARGE_DATASET_SIZE = int(os.getenv("HEXIS_TEST_LARGE_DATASET_SIZE", "1000"))
 
 async def _ensure_memory_node(conn, memory_id: uuid.UUID, mem_type: str) -> None:
     await conn.execute("LOAD 'age';")
-    await conn.execute("SET search_path = ag_catalog, public;")
+    await conn.execute("SET search_path = public, ag_catalog;")
     await conn.execute(
         """
         SELECT * FROM cypher('memory_graph', $q$
@@ -152,7 +152,7 @@ async def test_extensions(db_pool):
             assert ext in ext_names, f"{ext} extension not found"
         # Verify AGE is loaded
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
         result = await conn.fetchval("""
             SELECT count(*) FROM ag_catalog.ag_graph
         """)
@@ -330,7 +330,7 @@ async def test_age_setup(db_pool):
     """Test AGE graph functionality"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         graph_id = await conn.fetchval("""
             SELECT graphid FROM ag_catalog.ag_graph
@@ -375,7 +375,7 @@ async def test_memory_relationships(db_pool):
     """Test graph relationships between different memory types"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
         
         memory_pairs = [
             ('semantic', 'semantic', 'RELATES_TO'),
@@ -577,7 +577,7 @@ async def test_complex_graph_queries(db_pool):
     """Test more complex graph operations and queries"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
         
         # Create a chain of related memories
         memory_chain = [
@@ -2158,7 +2158,7 @@ async def test_create_memory_relationship_function(db_pool):
         # Ensure AGE graph/label exist without dropping the graph.
         await conn.execute("""
             LOAD 'age';
-            SET search_path = ag_catalog, public;
+            SET search_path = public, ag_catalog;
             DO $$
             BEGIN
                 IF NOT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'memory_graph') THEN
@@ -2284,7 +2284,7 @@ async def test_clusters(db_pool):
     async with db_pool.acquire() as conn:
         # Load AGE for this connection
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         # Create test cluster
         cluster_id = await conn.fetchval(
@@ -3082,7 +3082,7 @@ async def test_concurrency_safety(db_pool):
                 try:
                     # Load AGE for this connection
                     await connection.execute("LOAD 'age';")
-                    await connection.execute("SET search_path = ag_catalog, public;")
+                    await connection.execute("SET search_path = public, ag_catalog;")
                     # Sync memory to graph and create MEMBER_OF edge
                     await connection.execute("SELECT sync_memory_node($1)", mem_id)
                     await connection.execute(
@@ -4071,7 +4071,7 @@ async def test_complex_graph_traversals(db_pool):
     """Test complex multi-hop graph traversals and path finding"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
         
         # Create a complex memory network
         memory_chain = []
@@ -4944,7 +4944,7 @@ async def test_auto_episode_assignment_trigger(db_pool, ensure_embedding_service
     """Test trg_auto_episode_assignment trigger creates episodes automatically"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         # Clean up any existing open episodes for this test
         await conn.execute("""
@@ -4994,7 +4994,7 @@ async def test_episode_30_minute_gap_detection(db_pool, ensure_embedding_service
     """Test that episodes close and new ones open after 30-minute gap"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         # Close any open episodes
         await conn.execute("""
@@ -5053,7 +5053,7 @@ async def test_episode_summary_view(db_pool, ensure_embedding_service):
     """Test episode_summary view calculations"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         # Create episode with summary
         episode_id = await conn.fetchval(
@@ -5373,7 +5373,7 @@ async def test_link_memory_to_concept_creates_graph_edge(db_pool):
         # Create graph node for memory
         await conn.execute("""
             LOAD 'age';
-            SET search_path = ag_catalog, public;
+            SET search_path = public, ag_catalog;
         """)
 
         await conn.execute(f"""
@@ -5395,7 +5395,7 @@ async def test_link_memory_to_concept_creates_graph_edge(db_pool):
         # Verify graph edge (INSTANCE_OF) exists
         await conn.execute("""
             LOAD 'age';
-            SET search_path = ag_catalog, public;
+            SET search_path = public, ag_catalog;
         """)
 
         edge_result = await conn.fetch(f"""
@@ -5415,7 +5415,7 @@ async def test_link_memory_to_concept_creates_graph_edge(db_pool):
 async def test_create_concept_sets_description_and_depth(db_pool):
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         concept_name = f"Concept_{get_test_identifier('create_concept')}"
         result = await conn.fetchval(
@@ -5447,7 +5447,7 @@ async def test_create_concept_sets_description_and_depth(db_pool):
 async def test_link_concept_parent_creates_edge(db_pool):
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         child_name = f"Child_{get_test_identifier('concept_child')}"
         parent_name = f"Parent_{get_test_identifier('concept_parent')}"
@@ -6264,7 +6264,7 @@ async def test_temporal_next_edge(db_pool):
         """)
 
         # Create graph nodes
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         for mid, mtype in [(memory1_id, 'episodic'), (memory2_id, 'episodic')]:
             await conn.execute(f"""
@@ -6282,7 +6282,7 @@ async def test_temporal_next_edge(db_pool):
         """, memory1_id, memory2_id)
 
         # Verify edge exists
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         result = await conn.fetch(f"""
             SELECT * FROM ag_catalog.cypher('memory_graph', $$
@@ -6311,7 +6311,7 @@ async def test_causes_edge(db_pool):
             RETURNING id
         """)
 
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         for mid in [cause_id, effect_id]:
             await conn.execute(f"""
@@ -6328,7 +6328,7 @@ async def test_causes_edge(db_pool):
         """, cause_id, effect_id)
 
         # Verify causal chain query works
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         result = await conn.fetch(f"""
             SELECT * FROM ag_catalog.cypher('memory_graph', $$
@@ -6357,7 +6357,7 @@ async def test_contradicts_edge(db_pool):
             RETURNING id
         """)
 
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         for mid in [claim1_id, claim2_id]:
             await conn.execute(f"""
@@ -6379,7 +6379,7 @@ async def test_contradicts_edge(db_pool):
         """, claim2_id, claim1_id)
 
         # Query contradictions
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         result = await conn.fetch(f"""
             SELECT * FROM ag_catalog.cypher('memory_graph', $$
@@ -6408,7 +6408,7 @@ async def test_supports_edge(db_pool):
             RETURNING id
         """)
 
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         for mid, mtype in [(evidence_id, 'episodic'), (claim_id, 'semantic')]:
             await conn.execute(f"""
@@ -6425,7 +6425,7 @@ async def test_supports_edge(db_pool):
         """, evidence_id, claim_id)
 
         # Verify
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         result = await conn.fetch(f"""
             SELECT * FROM ag_catalog.cypher('memory_graph', $$
@@ -6454,7 +6454,7 @@ async def test_derived_from_edge(db_pool):
             RETURNING id
         """)
 
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         for mid, mtype in [(episodic_id, 'episodic'), (semantic_id, 'semantic')]:
             await conn.execute(f"""
@@ -6471,7 +6471,7 @@ async def test_derived_from_edge(db_pool):
         """, semantic_id, episodic_id)
 
         # Verify derivation chain
-        await conn.execute("LOAD 'age'; SET search_path = ag_catalog, public;")
+        await conn.execute("LOAD 'age'; SET search_path = public, ag_catalog;")
 
         result = await conn.fetch(f"""
             SELECT * FROM ag_catalog.cypher('memory_graph', $$
@@ -6695,7 +6695,7 @@ async def test_worldview_influence_types(db_pool):
                 json.dumps({"strength": 0.7, "type": inf_type}),
             )
 
-        await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+        await conn.execute("SET LOCAL search_path = public, ag_catalog;")
         rows = await conn.fetch(
             f"""
             SELECT type_val FROM cypher('memory_graph', $$
@@ -6768,7 +6768,7 @@ async def test_connected_beliefs_relationships(db_pool):
             json.dumps({"strength": 0.8}),
         )
 
-        await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+        await conn.execute("SET LOCAL search_path = public, ag_catalog;")
         cnt = await conn.fetchval(
             f"""
             SELECT COUNT(*) FROM cypher('memory_graph', $$
@@ -6813,7 +6813,7 @@ async def test_cluster_insights_view_ordering(db_pool):
     """Test cluster_insights view ordered by memory_count DESC."""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         clusters = []
         for i, member_count in enumerate([1, 4, 2, 3]):
@@ -7119,7 +7119,7 @@ async def test_create_memory_returns_uuid(db_pool, ensure_embedding_service):
     """Test create_memory() returns a valid UUID"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_uuid")
 
@@ -7135,7 +7135,7 @@ async def test_create_memory_generates_embedding(db_pool, ensure_embedding_servi
     """Test create_memory() generates embedding automatically via get_embedding()"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_emb")
         content = f"Memory with auto-generated embedding {test_id}"
@@ -7156,7 +7156,7 @@ async def test_create_memory_creates_graph_node(db_pool, ensure_embedding_servic
     """Test create_memory() creates a MemoryNode in the graph"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_graph")
 
@@ -7182,7 +7182,7 @@ async def test_create_memory_graph_node_properties(db_pool, ensure_embedding_ser
     """Test MemoryNode has correct properties (memory_id, type, created_at)"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_props")
 
@@ -7210,7 +7210,7 @@ async def test_create_memory_all_types(db_pool, ensure_embedding_service):
     """Test create_memory() works for all memory types"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_types")
         memory_types = ['episodic', 'semantic', 'procedural', 'strategic']
@@ -7234,7 +7234,7 @@ async def test_create_memory_importance_stored(db_pool, ensure_embedding_service
     """Test create_memory() stores importance value correctly"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_imp")
         importance = 0.95
@@ -7254,7 +7254,7 @@ async def test_create_memory_triggers_episode_assignment(db_pool, ensure_embeddi
     """Test create_memory() triggers auto episode assignment"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_ep")
 
@@ -7274,7 +7274,7 @@ async def test_create_memory_initializes_neighborhood(db_pool, ensure_embedding_
     """Test create_memory() initializes memory_neighborhoods record"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("create_mem_neigh")
 
@@ -7511,7 +7511,7 @@ async def test_batch_create_memories_creates_rows_and_nodes(db_pool, ensure_embe
 
             # Verify graph nodes exist
             await conn.execute("LOAD 'age';")
-            await conn.execute("SET search_path = ag_catalog, public;")
+            await conn.execute("SET search_path = public, ag_catalog;")
             for mid in ids:
                 node_count = await conn.fetchval(
                     f"""
@@ -7529,7 +7529,7 @@ async def test_batch_create_memories_creates_rows_and_nodes(db_pool, ensure_embe
 async def test_create_memory_with_embedding_creates_node(db_pool):
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         content = f"Memory with embedding {get_test_identifier('mem_with_embed')}"
         memory_id = await conn.fetchval(
@@ -7592,7 +7592,7 @@ async def test_auto_check_worldview_alignment_creates_support_edge(db_pool):
         await tr.start()
         try:
             await conn.execute("LOAD 'age';")
-            await conn.execute("SET search_path = ag_catalog, public;")
+            await conn.execute("SET search_path = public, ag_catalog;")
             await conn.execute(
                 "SELECT set_config('memory.worldview_support_threshold', '0.5'::jsonb)"
             )
@@ -7655,7 +7655,7 @@ async def test_full_memory_lifecycle_with_embeddings(db_pool, ensure_embedding_s
     """Test complete memory lifecycle: create -> search -> recall -> graph"""
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         test_id = get_test_identifier("full_lifecycle")
         unique_content = f"Quantum entanglement principles in distributed systems {test_id}"
@@ -9044,7 +9044,7 @@ async def test_worker_check_and_run_heartbeat_queues_decision_call(db_pool):
 async def test_assign_to_episode_trigger_sequences_and_splits_on_gap(db_pool, ensure_embedding_service):
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
 
         tr = conn.transaction()
         await tr.start()
@@ -9170,7 +9170,7 @@ async def test_subconscious_decider_applies_observations(db_pool, ensure_embeddi
         )
         assert int(worldview_count) >= 1
 
-        await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+        await conn.execute("SET LOCAL search_path = public, ag_catalog;")
         contra_count = await conn.fetchval(
             f"""
             SELECT COUNT(*) FROM cypher('memory_graph', $$
@@ -9251,7 +9251,7 @@ async def test_discover_relationship_creates_graph_edge(db_pool):
         tr = conn.transaction()
         await tr.start()
         try:
-            await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+            await conn.execute("SET LOCAL search_path = public, ag_catalog;")
 
             a = await conn.fetchval(
                 """
@@ -9309,7 +9309,7 @@ async def test_find_contradictions_returns_results(db_pool):
         tr = conn.transaction()
         await tr.start()
         try:
-            await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+            await conn.execute("SET LOCAL search_path = public, ag_catalog;")
 
             a = await conn.fetchval(
                 """
@@ -9358,7 +9358,7 @@ async def test_find_causal_chain_returns_causes(db_pool):
         tr = conn.transaction()
         await tr.start()
         try:
-            await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+            await conn.execute("SET LOCAL search_path = public, ag_catalog;")
 
             a = await conn.fetchval(
                 """
@@ -9412,7 +9412,7 @@ async def test_sync_worldview_node_trigger_creates_graph_node(db_pool):
         tr = conn.transaction()
         await tr.start()
         try:
-            await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+            await conn.execute("SET LOCAL search_path = public, ag_catalog;")
             test_id = get_test_identifier("worldview_node")
             wid = await conn.fetchval(
                 "SELECT create_worldview_memory($1, 'belief', 0.7, 0.7, 0.7, 'test')",
@@ -9524,7 +9524,7 @@ async def test_process_reflection_result_creates_artifacts(db_pool, ensure_embed
         )
         assert identity_count >= 1
         # Note: relationship_discoveries table removed in Phase 8 - check graph edge instead
-        await conn.execute("SET LOCAL search_path = ag_catalog, public;")
+        await conn.execute("SET LOCAL search_path = public, ag_catalog;")
         edge_count = await conn.fetchval(
             f"""
             SELECT COUNT(*) FROM cypher('memory_graph', $$

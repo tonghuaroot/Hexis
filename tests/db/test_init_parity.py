@@ -39,6 +39,28 @@ _STEP_KEYS = {
 }
 
 
+async def test_consent_gate_reports_missing_steps(db_pool):
+    """#79: the DB decides when consent is reachable; frontends render this."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            # Control preconditions: no LLM config, no profile.
+            await conn.execute("SELECT set_config('llm.heartbeat', 'null'::jsonb)")
+            await conn.execute("SELECT set_config('llm.chat', 'null'::jsonb)")
+            status = _json(await conn.fetchval("SELECT get_init_status()"))
+            assert status["ready_for_consent"] is False
+            assert status["missing"] == ["llm", "profile"]
+
+            await conn.execute(
+                """SELECT set_config('llm.heartbeat', '{"provider": "test", "model": "t"}'::jsonb)"""
+            )
+            status = _json(await conn.fetchval("SELECT get_init_status()"))
+            assert status["missing"] == ["profile"]
+        finally:
+            await tr.rollback()
+
+
 async def test_init_set_timezone_validates_and_respects_choice(db_pool):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()
@@ -93,6 +115,7 @@ async def test_express_and_character_paths_satisfy_the_same_steps_contract(db_po
                 await conn.fetchval("SELECT init_set_timezone('America/Denver')")
 
                 status = _json(await conn.fetchval("SELECT get_init_status()"))
+                assert "profile" not in status["missing"]
                 steps = status["steps"]
                 assert set(steps.keys()) == _STEP_KEYS, path_name
                 results[path_name] = {

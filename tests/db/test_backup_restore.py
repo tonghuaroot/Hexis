@@ -37,7 +37,7 @@ async def test_backup_restore_preserves_memory_and_graph(db_pool):
         conn = await asyncpg.connect(scratch_dsn)
         try:
             await conn.execute("LOAD 'age'")
-            await conn.execute("SET search_path = ag_catalog, public")
+            await conn.execute("SET search_path = public, ag_catalog")
             # the row survived
             assert await conn.fetchval("SELECT count(*) FROM memories WHERE content=$1", token) == 1
             # the AGE graph is registered again (the pg_dump AGE gotcha did NOT bite)

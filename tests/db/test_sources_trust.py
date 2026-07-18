@@ -92,7 +92,7 @@ async def test_worldview_alignment_and_trust_sync(db_pool):
 
         # Phase 5: Link via graph edge instead of worldview_memory_influences
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
         await conn.execute(
             f"""
             SELECT * FROM cypher('memory_graph', $$
@@ -149,7 +149,7 @@ async def test_update_worldview_confidence_from_influences(db_pool):
 
         # Phase 5: Link via graph edge instead of worldview_memory_influences
         await conn.execute("LOAD 'age';")
-        await conn.execute("SET search_path = ag_catalog, public;")
+        await conn.execute("SET search_path = public, ag_catalog;")
         await conn.execute(
             f"""
             SELECT * FROM cypher('memory_graph', $$

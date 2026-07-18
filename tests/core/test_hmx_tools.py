@@ -207,7 +207,7 @@ async def test_agent_tool_journey_keeps_files_private_and_reviews_in_place(
 
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age'")
-        await conn.execute('SET search_path = ag_catalog, public, "$user"')
+        await conn.execute('SET search_path = public, ag_catalog, "$user"')
         transaction = conn.transaction()
         await transaction.start()
         try:
@@ -344,7 +344,7 @@ async def test_agent_protected_replacement_journey_completes_in_place(
     }
     async with db_pool.acquire() as conn:
         await conn.execute("LOAD 'age'")
-        await conn.execute('SET search_path = ag_catalog, public, "$user"')
+        await conn.execute('SET search_path = public, ag_catalog, "$user"')
         transaction = conn.transaction()
         await transaction.start()
         try:

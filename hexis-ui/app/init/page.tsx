@@ -458,12 +458,10 @@ export default function Home() {
     const dbStage = (data.status?.stage as string) ?? "not_started";
     const uiStage = dbStageToUiStage(dbStage);
     if (uiStage === "llm") {
-      const hasConscious =
-        !!(data.llm_heartbeat?.provider || "").trim() && !!(data.llm_heartbeat?.model || "").trim();
-      const hasSubconscious =
-        !!(data.llm_subconscious?.provider || "").trim() &&
-        !!(data.llm_subconscious?.model || "").trim();
-      if (hasConscious && hasSubconscious) {
+      // Server truth (#79): the DB's steps contract says whether LLM config
+      // is complete — the wizard renders, it doesn't re-derive.
+      const steps = (data.status?.steps ?? {}) as Record<string, unknown>;
+      if (steps.llm_configured === true) {
         setStage("choose_path");
       }
     } else {
@@ -1829,7 +1827,30 @@ export default function Home() {
             )}
 
             {/* --- Consent Stage --- */}
-            {stage === "consent" && (
+            {stage === "consent" && (status as Record<string, unknown> | null)?.ready_for_consent === false && (
+              <div className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm">
+                <p className="font-medium">A few steps remain before consent:</p>
+                <ul className="mt-2 list-disc pl-5">
+                  {(((status as Record<string, unknown>)?.missing as string[]) ?? []).map((step) => (
+                    <li key={step}>
+                      {step === "llm"
+                        ? "Configure the language models (LLM step)"
+                        : step === "profile"
+                          ? "Complete the agent profile (name and identity)"
+                          : step}
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  type="button"
+                  className="mt-3 rounded-full border border-[var(--outline)] px-4 py-1.5 text-xs"
+                  onClick={() => setStage("llm")}
+                >
+                  Go back and finish setup
+                </button>
+              </div>
+            )}
+            {stage === "consent" && (status as Record<string, unknown> | null)?.ready_for_consent !== false && (
               <div className="space-y-5">
                 <p className="text-sm text-[var(--ink-soft)]">
                   Consent will be requested from both models. Existing contracts are reused
