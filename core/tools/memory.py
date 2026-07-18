@@ -1134,6 +1134,58 @@ class DeleteScheduledTaskHandler(ToolHandler):
             return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
 
 
+class PonderHandler(ToolHandler):
+    """Let a question simmer: file a background memory search (#98)."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="request_background_search",
+            description=(
+                "Let a question simmer in the back of your mind. Files a "
+                "background memory search; if the subconscious finds it "
+                "later, the answer rises as spontaneous recall — and "
+                "reaches the user as an 'it came back to me' note when it "
+                "resolves strongly. Use when something feels familiar but "
+                "will not surface right now."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What you are trying to remember.",
+                    },
+                },
+                "required": ["query"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT},
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        query = str(arguments.get("query") or "").strip()
+        if not query:
+            return ToolResult.error_result("query is required", ToolErrorType.INVALID_PARAMS)
+        try:
+            async with context.registry.pool.acquire() as conn:
+                activation_id = await conn.fetchval(
+                    "SELECT request_background_search($1::text)", query
+                )
+            return ToolResult.success_result(
+                {"activation_id": str(activation_id), "query": query},
+                display_output=f"Letting it simmer: {query[:80]}",
+            )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+
 class QueueUserMessageHandler(ToolHandler):
     """Queue a message for the user."""
 
@@ -1209,4 +1261,5 @@ def create_memory_tools() -> list[ToolHandler]:
         GetProceduresHandler(),
         GetStrategiesHandler(),
         QueueUserMessageHandler(),
+        PonderHandler(),
     ]

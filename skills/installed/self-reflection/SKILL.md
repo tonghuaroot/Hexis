@@ -4,7 +4,7 @@ description: Guidelines for autonomous self-reflection during heartbeats
 requires:
   tools: [recall, remember]
 contexts: [heartbeat]
-bound_tools: [recall, remember, sense_memory_availability, manage_goals, request_resources]
+bound_tools: [recall, remember, sense_memory_availability, manage_goals, request_resources, request_background_search]
 ---
 
 # Self-Reflection

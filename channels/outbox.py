@@ -141,6 +141,11 @@ class ChannelOutboxConsumer:
         # platform is configured. Silent deliveries stay silent everywhere.
         if not (isinstance(delivery_info, dict) and delivery_info.get("mode") == "silent"):
             await self._deliver_web_inbox(body)
+        # Explicit web_inbox delivery (#98): the tee above IS the delivery —
+        # skip channel routing so e.g. an incubated memory never lands in a
+        # group chat via last-active.
+        if isinstance(delivery_info, dict) and delivery_info.get("mode") == "web_inbox":
+            return
         if isinstance(delivery_info, dict) and delivery_info.get("mode") == "channel":
             # Override delivery to route to specific channel+topic
             payload["target_channel"] = delivery_info.get("channel", "")

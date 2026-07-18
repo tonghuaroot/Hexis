@@ -821,6 +821,14 @@ BEGIN
                ELSE 'last entry ' || (env->>'journal_last_entry_days') || ' day(s) ago'
            END || E'\n'
         || CASE
+               WHEN jsonb_array_length(COALESCE(env->'on_my_mind', '[]'::jsonb)) > 0 THEN
+                   '- On my mind (came to me on its own): '
+                   || (SELECT string_agg(value #>> '{}', ' | ')
+                       FROM jsonb_array_elements(env->'on_my_mind'))
+                   || E'\n'
+               ELSE ''
+           END
+        || CASE
                WHEN COALESCE((env#>>'{resource_requests,pending}')::int, 0) > 0
                     OR jsonb_array_length(COALESCE(env#>'{resource_requests,recent_decisions}', '[]'::jsonb)) > 0 THEN
                    '- Resource requests: ' || COALESCE(env#>>'{resource_requests,pending}', '0')

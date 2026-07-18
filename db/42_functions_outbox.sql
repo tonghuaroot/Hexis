@@ -29,18 +29,26 @@ CREATE INDEX IF NOT EXISTS idx_outbox_messages_publishing
 CREATE OR REPLACE FUNCTION queue_outbox_message(
     p_message TEXT,
     p_intent TEXT DEFAULT NULL,
-    p_source TEXT DEFAULT 'tool'
+    p_source TEXT DEFAULT 'tool',
+    -- Optional explicit delivery doc (#98): e.g. {"mode": "web_inbox"} pins
+    -- a message to the dashboard inbox instead of last-active routing.
+    p_delivery JSONB DEFAULT NULL
 ) RETURNS UUID
 LANGUAGE plpgsql
 AS $$
 DECLARE
     new_id UUID;
+    envelope JSONB;
 BEGIN
     IF NULLIF(btrim(p_message), '') IS NULL THEN
         RAISE EXCEPTION 'outbox message is required';
     END IF;
+    envelope := build_user_message(p_message, p_intent);
+    IF p_delivery IS NOT NULL THEN
+        envelope := jsonb_set(envelope, '{payload,delivery}', p_delivery);
+    END IF;
     INSERT INTO outbox_messages (envelope, source)
-    VALUES (build_user_message(p_message, p_intent), COALESCE(NULLIF(p_source, ''), 'tool'))
+    VALUES (envelope, COALESCE(NULLIF(p_source, ''), 'tool'))
     RETURNING id INTO new_id;
     RETURN new_id;
 END;

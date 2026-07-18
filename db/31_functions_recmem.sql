@@ -1378,6 +1378,34 @@ BEGIN
                w.retrieval_source
         FROM with_units w WHERE w.mtype::text IN ('procedural', 'strategic', 'worldview', 'goal')
         ORDER BY w.score DESC LIMIT GREATEST(COALESCE(p_k_know, 5), 0)
+    ),
+    spontaneous_hits AS (
+        -- What's on her mind arrives unbidden (#98): strongly boosted
+        -- memories (incubation resolutions, reward spikes) join recall even
+        -- when the query didn't ask for them — then fade with boost decay.
+        SELECT
+            'spontaneous'::text AS tier,
+            sm.id AS item_id,
+            sm.content,
+            sm.type::text AS memory_type,
+            LEAST(1.0, COALESCE((sm.metadata->>'activation_boost')::float, 0.0))::float AS score,
+            COALESCE((SELECT array_agg(msu.subconscious_unit_id)
+                      FROM memory_source_units msu WHERE msu.memory_id = sm.id), '{}'::uuid[]) AS source_unit_ids,
+            sm.source_attribution,
+            sm.created_at,
+            sm.trust_level,
+            sm.fidelity,
+            calculate_strength(sm.importance, sm.decay_rate, sm.created_at, sm.last_reinforced)::float AS strength,
+            NULL::float AS emotional_intensity,
+            (sm.metadata->>'confidence')::float AS confidence,
+            'spontaneous'::text AS retrieval_source
+        FROM get_spontaneous_memories(2) sm
+        WHERE (NOT p_exclude_sensitive
+               OR COALESCE(sm.source_attribution->>'sensitivity', '') <> 'private')
+          AND sm.id NOT IN (
+              SELECT h.item_id FROM epi_hits h
+              UNION ALL SELECT h.item_id FROM sem_hits h
+              UNION ALL SELECT h.item_id FROM know_hits h)
     )
     SELECT * FROM raw_hits
     UNION ALL
@@ -1388,6 +1416,8 @@ BEGIN
     SELECT * FROM sem_hits
     UNION ALL
     SELECT * FROM know_hits
+    UNION ALL
+    SELECT * FROM spontaneous_hits
     ORDER BY tier, score DESC, created_at DESC;
 END;
 $$ LANGUAGE plpgsql;

@@ -338,6 +338,21 @@ BEGIN
     RETURN activation_id;
 END;
 $$ LANGUAGE plpgsql;
+INSERT INTO config (key, value, description) VALUES
+    ('incubation.resolution_boost', '0.45'::jsonb,
+     'Activation boost applied when a background search resolves — must clear memory.spontaneous_min_boost so the answer genuinely rises into mind'),
+    ('incubation.tell_user', 'true'::jsonb,
+     'When a background search resolves strongly, tell the user ("it came back to me") via the web inbox'),
+    ('incubation.tell_user_min_similarity', '0.5'::jsonb,
+     'Resolution similarity above which the found memory is worth telling the user about'),
+    ('incubation.boost_min_similarity', '0.5'::jsonb,
+     'Resolution similarity above which matching memories receive the activation boost'),
+    ('incubation.tell_user_max_per_day', '3'::jsonb,
+     'Cap on it-came-to-me messages per rolling 24h (earn the interruption)'),
+    ('memory.spontaneous_min_boost', '0.3'::jsonb,
+     'Activation boost above which a memory is simply on her mind (spontaneous recall)')
+ON CONFLICT (key) DO NOTHING;
+
 CREATE OR REPLACE FUNCTION process_background_searches(
     p_limit INT DEFAULT 10,
     p_min_age INTERVAL DEFAULT INTERVAL '30 seconds'
@@ -346,6 +361,21 @@ RETURNS INT AS $$
 DECLARE
     pending RECORD;
     processed_count INT := 0;
+    resolution_boost FLOAT := LEAST(1.0, GREATEST(0.0,
+        COALESCE(get_config_float('incubation.resolution_boost'), 0.45)));
+    -- One coherent bar (#98): filing, boosting, and telling all key off the
+    -- familiarity that justified incubating — a background search re-uses
+    -- the filing embedding, so demanding more similarity than filing saw
+    -- resolves every search into silence. New memories arriving between
+    -- filing and resolution clear the bar naturally.
+    tell_min_sim FLOAT := COALESCE(get_config_float('incubation.tell_user_min_similarity'),
+                                   get_config_float('metamemory.incubate_min_familiarity'), 0.5);
+    boost_min_sim FLOAT := COALESCE(get_config_float('incubation.boost_min_similarity'),
+                                    get_config_float('metamemory.incubate_min_familiarity'), 0.5);
+    tell_enabled BOOLEAN := COALESCE(get_config_bool('incubation.tell_user'), TRUE);
+    tell_cap INT := COALESCE(get_config_int('incubation.tell_user_max_per_day'), 3);
+    told_today INT;
+    best RECORD;
 BEGIN
     FOR pending IN
         SELECT * FROM memory_activation
@@ -354,15 +384,53 @@ BEGIN
         ORDER BY created_at ASC
         LIMIT GREATEST(1, COALESCE(p_limit, 10))
     LOOP
+        -- Incubation resolution (#98): boost strong enough to clear the
+        -- spontaneous floor, so a found answer genuinely rises into mind
+        -- (the unified ranker's activation_boost term) before decay fades it.
         UPDATE memories
         SET metadata = jsonb_set(
             COALESCE(metadata, '{}'::jsonb),
             '{activation_boost}',
-            to_jsonb(COALESCE((metadata->>'activation_boost')::float, 0) + 0.2)
+            to_jsonb(LEAST(1.0, COALESCE((metadata->>'activation_boost')::float, 0) + resolution_boost))
         )
         WHERE status = 'active'
           AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP)
-          AND (1 - (embedding <=> pending.query_embedding)) > 0.6;
+          AND (1 - (embedding <=> pending.query_embedding)) >= boost_min_sim;
+
+        -- "It came to me" (#98): a strong resolution reaches the user as a
+        -- first-person note. Delivery is explicitly web_inbox — never
+        -- last_active, which could land a private memory in a group channel
+        -- — and honors the memory's own sensitivity. The cap counts sent
+        -- messages (activation rows expire too fast to carry it); firing is
+        -- once per activation (this row's flags flip below, and resolved
+        -- rows never re-enter this loop).
+        IF tell_enabled AND pending.query_text IS NOT NULL THEN
+            SELECT m.id, m.content,
+                   (1 - (m.embedding <=> pending.query_embedding))::float AS sim
+            INTO best
+            FROM memories m
+            WHERE m.status = 'active'
+              AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
+              AND m.embedding IS NOT NULL
+              AND COALESCE(m.source_attribution->>'sensitivity', '') <> 'private'
+            ORDER BY m.embedding <=> pending.query_embedding
+            LIMIT 1;
+
+            IF best.id IS NOT NULL AND best.sim >= tell_min_sim THEN
+                SELECT COUNT(*) INTO told_today
+                FROM outbox_messages
+                WHERE envelope#>>'{payload,intent}' = 'incubation'
+                  AND created_at > CURRENT_TIMESTAMP - INTERVAL '24 hours';
+                IF told_today < tell_cap THEN
+                    PERFORM queue_outbox_message(
+                        format('Earlier I couldn''t remember this: "%s". It came back to me — %s',
+                               left(pending.query_text, 160), left(best.content, 400)),
+                        'incubation',
+                        'incubation',
+                        jsonb_build_object('mode', 'web_inbox'));
+                END IF;
+            END IF;
+        END IF;
 
         UPDATE memory_activation
         SET background_search_pending = FALSE,
@@ -408,7 +476,8 @@ BEGIN
     SELECT * FROM memories
     WHERE status = 'active'
       AND (valid_until IS NULL OR valid_until > CURRENT_TIMESTAMP)
-      AND (metadata->>'activation_boost')::float > 0.3
+      AND (metadata->>'activation_boost')::float
+          > COALESCE(get_config_float('memory.spontaneous_min_boost'), 0.3)
     ORDER BY (metadata->>'activation_boost')::float DESC
     LIMIT GREATEST(1, COALESCE(p_limit, 3));
 END;

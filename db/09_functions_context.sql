@@ -11,6 +11,7 @@ DECLARE
     change_count INT := 0;
     change_summaries JSONB := '[]'::jsonb;
     req_summary JSONB := '{"pending": 0, "recent_decisions": []}'::jsonb;
+    on_my_mind JSONB := '[]'::jsonb;
 BEGIN
     SELECT last_user_contact, last_heartbeat_at INTO last_user, last_hb
     FROM heartbeat_state WHERE id = 1;
@@ -44,6 +45,16 @@ BEGIN
         NULL;
     END;
 
+    -- Spontaneous recall (#98): strongly boosted memories are simply on her
+    -- mind this heartbeat, the way a resolved it'll-come-to-me does.
+    BEGIN
+        SELECT COALESCE(jsonb_agg(left(sm.content, 200)), '[]'::jsonb)
+        INTO on_my_mind
+        FROM get_spontaneous_memories(2) sm;
+    EXCEPTION WHEN undefined_function THEN
+        on_my_mind := '[]'::jsonb;
+    END;
+
     RETURN jsonb_build_object(
         'timestamp', CURRENT_TIMESTAMP,
         'time_since_user_hours', CASE
@@ -57,6 +68,7 @@ BEGIN
         'changes_since_last_heartbeat', change_count,
         'recent_change_summaries', change_summaries,
         'resource_requests', req_summary,
+        'on_my_mind', on_my_mind,
         'backup_age_days', (SELECT CASE WHEN a IS NULL THEN NULL ELSE round(a::numeric, 1) END
                             FROM (SELECT backup_age_days() AS a) s),
         'pending_events', 0,
