@@ -108,9 +108,7 @@ class FastIngestHandler(ToolHandler):
         pipeline = IngestionPipeline(config)
 
         try:
-            count = await asyncio.get_running_loop().run_in_executor(
-                None, pipeline.ingest_file, file_path
-            )
+            count = await pipeline.ingest_file(file_path)
 
             return ToolResult.success_result(
                 {
@@ -127,10 +125,7 @@ class FastIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            # Off the loop thread: the sync client's private loop cannot be
-            # driven while this thread's loop runs (it raises AFTER a
-            # successful ingest, turning tool success into failure).
-            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
+            await pipeline.close()
 
 
 class SlowIngestHandler(ToolHandler):
@@ -258,10 +253,7 @@ class SlowIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            # Off the loop thread: the sync client's private loop cannot be
-            # driven while this thread's loop runs (it raises AFTER a
-            # successful ingest, turning tool success into failure).
-            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
+            await pipeline.close()
 
 
 class HybridIngestHandler(ToolHandler):
@@ -388,10 +380,7 @@ class HybridIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            # Off the loop thread: the sync client's private loop cannot be
-            # driven while this thread's loop runs (it raises AFTER a
-            # successful ingest, turning tool success into failure).
-            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
+            await pipeline.close()
 
 
 class GitIngestHandler(ToolHandler):
@@ -467,13 +456,10 @@ class GitIngestHandler(ToolHandler):
                 ),
             )
 
-            count = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: pipeline.ingest_directory(
-                    Path(tmpdir),
-                    recursive=True,
-                    exclude_dirs=IngestionPipeline.GIT_IGNORE_DIRS,
-                ),
+            count = await pipeline.ingest_directory(
+                Path(tmpdir),
+                recursive=True,
+                exclude_dirs=IngestionPipeline.GIT_IGNORE_DIRS,
             )
 
             return ToolResult.success_result(
@@ -497,10 +483,7 @@ class GitIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            # Off the loop thread: the sync client's private loop cannot be
-            # driven while this thread's loop runs (it raises AFTER a
-            # successful ingest, turning tool success into failure).
-            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
+            await pipeline.close()
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -661,50 +644,38 @@ class URLIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
 
-        # Write to temp file for the pipeline
-        suffix = ".md" if source_type != "pdf" else ".txt"
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=suffix, prefix="hexis_url_", delete=False
-        )
+        # The pipeline ingests text directly now (#89) — no temp-file dance.
+        pool = context.registry.pool
+        config = await _build_ingest_config(pool, mode=mode)
+        pipeline = IngestionPipeline(config)
         try:
-            tmp.write(content)
-            tmp.flush()
-            tmp.close()
+            count = await pipeline.ingest_text(
+                content,
+                title=arguments.get("title") or url,
+                source_type=source_type,
+            )
 
-            pool = context.registry.pool
-            config = await _build_ingest_config(pool, mode=mode)
-            pipeline = IngestionPipeline(config)
-
-            try:
-                count = await asyncio.get_running_loop().run_in_executor(
-                    None, pipeline.ingest_file, Path(tmp.name)
-                )
-
-                title = arguments.get("title") or url
-                return ToolResult.success_result(
-                    {
-                        "memories_created": count,
-                        "url": url,
-                        "mode": mode_str,
-                        "source_type": source_type,
-                        "content_chars": len(content),
-                    },
-                    display_output=(
-                        f"Ingested {url} ({source_type}, {mode_str}): {count} memories "
-                        f"created from {len(content):,} chars."
-                    ),
-                )
-            except Exception as e:
-                logger.error("url_ingest pipeline failed: %s", e)
-                return ToolResult.error_result(
-                    f"URL ingestion failed: {e}",
-                    ToolErrorType.EXECUTION_FAILED,
-                )
-            finally:
-                await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
+            return ToolResult.success_result(
+                {
+                    "memories_created": count,
+                    "url": url,
+                    "mode": mode_str,
+                    "source_type": source_type,
+                    "content_chars": len(content),
+                },
+                display_output=(
+                    f"Ingested {url} ({source_type}, {mode_str}): {count} memories "
+                    f"created from {len(content):,} chars."
+                ),
+            )
+        except Exception as e:
+            logger.error("url_ingest pipeline failed: %s", e)
+            return ToolResult.error_result(
+                f"URL ingestion failed: {e}",
+                ToolErrorType.EXECUTION_FAILED,
+            )
         finally:
-            import os
-            os.unlink(tmp.name)
+            await pipeline.close()
 
 
 def create_ingest_tools() -> list[ToolHandler]:

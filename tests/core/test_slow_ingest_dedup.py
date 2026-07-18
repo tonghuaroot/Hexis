@@ -32,11 +32,12 @@ def _assessment(facts: list[str]) -> dict[str, Any]:
 
 
 def _make_pipeline(plan: list[dict[str, Any]]) -> MagicMock:
+    """The pipeline's store is fully async now (#88) — AsyncMock throughout."""
     pipeline = MagicMock()
     pipeline._skip_section.return_value = False
     pipeline._source_payload.return_value = {"kind": "document", "ref": "test-doc.md"}
-    pipeline._create_encounter_memory.return_value = "encounter-1"
-    store = pipeline.store
+    pipeline._create_encounter_memory = AsyncMock(return_value="encounter-1")
+    store = pipeline.store = AsyncMock()
     store.client = object()  # already "connected"
     store.fetch_appraisal_context.return_value = {
         "worldview": [], "emotional_state": {}, "goals": [],

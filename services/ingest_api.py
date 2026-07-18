@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import queue
 import threading
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -10,6 +9,8 @@ from uuid import uuid4
 from core.agent_api import db_dsn_from_env
 from services.ingest import Config, IngestionPipeline
 
+# Cancel events stay threading.Events: is_set() is loop-agnostic and the
+# public contract (create/cancel from any thread) is unchanged.
 _INGESTION_CANCEL: dict[str, threading.Event] = {}
 _CANCEL_LOCK = threading.Lock()
 
@@ -39,16 +40,24 @@ async def stream_ingestion(
     permanent: bool = False,
     base_trust: float | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
+    """Stream ingestion log lines as {"type": "log", "text": ...} events.
+
+    Pure-async internals (#88): the pipeline runs as a task on this loop and
+    logs flow through an asyncio.Queue — the daemon thread and its queue.Queue
+    died with the sync pipeline. The event shape and cancel contract are
+    unchanged.
+    """
     dsn = db_dsn_from_env()
     with _CANCEL_LOCK:
         cancel_event = _INGESTION_CANCEL.get(session_id) or threading.Event()
         _INGESTION_CANCEL[session_id] = cancel_event
-    log_queue: queue.Queue[str | None] = queue.Queue()
+    log_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
     def log(message: str) -> None:
-        log_queue.put(message)
+        # The pipeline calls this from coroutine context on this same loop.
+        log_queue.put_nowait(message)
 
-    def run() -> None:
+    async def run() -> None:
         config = Config(
             dsn=dsn,
             llm_config=llm_config,
@@ -64,26 +73,32 @@ async def stream_ingestion(
         try:
             target = Path(path)
             if target.is_dir():
-                pipeline.ingest_directory(target, recursive=recursive)
+                await pipeline.ingest_directory(target, recursive=recursive)
             else:
-                pipeline.ingest_file(target)
+                await pipeline.ingest_file(target)
             pipeline.print_stats()
         except Exception as exc:
             log(f"Error: {exc}")
         finally:
-            pipeline.close()
-            log_queue.put(None)
+            # The end-of-stream sentinel must reach the consumer even when
+            # close() itself fails — a missing sentinel hangs the stream.
+            try:
+                await pipeline.close()
+            except Exception as exc:
+                log(f"Error closing pipeline: {exc}")
+            finally:
+                log_queue.put_nowait(None)
 
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-
-    loop = asyncio.get_running_loop()
+    task = asyncio.create_task(run())
     try:
         while True:
-            line = await loop.run_in_executor(None, log_queue.get)
+            line = await log_queue.get()
             if line is None:
                 break
             yield {"type": "log", "text": line}
+        await task
     finally:
+        if not task.done():
+            task.cancel()
         with _CANCEL_LOCK:
             _INGESTION_CANCEL.pop(session_id, None)

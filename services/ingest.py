@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional
 from uuid import UUID
 
 from core.cognitive_memory_api import (
-    CognitiveMemorySync,
+    CognitiveMemory,
     MemoryInput as ApiMemoryInput,
     MemoryType as ApiMemoryType,
     RelationshipType,
@@ -1194,12 +1194,8 @@ class IngestLLM:
         self._cfg = normalize_llm_config(config.llm_config)
         self.call_count = 0
 
-    def complete(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
-        """Sync completion -- uses asyncio.run() for the standalone CLI path."""
-        return asyncio.run(self.acomplete(messages, temperature=temperature))
-
-    async def acomplete(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
-        """Async completion via core.llm."""
+    async def complete(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
+        """Async completion via core.llm (#88: one async path, no sync twin)."""
         from core.llm import chat_completion
         from core.usage import record_llm_usage
 
@@ -1214,21 +1210,16 @@ class IngestLLM:
             max_tokens=1200,
             auth_mode=self._cfg.get("auth_mode"),
         )
-        asyncio.ensure_future(record_llm_usage(
+        await record_llm_usage(
             provider=self._cfg["provider"],
             model=self._cfg["model"],
             raw_response=result.get("raw"),
             source="ingest",
-        ))
+        )
         return result.get("content", "")
 
-    def complete_json(self, messages: list[dict[str, str]], temperature: float = 0.2) -> dict[str, Any]:
-        text = self.complete(messages, temperature=temperature)
-        return self._parse_json(text)
-
-    async def acomplete_json(self, messages: list[dict[str, str]], temperature: float = 0.2) -> dict[str, Any]:
-        """Async version of complete_json() for use with asyncio.gather()."""
-        text = await self.acomplete(messages, temperature=temperature)
+    async def complete_json(self, messages: list[dict[str, str]], temperature: float = 0.2) -> dict[str, Any]:
+        text = await self.complete(messages, temperature=temperature)
         return self._parse_json(text)
 
     @staticmethod
@@ -1290,15 +1281,9 @@ class Appraiser:
             summary=str(raw.get("summary", "") or ""),
         )
 
-    def appraise(self, *, content: str, context: dict[str, Any], mode: IngestionMode) -> Appraisal:
+    async def appraise(self, *, content: str, context: dict[str, Any], mode: IngestionMode) -> Appraisal:
         msgs = self._build_messages(content, context)
-        raw = self.llm.complete_json(msgs, temperature=0.2)
-        return self._parse(raw)
-
-    async def aappraise(self, *, content: str, context: dict[str, Any], mode: IngestionMode) -> Appraisal:
-        """Async version for use with asyncio.gather()."""
-        msgs = self._build_messages(content, context)
-        raw = await self.llm.acomplete_json(msgs, temperature=0.2)
+        raw = await self.llm.complete_json(msgs, temperature=0.2)
         return self._parse(raw)
 
 
@@ -1372,7 +1357,7 @@ class KnowledgeExtractor:
             )
         return out
 
-    def extract(
+    async def extract(
         self,
         *,
         section: Section,
@@ -1382,21 +1367,7 @@ class KnowledgeExtractor:
         max_items: int,
     ) -> list[Extraction]:
         msgs = self._build_messages(section, doc, appraisal, mode, max_items)
-        raw = self.llm.complete_json(msgs, temperature=0.3)
-        return self._parse(raw, max_items)
-
-    async def aextract(
-        self,
-        *,
-        section: Section,
-        doc: DocumentInfo,
-        appraisal: Appraisal,
-        mode: IngestionMode,
-        max_items: int,
-    ) -> list[Extraction]:
-        """Async version for use with asyncio.gather()."""
-        msgs = self._build_messages(section, doc, appraisal, mode, max_items)
-        raw = await self.llm.acomplete_json(msgs, temperature=0.3)
+        raw = await self.llm.complete_json(msgs, temperature=0.3)
         return self._parse(raw, max_items)
 
 
@@ -1406,13 +1377,21 @@ class KnowledgeExtractor:
 
 
 class MemoryStore:
+    """Async-native store (#88): one event loop — the caller's — over an
+    asyncpg pool and the async CognitiveMemory client. The former sync
+    wrapper drove a private loop per call through CognitiveMemorySync's
+    internals; every method is now a plain coroutine."""
+
     def __init__(self, config: Config):
         self.config = config
-        self.client: CognitiveMemorySync | None = None
+        self.client: CognitiveMemory | None = None
+        self._pool: Any = None
 
-    def connect(self) -> None:
+    async def connect(self) -> None:
         if self.client is not None:
             return
+        import asyncpg
+
         if self.config.dsn:
             dsn = self.config.dsn
         else:
@@ -1420,49 +1399,45 @@ class MemoryStore:
                 f"postgresql://{self.config.db_user}:{self.config.db_password}"
                 f"@{self.config.db_host}:{self.config.db_port}/{self.config.db_name}"
             )
-        self.client = CognitiveMemorySync.connect(dsn, min_size=1, max_size=5)
+        self._pool = await asyncpg.create_pool(dsn, min_size=1, max_size=5)
+        self.client = CognitiveMemory(self._pool)
 
-    def close(self) -> None:
-        if self.client is not None:
-            self.client.close()
-            self.client = None
+    async def close(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+        self._pool = None
+        self.client = None
 
-    def _exec(self, sql: str, *params: Any) -> Any:
-        assert self.client is not None
-        async def _run():
-            async with self.client._async._pool.acquire() as conn:
-                return await conn.execute(sql, *params)
+    async def _exec(self, sql: str, *params: Any) -> Any:
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            return await conn.execute(sql, *params)
 
-        return self.client._loop.run_until_complete(_run())
+    async def _fetchval(self, sql: str, *params: Any) -> Any:
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            return await conn.fetchval(sql, *params)
 
-    def _fetchval(self, sql: str, *params: Any) -> Any:
-        assert self.client is not None
-        async def _run():
-            async with self.client._async._pool.acquire() as conn:
-                return await conn.fetchval(sql, *params)
-
-        return self.client._loop.run_until_complete(_run())
-
-    def has_receipt(self, content_hash: str) -> bool:
+    async def has_receipt(self, content_hash: str) -> bool:
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
         try:
-            receipts = self.client.get_ingestion_receipts(content_hash, [content_hash])
+            receipts = await self.client.get_ingestion_receipts(content_hash, [content_hash])
         except Exception:
             return False
         return bool(receipts)
 
-    def set_affective_state(self, appraisal: Appraisal) -> None:
+    async def set_affective_state(self, appraisal: Appraisal) -> None:
         if self.client is None:
-            self.connect()
+            await self.connect()
         payload = json.dumps(appraisal.to_state_payload(source="ingest"))
         try:
-            self._fetchval("SELECT set_current_affective_state($1::jsonb)", payload)
+            await self._fetchval("SELECT set_current_affective_state($1::jsonb)", payload)
         except Exception:
             pass
 
-    def create_encounter_memory(
+    async def create_encounter_memory(
         self,
         *,
         text: str,
@@ -1472,9 +1447,9 @@ class MemoryStore:
         importance: float,
     ) -> str:
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
-        memory_id = self.client.remember(
+        memory_id = await self.client.remember(
             text,
             type=ApiMemoryType.EPISODIC,
             importance=importance,
@@ -1484,7 +1459,7 @@ class MemoryStore:
         )
         return str(memory_id)
 
-    def create_semantic_memory(
+    async def create_semantic_memory(
         self,
         *,
         content: str,
@@ -1496,10 +1471,10 @@ class MemoryStore:
         trust: float | None,
     ) -> str:
         if self.client is None:
-            self.connect()
+            await self.connect()
         payload_sources = json.dumps([source])
         return str(
-            self._fetchval(
+            await self._fetchval(
                 "SELECT create_semantic_memory($1::text,$2::float,$3::text[],$4::text[],$5::jsonb,$6::float,$7::jsonb,$8::float)",
                 content,
                 confidence,
@@ -1512,15 +1487,13 @@ class MemoryStore:
             )
         )
 
-    def add_source(self, memory_id: str, source: dict[str, Any]) -> None:
+    async def add_source(self, memory_id: str, source: dict[str, Any]) -> None:
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
-        self.client._loop.run_until_complete(
-            self.client._async.add_source(UUID(memory_id), source)
-        )
+        await self.client.add_source(UUID(memory_id), source)
 
-    def add_evidence(
+    async def add_evidence(
         self,
         memory_id: str,
         stance: str,
@@ -1534,8 +1507,8 @@ class MemoryStore:
         calibrated confidence update, and an audit row. Returns the revision
         result ({prior, posterior, applied, reason, ...})."""
         if self.client is None:
-            self.connect()
-        raw = self._fetchval(
+            await self.connect()
+        raw = await self._fetchval(
             "SELECT add_memory_evidence($1::uuid, $2::text, $3::jsonb, $4::text, $5::uuid, $6::text)",
             memory_id,
             stance,
@@ -1547,40 +1520,37 @@ class MemoryStore:
         parsed = json.loads(raw) if isinstance(raw, str) else raw
         return parsed if isinstance(parsed, dict) else {}
 
-    def link_concept(self, memory_id: str, concept: str, strength: float = 1.0) -> None:
+    async def link_concept(self, memory_id: str, concept: str, strength: float = 1.0) -> None:
         """Link a memory to a concept in the knowledge graph."""
         if self.client is None:
-            self.connect()
-        self._fetchval(
+            await self.connect()
+        await self._fetchval(
             "SELECT link_memory_to_concept($1::uuid, $2::text, $3::float)",
             memory_id,
             concept,
             strength,
         )
 
-    def link_concepts_batch(self, pairs: list[tuple[str, str]], strength: float = 1.0) -> None:
+    async def link_concepts_batch(self, pairs: list[tuple[str, str]], strength: float = 1.0) -> None:
         """Link multiple (memory_id, concept) pairs in a single batch call."""
         if not pairs:
             return
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
 
-        async def _run():
-            async with self.client._async._pool.acquire() as conn:
-                await conn.executemany(
-                    "SELECT link_memory_to_concept($1::uuid, $2::text, $3::float)",
-                    [(mid, concept, strength) for mid, concept in pairs],
-                )
+        async with self._pool.acquire() as conn:
+            await conn.executemany(
+                "SELECT link_memory_to_concept($1::uuid, $2::text, $3::float)",
+                [(mid, concept, strength) for mid, concept in pairs],
+            )
 
-        self.client._loop.run_until_complete(_run())
-
-    def connect_memories_batch(self, edges: list[tuple[str, str, "RelationshipType", float]]) -> None:
+    async def connect_memories_batch(self, edges: list[tuple[str, str, "RelationshipType", float]]) -> None:
         """Create multiple memory relationships in a single batch call."""
         if not edges:
             return
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
         from core.cognitive_memory_api import RelationshipInput
         rels = [
@@ -1592,9 +1562,9 @@ class MemoryStore:
             )
             for from_id, to_id, rel_type, conf in edges
         ]
-        self.client.connect_batch(rels)
+        await self.client.connect_batch(rels)
 
-    def prefetch_embeddings(self, texts: list[str]) -> int:
+    async def prefetch_embeddings(self, texts: list[str]) -> int:
         """Pre-warm embedding cache for a batch of texts.
 
         Calls the SQL ``prefetch_embeddings()`` function which batches HTTP
@@ -1605,48 +1575,48 @@ class MemoryStore:
         if not texts:
             return 0
         if self.client is None:
-            self.connect()
-        return self._fetchval("SELECT prefetch_embeddings($1::text[])", texts) or 0
+            await self.connect()
+        return await self._fetchval("SELECT prefetch_embeddings($1::text[])", texts) or 0
 
-    def recall_similar_semantic(self, query: str, limit: int = 5):
+    async def recall_similar_semantic(self, query: str, limit: int = 5):
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
-        return self.client.recall(
+        return await self.client.recall(
             query,
             limit=limit,
             memory_types=[ApiMemoryType.SEMANTIC],
         ).memories
 
-    def recall_similar(self, query: str, memory_types: list[str], limit: int = 5):
+    async def recall_similar(self, query: str, memory_types: list[str], limit: int = 5):
         """Recall nearest memories of the given types (list result)."""
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
-        return self.client.recall(
+        return await self.client.recall(
             query,
             limit=limit,
             memory_types=[ApiMemoryType(t) for t in memory_types],
         ).memories
 
-    def route_extractions(self, extractions: list, min_confidence: float) -> list:
+    async def route_extractions(self, extractions: list, min_confidence: float) -> list:
         """Route extractions through the DB dedup/related/create policy
         (db/41 ingest_route_extractions): config-driven thresholds + one batched
         nearest-neighbor search. Returns a per-extraction plan with 'index',
         'decision' (duplicate|related|create) and 'matched_memory_id'."""
         if self.client is None:
-            self.connect()
+            await self.connect()
         payload = json.dumps([
             {"content": ext.content, "confidence": ext.confidence}
             for ext in extractions
         ])
-        raw = self._fetchval(
+        raw = await self._fetchval(
             "SELECT ingest_route_extractions($1::jsonb, $2::float)", payload, min_confidence
         )
         plan = json.loads(raw) if isinstance(raw, str) else raw
         return plan or []
 
-    def persist_extractions(
+    async def persist_extractions(
         self,
         extractions: list,
         source: dict[str, Any],
@@ -1662,7 +1632,7 @@ class MemoryStore:
         ingest_persist_extractions): route -> corroborate/create -> concept
         links -> worldview edges -> provenance edges -> decay."""
         if self.client is None:
-            self.connect()
+            await self.connect()
         payload = json.dumps([
             {
                 "content": ext.content,
@@ -1676,7 +1646,7 @@ class MemoryStore:
             }
             for ext in extractions
         ])
-        raw = self._fetchval(
+        raw = await self._fetchval(
             "SELECT ingest_persist_extractions($1::jsonb, $2::jsonb, $3::uuid, $4::float, $5::jsonb)",
             payload,
             json.dumps(source),
@@ -1692,7 +1662,7 @@ class MemoryStore:
         result = json.loads(raw) if isinstance(raw, str) else raw
         return result if isinstance(result, dict) else {}
 
-    def persist_slow_facts(
+    async def persist_slow_facts(
         self,
         facts: list[str],
         assessment: dict[str, Any],
@@ -1708,7 +1678,7 @@ class MemoryStore:
         slow_ingest_persist_facts): route -> corroborate/create -> provenance,
         association, worldview, and contested edges."""
         if self.client is None:
-            self.connect()
+            await self.connect()
 
         def _uuids(vals):
             out = []
@@ -1719,7 +1689,7 @@ class MemoryStore:
                     continue
             return out
 
-        raw = self._fetchval(
+        raw = await self._fetchval(
             "SELECT slow_ingest_persist_facts($1::jsonb, $2::jsonb, $3::jsonb,"
             " $4::uuid, $5::uuid[], $6::uuid[], $7::uuid[], $8::text)",
             json.dumps(list(facts)),
@@ -1734,12 +1704,12 @@ class MemoryStore:
         result = json.loads(raw) if isinstance(raw, str) else raw
         return result if isinstance(result, dict) else {}
 
-    def apply_ingest_decay(self, memory_id: str, intensity: float, permanent: bool) -> None:
+    async def apply_ingest_decay(self, memory_id: str, intensity: float, permanent: bool) -> None:
         """Decay policy is DB-owned (db/66 decay_rate_for_intensity)."""
         if self.client is None:
-            self.connect()
+            await self.connect()
         try:
-            self._exec(
+            await self._exec(
                 "UPDATE memories SET decay_rate = CASE WHEN $3 THEN 0.0"
                 " ELSE decay_rate_for_intensity($2) END WHERE id = $1::uuid",
                 memory_id,
@@ -1749,47 +1719,47 @@ class MemoryStore:
         except Exception:
             pass
 
-    def route_texts(self, items: list[tuple[str, float]], min_confidence: float = 0.0) -> list:
+    async def route_texts(self, items: list[tuple[str, float]], min_confidence: float = 0.0) -> list:
         """Route bare (content, confidence) pairs through the same DB
         dedup/related/create policy as route_extractions."""
         if not items:
             return []
         if self.client is None:
-            self.connect()
+            await self.connect()
         payload = json.dumps([
             {"content": content, "confidence": confidence}
             for content, confidence in items
         ])
-        raw = self._fetchval(
+        raw = await self._fetchval(
             "SELECT ingest_route_extractions($1::jsonb, $2::float)", payload, min_confidence
         )
         plan = json.loads(raw) if isinstance(raw, str) else raw
         return plan or []
 
-    def connect_memories(self, from_id: str, to_id: str, relationship: RelationshipType, confidence: float = 0.8) -> None:
+    async def connect_memories(self, from_id: str, to_id: str, relationship: RelationshipType, confidence: float = 0.8) -> None:
         if self.client is None:
-            self.connect()
+            await self.connect()
         assert self.client is not None
-        self.client.connect_memories(
+        await self.client.connect_memories(
             from_id,
             to_id,
             relationship,
             confidence=confidence,
         )
 
-    def update_decay_rate(self, memory_id: str, decay_rate: float) -> None:
+    async def update_decay_rate(self, memory_id: str, decay_rate: float) -> None:
         if self.client is None:
-            self.connect()
+            await self.connect()
         try:
-            self._exec("UPDATE memories SET decay_rate = $1 WHERE id = $2::uuid", decay_rate, memory_id)
+            await self._exec("UPDATE memories SET decay_rate = $1 WHERE id = $2::uuid", decay_rate, memory_id)
         except Exception:
             pass
 
-    def fetch_appraisal_context(self) -> dict[str, Any]:
+    async def fetch_appraisal_context(self) -> dict[str, Any]:
         if self.client is None:
-            self.connect()
+            await self.connect()
         try:
-            raw = self._fetchval(
+            raw = await self._fetchval(
                 """
                 SELECT jsonb_build_object(
                     'emotional_state', get_current_affective_state(),
@@ -1807,12 +1777,12 @@ class MemoryStore:
             return {}
         return {}
 
-    def store_metrics(self, metrics: "IngestionMetrics") -> None:
+    async def store_metrics(self, metrics: "IngestionMetrics") -> None:
         """Store ingestion metrics for observability."""
         if self.client is None:
-            self.connect()
+            await self.connect()
         try:
-            self._exec(
+            await self._exec(
                 """
                 INSERT INTO ingestion_metrics (
                     source_type, source_size_bytes, word_count, mode,
@@ -1841,12 +1811,12 @@ class MemoryStore:
         except Exception:
             pass  # Don't fail ingestion due to metrics storage
 
-    def check_archived_for_query(self, query: str, threshold: float = 0.75, limit: int = 5) -> list[dict[str, Any]]:
+    async def check_archived_for_query(self, query: str, threshold: float = 0.75, limit: int = 5) -> list[dict[str, Any]]:
         """Check if archived content matches a query."""
         if self.client is None:
-            self.connect()
+            await self.connect()
         try:
-            rows = self._fetchval(
+            rows = await self._fetchval(
                 """
                 SELECT jsonb_agg(jsonb_build_object(
                     'memory_id', memory_id,
@@ -1868,12 +1838,12 @@ class MemoryStore:
         except Exception:
             return []
 
-    def mark_archived_processed(self, memory_id: str) -> bool:
+    async def mark_archived_processed(self, memory_id: str) -> bool:
         """Mark an archived memory as processed."""
         if self.client is None:
-            self.connect()
+            await self.connect()
         try:
-            result = self._fetchval(
+            result = await self._fetchval(
                 "SELECT mark_archived_as_processed($1::uuid)",
                 memory_id,
             )
@@ -1919,10 +1889,8 @@ class IngestionPipeline:
         self.store = MemoryStore(config)
         self.stats = {"files_processed": 0, "memories_created": 0, "errors": 0}
 
-    def ingest_file(self, file_path: Path) -> int:
-        # Initialize metrics tracking
+    async def ingest_file(self, file_path: Path) -> int:
         metrics = IngestionMetrics(start_time=time.time())
-
         if _should_cancel(self.config):
             raise RuntimeError("Ingestion cancelled")
         if not file_path.exists():
@@ -1931,12 +1899,8 @@ class IngestionPipeline:
         if file_path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
             _emit(self.config, f"Unsupported file type: {file_path.suffix}")
             return 0
-
         if self.config.verbose:
             _emit(self.config, f"\nProcessing: {file_path}")
-
-        # Track LLM calls at start
-        llm_calls_start = self.llm.call_count
 
         reader = get_reader(file_path)
         try:
@@ -1948,133 +1912,15 @@ class IngestionPipeline:
             metrics.errors.append(str(exc))
             return 0
 
-        title = _extract_title(content, file_path)
-        words = _word_count(content)
-        mode = self.config.mode
-        source_type = _infer_source_type(file_path)
-        content_hash = _hash_text(content)
-
-        # Update metrics
-        metrics.word_count = words
-        metrics.mode = mode.value
-        metrics.source_type = source_type
-
         doc = DocumentInfo(
-            title=title,
-            source_type=source_type,
-            content_hash=content_hash,
-            word_count=words,
+            title=_extract_title(content, file_path),
+            source_type=_infer_source_type(file_path),
+            content_hash=_hash_text(content),
+            word_count=_word_count(content),
             path=str(file_path),
             file_type=file_path.suffix.lower(),
         )
-
-        if self.store.has_receipt(content_hash):
-            if self.config.verbose:
-                _emit(self.config, f"  Already ingested (hash={content_hash[:8]}...). Skipping.")
-            return 0
-
-        sections = self.sectioner.split(content, file_path)
-
-        if self.config.verbose:
-            _emit(self.config, f"  Mode: {mode.value} | Words: {words} | Sections: {len(sections)}")
-
-        # Slow/hybrid mode: delegate to RLM-based ingestion
-        if mode in (IngestionMode.SLOW, IngestionMode.HYBRID):
-            count = self._run_rlm_ingest(mode, doc, sections, metrics, llm_calls_start)
-            return count
-
-        # FAST mode: small docs (<=deep_max_words) get per-section appraisal;
-        # larger docs get a single doc-level appraisal. All sections processed.
-        base_context = self._build_appraisal_context(doc)
-        use_deep = words <= self.config.deep_max_words
-
-        overall_appraisal = None
-        if not use_deep:
-            sample = self._sample_content(content)
-            overall_appraisal = self.appraiser.appraise(content=sample, context=base_context, mode=mode)
-            self.store.set_affective_state(overall_appraisal)
-            metrics.appraisal_valence = overall_appraisal.valence
-            metrics.appraisal_arousal = overall_appraisal.arousal
-            metrics.appraisal_emotion = overall_appraisal.primary_emotion
-            metrics.appraisal_intensity = overall_appraisal.intensity
-
-        encounter_id = self._create_encounter_memory(doc, overall_appraisal, mode)
-
-        created_ids: list[str] = []
-        total_extractions = 0
-        dedup_count = 0
-
-        # -- Phase 1: parallel LLM extraction --
-        active_sections = [s for s in sections if not self._skip_section(s.title)]
-
-        if _should_cancel(self.config):
-            raise RuntimeError("Ingestion cancelled")
-
-        max_items = self.config.max_facts_per_section
-
-        if use_deep:
-            # Small docs: each section gets its own appraisal + extraction
-            async def _parallel_deep() -> list[tuple[Appraisal, list[Extraction]]]:
-                async def _appraise_and_extract(s: Section) -> tuple[Appraisal, list[Extraction]]:
-                    sample = self._sample_content(s.content)
-                    apr = await self.appraiser.aappraise(content=sample, context=base_context, mode=mode)
-                    exts = await self.extractor.aextract(
-                        section=s, doc=doc, appraisal=apr, mode=mode, max_items=max_items,
-                    )
-                    return apr, exts
-                return await asyncio.gather(*[_appraise_and_extract(s) for s in active_sections])
-
-            deep_results = asyncio.run(_parallel_deep())
-
-            for section, (appraisal, extractions) in zip(active_sections, deep_results):
-                self.store.set_affective_state(appraisal)
-                metrics.appraisal_valence = appraisal.valence
-                metrics.appraisal_arousal = appraisal.arousal
-                metrics.appraisal_emotion = appraisal.primary_emotion
-                metrics.appraisal_intensity = appraisal.intensity
-                if not extractions:
-                    continue
-                total_extractions += len(extractions)
-                new_memories = self._create_semantic_memories(doc, encounter_id, appraisal, extractions)
-                dedup_count += len(extractions) - len(new_memories)
-                created_ids.extend(new_memories)
-        else:
-            # Larger docs: shared appraisal, parallel extraction only
-            appraisal = overall_appraisal if overall_appraisal is not None else Appraisal()
-
-            async def _parallel_extract() -> list[list[Extraction]]:
-                return await asyncio.gather(*[
-                    self.extractor.aextract(
-                        section=s, doc=doc, appraisal=appraisal, mode=mode, max_items=max_items,
-                    )
-                    for s in active_sections
-                ])
-
-            section_extractions = asyncio.run(_parallel_extract())
-
-            for section, extractions in zip(active_sections, section_extractions):
-                if not extractions:
-                    continue
-                total_extractions += len(extractions)
-                new_memories = self._create_semantic_memories(doc, encounter_id, appraisal, extractions)
-                dedup_count += len(extractions) - len(new_memories)
-                created_ids.extend(new_memories)
-
-        if self.config.verbose:
-            _emit(self.config, f"  Created {len(created_ids)} semantic memories")
-
-        self.stats["files_processed"] += 1
-        self.stats["memories_created"] += len(created_ids) + (1 if encounter_id else 0)
-
-        # Store metrics
-        metrics.extraction_count = total_extractions
-        metrics.dedup_count = dedup_count
-        metrics.memory_count = len(created_ids) + (1 if encounter_id else 0)
-        metrics.llm_calls = self.llm.call_count - llm_calls_start
-        metrics.duration_seconds = time.time() - metrics.start_time
-        self.store.store_metrics(metrics)
-
-        return len(created_ids)
+        return await self._ingest_content(content, doc, metrics, section_path=file_path)
 
     GIT_IGNORE_DIRS = {
         ".git", "node_modules", "__pycache__", ".venv", "venv",
@@ -2082,7 +1928,7 @@ class IngestionPipeline:
         ".pytest_cache", "vendor", ".bundle", ".next", "coverage",
     }
 
-    def ingest_directory(
+    async def ingest_directory(
         self,
         dir_path: Path,
         recursive: bool = True,
@@ -2107,13 +1953,12 @@ class IngestionPipeline:
             _emit(self.config, f"Found {len(files)} files to process")
         total = 0
         for file_path in files:
-            total += self.ingest_file(file_path)
+            total += await self.ingest_file(file_path)
         return total
 
-    def ingest_url(self, url: str, title: str | None = None) -> int:
+    async def ingest_url(self, url: str, title: str | None = None) -> int:
         """Ingest content from a URL."""
         metrics = IngestionMetrics(start_time=time.time())
-        llm_calls_start = self.llm.call_count
 
         if self.config.verbose:
             _emit(self.config, f"\nFetching: {url}")
@@ -2137,106 +1982,148 @@ class IngestionPipeline:
                 metrics.errors.append(str(exc2))
                 return 0
 
-        content_hash = _hash_text(content)
-        words = _word_count(content)
-        mode = self.config.mode
-
-        # Extract title from content header if not provided
         if not title:
-            import re
             title_match = re.search(r"\[Title: (.+?)\]", content)
             if title_match:
                 title = title_match.group(1)
             else:
                 title = url.split("/")[-1] or url
 
-        metrics.word_count = words
-        metrics.mode = mode.value
-        metrics.source_type = "web"
-
         doc = DocumentInfo(
             title=title,
             source_type="web",
-            content_hash=content_hash,
-            word_count=words,
+            content_hash=_hash_text(content),
+            word_count=_word_count(content),
             path=url,
             file_type=".html",
         )
+        return await self._ingest_content(
+            content, doc, metrics, section_path=Path("web_content.md")
+        )
 
-        if self.store.has_receipt(content_hash):
+    async def ingest_text(
+        self,
+        content: str,
+        *,
+        title: str | None = None,
+        source_type: str = "pasted_text",
+    ) -> int:
+        """Ingest raw text (pasted documents, job payloads) — no file needed."""
+        metrics = IngestionMetrics(start_time=time.time())
+        metrics.source_size_bytes = len(content.encode("utf-8"))
+        if not title:
+            first_line = next((ln.strip() for ln in content.splitlines() if ln.strip()), "")
+            title = first_line[:80] or "Pasted text"
+
+        doc = DocumentInfo(
+            title=title,
+            source_type=source_type,
+            content_hash=_hash_text(content),
+            word_count=_word_count(content),
+            path=f"text:{_hash_text(content)[:12]}",
+            file_type=".md",
+        )
+        return await self._ingest_content(
+            content, doc, metrics, section_path=Path("pasted_text.md")
+        )
+
+    async def _ingest_content(
+        self,
+        content: str,
+        doc: DocumentInfo,
+        metrics: IngestionMetrics,
+        *,
+        section_path: Path,
+    ) -> int:
+        """The single ingestion core (#89): every entry point — file, URL,
+        raw text, stdin — reduces to a reader over this."""
+        llm_calls_start = self.llm.call_count
+        mode = self.config.mode
+        metrics.word_count = doc.word_count
+        metrics.mode = mode.value
+        metrics.source_type = doc.source_type
+
+        if await self.store.has_receipt(doc.content_hash):
             if self.config.verbose:
-                _emit(self.config, f"  Already ingested (hash={content_hash[:8]}...)")
+                _emit(self.config, f"  Already ingested (hash={doc.content_hash[:8]}...). Skipping.")
             return 0
 
-        virtual_path = Path("web_content.md")
-        sections = self.sectioner.split(content, virtual_path)
-
+        sections = self.sectioner.split(content, section_path)
         if self.config.verbose:
-            _emit(self.config, f"  Mode: {mode.value} | Words: {words} | Sections: {len(sections)}")
+            _emit(self.config, f"  Mode: {mode.value} | Words: {doc.word_count} | Sections: {len(sections)}")
 
-        # FAST mode: small docs get per-section appraisal, larger get doc-level
-        base_context = self._build_appraisal_context(doc)
-        use_deep = words <= self.config.deep_max_words
+        # Slow/hybrid mode: delegate to RLM-based ingestion
+        if mode in (IngestionMode.SLOW, IngestionMode.HYBRID):
+            return await self._run_rlm_ingest(mode, doc, sections, metrics, llm_calls_start)
 
-        if use_deep:
-            overall_appraisal = None
-        else:
+        # FAST mode: small docs (<=deep_max_words) get per-section appraisal;
+        # larger docs get a single doc-level appraisal. All sections processed.
+        base_context = await self._build_appraisal_context(doc)
+        use_deep = doc.word_count <= self.config.deep_max_words
+
+        overall_appraisal = None
+        if not use_deep:
             sample = self._sample_content(content)
-            overall_appraisal = self.appraiser.appraise(content=sample, context=base_context, mode=mode)
-            self.store.set_affective_state(overall_appraisal)
+            overall_appraisal = await self.appraiser.appraise(content=sample, context=base_context, mode=mode)
+            await self.store.set_affective_state(overall_appraisal)
             metrics.appraisal_valence = overall_appraisal.valence
             metrics.appraisal_arousal = overall_appraisal.arousal
             metrics.appraisal_emotion = overall_appraisal.primary_emotion
             metrics.appraisal_intensity = overall_appraisal.intensity
 
-        encounter_id = self._create_encounter_memory(doc, overall_appraisal, mode)
+        encounter_id = await self._create_encounter_memory(doc, overall_appraisal, mode)
 
         created_ids: list[str] = []
         total_extractions = 0
         dedup_count = 0
 
         active_sections = [s for s in sections if not self._skip_section(s.title)]
+        if _should_cancel(self.config):
+            raise RuntimeError("Ingestion cancelled")
         max_items = self.config.max_facts_per_section
 
         if use_deep:
-            async def _parallel_deep() -> list[tuple[Appraisal, list[Extraction]]]:
-                async def _appraise_and_extract(s: Section) -> tuple[Appraisal, list[Extraction]]:
-                    sample = self._sample_content(s.content)
-                    apr = await self.appraiser.aappraise(content=sample, context=base_context, mode=mode)
-                    exts = await self.extractor.aextract(
-                        section=s, doc=doc, appraisal=apr, mode=mode, max_items=max_items,
-                    )
-                    return apr, exts
-                return await asyncio.gather(*[_appraise_and_extract(s) for s in active_sections])
+            # Small docs: each section gets its own appraisal + extraction,
+            # gathered on the caller's loop (#88 — the asyncio.run island died).
+            async def _appraise_and_extract(s: Section) -> tuple[Appraisal, list[Extraction]]:
+                sample = self._sample_content(s.content)
+                apr = await self.appraiser.appraise(content=sample, context=base_context, mode=mode)
+                exts = await self.extractor.extract(
+                    section=s, doc=doc, appraisal=apr, mode=mode, max_items=max_items,
+                )
+                return apr, exts
 
-            deep_results = asyncio.run(_parallel_deep())
-
-            for section, (section_appraisal, extractions) in zip(active_sections, deep_results):
-                self.store.set_affective_state(section_appraisal)
-                if extractions:
-                    total_extractions += len(extractions)
-                    new_memories = self._create_semantic_memories(doc, encounter_id, section_appraisal, extractions)
-                    dedup_count += len(extractions) - len(new_memories)
-                    created_ids.extend(new_memories)
+            deep_results = await asyncio.gather(
+                *[_appraise_and_extract(s) for s in active_sections]
+            )
+            for section, (appraisal, extractions) in zip(active_sections, deep_results):
+                await self.store.set_affective_state(appraisal)
+                metrics.appraisal_valence = appraisal.valence
+                metrics.appraisal_arousal = appraisal.arousal
+                metrics.appraisal_emotion = appraisal.primary_emotion
+                metrics.appraisal_intensity = appraisal.intensity
+                if not extractions:
+                    continue
+                total_extractions += len(extractions)
+                new_memories = await self._create_semantic_memories(doc, encounter_id, appraisal, extractions)
+                dedup_count += len(extractions) - len(new_memories)
+                created_ids.extend(new_memories)
         else:
+            # Larger docs: shared appraisal, parallel extraction only
             appraisal = overall_appraisal if overall_appraisal is not None else Appraisal()
-
-            async def _parallel_extract() -> list[list[Extraction]]:
-                return await asyncio.gather(*[
-                    self.extractor.aextract(
-                        section=s, doc=doc, appraisal=appraisal, mode=mode, max_items=max_items,
-                    )
-                    for s in active_sections
-                ])
-
-            section_extractions = asyncio.run(_parallel_extract())
-
+            section_extractions = await asyncio.gather(*[
+                self.extractor.extract(
+                    section=s, doc=doc, appraisal=appraisal, mode=mode, max_items=max_items,
+                )
+                for s in active_sections
+            ])
             for section, extractions in zip(active_sections, section_extractions):
-                if extractions:
-                    total_extractions += len(extractions)
-                    new_memories = self._create_semantic_memories(doc, encounter_id, appraisal, extractions)
-                    dedup_count += len(extractions) - len(new_memories)
-                    created_ids.extend(new_memories)
+                if not extractions:
+                    continue
+                total_extractions += len(extractions)
+                new_memories = await self._create_semantic_memories(doc, encounter_id, appraisal, extractions)
+                dedup_count += len(extractions) - len(new_memories)
+                created_ids.extend(new_memories)
 
         if self.config.verbose:
             _emit(self.config, f"  Created {len(created_ids)} semantic memories")
@@ -2249,7 +2136,7 @@ class IngestionPipeline:
         metrics.memory_count = len(created_ids) + (1 if encounter_id else 0)
         metrics.llm_calls = self.llm.call_count - llm_calls_start
         metrics.duration_seconds = time.time() - metrics.start_time
-        self.store.store_metrics(metrics)
+        await self.store.store_metrics(metrics)
 
         return len(created_ids)
 
@@ -2260,7 +2147,7 @@ class IngestionPipeline:
         tail = content[-limit:]
         return f"{head}\n\n...\n\n{tail}"
 
-    def _build_appraisal_context(self, doc: DocumentInfo) -> dict[str, Any]:
+    async def _build_appraisal_context(self, doc: DocumentInfo) -> dict[str, Any]:
         ctx = {
             "document": {
                 "title": doc.title,
@@ -2269,7 +2156,7 @@ class IngestionPipeline:
             }
         }
         try:
-            ctx.update(self.store.fetch_appraisal_context())
+            ctx.update(await self.store.fetch_appraisal_context())
         except Exception:
             pass
         return ctx
@@ -2288,7 +2175,7 @@ class IngestionPipeline:
             payload["trust"] = float(self.config.base_trust)
         return payload
 
-    def _create_archive_encounter(self, doc: DocumentInfo) -> str | None:
+    async def _create_archive_encounter(self, doc: DocumentInfo) -> str | None:
         source = self._source_payload(doc)
         text = f"I have access to '{doc.title}' but haven't engaged with it yet."
         context = {
@@ -2300,17 +2187,17 @@ class IngestionPipeline:
             "awaiting_processing": True,
         }
         importance = max(self.config.min_importance_floor or 0.0, 0.2)
-        encounter_id = self.store.create_encounter_memory(
+        encounter_id = await self.store.create_encounter_memory(
             text=text,
             source=source,
             emotional_valence=0.0,
             context=context,
             importance=importance,
         )
-        self._apply_decay(encounter_id, intensity=0.0)
+        await self._apply_decay(encounter_id, intensity=0.0)
         return encounter_id
 
-    def _create_encounter_memory(self, doc: DocumentInfo, appraisal: Appraisal | None, mode: IngestionMode) -> str | None:
+    async def _create_encounter_memory(self, doc: DocumentInfo, appraisal: Appraisal | None, mode: IngestionMode) -> str | None:
         source = self._source_payload(doc)
         appraisal = appraisal or Appraisal()
         summary = appraisal.summary or ""
@@ -2326,21 +2213,21 @@ class IngestionPipeline:
             "appraisal": appraisal.__dict__,
         }
         importance = max(self.config.min_importance_floor or 0.0, 0.4 + appraisal.intensity * 0.4)
-        encounter_id = self.store.create_encounter_memory(
+        encounter_id = await self.store.create_encounter_memory(
             text=text,
             source=source,
             emotional_valence=appraisal.valence,
             context=context,
             importance=importance,
         )
-        self._apply_decay(encounter_id, intensity=appraisal.intensity)
+        await self._apply_decay(encounter_id, intensity=appraisal.intensity)
         return encounter_id
 
-    def _apply_decay(self, memory_id: str, intensity: float) -> None:
+    async def _apply_decay(self, memory_id: str, intensity: float) -> None:
         # Decay bands are DB-owned (db/66 decay_rate_for_intensity).
-        self.store.apply_ingest_decay(memory_id, intensity, self.config.permanent)
+        await self.store.apply_ingest_decay(memory_id, intensity, self.config.permanent)
 
-    def _create_semantic_memories(
+    async def _create_semantic_memories(
         self,
         doc: DocumentInfo,
         encounter_id: str | None,
@@ -2352,7 +2239,7 @@ class IngestionPipeline:
         via the audited belief-revision policy, creation, concept links,
         worldview-hint edges, provenance edges, and decay."""
         source = self._source_payload(doc)
-        result = self.store.persist_extractions(
+        result = await self.store.persist_extractions(
             extractions,
             source,
             encounter_id=encounter_id,
@@ -2368,7 +2255,7 @@ class IngestionPipeline:
         lowered = title.strip().lower()
         return any(skip in lowered for skip in self.config.skip_sections)
 
-    def _run_rlm_ingest(
+    async def _run_rlm_ingest(
         self,
         mode: IngestionMode,
         doc: DocumentInfo,
@@ -2376,14 +2263,8 @@ class IngestionPipeline:
         metrics: IngestionMetrics,
         llm_calls_start: int,
     ) -> int:
-        """Run slow or hybrid ingestion via RLM loop.
-
-        This is a sync wrapper that calls the async slow_ingest_rlm functions.
-        Used by ingest_file() when mode is SLOW or HYBRID.
-        """
-        import asyncio as _asyncio
-        import concurrent.futures
-
+        """Run slow or hybrid ingestion via the async RLM loop, on the
+        caller's loop (#88 — the thread-plus-third-loop bridge died)."""
         from services.slow_ingest_rlm import run_hybrid_ingest, run_slow_ingest
 
         if self.config.dsn:
@@ -2393,28 +2274,15 @@ class IngestionPipeline:
                 f"postgresql://{self.config.db_user}:{self.config.db_password}"
                 f"@{self.config.db_host}:{self.config.db_port}/{self.config.db_name}"
             )
-        llm_cfg = self.llm._cfg
 
         runner = run_slow_ingest if mode == IngestionMode.SLOW else run_hybrid_ingest
-        coro = runner(
+        result = await runner(
             pipeline=self,
             doc=doc,
             sections=sections,
-            llm_config=llm_cfg,
+            llm_config=self.llm._cfg,
             dsn=dsn,
         )
-
-        # Run async coroutine from sync context. If an event loop is already
-        # running (e.g. called from ingest_api thread), offload to a fresh
-        # thread with its own loop; otherwise use asyncio.run() directly.
-        try:
-            _asyncio.get_running_loop()
-            # Already inside an event loop -- run in a separate thread.
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                result = pool.submit(_asyncio.run, coro).result()
-        except RuntimeError:
-            # No running loop -- safe to use asyncio.run().
-            result = _asyncio.run(coro)
 
         count = result.get("memories_created", 0)
         self.stats["files_processed"] += 1
@@ -2424,7 +2292,7 @@ class IngestionPipeline:
         metrics.mode = mode.value
         metrics.llm_calls = self.llm.call_count - llm_calls_start
         metrics.duration_seconds = time.time() - metrics.start_time
-        self.store.store_metrics(metrics)
+        await self.store.store_metrics(metrics)
 
         if self.config.verbose:
             _emit(self.config, f"  RLM {mode.value} ingest: {count} memories created")
@@ -2437,7 +2305,7 @@ class IngestionPipeline:
 
         return count
 
-    def check_and_process_archived(self, query: str, threshold: float = 0.75) -> list[str]:
+    async def check_and_process_archived(self, query: str, threshold: float = 0.75) -> list[str]:
         """
         Check if any archived content matches the query and process it.
 
@@ -2447,10 +2315,10 @@ class IngestionPipeline:
         Returns list of content hashes that were processed.
         """
         if self.store.client is None:
-            self.store.connect()
+            await self.store.connect()
 
         # Find archived content matching the query
-        rows = self.store._fetchval(
+        rows = await self.store._fetchval(
             """
             SELECT jsonb_agg(jsonb_build_object(
                 'memory_id', memory_id,
@@ -2497,18 +2365,18 @@ class IngestionPipeline:
                     self.config.mode = IngestionMode.FAST
                     try:
                         # Mark as processed first to avoid duplicate detection
-                        self.store._fetchval(
+                        await self.store._fetchval(
                             "SELECT mark_archived_as_processed($1::uuid)",
                             memory_id,
                         )
-                        self.ingest_file(path)
+                        await self.ingest_file(path)
                         processed_hashes.append(content_hash)
                     finally:
                         self.config.mode = original_mode
                     continue
 
             # If source file not available, just mark as processed
-            self.store._fetchval(
+            await self.store._fetchval(
                 "SELECT mark_archived_as_processed($1::uuid)",
                 memory_id,
             )
@@ -2525,8 +2393,8 @@ class IngestionPipeline:
         _emit(self.config, f"Errors:            {self.stats['errors']}")
         _emit(self.config, "=" * 50)
 
-    def close(self) -> None:
-        self.store.close()
+    async def close(self) -> None:
+        await self.store.close()
 
 
 # =========================================================================
@@ -2548,23 +2416,23 @@ class ArchivedContentProcessor:
         self.config = config
         self.pipeline = IngestionPipeline(config)
 
-    def process_for_query(self, query: str, threshold: float = 0.75) -> list[str]:
+    async def process_for_query(self, query: str, threshold: float = 0.75) -> list[str]:
         """
         Check if archived content matches a query and process it.
 
         Returns list of content hashes that were processed.
         """
-        return self.pipeline.check_and_process_archived(query, threshold)
+        return await self.pipeline.check_and_process_archived(query, threshold)
 
-    def process_by_hash(self, content_hash: str) -> bool:
+    async def process_by_hash(self, content_hash: str) -> bool:
         """Process a specific archived item by content hash."""
-        archived = self.pipeline.store.check_archived_for_query(
+        archived = await self.pipeline.store.check_archived_for_query(
             content_hash, threshold=0.0, limit=1
         )
 
         if not archived:
             # Try direct lookup
-            row = self.pipeline.store._fetchval(
+            row = await self.pipeline.store._fetchval(
                 """
                 SELECT jsonb_build_object(
                     'memory_id', id,
@@ -2594,23 +2462,23 @@ class ArchivedContentProcessor:
             if source_path and source_path != "stdin" and not source_path.startswith("http"):
                 path = Path(source_path)
                 if path.exists():
-                    self.pipeline.store.mark_archived_processed(memory_id)
+                    await self.pipeline.store.mark_archived_processed(memory_id)
                     original_mode = self.config.mode
                     self.config.mode = IngestionMode.FAST
                     try:
-                        self.pipeline.ingest_file(path)
+                        await self.pipeline.ingest_file(path)
                     finally:
                         self.config.mode = original_mode
                     return True
 
             # Mark as processed even if file not found
-            return self.pipeline.store.mark_archived_processed(memory_id)
+            return await self.pipeline.store.mark_archived_processed(memory_id)
 
         return False
 
-    def process_batch(self, limit: int = 10) -> int:
+    async def process_batch(self, limit: int = 10) -> int:
         """Process a batch of archived items."""
-        rows = self.pipeline.store._fetchval(
+        rows = await self.pipeline.store._fetchval(
             """
             SELECT ARRAY_AGG(source_attribution->>'content_hash')
             FROM memories
@@ -2628,13 +2496,13 @@ class ArchivedContentProcessor:
         hashes = list(rows) if rows else []
         count = 0
         for h in hashes:
-            if h and self.process_by_hash(h):
+            if h and await self.process_by_hash(h):
                 count += 1
 
         return count
 
-    def close(self) -> None:
-        self.pipeline.close()
+    async def close(self) -> None:
+        await self.pipeline.close()
 
 
 # =========================================================================
@@ -2744,21 +2612,26 @@ def _build_config_from_args(args: argparse.Namespace) -> Config:
 
 
 def _cmd_ingest(args: argparse.Namespace) -> None:
-    """Handle the ingest subcommand."""
+    """Handle the ingest subcommand — the one sync shell (#88): a single
+    asyncio.run at the very top of the CLI."""
+    asyncio.run(_cmd_ingest_async(args))
+
+
+async def _cmd_ingest_async(args: argparse.Namespace) -> None:
     config = _build_config_from_args(args)
     pipeline = IngestionPipeline(config)
 
     try:
         if args.stdin:
-            count = _ingest_stdin(pipeline, args)
+            count = await _ingest_stdin(pipeline, args)
         elif args.url:
-            count = _ingest_url(pipeline, args)
+            count = await _ingest_url(pipeline, args)
         elif getattr(args, "github", None):
-            count = _ingest_github(pipeline, args)
+            count = await _ingest_github(pipeline, args)
         elif args.file:
-            count = pipeline.ingest_file(args.file)
+            count = await pipeline.ingest_file(args.file)
         elif args.input:
-            count = pipeline.ingest_directory(args.input, recursive=not args.no_recursive)
+            count = await pipeline.ingest_directory(args.input, recursive=not args.no_recursive)
         else:
             print("Error: No input source specified")
             return
@@ -2766,11 +2639,11 @@ def _cmd_ingest(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     finally:
-        pipeline.close()
+        await pipeline.close()
 
 
-def _ingest_stdin(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
-    """Ingest content from stdin."""
+async def _ingest_stdin(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
+    """Ingest content from stdin — a reader over the shared core (#89)."""
     content = sys.stdin.read()
     if not content.strip():
         _emit(pipeline.config, "No content received from stdin")
@@ -2778,12 +2651,6 @@ def _ingest_stdin(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
 
     content_type = getattr(args, "stdin_type", "text") or "text"
     title = getattr(args, "stdin_title", None) or f"stdin-{_hash_text(content)[:8]}"
-
-    # Create a virtual DocumentInfo
-    content_hash = _hash_text(content)
-    words = _word_count(content)
-    mode = pipeline.config.mode
-
     source_type_map = {
         "text": "document",
         "markdown": "document",
@@ -2792,77 +2659,21 @@ def _ingest_stdin(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
         "yaml": "data",
         "data": "data",
     }
-    source_type = source_type_map.get(content_type, "document")
-
-    doc = DocumentInfo(
+    _emit(pipeline.config, f"Processing stdin: {title}")
+    return await pipeline.ingest_text(
+        content,
         title=title,
-        source_type=source_type,
-        content_hash=content_hash,
-        word_count=words,
-        path="stdin",
-        file_type=f".{content_type}",
+        source_type=source_type_map.get(content_type, "document"),
     )
 
-    if pipeline.store.has_receipt(content_hash):
-        _emit(pipeline.config, f"Content already ingested (hash={content_hash[:8]}...)")
-        return 0
 
-    # Create virtual path for sectioning
-    virtual_path = Path(f"stdin.{content_type}")
-    sections = pipeline.sectioner.split(content, virtual_path)
-
-    _emit(pipeline.config, f"Processing stdin: {title}")
-    _emit(pipeline.config, f"  Mode: {mode.value} | Words: {words} | Sections: {len(sections)}")
-
-    # FAST mode: small docs get per-section appraisal, larger get doc-level
-    base_context = pipeline._build_appraisal_context(doc)
-    use_deep = words <= pipeline.config.deep_max_words
-
-    if use_deep:
-        overall_appraisal = None
-    else:
-        sample = pipeline._sample_content(content)
-        overall_appraisal = pipeline.appraiser.appraise(content=sample, context=base_context, mode=mode)
-        pipeline.store.set_affective_state(overall_appraisal)
-
-    encounter_id = pipeline._create_encounter_memory(doc, overall_appraisal, mode)
-
-    created_ids: list[str] = []
-    for section in sections:
-        if pipeline._skip_section(section.title):
-            continue
-        if use_deep:
-            sample = pipeline._sample_content(section.content)
-            section_appraisal = pipeline.appraiser.appraise(content=sample, context=base_context, mode=mode)
-            pipeline.store.set_affective_state(section_appraisal)
-        else:
-            section_appraisal = overall_appraisal if overall_appraisal is not None else Appraisal()
-
-        max_items = pipeline.config.max_facts_per_section
-
-        extractions = pipeline.extractor.extract(
-            section=section,
-            doc=doc,
-            appraisal=section_appraisal,
-            mode=mode,
-            max_items=max_items,
-        )
-        if extractions:
-            created_ids.extend(pipeline._create_semantic_memories(doc, encounter_id, section_appraisal, extractions))
-
-    _emit(pipeline.config, f"  Created {len(created_ids)} semantic memories")
-    pipeline.stats["files_processed"] += 1
-    pipeline.stats["memories_created"] += len(created_ids) + (1 if encounter_id else 0)
-    return len(created_ids)
-
-
-def _ingest_url(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
+async def _ingest_url(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
     """Ingest content from a URL."""
     title = getattr(args, "title", None)
-    return pipeline.ingest_url(args.url, title=title)
+    return await pipeline.ingest_url(args.url, title=title)
 
 
-def _ingest_github(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
+async def _ingest_github(pipeline: IngestionPipeline, args: argparse.Namespace) -> int:
     """Clone a GitHub repo to a temp dir and ingest its contents."""
     import shutil
     import subprocess
@@ -2884,7 +2695,7 @@ def _ingest_github(pipeline: IngestionPipeline, args: argparse.Namespace) -> int
         _emit(pipeline.config, f"Cloning {repo} ...")
         subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-        count = pipeline.ingest_directory(
+        count = await pipeline.ingest_directory(
             Path(tmpdir),
             recursive=True,
             exclude_dirs=IngestionPipeline.GIT_IGNORE_DIRS,
@@ -2900,14 +2711,18 @@ def _ingest_github(pipeline: IngestionPipeline, args: argparse.Namespace) -> int
 
 def _cmd_status(args: argparse.Namespace) -> None:
     """Handle the status subcommand."""
+    asyncio.run(_cmd_status_async(args))
+
+
+async def _cmd_status_async(args: argparse.Namespace) -> None:
     config = _build_config_from_args(args)
     store = MemoryStore(config)
-    store.connect()
+    await store.connect()
 
     try:
         if args.pending:
             # Query for archived/pending memories
-            rows = store._fetchval(
+            rows = await store._fetchval(
                 """
                 SELECT jsonb_agg(jsonb_build_object(
                     'id', id,
@@ -2935,7 +2750,7 @@ def _cmd_status(args: argparse.Namespace) -> None:
                         print(f"  - {p.get('title', 'Unknown')} ({p.get('hash', '')[:8]}...)")
         else:
             # General ingestion stats
-            stats = store._fetchval(
+            stats = await store._fetchval(
                 """
                 SELECT jsonb_build_object(
                     'total_memories', (SELECT COUNT(*) FROM memories),
@@ -2958,27 +2773,31 @@ def _cmd_status(args: argparse.Namespace) -> None:
                 print(f"  Pending processing: {stats_data.get('pending', 0)}")
                 print(f"  Last 24 hours:      {stats_data.get('recent_24h', 0)}")
     finally:
-        store.close()
+        await store.close()
 
 
 def _cmd_process(args: argparse.Namespace) -> None:
     """Handle the process subcommand - upgrade archived content."""
+    asyncio.run(_cmd_process_async(args))
+
+
+async def _cmd_process_async(args: argparse.Namespace) -> None:
     config = _build_config_from_args(args)
     processor = ArchivedContentProcessor(config)
 
     try:
         if args.content_hash:
-            success = processor.process_by_hash(args.content_hash)
+            success = await processor.process_by_hash(args.content_hash)
             print(f"Processed: {'Yes' if success else 'No (not found or failed)'}")
         elif args.all_archived:
-            count = processor.process_batch(limit=getattr(args, "limit", 10))
+            count = await processor.process_batch(limit=getattr(args, "limit", 10))
             print(f"Processed {count} archived items")
         else:
             print("Error: Specify --content-hash or --all-archived")
     except KeyboardInterrupt:
         print("\nInterrupted by user")
     finally:
-        processor.close()
+        await processor.close()
 
 
 def main() -> None:

@@ -18,16 +18,16 @@ async def test_stream_ingestion_emits_logs(monkeypatch, tmp_path):
         def __init__(self, config):
             self.config = config
 
-        def ingest_file(self, target):
+        async def ingest_file(self, target):
             self.config.log(f"ingest_file:{target}")
 
-        def ingest_directory(self, target, recursive=False):
+        async def ingest_directory(self, target, recursive=False):
             self.config.log(f"ingest_dir:{target}:{recursive}")
 
         def print_stats(self):
             self.config.log("stats")
 
-        def close(self):
+        async def close(self):
             return None
 
     monkeypatch.setattr(ingest_api, "IngestionPipeline", StubPipeline)

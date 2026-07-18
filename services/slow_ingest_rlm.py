@@ -239,10 +239,10 @@ async def run_slow_ingest(
 
     # Ensure store is connected
     if pipeline.store.client is None:
-        pipeline.store.connect()
+        await pipeline.store.connect()
 
     # Fetch appraisal context (worldview, emotional state, goals)
-    ctx = pipeline.store.fetch_appraisal_context()
+    ctx = await pipeline.store.fetch_appraisal_context()
     worldview_stubs = ctx.get("worldview", [])
     emotional_state = ctx.get("emotional_state", {})
     goal_stubs = ctx.get("goals", [])
@@ -256,7 +256,7 @@ async def run_slow_ingest(
         curiosity=0.6,
         summary=f"Beginning conscious reading of '{doc.title}'.",
     )
-    encounter_id = pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.SLOW)
+    encounter_id = await pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.SLOW)
 
     memories_created: list[str] = []
     assessments: list[dict[str, Any]] = []
@@ -317,7 +317,7 @@ async def run_slow_ingest(
         worldview_edge_ids = [
             wv.get("memory_id") or wv.get("id") for wv in worldview_stubs[:3]
         ]
-        result = pipeline.store.persist_slow_facts(
+        result = await pipeline.store.persist_slow_facts(
             valid_facts,
             assessment,
             chunk_source,
@@ -374,9 +374,9 @@ async def run_hybrid_ingest(
     time_start = time.perf_counter()
 
     if pipeline.store.client is None:
-        pipeline.store.connect()
+        await pipeline.store.connect()
 
-    ctx = pipeline.store.fetch_appraisal_context()
+    ctx = await pipeline.store.fetch_appraisal_context()
     worldview_stubs = ctx.get("worldview", [])
     emotional_state = ctx.get("emotional_state", {})
     goal_stubs = ctx.get("goals", [])
@@ -389,7 +389,7 @@ async def run_hybrid_ingest(
         curiosity=0.6,
         summary=f"Beginning hybrid reading of '{doc.title}'.",
     )
-    encounter_id = pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.HYBRID)
+    encounter_id = await pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.HYBRID)
 
     # Phase 1: Fast pass -- use the pipeline's KnowledgeExtractor to score all chunks
     fast_extractions: dict[int, list[Extraction]] = {}
@@ -402,7 +402,7 @@ async def run_hybrid_ingest(
             continue
 
         try:
-            extractions = pipeline.extractor.extract(
+            extractions = await pipeline.extractor.extract(
                 section=section,
                 doc=doc,
                 appraisal=appraisal,
@@ -431,7 +431,7 @@ async def run_hybrid_ingest(
         # Criterion 2/3: Similarity to worldview or goals. Query those types
         # directly — the old semantic-only recall could never return them.
         try:
-            similar = pipeline.store.recall_similar(
+            similar = await pipeline.store.recall_similar(
                 section.content[:500], memory_types=["worldview", "goal"], limit=3
             )
             if any(
@@ -498,7 +498,7 @@ async def run_hybrid_ingest(
                 fact for fact in assessment.get("extracted_facts", [])
                 if fact and isinstance(fact, str) and len(fact.strip()) >= 10
             ]
-            hybrid_result = pipeline.store.persist_slow_facts(
+            hybrid_result = await pipeline.store.persist_slow_facts(
                 hybrid_facts,
                 assessment,
                 chunk_source,
@@ -514,7 +514,7 @@ async def run_hybrid_ingest(
             # Fast path: use pre-extracted facts from Phase 1
             fast_chunk_count += 1
             extractions = fast_extractions.get(section.index, [])
-            created = pipeline._create_semantic_memories(
+            created = await pipeline._create_semantic_memories(
                 doc, encounter_id, appraisal, extractions,
             )
             memories_created.extend(created)

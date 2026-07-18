@@ -231,7 +231,10 @@ class TestURLIngestExecution:
             mock_asyncio.get_running_loop.return_value = mock_loop
             mock_loop.run_in_executor = mock_run_in_executor
             mock_config.return_value = MagicMock()
-            mock_pipeline_cls.return_value = MagicMock()
+            pipeline = MagicMock()
+            pipeline.ingest_text = AsyncMock(return_value=5)
+            pipeline.close = AsyncMock()
+            mock_pipeline_cls.return_value = pipeline
 
             result = await handler.execute(
                 {"url": "https://example.com/article", "mode": "fast"}, ctx
@@ -267,7 +270,10 @@ class TestURLIngestExecution:
             mock_asyncio.get_running_loop.return_value = mock_loop
             mock_loop.run_in_executor = mock_run_in_executor
             mock_config.return_value = MagicMock()
-            mock_pipeline_cls.return_value = MagicMock()
+            pipeline = MagicMock()
+            pipeline.ingest_text = AsyncMock(return_value=3)
+            pipeline.close = AsyncMock()
+            mock_pipeline_cls.return_value = pipeline
 
             result = await handler.execute(
                 {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, ctx

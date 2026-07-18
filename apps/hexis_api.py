@@ -794,38 +794,23 @@ async def chat(req: ChatRequest):
 
 
 async def _run_text_ingest(content: str, title: str, mode_value: str) -> None:
-    """Background ingestion of pasted text: temp file → IngestionPipeline."""
-    import tempfile
-
+    """Background ingestion of pasted text via the async pipeline (#88/#89:
+    no temp file, no executor). Stage 6 replaces this task with a durable
+    job the maintenance worker processes."""
     from core.tools.ingest import _build_ingest_config
     from services.ingest import IngestionMode, IngestionPipeline
 
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", prefix="pasted-", delete=False, encoding="utf-8"
-    )
     try:
-        tmp.write(f"# {title}\n\n{content}")
-        tmp.close()
         config = await _build_ingest_config(_pool, mode=IngestionMode(mode_value))
         config.verbose = False
         pipeline = IngestionPipeline(config)
         try:
-            count = await asyncio.get_running_loop().run_in_executor(
-                None, pipeline.ingest_file, Path(tmp.name)
-            )
+            count = await pipeline.ingest_text(content, title=title, source_type="pasted_text")
             logger.info("Pasted-text ingest '%s': %s memories created", title, count)
         finally:
-            # The pipeline's sync DB client owns a private event loop; closing
-            # it must happen off the API loop thread or run_until_complete
-            # raises with the ingest already durably persisted.
-            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
+            await pipeline.close()
     except Exception:
         logger.exception("Pasted-text ingest failed for '%s'", title)
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
 
 
 @app.post("/api/ingest/text")
