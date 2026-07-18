@@ -68,6 +68,14 @@ BEGIN
             ctx := ctx || '{"open_protected_reversions": {"total": 0, "records": []}}'::jsonb;
         END;
     END IF;
+    IF NOT ctx ? 'resource_requests' THEN
+        BEGIN
+            ctx := ctx || jsonb_build_object('resource_requests',
+                COALESCE(resource_requests_summary(), '{"pending": 0, "recent_decisions": []}'::jsonb));
+        EXCEPTION WHEN OTHERS THEN
+            ctx := ctx || '{"resource_requests": {"pending": 0, "recent_decisions": []}}'::jsonb;
+        END;
+    END IF;
 
     -- The backlog gate.
     backlog := CASE WHEN jsonb_typeof(ctx->'backlog') = 'object' THEN ctx->'backlog' ELSE '{}'::jsonb END;
@@ -127,6 +135,29 @@ BEGIN
         lines := lines || ('Load the memory-exchange skill and inspect the replacement first. Use '
             || 'protected_replacement_revert with its audit ID and an explicit rationale '
             || 'only if restoring the snapshot is your chosen action.');
+        suffix_parts := suffix_parts || array_to_string(lines, E'\n');
+    END IF;
+
+    -- Resource request decisions fragment (#84): outcomes are how the agent
+    -- learns what asks succeed.
+    pending := ctx->'resource_requests';
+    IF jsonb_array_length(COALESCE(pending->'recent_decisions', '[]'::jsonb)) > 0 THEN
+        lines := ARRAY[
+            '## Resource Request Decisions',
+            'The operator decided on requests you filed:'
+        ];
+        FOR record IN
+            SELECT value FROM jsonb_array_elements(pending->'recent_decisions') LIMIT 5
+        LOOP
+            lines := lines || format('- [%s] %s%s: %s%s',
+                COALESCE(record->>'id', '?'),
+                COALESCE(record->>'kind', '?'),
+                COALESCE(' (' || NULLIF(record->>'target_key', '') || ')', ''),
+                COALESCE(record->>'status', '?'),
+                COALESCE(' — ' || NULLIF(record->>'decision_note', ''), ''));
+        END LOOP;
+        lines := lines || ('Granted changes are already applied. A denial with a note is '
+            || 'information about what to ask differently.');
         suffix_parts := suffix_parts || array_to_string(lines, E'\n');
     END IF;
 

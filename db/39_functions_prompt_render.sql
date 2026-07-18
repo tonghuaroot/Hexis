@@ -821,6 +821,21 @@ BEGIN
                ELSE 'last entry ' || (env->>'journal_last_entry_days') || ' day(s) ago'
            END || E'\n'
         || CASE
+               WHEN COALESCE((env#>>'{resource_requests,pending}')::int, 0) > 0
+                    OR jsonb_array_length(COALESCE(env#>'{resource_requests,recent_decisions}', '[]'::jsonb)) > 0 THEN
+                   '- Resource requests: ' || COALESCE(env#>>'{resource_requests,pending}', '0')
+                   || ' pending (the operator decides)'
+                   || COALESCE('. Decided since your last heartbeat: '
+                       || (SELECT string_agg(
+                               format('[%s] %s %s%s',
+                                   d.value->>'id', d.value->>'kind', d.value->>'status',
+                                   COALESCE(' — ' || NULLIF(d.value->>'decision_note', ''), '')),
+                               '; ')
+                           FROM jsonb_array_elements(env#>'{resource_requests,recent_decisions}') d), '')
+                   || E'\n'
+               ELSE ''
+           END
+        || CASE
                WHEN COALESCE((env->>'changes_since_last_heartbeat')::int, 0) > 0 THEN
                    '- Since your last heartbeat, ' || (env->>'changes_since_last_heartbeat')
                    || ' change(s) landed in your substrate: '

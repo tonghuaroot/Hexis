@@ -704,6 +704,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     from .backup import create_backup_tools
     from .humanizer import create_humanizer_tools
     from .self_inspection import create_self_inspection_tools
+    from .resources import create_resource_tools
     from .skills import create_skill_tools
     from .hooks import AuditTrailHook
 
@@ -790,6 +791,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     builder.add_all(create_backup_tools())
     builder.add_all(create_humanizer_tools())
     builder.add_all(create_self_inspection_tools())
+    builder.add_all(create_resource_tools())
 
     registry = builder.build()
 

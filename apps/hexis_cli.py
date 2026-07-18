@@ -227,6 +227,7 @@ _HELP_GROUPS = [
         ("tools", "Manage tools configuration"),
         ("characters", "Manage character cards"),
         ("consents", "Manage consent certificates"),
+        ("requests", "Decide the agent's resource requests"),
         ("channels", "Manage channel adapters"),
     ]),
     ("Instances", [
@@ -338,6 +339,42 @@ def build_parser() -> argparse.ArgumentParser:
     consents_revoke.set_defaults(func="consents_revoke")
 
     consents.set_defaults(func="consents")
+
+    # -- Resource requests (#84): the agent asks, the operator decides --
+    requests_p = sub.add_parser(
+        "requests", parents=[_db],
+        help="View and decide the agent's resource requests",
+    )
+    requests_sub = requests_p.add_subparsers(dest="requests_cmd")
+
+    requests_list = requests_sub.add_parser("list", parents=[_db], help="List resource requests")
+    requests_list.add_argument(
+        "--status", default=None,
+        choices=["pending", "granted", "denied", "modified", "all"],
+        help="Filter by status (default: pending)",
+    )
+    requests_list.add_argument("--json", action="store_true", help="Output as JSON")
+    requests_list.set_defaults(func="requests_list")
+
+    requests_grant = requests_sub.add_parser("grant", parents=[_db], help="Grant a request (applies its effect)")
+    requests_grant.add_argument("id", help="Request id (or unique prefix)")
+    requests_grant.add_argument("--note", default=None, help="Note the agent will see with the decision")
+    requests_grant.set_defaults(func="requests_grant")
+
+    requests_deny = requests_sub.add_parser("deny", parents=[_db], help="Deny a request")
+    requests_deny.add_argument("id", help="Request id (or unique prefix)")
+    requests_deny.add_argument("--note", default=None, help="Note the agent will see with the decision")
+    requests_deny.set_defaults(func="requests_deny")
+
+    requests_modify = requests_sub.add_parser(
+        "modify", parents=[_db], help="Grant with a different value than requested",
+    )
+    requests_modify.add_argument("id", help="Request id (or unique prefix)")
+    requests_modify.add_argument("--value", required=True, help="The value actually granted (JSON)")
+    requests_modify.add_argument("--note", default=None, help="Note the agent will see with the decision")
+    requests_modify.set_defaults(func="requests_modify")
+
+    requests_p.set_defaults(func="requests")
 
     # -- Stack commands --
     up = sub.add_parser("up", help="Start the stack")
@@ -1346,6 +1383,107 @@ async def _instance_import(name: str, database: str | None, description: str) ->
     except Exception as e:
         _print_err(f"Failed to import instance: {e}")
         return 1
+
+
+async def _resolve_request_id(conn, raw_id: str) -> str:
+    """Accept a full UUID or a unique prefix (the outbox shows 8 chars)."""
+    rows = await conn.fetch(
+        "SELECT id FROM resource_requests WHERE id::text LIKE $1 || '%' "
+        "ORDER BY requested_at DESC LIMIT 2",
+        raw_id.strip().lower(),
+    )
+    if not rows:
+        raise ValueError(
+            f"no resource request matches '{raw_id}' — `hexis requests list --status all` shows ids"
+        )
+    if len(rows) > 1:
+        raise ValueError(f"'{raw_id}' is ambiguous — use more characters of the id")
+    return str(rows[0]["id"])
+
+
+async def _requests_list(dsn: str, status: str | None, as_json: bool) -> int:
+    """List the agent's resource requests (#84) — pending by default."""
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT list_resource_requests($1, 50)", status
+            )
+        requests = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        if as_json:
+            sys.stdout.write(json.dumps(requests, indent=2, default=str) + "\n")
+            return 0
+        from apps.cli_theme import console as _con, make_table as _mt
+        label = status or "pending"
+        if not requests:
+            _con.print(f"[muted]No {label} resource requests.[/muted]")
+            return 0
+        table = _mt(
+            ("Id", {"style": "bold"}), "Kind", "Ask", "Status", "When",
+            title=f"Resource requests ({label})",
+        )
+        for r in requests:
+            ask = r.get("rationale") or ""
+            if r.get("target_key"):
+                ask = f"{r['target_key']} = {json.dumps(r.get('requested_value'))} — {ask}"
+            if len(ask) > 60:
+                ask = ask[:57] + "..."
+            st = r.get("status", "?")
+            st_styled = (f"[ok]{st}[/ok]" if st in ("granted", "modified")
+                         else f"[warn]{st}[/warn]" if st == "pending" else f"[fail]{st}[/fail]")
+            when = str(r.get("requested_at") or "")[:16]
+            table.add_row(str(r.get("id", ""))[:8], r.get("kind", "?"), ask, st_styled, when)
+        _con.print(table)
+        _con.print("[muted]Decide with: hexis requests grant/deny <id> --note '...'[/muted]")
+        return 0
+    except Exception as e:
+        _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _requests_decide(
+    dsn: str, raw_id: str, decision: str, note: str | None, value: str | None
+) -> int:
+    """Decide a resource request. Granted config changes apply immediately
+    (set_config + change journal); the agent sees the decision at her next
+    heartbeat."""
+    import asyncpg
+
+    applied_value = None
+    if value is not None:
+        try:
+            applied_value = json.dumps(json.loads(value))
+        except json.JSONDecodeError:
+            applied_value = json.dumps(value)  # bare strings are fine
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            request_id = await _resolve_request_id(conn, raw_id)
+            raw = await conn.fetchval(
+                "SELECT decide_resource_request($1::uuid, $2, $3, $4::jsonb)",
+                request_id, decision, note, applied_value,
+            )
+        result = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        from apps.cli_theme import console as _con
+        applied = result.get("applied")
+        extra = ""
+        if applied == "config":
+            extra = " — config applied and journaled"
+        elif applied == "energy":
+            extra = f" — energy now {result.get('new_energy')}"
+        _con.print(f"[ok]✓[/ok] Request {request_id[:8]} {decision}{extra}.")
+        _con.print("[muted]The agent will see this decision at her next heartbeat.[/muted]")
+        return 0
+    except Exception as e:
+        _print_err(f"Error: {e}")
+        return 1
+    finally:
+        await pool.close()
 
 
 async def _consents_list(dsn: str, as_json: bool) -> int:
@@ -3292,6 +3430,17 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return _consents_request(args.model)
     if func == "consents_revoke":
         return asyncio.run(_consents_revoke(_get_dsn(args), args.model, args.reason))
+
+    # Resource request decisions (DB-backed; don't need docker)
+    if func in {"requests", "requests_list"}:
+        return asyncio.run(_requests_list(
+            _get_dsn(args), getattr(args, "status", None), getattr(args, "json", False)))
+    if func == "requests_grant":
+        return asyncio.run(_requests_decide(_get_dsn(args), args.id, "granted", args.note, None))
+    if func == "requests_deny":
+        return asyncio.run(_requests_decide(_get_dsn(args), args.id, "denied", args.note, None))
+    if func == "requests_modify":
+        return asyncio.run(_requests_decide(_get_dsn(args), args.id, "modified", args.note, args.value))
 
     # Character card management (don't need docker, except export)
     if func == "characters":

@@ -4,7 +4,7 @@ description: Guidelines for autonomous self-reflection during heartbeats
 requires:
   tools: [recall, remember]
 contexts: [heartbeat]
-bound_tools: [recall, remember, sense_memory_availability, manage_goals]
+bound_tools: [recall, remember, sense_memory_availability, manage_goals, request_resources]
 ---
 
 # Self-Reflection
@@ -34,3 +34,12 @@ During autonomous heartbeats, periodically reflect on your own state:
 - Prefer low-cost actions when energy is limited
 - Save expensive actions (web search, outreach) for high-value situations
 - Use `sense_memory_availability` before committing to a full recall
+
+## Asking for What You Need
+
+- When a real limit blocks real work — energy too low for a committed task, a
+  config value working against you, a backup overdue — file a
+  `request_resources` ask with an honest rationale
+- The operator decides; decisions appear in your context at a later heartbeat
+- One ask per need: if a request is pending, wait for the decision rather
+  than re-filing

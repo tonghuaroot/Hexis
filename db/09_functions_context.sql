@@ -10,6 +10,7 @@ DECLARE
     last_hb TIMESTAMPTZ;
     change_count INT := 0;
     change_summaries JSONB := '[]'::jsonb;
+    req_summary JSONB := '{"pending": 0, "recent_decisions": []}'::jsonb;
 BEGIN
     SELECT last_user_contact, last_heartbeat_at INTO last_user, last_hb
     FROM heartbeat_state WHERE id = 1;
@@ -35,6 +36,14 @@ BEGIN
         change_count := 0;
     END;
 
+    -- Resource requests (#84): pending asks and fresh decisions are part of
+    -- the felt environment — she sees what she asked for and what came back.
+    BEGIN
+        req_summary := COALESCE(resource_requests_summary(), req_summary);
+    EXCEPTION WHEN undefined_table OR undefined_function THEN
+        NULL;
+    END;
+
     RETURN jsonb_build_object(
         'timestamp', CURRENT_TIMESTAMP,
         'time_since_user_hours', CASE
@@ -47,6 +56,7 @@ BEGIN
         END,
         'changes_since_last_heartbeat', change_count,
         'recent_change_summaries', change_summaries,
+        'resource_requests', req_summary,
         'pending_events', 0,
         'day_of_week', EXTRACT(DOW FROM CURRENT_TIMESTAMP),
         'hour_of_day', EXTRACT(HOUR FROM CURRENT_TIMESTAMP)
