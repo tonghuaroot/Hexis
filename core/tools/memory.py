@@ -225,138 +225,22 @@ class SearchHistoryHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        pool = context.registry.pool if context.registry else None
-        if pool is None:
-            return ToolResult.error_result(
-                "History search requires a database-backed registry",
-                ToolErrorType.EXECUTION_FAILED,
-            )
-
-        query = str(arguments.get("query") or "").strip()
-
-        try:
-            created_after = _history_search_datetime(
-                arguments.get("created_after"), "created_after"
-            )
-            created_before = _history_search_datetime(
-                arguments.get("created_before"), "created_before"
-            )
-        except ValueError as exc:
-            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
-        if created_after and created_before and created_after >= created_before:
-            return ToolResult.error_result(
-                "created_after must be earlier than created_before",
-                ToolErrorType.INVALID_PARAMS,
-            )
-        if not query.strip("* ") and created_after is None and created_before is None:
-            return ToolResult.error_result(
-                "Provide query keywords, or a created_after/created_before window "
-                "to browse a time range chronologically",
-                ToolErrorType.INVALID_PARAMS,
-            )
-
-        exclude_session_id: str | None = None
-        if arguments.get("exclude_current_session", True) and context.session_id:
+        # The session id is I/O context only Python holds; everything else —
+        # validation, browse-vs-keyword limits, shaping, the truncation
+        # note — is owned by execute_memory_tool (db/38).
+        args = dict(arguments)
+        if args.pop("exclude_current_session", True) and context.session_id:
             try:
-                exclude_session_id = str(UUID(str(context.session_id)))
+                args["exclude_session_id"] = str(UUID(str(context.session_id)))
             except ValueError:
-                exclude_session_id = None
-
-        try:
-            from core.cognitive_memory_api import CognitiveMemory
-
-            raw_sources = arguments.get("sources")
-            # Browse mode (keyword-less window) affords a higher ceiling —
-            # rows come back preview-grain (#76).
-            is_browse = not query.strip("* ")
-            limit_used = min(max(int(arguments.get("limit", 20)), 1), 200 if is_browse else 50)
-            results = await CognitiveMemory(pool).search_history(
-                query,
-                limit=limit_used,
-                sources=[
-                    str(value)
-                    for value in (
-                        raw_sources
-                        if raw_sources is not None
-                        else ["turn", "memory"]
-                    )
-                ],
-                created_after=created_after,
-                created_before=created_before,
-                exclude_session_id=exclude_session_id,
-            )
-        except ValueError as exc:
-            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
-        except Exception as exc:
-            return ToolResult.error_result(
-                f"History search failed: {exc}",
-                ToolErrorType.EXECUTION_FAILED,
-            )
-
-        return ToolResult.success_result(
-            {
-                "query": query,
-                "results": [
-                    {
-                        "source_kind": result.source_kind,
-                        "item_id": str(result.item_id),
-                        "session_id": (
-                            str(result.session_id) if result.session_id else None
-                        ),
-                        "content": result.content,
-                        "user_text": result.user_text,
-                        "assistant_text": result.assistant_text,
-                        "memory_type": (
-                            result.memory_type.value if result.memory_type else None
-                        ),
-                        "occurred_at": result.occurred_at.isoformat(),
-                        "rank": result.rank,
-                        "source_unit_ids": [
-                            str(source_id) for source_id in result.source_unit_ids
-                        ],
-                        "source_attribution": result.source_attribution,
-                        "metadata": result.metadata,
-                    }
-                    for result in results
-                ],
-                "count": len(results),
-                "limit": limit_used,
-                # Loud truncation (#76): a full page means the window holds
-                # more — silence here once read as "the morning was blank."
-                "truncated": len(results) >= limit_used,
-                **(
-                    {
-                        "note": (
-                            "window truncated — older entries exist; page with "
-                            f"created_before={min(r.occurred_at for r in results).isoformat()}"
-                        )
-                    }
-                    if results and len(results) >= limit_used
-                    else {}
-                ),
-                "excluded_session_id": exclude_session_id,
-            },
-            f"Found {len(results)} history result(s)"
-            + (" (page full — more exist in this window)" if len(results) >= limit_used else ""),
+                pass
+        db_result = await _try_db_memory_tool("search_history", args, context)
+        if db_result is not None:
+            return db_result
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
         )
-
-
-def _history_search_datetime(value: Any, field_name: str) -> datetime | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError(
-                f"{field_name} must be an ISO-8601 timestamp, for example "
-                "2026-07-10T12:00:00Z"
-            ) from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
 
 
 class RememberHandler(ToolHandler):

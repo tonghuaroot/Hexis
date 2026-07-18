@@ -169,3 +169,39 @@ async def test_record_tool_execution(db_pool):
             assert row["energy_spent"] == 2
         finally:
             await tr.rollback()
+
+
+async def test_apply_channel_config_writes_catalog_keys(db_pool):
+    """The channel setting catalog is DB policy: known settings write
+    channel.<type>.<name> config keys atomically; unknown ones fail loud."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            result = await conn.fetchval(
+                "SELECT apply_channel_config('signal', $1::jsonb)",
+                '{"phone_number": "SIGNAL_PHONE_NUMBER", '
+                '"api_url": "http://localhost:8080", "allowed_numbers": "*"}',
+            )
+            payload = json.loads(result)
+            assert payload["channel"] == "signal"
+            assert sorted(payload["applied"]) == [
+                "allowed_numbers", "api_url", "phone_number",
+            ]
+            assert await conn.fetchval(
+                "SELECT get_config_text('channel.signal.api_url')"
+            ) == "http://localhost:8080"
+        finally:
+            await tr.rollback()
+
+
+async def test_apply_channel_config_rejects_unknowns(db_pool):
+    async with db_pool.acquire() as conn:
+        with pytest.raises(Exception, match="Unknown channel type: carrier_pigeon"):
+            await conn.fetchval(
+                "SELECT apply_channel_config('carrier_pigeon', '{\"a\": \"b\"}'::jsonb)"
+            )
+        with pytest.raises(Exception, match="Unknown discord setting"):
+            await conn.fetchval(
+                "SELECT apply_channel_config('discord', '{\"webhook\": \"x\"}'::jsonb)"
+            )

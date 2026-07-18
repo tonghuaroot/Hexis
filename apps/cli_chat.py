@@ -119,7 +119,7 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
     from core.llm_config import load_llm_config
     from core.tools import ToolContext, create_default_registry
     from services.agent import stream_agent
-    from services.chat import _build_system_prompt, _remember_conversation, _conversation_source_identity
+    from services.chat import _build_system_prompt, _remember_conversation
     from rich.panel import Panel
     from rich.table import Table
 
@@ -432,11 +432,8 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                 if was_greet:
                     continue
 
-                # Memory formation (advisory — never blocks, but fails loud in logs).
-                # Pass a stable dedup key so an identical turn isn't stored twice.
-                src_id = _conversation_source_identity(
-                    chat_session_id, history, user_input, clean_text
-                )
+                # Memory formation (advisory — never blocks, but fails loud in
+                # logs). record_chat_turn_memory derives the stable dedup key.
                 try:
                     async with CognitiveMemory.connect(dsn) as mem_client:
                         await _remember_conversation(
@@ -444,7 +441,6 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                             user_message=user_input,
                             assistant_message=clean_text,
                             session_id=chat_session_id,
-                            source_identity=src_id,
                         )
                 except Exception:
                     logger.warning("memory formation failed", exc_info=True)

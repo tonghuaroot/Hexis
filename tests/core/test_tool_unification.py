@@ -130,7 +130,8 @@ class TestBuildSystemPrompt:
         assert "TestAgent" in prompt
         assert "Agent Profile" in prompt
 
-    async def test_prompt_includes_active_character_persona(self):
+    async def test_prompt_includes_active_character_persona(self, db_pool):
+        from core.tools import create_default_registry
         from services.chat import _build_system_prompt
 
         profile = {
@@ -145,7 +146,7 @@ class TestBuildSystemPrompt:
                 "scenario": "Samantha and the user are getting to know each other.",
             }
         }
-        prompt = await _build_system_prompt(profile)
+        prompt = await _build_system_prompt(profile, registry=create_default_registry(db_pool))
         assert "----- ACTIVE PERSONA -----" in prompt
         assert "Name: Samantha" in prompt
         assert "Voice: Warm, expressive, feminine, and charismatic" in prompt

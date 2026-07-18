@@ -40,7 +40,7 @@ from core.cognitive_memory_api import CognitiveMemory
 from core.gateway import EventSource, Gateway
 from core.tools import create_default_registry
 from services.agent import stream_agent
-from services.chat import _conversation_source_identity, _remember_conversation
+from services.chat import _remember_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -431,9 +431,6 @@ async def _remember_openai_chat(
             user_message=user_message,
             assistant_message=assistant_message,
             session_id=session_id,
-            source_identity=_conversation_source_identity(
-                session_id, history, user_message, assistant_message
-            ),
         )
     except Exception:
         logger.exception("OpenAI-compatible chat memory formation failed")
@@ -1155,9 +1152,6 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     user_message=user_message,
                     assistant_message=full_text,
                     session_id=session_id,
-                    source_identity=_conversation_source_identity(
-                        session_id, history, user_message, full_text
-                    ),
                 )
                 yield _sse_event("log", {
                     "id": str(uuid.uuid4()),

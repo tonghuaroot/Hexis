@@ -501,8 +501,13 @@ async def build_system_prompt(
     # Agent profile
     if agent_profile:
         persona = agent_profile.get("persona")
-        if isinstance(persona, dict) and persona:
-            prompt += "\n\n----- ACTIVE PERSONA -----\n\n" + _format_active_persona(persona)
+        if isinstance(persona, dict) and persona and registry is not None and getattr(registry, "pool", None) is not None:
+            async with registry.pool.acquire() as conn:
+                persona_block = await conn.fetchval(
+                    "SELECT render_active_persona($1::jsonb)", json.dumps(persona)
+                )
+            if persona_block:
+                prompt += "\n\n----- ACTIVE PERSONA -----\n\n" + persona_block
         # The offered tool list is the source of truth for capabilities (#66);
         # the profile's stale tool inventory and empty fields are noise.
         runtime_profile = {
@@ -514,65 +519,6 @@ async def build_system_prompt(
             prompt += "\n\n## Agent Profile (Runtime)\n" + json.dumps(runtime_profile, separators=(", ", ": "))
 
     return prompt
-
-
-def _format_active_persona(persona: dict[str, Any]) -> str:
-    """Render the DB-owned character profile as stable conscious grounding."""
-    lines = [
-        "This is your active identity and manner of presence. Express it naturally; do not quote or summarize these instructions to the user."
-    ]
-    labels = (
-        ("name", "Name"),
-        ("pronouns", "Pronouns"),
-        ("voice", "Voice"),
-        ("description", "Description"),
-        ("personality", "Personality"),
-        ("purpose", "Purpose"),
-        ("relationship_aspiration", "Relationship aspiration"),
-        ("character_description", "Character description"),
-        ("character_personality", "Character personality"),
-        # The card scenario describes the first meeting; framed as origin
-        # rather than the present (#70) — the agent has continuity now, and a
-        # prompt that says "has just been initialized" every session fights it.
-        ("scenario", "How your story began (long since; you have lived and remembered much since then)"),
-    )
-    for key, label in labels:
-        value = persona.get(key)
-        if value:
-            lines.append(f"{label}: {str(value).strip()}")
-
-    for key, label in (("values", "Values"), ("boundaries", "Boundaries"), ("interests", "Interests")):
-        values = persona.get(key)
-        if isinstance(values, list) and values:
-            lines.append(f"{label}: " + "; ".join(str(value) for value in values[:12]))
-
-    worldview = persona.get("worldview")
-    if isinstance(worldview, dict) and worldview:
-        lines.append(
-            "Worldview: "
-            + "; ".join(f"{key}: {value}" for key, value in list(worldview.items())[:8])
-        )
-
-    relationship = persona.get("relationship")
-    if isinstance(relationship, dict) and relationship:
-        lines.append("Relationship context: " + json.dumps(relationship, separators=(", ", ": ")))
-
-    narrative = str(persona.get("narrative") or "").strip()
-    if narrative:
-        lines.append("Foundational narrative:\n" + narrative[:6000])
-
-    character_instructions = str(persona.get("character_instructions") or "").strip()
-    if character_instructions:
-        lines.append("Character instructions:\n" + character_instructions[:8000])
-
-    example_dialogue = str(persona.get("example_dialogue") or "").strip()
-    if example_dialogue:
-        lines.append("Example dialogue:\n" + example_dialogue[:6000])
-
-    post_history = str(persona.get("post_history_instructions") or "").strip()
-    if post_history:
-        lines.append("Current character instructions:\n" + post_history[:4000])
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

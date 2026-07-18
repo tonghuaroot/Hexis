@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import hashlib
 import json
 from typing import Any, AsyncIterator
 from uuid import UUID
@@ -69,14 +68,6 @@ async def _remember_conversation(
         source_identity=source_identity,
         context=context,
     )
-
-
-def _conversation_source_identity(session_id: str | None, history: list[dict[str, Any]] | None, user_message: str, assistant_message: str) -> str | None:
-    if not session_id:
-        return None
-    digest = hashlib.sha256(f"{user_message}\x1e{assistant_message}".encode("utf-8")).hexdigest()[:16]
-    turn_index = len(history or [])
-    return f"chat:{session_id}:{turn_index}:{digest}"
 
 
 async def _build_execution_context(
@@ -160,7 +151,6 @@ async def chat_turn(
                 assistant_message=assistant_text,
                 session_id=session_id,
                 user_label=user_label,
-                source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
                 background_dsn=dsn,
             )
         else:
@@ -171,8 +161,7 @@ async def chat_turn(
                     assistant_message=assistant_text,
                     session_id=session_id,
                     user_label=user_label,
-                    source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
-                    background_dsn=dsn,
+                        background_dsn=dsn,
                 )
         new_history = list(history)
         new_history.append({"role": "user", "content": user_message})
@@ -212,7 +201,6 @@ async def chat_turn(
                 assistant_message=assistant_text,
                 session_id=session_id,
                 user_label=user_label,
-                source_identity=_conversation_source_identity(session_id, history, user_message, assistant_text),
                 background_dsn=dsn,
             )
 
@@ -286,7 +274,6 @@ async def stream_chat_turn(
                     assistant_message=full_text,
                     session_id=session_id,
                     user_label=user_label,
-                    source_identity=_conversation_source_identity(session_id, history, user_message, full_text),
                     background_dsn=dsn,
                 )
     finally:

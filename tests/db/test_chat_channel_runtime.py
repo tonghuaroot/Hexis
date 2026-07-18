@@ -56,6 +56,59 @@ async def test_record_chat_turn_memory_always_uses_recmem(db_pool):
         assert int(linked) == 1
 
 
+async def test_record_chat_turn_memory_derives_source_identity(db_pool):
+    """With no caller identity, the DB self-derives chat:<session>:<ordinal>:
+    <digest> — the ordinal from its own unit count, the digest from content."""
+    session_id = str(uuid4())
+    async with db_pool.acquire() as conn:
+        await _stub_get_embedding(conn)
+
+        first = _json(await conn.fetchval(
+            "SELECT record_chat_turn_memory($1, $2, $3, NULL, '{}'::jsonb)",
+            "identity derivation turn one",
+            "first reply",
+            session_id,
+        ))
+        second = _json(await conn.fetchval(
+            "SELECT record_chat_turn_memory($1, $2, $3, NULL, '{}'::jsonb)",
+            "identity derivation turn two",
+            "second reply",
+            session_id,
+        ))
+        identities = [
+            await conn.fetchval(
+                "SELECT source_identity FROM subconscious_units WHERE id = $1::uuid",
+                result["raw_unit_id"],
+            )
+            for result in (first, second)
+        ]
+
+    assert identities[0].startswith(f"chat:{session_id}:0:")
+    assert identities[1].startswith(f"chat:{session_id}:1:")
+    digests = [identity.rsplit(":", 1)[1] for identity in identities]
+    assert all(len(digest) == 16 for digest in digests)
+    assert digests[0] != digests[1]
+
+
+async def test_record_chat_turn_memory_keeps_caller_identity(db_pool):
+    async with db_pool.acquire() as conn:
+        await _stub_get_embedding(conn)
+        explicit = f"channel:telegram:{uuid4()}"
+        result = _json(await conn.fetchval(
+            "SELECT record_chat_turn_memory($1, $2, $3, $4, '{}'::jsonb)",
+            "caller identity wins",
+            "kept verbatim",
+            str(uuid4()),
+            explicit,
+        ))
+        stored = await conn.fetchval(
+            "SELECT source_identity FROM subconscious_units WHERE id = $1::uuid",
+            result["raw_unit_id"],
+        )
+
+    assert stored == explicit
+
+
 async def test_record_chat_turn_memory_low_importance_no_promotion(db_pool):
     async with db_pool.acquire() as conn:
         await _stub_get_embedding(conn)

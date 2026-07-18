@@ -2347,8 +2347,10 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             guilds = input("Allowed guild IDs (comma-separated, or * for all) [*]: ").strip() or "*"
 
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.discord.bot_token", json.dumps(token_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.discord.allowed_guilds", json.dumps(guilds))
+                await conn.execute(
+                    "SELECT apply_channel_config('discord', $1::jsonb)",
+                    json.dumps({"bot_token": token_env, "allowed_guilds": guilds}),
+                )
 
             sys.stdout.write(f"\nDiscord configured. Set {token_env} in your environment.\n")
             sys.stdout.write("Start with: hexis channels start --channel discord\n")
@@ -2363,8 +2365,10 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             chats = input("Allowed chat IDs (comma-separated, or * for all) [*]: ").strip() or "*"
 
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.telegram.bot_token", json.dumps(token_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.telegram.allowed_chat_ids", json.dumps(chats))
+                await conn.execute(
+                    "SELECT apply_channel_config('telegram', $1::jsonb)",
+                    json.dumps({"bot_token": token_env, "allowed_chat_ids": chats}),
+                )
 
             sys.stdout.write(f"\nTelegram configured. Set {token_env} in your environment.\n")
             sys.stdout.write("Start with: hexis channels start --channel telegram\n")
@@ -2381,9 +2385,14 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             channels_allow = input("Allowed channel IDs (comma-separated, or * for all) [*]: ").strip() or "*"
 
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.slack.bot_token", json.dumps(bot_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.slack.app_token", json.dumps(app_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.slack.allowed_channels", json.dumps(channels_allow))
+                await conn.execute(
+                    "SELECT apply_channel_config('slack', $1::jsonb)",
+                    json.dumps({
+                        "bot_token": bot_env,
+                        "app_token": app_env,
+                        "allowed_channels": channels_allow,
+                    }),
+                )
 
             sys.stdout.write(f"\nSlack configured. Set {bot_env} and {app_env} in your environment.\n")
             sys.stdout.write("Start with: hexis channels start --channel slack\n")
@@ -2399,9 +2408,14 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             numbers = input("Allowed sender numbers (comma-separated, or * for all) [*]: ").strip() or "*"
 
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.signal.phone_number", json.dumps(phone_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.signal.api_url", json.dumps(api_url))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.signal.allowed_numbers", json.dumps(numbers))
+                await conn.execute(
+                    "SELECT apply_channel_config('signal', $1::jsonb)",
+                    json.dumps({
+                        "phone_number": phone_env,
+                        "api_url": api_url,
+                        "allowed_numbers": numbers,
+                    }),
+                )
 
             sys.stdout.write(f"\nSignal configured. Set {phone_env} in your environment.\n")
             sys.stdout.write("Start with: hexis channels start --channel signal\n")
@@ -2420,11 +2434,16 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             numbers = input("Allowed sender numbers (comma-separated, or * for all) [*]: ").strip() or "*"
 
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.whatsapp.access_token", json.dumps(token_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.whatsapp.phone_number_id", json.dumps(phone_id))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.whatsapp.verify_token", json.dumps(verify))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.whatsapp.webhook_port", json.dumps(port))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.whatsapp.allowed_numbers", json.dumps(numbers))
+                await conn.execute(
+                    "SELECT apply_channel_config('whatsapp', $1::jsonb)",
+                    json.dumps({
+                        "access_token": token_env,
+                        "phone_number_id": phone_id,
+                        "verify_token": verify,
+                        "webhook_port": port,
+                        "allowed_numbers": numbers,
+                    }),
+                )
 
             sys.stdout.write(f"\nWhatsApp configured. Set {token_env} in your environment.\n")
             sys.stdout.write("Start with: hexis channels start --channel whatsapp\n")
@@ -2440,9 +2459,14 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             handles = input("Allowed handles (comma-separated, or * for all) [*]: ").strip() or "*"
 
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.imessage.api_url", json.dumps(api_url))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.imessage.password", json.dumps(password_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.imessage.allowed_handles", json.dumps(handles))
+                await conn.execute(
+                    "SELECT apply_channel_config('imessage', $1::jsonb)",
+                    json.dumps({
+                        "api_url": api_url,
+                        "password": password_env,
+                        "allowed_handles": handles,
+                    }),
+                )
 
             sys.stdout.write(f"\niMessage configured. Set {password_env} in your environment.\n")
             sys.stdout.write("Start with: hexis channels start --channel imessage\n")
@@ -2459,10 +2483,15 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
             rooms = input("Allowed room IDs (comma-separated, or * for all) [*]: ").strip() or "*"
 
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.matrix.homeserver", json.dumps(homeserver))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.matrix.user_id", json.dumps(user_id))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.matrix.access_token", json.dumps(token_env))
-                await conn.execute("SELECT set_config($1, $2::jsonb)", "channel.matrix.allowed_rooms", json.dumps(rooms))
+                await conn.execute(
+                    "SELECT apply_channel_config('matrix', $1::jsonb)",
+                    json.dumps({
+                        "homeserver": homeserver,
+                        "user_id": user_id,
+                        "access_token": token_env,
+                        "allowed_rooms": rooms,
+                    }),
+                )
 
             sys.stdout.write(f"\nMatrix configured. Set {token_env} in your environment.\n")
             sys.stdout.write("Start with: hexis channels start --channel matrix\n")
