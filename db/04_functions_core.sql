@@ -90,7 +90,8 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION fast_recall(
     p_query_text TEXT,
-    p_limit INT DEFAULT 10
+    p_limit INT DEFAULT 10,
+    p_exclude_sensitive BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE (
     memory_id UUID,
     content TEXT,
@@ -100,169 +101,32 @@ CREATE OR REPLACE FUNCTION fast_recall(
     fidelity FLOAT,
     emotional_intensity FLOAT
 ) AS $$
-	DECLARE
-	    query_embedding vector;
-	    zero_vec vector;
-	    affective_state JSONB;
-	    current_valence FLOAT;
-	    current_arousal FLOAT;
-	    current_primary TEXT;
-        min_trust FLOAT;
-	BEGIN
-	    query_embedding := (get_embedding(ARRAY[ensure_embedding_prefix(p_query_text, 'search_query')]))[1];
-	    zero_vec := array_fill(0.0::float, ARRAY[embedding_dimension()])::vector;
-        affective_state := get_current_affective_state();
-	    BEGIN
-	        current_valence := NULLIF(affective_state->>'valence', '')::float;
-	    EXCEPTION
-	        WHEN OTHERS THEN
-	            current_valence := NULL;
-	    END;
-	    BEGIN
-	        current_arousal := NULLIF(affective_state->>'arousal', '')::float;
-	    EXCEPTION
-	        WHEN OTHERS THEN
-	            current_arousal := NULL;
-	    END;
-	    BEGIN
-	        current_primary := NULLIF(affective_state->>'primary_emotion', '');
-	    EXCEPTION
-	        WHEN OTHERS THEN
-	            current_primary := NULL;
-	    END;
-	    current_valence := COALESCE(current_valence, 0.0);
-	    current_arousal := COALESCE(current_arousal, 0.5);
-	    current_primary := COALESCE(current_primary, 'neutral');
-        min_trust := COALESCE(get_config_float('memory.recall_min_trust_level'), 0.0);
-	    
-	    RETURN QUERY
-	    WITH 
-	    seeds AS (
-	        SELECT 
-	            m.id, 
-	            m.content, 
-	            m.type,
-            m.importance,
-            m.decay_rate,
-            m.created_at,
-            m.last_accessed,
-            1 - (m.embedding <=> query_embedding) as sim
-        FROM memories m
-	        WHERE m.status = 'active'
-              AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
-	          AND m.embedding IS NOT NULL
-	          AND m.embedding <> zero_vec
-	        ORDER BY m.embedding <=> query_embedding
-	        LIMIT GREATEST(p_limit, 5)
-	    ),
-    associations AS (
-        SELECT 
-            (key)::UUID as mem_id,
-            MAX((value::float) * s.sim) as assoc_score
-        FROM seeds s
-        JOIN memory_neighborhoods mn ON s.id = mn.memory_id,
-        jsonb_each_text(mn.neighbors)
-        WHERE NOT mn.is_stale
-        GROUP BY key
-    ),
-    temporal AS (
-        SELECT DISTINCT
-            fem.memory_id as mem_id,
-            0.15 as temp_score
-        FROM episodes e
-        CROSS JOIN LATERAL find_episode_memories_graph(e.id) fem
-        WHERE e.ended_at IS NULL
-          OR e.ended_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'
-        LIMIT 20
-    ),
-    candidates AS (
-        SELECT id as mem_id, sim as vector_score, NULL::float as assoc_score, NULL::float as temp_score
-        FROM seeds
-        UNION
-        SELECT mem_id, NULL, assoc_score, NULL FROM associations
-        UNION
-        SELECT mem_id, NULL, NULL, temp_score FROM temporal
-    ),
-    scored AS (
-        SELECT 
-            c.mem_id,
-            MAX(c.vector_score) as vector_score,
-            MAX(c.assoc_score) as assoc_score,
-            MAX(c.temp_score) as temp_score
-        FROM candidates c
-        GROUP BY c.mem_id
-    )
-	    SELECT
-	        m.id,
-	        m.content,
-	        m.type,
-	        GREATEST(
-	            COALESCE(sc.vector_score, 0) * 0.5 +
-	            COALESCE(sc.assoc_score, 0) * 0.2 +
-	            COALESCE(sc.temp_score, 0) * 0.15 +
-	            -- Recency (#47): newer memories win similarity ties. Exponential
-	            -- decay with a config half-life; weight 0 disables entirely.
-	            COALESCE(get_config_float('memory.recency_weight'), 0.1)
-	              * exp(-ln(2.0) * GREATEST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - m.created_at)), 0)
-	                    / (86400.0 * GREATEST(COALESCE(get_config_float('memory.recency_halflife_days'), 7.0), 0.01))) +
-	            GREATEST(
-                calculate_strength(m.importance, m.decay_rate, m.created_at, m.last_reinforced),
-                COALESCE(get_config_float('memory.recall_intensity_weight'), 0.5)
-                  * current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
-                        (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
-            ) * 0.05 +
-                COALESCE(m.trust_level, 0.5) * 0.1 +
-	            (CASE
-	                WHEN m.metadata ? 'emotional_context' THEN
-	                    (
-	                        COALESCE(
-	                            CASE
-	                                WHEN (m.metadata->'emotional_context'->>'valence') IS NULL THEN NULL
-	                                ELSE 1.0 - (ABS((m.metadata->'emotional_context'->>'valence')::float - current_valence) / 2.0)
-	                            END,
-	                            0.5
-	                        ) * 0.6
-	                        +
-	                        COALESCE(
-	                            CASE
-	                                WHEN (m.metadata->'emotional_context'->>'arousal') IS NULL THEN NULL
-	                                ELSE 1.0 - ABS((m.metadata->'emotional_context'->>'arousal')::float - current_arousal)
-	                            END,
-	                            0.5
-	                        ) * 0.3
-	                        +
-	                        (CASE
-	                            WHEN (m.metadata->'emotional_context'->>'primary_emotion') IS NULL THEN 0.5
-	                            WHEN (m.metadata->'emotional_context'->>'primary_emotion') = current_primary THEN 1.0
-	                            ELSE 0.7
-	                        END) * 0.1
-	                    )
-	                ELSE
-	                    CASE
-	                        WHEN (m.metadata->>'emotional_valence') IS NULL THEN 0.5
-	                        ELSE 1.0 - (ABS((m.metadata->>'emotional_valence')::float - current_valence) / 2.0)
-	                    END
-	            END) * 0.05,
-	            0.001
-	        ) as final_score,
-	        CASE
-	            WHEN sc.vector_score IS NOT NULL THEN 'vector'
-	            WHEN sc.assoc_score IS NOT NULL THEN 'association'
-	            WHEN sc.temp_score IS NOT NULL THEN 'temporal'
-	            ELSE 'fallback'
-	        END as source,
-	        m.fidelity,
-	        (current_emotional_intensity((m.metadata->'emotional_context'->>'intensity')::float,
-	            (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)
-	         * SIGN(COALESCE((m.metadata->>'emotional_valence')::float, 0))) AS emotional_intensity
-	    FROM scored sc
-	    JOIN memories m ON sc.mem_id = m.id
-	    WHERE m.status = 'active'
-          AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
-          AND m.trust_level >= min_trust
-	    ORDER BY final_score DESC
-	    LIMIT p_limit;
-END;
-$$ LANGUAGE plpgsql;
+    -- One mind, one retrieval mechanism (#96/#78): fast_recall is now a
+    -- flattening wrapper over the unified ranker in recmem_recall_context —
+    -- every caller (the db/05 recall wrapper family, context gathering,
+    -- observation sweeps) gets the same scoring the chat hot path uses:
+    -- associations, episode binding, recency, strength, mood congruence,
+    -- trust floor, activation boost, and sensitivity enforcement.
+    SELECT
+        r.item_id AS memory_id,
+        r.content,
+        r.memory_type::memory_type,
+        r.score,
+        r.retrieval_source AS source,
+        r.fidelity,
+        r.emotional_intensity
+    FROM recmem_recall_context(
+        p_query_text,
+        0,                    -- no unit tiers: fast_recall's contract is memories
+        GREATEST(p_limit, 5),
+        GREATEST(p_limit, 5),
+        NULL,
+        p_exclude_sensitive,
+        GREATEST(p_limit, 5)
+    ) r
+    WHERE r.tier IN ('episodic', 'semantic', 'knowledge')
+    ORDER BY r.score DESC, r.created_at DESC
+    LIMIT p_limit;
+$$ LANGUAGE sql STABLE;
 
 SET check_function_bodies = on;

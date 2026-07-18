@@ -44,7 +44,7 @@ class _Conn:
     async def fetchrow(self, query, *args):
         # The recmem per-tier budget config read (#76) — serve the defaults.
         if "recmem_sub_limit" in query:
-            return {"sub": 10, "epi": 5, "sem": 10}
+            return {"sub": 10, "epi": 5, "sem": 10, "know": 5}
         return None
 
     async def fetch(self, query, *args):

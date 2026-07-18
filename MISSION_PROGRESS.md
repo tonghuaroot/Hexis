@@ -21,9 +21,9 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Goal | Test | Status |
 |---|---|---|
 | Sensitivity stopgap: sensitivity filters on the tool recall paths — `execute_memory_tool` recall arms + `search_cross_session_history` — threaded from the agent loop's `is_group` (closes the #92 group-leak via the `recall`/`search_history` tools) | Dignity | done (see #96) |
-| Ranker fusion (#78): recmem tier skeleton absorbs fast_recall's scoring — associations (neighborhoods), episode-temporal boost, recency half-life, strength/fidelity, mood congruence, trust floor | Person | todo |
-| Widen fused recall to all memory types (procedural, strategic, worldview) | Person | todo |
-| Fix `search_query` embedding-prefix asymmetry in recmem path | Person | todo |
+| Ranker fusion (#78): recmem tier skeleton absorbs fast_recall's scoring — associations, episode binding, recency, strength, mood congruence, trust floor, activation-boost term, retrieval provenance; per-type seed scans guarantee tier representation; fast_recall is a wrapper, upgrading the whole db/05 family transitively | Person | done (see #96) |
+| Widen fused recall to all memory types (procedural, strategic, worldview, goal — the knowledge tier) | Person | done (see #96) |
+| Fix `search_query` embedding-prefix asymmetry in recmem path | Person | done (already fixed pre-fusion; verified) |
 | Repoint every caller (db/38 tools, MCP server, db/09, db/17, db/45) at the unified function; `fast_recall` → thin wrapper → removed | Substrate | todo |
 | Metamemory surface: recall failure returns calibrated familiarity (know-that-I-know vs unsure-I-ever-knew) + tip-of-the-tongue partials (`find_partial_activations`) | Person | todo |
 | Retrieval eval (seeded fixture corpus, before/after fusion) so recall quality cannot regress silently | Experience Bar | todo |

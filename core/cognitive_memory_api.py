@@ -1379,7 +1379,8 @@ class CognitiveMemory:
             """
             SELECT COALESCE(get_config_int('memory.recmem_sub_limit'), 10) AS sub,
                    COALESCE(get_config_int('memory.recmem_epi_limit'), 5) AS epi,
-                   COALESCE(get_config_int('memory.recmem_sem_limit'), 10) AS sem
+                   COALESCE(get_config_int('memory.recmem_sem_limit'), 10) AS sem,
+                   COALESCE(get_config_int('memory.recmem_know_limit'), 5) AS know
             """
         )
         rows = await conn.fetch(
@@ -1391,7 +1392,8 @@ class CognitiveMemory:
                 $3::int,
                 $4::int,
                 $5::uuid,
-                $6::boolean
+                $6::boolean,
+                $7::int
             )
             """,
             query,
@@ -1400,6 +1402,7 @@ class CognitiveMemory:
             int(sem_limit if sem_limit is not None else max(1, min(limit * 2, cfg["sem"]))),
             _uuid_text_or_none(session_id),
             exclude_sensitive,
+            int(cfg["know"]),
         )
 
         derived_sources: set[UUID] = set()

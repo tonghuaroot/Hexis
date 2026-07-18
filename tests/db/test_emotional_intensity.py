@@ -76,7 +76,12 @@ async def test_embered_joy_stays_recallable(db_pool):
         tr = conn.transaction()
         await tr.start()
         try:
-            emb = "array_fill(0.13, ARRAY[embedding_dimension()])::vector"
+            # Both memories embed AT the query so similarity is realistic
+            # (~1.0). At artificial near-zero similarity the multiplicative
+            # ember term vanishes and additive mood congruence (a real,
+            # separate mechanism — the joyful memory is incongruent with a
+            # neutral present mood) decides instead of the ember under test.
+            emb = "(get_embedding(ARRAY['an old note']))[1]"
             mundane = await conn.fetchval(
                 f"INSERT INTO memories (type, content, embedding, importance, trust_level, status, created_at) "
                 f"VALUES ('semantic', 'a mundane old note', {emb}, 0.3, 0.9, 'active', now() - interval '300 days') RETURNING id")
