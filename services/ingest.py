@@ -212,16 +212,6 @@ def _normalize_mode(mode: IngestionMode | str | None) -> IngestionMode:
     return IngestionMode.FAST
 
 
-def _decay_rate_for_intensity(intensity: float, base: float = 0.01) -> float:
-    if intensity < 0.1:
-        return base * 3.0
-    if intensity < 0.3:
-        return base * 1.5
-    if intensity > 0.6:
-        return base * 0.5
-    return base
-
-
 def _infer_source_type(file_path: Path) -> str:
     suffix = file_path.suffix.lower()
     if suffix in {".pdf", ".md", ".markdown", ".txt", ".text", ".rtf", ".docx", ".tex", ".bib", ".epub"}:
@@ -1656,6 +1646,67 @@ class MemoryStore:
         plan = json.loads(raw) if isinstance(raw, str) else raw
         return plan or []
 
+    def persist_extractions(
+        self,
+        extractions: list,
+        source: dict[str, Any],
+        *,
+        encounter_id: str | None,
+        intensity: float,
+        min_confidence: float,
+        min_importance_floor: float | None,
+        base_trust: float | None,
+        permanent: bool,
+    ) -> dict[str, Any]:
+        """The whole post-LLM persistence pass, atomic in the DB (db/66
+        ingest_persist_extractions): route -> corroborate/create -> concept
+        links -> worldview edges -> provenance edges -> decay."""
+        if self.client is None:
+            self.connect()
+        payload = json.dumps([
+            {
+                "content": ext.content,
+                "confidence": ext.confidence,
+                "importance": ext.importance,
+                "category": ext.category,
+                "concepts": list(ext.concepts or []),
+                "connections": list(ext.connections or []),
+                "supports": ext.supports,
+                "contradicts": ext.contradicts,
+            }
+            for ext in extractions
+        ])
+        raw = self._fetchval(
+            "SELECT ingest_persist_extractions($1::jsonb, $2::jsonb, $3::uuid, $4::float, $5::jsonb)",
+            payload,
+            json.dumps(source),
+            encounter_id,
+            float(intensity),
+            json.dumps({
+                "min_confidence": min_confidence,
+                "min_importance_floor": min_importance_floor,
+                "base_trust": base_trust,
+                "permanent": permanent,
+            }),
+        )
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        return result if isinstance(result, dict) else {}
+
+    def apply_ingest_decay(self, memory_id: str, intensity: float, permanent: bool) -> None:
+        """Decay policy is DB-owned (db/66 decay_rate_for_intensity)."""
+        if self.client is None:
+            self.connect()
+        try:
+            self._exec(
+                "UPDATE memories SET decay_rate = CASE WHEN $3 THEN 0.0"
+                " ELSE decay_rate_for_intensity($2) END WHERE id = $1::uuid",
+                memory_id,
+                float(intensity),
+                bool(permanent),
+            )
+        except Exception:
+            pass
+
     def route_texts(self, items: list[tuple[str, float]], min_confidence: float = 0.0) -> list:
         """Route bare (content, confidence) pairs through the same DB
         dedup/related/create policy as route_extractions."""
@@ -2244,11 +2295,8 @@ class IngestionPipeline:
         return encounter_id
 
     def _apply_decay(self, memory_id: str, intensity: float) -> None:
-        if self.config.permanent:
-            self.store.update_decay_rate(memory_id, 0.0)
-            return
-        decay = _decay_rate_for_intensity(intensity)
-        self.store.update_decay_rate(memory_id, decay)
+        # Decay bands are DB-owned (db/66 decay_rate_for_intensity).
+        self.store.apply_ingest_decay(memory_id, intensity, self.config.permanent)
 
     def _create_semantic_memories(
         self,
@@ -2257,141 +2305,22 @@ class IngestionPipeline:
         appraisal: Appraisal,
         extractions: list[Extraction],
     ) -> list[str]:
-        created: list[str] = []
+        """Thin wrapper: the whole post-LLM persistence pass runs atomically
+        in the DB (db/66 ingest_persist_extractions) — routing, corroboration
+        via the audited belief-revision policy, creation, concept links,
+        worldview-hint edges, provenance edges, and decay."""
         source = self._source_payload(doc)
-
-        # Pre-warm embedding cache: batch all extraction texts into a single
-        # call so subsequent per-extraction recall + create are cache hits.
-        texts_to_embed = [
-            ext.content
-            for ext in extractions
-            if ext.confidence >= self.config.min_confidence_threshold
-        ]
-        if texts_to_embed:
-            self.store.prefetch_embeddings(texts_to_embed)
-
-        # Collect deferred work for batch execution after the per-item loop
-        concept_pairs: list[tuple[str, str]] = []
-        worldview_hints: dict[str, str | list] = {}  # hint_key -> raw hint
-        deferred_worldview_edges: list[tuple[str, str | list, str, float]] = []  # (memory_id, hint, rel_type_name, confidence)
-        deferred_edges: list[tuple[str, str, RelationshipType, float]] = []
-
-        # Dedup/related/create routing is DB-owned (db/41 ingest_route_extractions):
-        # thresholds live in config and the nearest-neighbor search runs in one
-        # batched call instead of a Python recall per extraction.
-        plan = self.store.route_extractions(extractions, self.config.min_confidence_threshold)
-        plan_by_index = {p["index"]: p for p in plan if isinstance(p, dict) and "index" in p}
-
-        for idx, ext in enumerate(extractions):
-            routed = plan_by_index.get(idx)
-            if routed is None:
-                continue  # dropped below the confidence threshold by the router
-            decision = routed.get("decision")
-            matched_id = routed.get("matched_memory_id")
-
-            if decision == "duplicate" and matched_id:
-                # Corroboration, not re-creation: merge the source, revise
-                # confidence via the audited policy, and keep an evidence edge
-                # from the encounter memory (#34/#35).
-                try:
-                    self.store.add_evidence(
-                        str(matched_id),
-                        "supports",
-                        source,
-                        evidence_memory_id=encounter_id,
-                        context="fast_ingest",
-                    )
-                except Exception:
-                    logger.exception("fast ingest corroboration failed for memory %s", matched_id)
-                continue
-
-            importance = ext.importance
-            if self.config.min_importance_floor is not None:
-                importance = max(importance, self.config.min_importance_floor)
-            trust = self.config.base_trust
-
-            memory_id = self.store.create_semantic_memory(
-                content=ext.content,
-                confidence=ext.confidence,
-                category=ext.category,
-                related_concepts=ext.connections,
-                source=source,
-                importance=importance,
-                trust=trust,
-            )
-            created.append(memory_id)
-
-            # Collect concept links for batch
-            for concept in ext.concepts:
-                concept_pairs.append((memory_id, concept.strip()))
-
-            # Collect worldview edge hints (deduplicated lookup later)
-            if ext.supports:
-                hint_key = str(ext.supports) if isinstance(ext.supports, list) else ext.supports
-                worldview_hints[hint_key] = ext.supports
-                deferred_worldview_edges.append((memory_id, ext.supports, "SUPPORTS", ext.confidence))
-
-            if ext.contradicts:
-                hint_key = str(ext.contradicts) if isinstance(ext.contradicts, list) else ext.contradicts
-                worldview_hints[hint_key] = ext.contradicts
-                deferred_worldview_edges.append((memory_id, ext.contradicts, "CONTRADICTS", ext.confidence))
-
-            if encounter_id:
-                deferred_edges.append((memory_id, encounter_id, RelationshipType.DERIVED_FROM, 0.9))
-            if decision == "related" and matched_id:
-                deferred_edges.append((memory_id, str(matched_id), RelationshipType.ASSOCIATED, 0.6))
-            self._apply_decay(memory_id, intensity=appraisal.intensity)
-
-        # --- Batch flush phase ---
-
-        # 1. Batch concept linking
-        if concept_pairs:
-            try:
-                self.store.link_concepts_batch(concept_pairs)
-            except Exception:
-                pass
-
-        # 2. Batch worldview lookups (deduplicated)
-        worldview_cache: dict[str, str | None] = {}
-        for hint_key, hint_val in worldview_hints.items():
-            if hint_key not in worldview_cache:
-                worldview_cache[hint_key] = self._find_worldview_by_content(hint_val)
-
-        # 3. Resolve worldview edges and add to deferred_edges
-        for memory_id, hint, rel_type_name, confidence in deferred_worldview_edges:
-            hint_key = str(hint) if isinstance(hint, list) else hint
-            worldview_id = worldview_cache.get(hint_key)
-            if worldview_id:
-                rel_type = RelationshipType.SUPPORTS if rel_type_name == "SUPPORTS" else RelationshipType.CONTRADICTS
-                deferred_edges.append((memory_id, worldview_id, rel_type, confidence))
-
-        # 4. Batch relationship creation
-        if deferred_edges:
-            try:
-                self.store.connect_memories_batch(deferred_edges)
-            except Exception:
-                pass
-
-        return created
-
-    def _find_worldview_by_content(self, hint) -> str | None:
-        """Find a worldview memory matching the given hint."""
-        if isinstance(hint, list):
-            hint = " ".join(str(h) for h in hint if h) if hint else ""
-        if not hint or not isinstance(hint, str) or not hint.strip():
-            return None
-        try:
-            results = self.store.client.recall(
-                hint.strip(),
-                limit=3,
-                memory_types=[ApiMemoryType.WORLDVIEW],
-            )
-            for mem in results.memories:
-                if mem.similarity is not None and mem.similarity >= 0.7:
-                    return str(mem.id)
-        except Exception:
-            pass
-        return None
+        result = self.store.persist_extractions(
+            extractions,
+            source,
+            encounter_id=encounter_id,
+            intensity=appraisal.intensity,
+            min_confidence=self.config.min_confidence_threshold,
+            min_importance_floor=self.config.min_importance_floor,
+            base_trust=self.config.base_trust,
+            permanent=self.config.permanent,
+        )
+        return [str(mid) for mid in (result.get("created") or [])]
 
     def _skip_section(self, title: str) -> bool:
         lowered = title.strip().lower()

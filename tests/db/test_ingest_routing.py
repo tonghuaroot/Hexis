@@ -80,3 +80,67 @@ async def test_route_extractions_drops_below_confidence(db_pool):
             "SELECT ingest_route_extractions('[]'::jsonb, 0.0)"
         )
         assert (json.loads(empty) if isinstance(empty, str) else empty) == []
+
+
+async def test_ingest_persist_extractions_atomic_pass(db_pool):
+    """3.1 pushdown: one call routes, corroborates via the audited policy,
+    creates, links, and sets decay — no half-written state possible."""
+    import json as _json_mod
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                """
+                CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
+                RETURNS vector[] AS $$
+                    SELECT COALESCE(
+                        array_agg(array_fill(0.2::float, ARRAY[embedding_dimension()])::vector),
+                        ARRAY[]::vector[]
+                    ) FROM unnest(text_contents)
+                $$ LANGUAGE sql;
+                """
+            )
+            source = {"kind": "doc", "ref": "persist-test.md", "label": "persist test", "trust": 0.8}
+            extractions = [
+                {"content": "Photosynthesis converts light into chemical energy.",
+                 "confidence": 0.8, "importance": 0.6, "category": "science",
+                 "concepts": ["photosynthesis"], "connections": [],
+                 "supports": None, "contradicts": None},
+                {"content": "Too vague to keep.", "confidence": 0.1, "importance": 0.2,
+                 "category": "general", "concepts": [], "connections": [],
+                 "supports": None, "contradicts": None},
+            ]
+            result_raw = await conn.fetchval(
+                "SELECT ingest_persist_extractions($1::jsonb, $2::jsonb, NULL, 0.7, $3::jsonb)",
+                _json_mod.dumps(extractions),
+                _json_mod.dumps(source),
+                _json_mod.dumps({"min_confidence": 0.5, "base_trust": 0.7, "permanent": False}),
+            )
+            result = _json_mod.loads(result_raw) if isinstance(result_raw, str) else result_raw
+            assert len(result["created"]) == 1
+            mem_id = result["created"][0]
+
+            row = await conn.fetchrow(
+                "SELECT decay_rate, trust_level FROM memories WHERE id = $1::uuid", mem_id
+            )
+            # intensity 0.7 -> half the config base decay (vivid band).
+            assert abs(row["decay_rate"] - 0.005) < 1e-9
+
+            # Re-ingesting the same fact corroborates instead of duplicating.
+            again_raw = await conn.fetchval(
+                "SELECT ingest_persist_extractions($1::jsonb, $2::jsonb, NULL, 0.7, $3::jsonb)",
+                _json_mod.dumps(extractions[:1]),
+                _json_mod.dumps({**source, "ref": "persist-test-2.md"}),
+                _json_mod.dumps({"min_confidence": 0.5, "base_trust": 0.7, "permanent": False}),
+            )
+            again = _json_mod.loads(again_raw) if isinstance(again_raw, str) else again_raw
+            assert again["created"] == []
+            assert again["corroborated"] == 1
+            revisions = await conn.fetchval(
+                "SELECT count(*) FROM belief_revision_audit WHERE memory_id = $1::uuid", mem_id
+            )
+            assert revisions >= 1
+        finally:
+            await tr.rollback()
