@@ -427,6 +427,7 @@ async def build_system_prompt(
     active_skills: list["SkillSpec"] | None = None,
     available_skills: list["SkillSpec"] | None = None,
     allowed_tool_names: set[str] | None = None,
+    prompt_addenda: list[str] | None = None,
 ) -> str:
     """Build the system prompt for either chat or heartbeat mode."""
 
@@ -523,6 +524,14 @@ async def build_system_prompt(
         }
         if runtime_profile:
             prompt += "\n\n## Agent Profile (Runtime)\n" + json.dumps(runtime_profile, separators=(", ", ": "))
+
+    # Session addenda: per-request prompt sections the caller resolved
+    # (attached-document text, opted-in grounding modules). Turn-scoped —
+    # they ride the system prompt, never the stored conversation turn.
+    for addendum in prompt_addenda or []:
+        text = str(addendum or "").strip()
+        if text:
+            prompt += "\n\n" + text
 
     return prompt
 
@@ -792,6 +801,7 @@ async def stream_agent(
     max_tokens: int | None = None,
     temperature: float | None = None,
     on_approval: "Callable[[str, dict[str, Any]], Awaitable[bool]] | None" = None,
+    prompt_addenda: list[str] | None = None,
 ) -> AsyncIterator[AgentEventData]:
     """
     Streaming variant of run_agent(). Yields AgentEventData as they happen.
@@ -897,6 +907,7 @@ async def stream_agent(
         active_skills=skill_selection.skills,
         available_skills=skill_selection.available,
         allowed_tool_names=set(skill_selection.allowed_tool_names),
+        prompt_addenda=prompt_addenda,
     )
 
     # Build enriched user message (signals were rendered by the DB in-scope)

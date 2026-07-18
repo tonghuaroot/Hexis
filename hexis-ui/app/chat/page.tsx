@@ -6,6 +6,7 @@ import {
   Database,
   Eye,
   EyeOff,
+  FileText,
   Send,
   Settings2,
   Trash2,
@@ -28,6 +29,46 @@ type ChatMessage = {
   content: string;
   presentation?: MessagePresentation;
 };
+
+// A large paste captured as an attachment instead of composer text; on send
+// it is ingested as a document (POST /api/ingest) rather than inlined.
+type PastedAttachment = {
+  id: string;
+  title: string;
+  content: string;
+  wordCount: number;
+};
+
+// Pastes longer than this become attachments (matching the Claude/ChatGPT
+// composer convention) so huge texts go through document ingestion instead
+// of flooding the conversation turn.
+const PASTE_ATTACH_THRESHOLD = 2000;
+
+// The turn's system prompt carries the attachment text up to this cap so the
+// agent can discuss the document immediately; ingestion holds the full text.
+const ATTACHMENT_PROMPT_CHARS = 16000;
+
+function attachmentTitle(content: string): string {
+  const firstLine = content.split("\n").map((line) => line.trim()).find(Boolean) || "";
+  if (!firstLine) return "Pasted text";
+  if (firstLine.length <= 80) return firstLine;
+  const words = firstLine.split(/\s+/).slice(0, 8).join(" ");
+  return `${words}…`;
+}
+
+function attachmentAddendum(attachment: PastedAttachment): string {
+  const truncated = attachment.content.length > ATTACHMENT_PROMPT_CHARS;
+  const body = attachment.content.slice(0, ATTACHMENT_PROMPT_CHARS);
+  return [
+    `----- ATTACHED DOCUMENT: ${attachment.title} -----`,
+    "The user attached this document to their message. It is also being ingested into your durable memory (recall or open_memory can retrieve it later).",
+    "",
+    body,
+    truncated
+      ? "\n[Document truncated here for the live turn — the full text is in memory via ingestion.]"
+      : "",
+  ].join("\n");
+}
 
 type LogEvent = {
   id: string;
@@ -100,6 +141,7 @@ export default function ChatPage() {
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [attachments, setAttachments] = useState<PastedAttachment[]>([]);
   const [ready, setReady] = useState<boolean | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({});
   const [promptAddenda, setPromptAddenda] = useState<string[]>([]);
@@ -254,13 +296,81 @@ export default function ChatPage() {
     }
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || sending) return;
+  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const pasted = event.clipboardData?.getData("text") ?? "";
+    if (pasted.length <= PASTE_ATTACH_THRESHOLD) return;
+    event.preventDefault();
+    setAttachments((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        title: attachmentTitle(pasted),
+        content: pasted,
+        wordCount: pasted.split(/\s+/).filter(Boolean).length,
+      },
+    ]);
+  };
 
+  const removeAttachment = (id: string) => {
+    setAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+  };
+
+  const handleSend = async () => {
+    if ((!input.trim() && attachments.length === 0) || sending) return;
+
+    // Attachments ingest as documents (durable) AND ride the turn's prompt
+    // addenda (immediate sight); the visible message carries only a note.
+    const toIngest = attachments;
+    setAttachments([]);
+    const attachmentAddenda = toIngest.map(attachmentAddendum);
+    const ingestNotes: string[] = [];
+    for (const attachment of toIngest) {
+      try {
+        const res = await fetch("/api/ingest", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: attachment.content,
+            title: attachment.title,
+            mode: "fast",
+          }),
+        });
+        if (res.ok) {
+          ingestNotes.push(
+            `[Attached document "${attachment.title}" (${attachment.wordCount} words) — being ingested into memory]`
+          );
+        } else {
+          const detail = await res.text();
+          ingestNotes.push(
+            `[Attached document "${attachment.title}" could not be ingested: ${res.status}]`
+          );
+          appendLog({
+            id: crypto.randomUUID(),
+            category: "error",
+            title: "Ingest error",
+            detail: `Attachment "${attachment.title}" failed (${res.status}): ${detail.slice(0, 200)}`,
+            ts: Date.now(),
+          });
+        }
+      } catch (err) {
+        ingestNotes.push(
+          `[Attached document "${attachment.title}" could not be ingested: network error]`
+        );
+        appendLog({
+          id: crypto.randomUUID(),
+          category: "error",
+          title: "Ingest error",
+          detail: `Attachment "${attachment.title}": ${err instanceof Error ? err.message : String(err)}`,
+          ts: Date.now(),
+        });
+      }
+    }
+
+    const messageText = [input.trim(), ...ingestNotes].filter(Boolean).join("\n\n");
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
-      content: input.trim(),
+      content: messageText,
     };
     const assistantMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -282,7 +392,7 @@ export default function ChatPage() {
         body: JSON.stringify({
           message: userMessage.content,
           history: historyPayload,
-          prompt_addenda: promptAddenda,
+          prompt_addenda: [...promptAddenda, ...attachmentAddenda],
           session_id: loadSessionId(),
         }),
       });
@@ -616,6 +726,26 @@ export default function ChatPage() {
           </div>
 
           <div className="border-t border-[var(--outline)] bg-white px-4 py-3 sm:px-6">
+            {attachments.length > 0 ? (
+              <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
+                {attachments.map((attachment) => (
+                  <span key={attachment.id} className="flex items-center gap-2 rounded-md border border-[var(--outline)] bg-[#f5f7f5] px-2 py-1 text-xs">
+                    <FileText size={13} className="flex-none text-[var(--teal)]" />
+                    <span className="max-w-56 truncate font-medium">{attachment.title}</span>
+                    <span className="text-[var(--ink-soft)]">{attachment.wordCount.toLocaleString()} words</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove attachment ${attachment.title}`}
+                      title="Remove"
+                      onClick={() => removeAttachment(attachment.id)}
+                      className="flex-none rounded p-0.5 text-[var(--ink-soft)] hover:bg-[var(--outline)] hover:text-[var(--foreground)]"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-lg border border-[var(--outline)] bg-white p-2 focus-within:border-[var(--teal)] focus-within:ring-2 focus-within:ring-[var(--teal)]/10">
               <textarea
                 ref={textareaRef}
@@ -625,9 +755,10 @@ export default function ChatPage() {
                 value={input}
                 onChange={(event) => { if (historyIndex !== null) setHistoryIndex(null); setInput(event.target.value); }}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 rows={1}
               />
-              <button type="button" aria-label="Send message" title="Send" onClick={handleSend} disabled={sending || !input.trim()} className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-[var(--foreground)] text-white hover:bg-[var(--teal)] disabled:opacity-35">
+              <button type="button" aria-label="Send message" title="Send" onClick={handleSend} disabled={sending || (!input.trim() && attachments.length === 0)} className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-[var(--foreground)] text-white hover:bg-[var(--teal)] disabled:opacity-35">
                 <Send size={17} />
               </button>
             </div>

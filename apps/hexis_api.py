@@ -15,12 +15,14 @@ Endpoints:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
 import asyncpg
@@ -127,6 +129,12 @@ class ChatRequest(BaseModel):
     # turn's `done` event to keep one conversation as one session; omit and
     # the server mints one (returned in `done`).
     session_id: str | None = None
+
+
+class IngestTextRequest(BaseModel):
+    content: str
+    title: str | None = None
+    mode: str = "fast"
 
 
 class OpenAIChatMessage(BaseModel):
@@ -779,6 +787,72 @@ async def chat(req: ChatRequest):
     )
 
 
+async def _run_text_ingest(content: str, title: str, mode_value: str) -> None:
+    """Background ingestion of pasted text: temp file → IngestionPipeline."""
+    import tempfile
+
+    from core.tools.ingest import _build_ingest_config
+    from services.ingest import IngestionMode, IngestionPipeline
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", prefix="pasted-", delete=False, encoding="utf-8"
+    )
+    try:
+        tmp.write(f"# {title}\n\n{content}")
+        tmp.close()
+        config = await _build_ingest_config(_pool, mode=IngestionMode(mode_value))
+        config.verbose = False
+        pipeline = IngestionPipeline(config)
+        try:
+            count = await asyncio.get_running_loop().run_in_executor(
+                None, pipeline.ingest_file, Path(tmp.name)
+            )
+            logger.info("Pasted-text ingest '%s': %s memories created", title, count)
+        finally:
+            # The pipeline's sync DB client owns a private event loop; closing
+            # it must happen off the API loop thread or run_until_complete
+            # raises with the ingest already durably persisted.
+            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
+    except Exception:
+        logger.exception("Pasted-text ingest failed for '%s'", title)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
+@app.post("/api/ingest/text")
+async def ingest_text(req: IngestTextRequest):
+    """Ingest pasted text as a document (the UI's large-paste attachment path).
+
+    Returns immediately; extraction runs in the background. The chat message
+    that accompanies the attachment tells the agent the document arrived, and
+    the encounter memory records the read.
+    """
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="content is required")
+    mode_value = (req.mode or "fast").lower()
+    if mode_value not in ("fast", "slow", "hybrid"):
+        raise HTTPException(status_code=422, detail="mode must be fast, slow, or hybrid")
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="database not ready")
+
+    title = (req.title or "").strip()
+    if not title:
+        first_line = next((ln.strip() for ln in content.splitlines() if ln.strip()), "")
+        title = (first_line[:80] or "Pasted text")
+
+    asyncio.create_task(_run_text_ingest(content, title, mode_value))
+    return {
+        "accepted": True,
+        "title": title,
+        "mode": mode_value,
+        "word_count": len(content.split()),
+    }
+
+
 @app.get("/v1/models")
 async def openai_models():
     try:
@@ -990,6 +1064,33 @@ async def _stream_openai_chat_completion(
     yield _openai_sse_data("[DONE]")
 
 
+# Checkbox ids the UI settings panel may send as prompt addenda; they render
+# the corresponding DB prompt module. Anything else is literal addendum text
+# (the attached-document path).
+_ADDENDA_MODULES = {"philosophy": "philosophy", "letter": "LetterFromClaude"}
+
+
+async def _resolve_prompt_addenda(pool: asyncpg.Pool, addenda: list[str] | None) -> list[str]:
+    resolved: list[str] = []
+    for entry in addenda or []:
+        text = str(entry or "").strip()
+        if not text:
+            continue
+        module_key = _ADDENDA_MODULES.get(text)
+        if module_key:
+            try:
+                async with pool.acquire() as conn:
+                    rendered = await conn.fetchval("SELECT render_prompt($1)", module_key)
+                if rendered:
+                    resolved.append(str(rendered).strip())
+                continue
+            except Exception:
+                logger.warning("Prompt addendum module %r failed to render", module_key, exc_info=True)
+                continue
+        resolved.append(text)
+    return resolved
+
+
 async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
     """
     Run the unified agent in streaming mode and yield SSE events that match
@@ -1039,6 +1140,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
     try:
         registry = create_default_registry(pool)
         agent_profile = await get_agent_profile_context(pool=pool)
+        addenda = await _resolve_prompt_addenda(pool, req.prompt_addenda)
 
         full_text = ""
         conscious_started = False
@@ -1052,6 +1154,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
             session_id=session_id,
             agent_profile=agent_profile,
             dsn=dsn,
+            prompt_addenda=addenda,
         ):
             if event.event == AgentEvent.PHASE_CHANGE:
                 phase = event.data.get("phase", "")

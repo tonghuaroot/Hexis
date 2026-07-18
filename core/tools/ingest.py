@@ -127,7 +127,10 @@ class FastIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            pipeline.close()
+            # Off the loop thread: the sync client's private loop cannot be
+            # driven while this thread's loop runs (it raises AFTER a
+            # successful ingest, turning tool success into failure).
+            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
 
 
 class SlowIngestHandler(ToolHandler):
@@ -255,7 +258,10 @@ class SlowIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            pipeline.close()
+            # Off the loop thread: the sync client's private loop cannot be
+            # driven while this thread's loop runs (it raises AFTER a
+            # successful ingest, turning tool success into failure).
+            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
 
 
 class HybridIngestHandler(ToolHandler):
@@ -382,7 +388,10 @@ class HybridIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            pipeline.close()
+            # Off the loop thread: the sync client's private loop cannot be
+            # driven while this thread's loop runs (it raises AFTER a
+            # successful ingest, turning tool success into failure).
+            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
 
 
 class GitIngestHandler(ToolHandler):
@@ -488,7 +497,10 @@ class GitIngestHandler(ToolHandler):
                 ToolErrorType.EXECUTION_FAILED,
             )
         finally:
-            pipeline.close()
+            # Off the loop thread: the sync client's private loop cannot be
+            # driven while this thread's loop runs (it raises AFTER a
+            # successful ingest, turning tool success into failure).
+            await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -689,7 +701,7 @@ class URLIngestHandler(ToolHandler):
                     ToolErrorType.EXECUTION_FAILED,
                 )
             finally:
-                pipeline.close()
+                await asyncio.get_running_loop().run_in_executor(None, pipeline.close)
         finally:
             import os
             os.unlink(tmp.name)

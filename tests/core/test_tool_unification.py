@@ -828,3 +828,24 @@ class TestToolEnergyCostsBlock:
         block = _format_tool_costs(registry, {"mcp_github_create_issue", "recall"})
         assert "recall" in block
         assert "mcp_github_create_issue" not in block
+
+
+class TestPromptAddenda:
+    async def test_addenda_append_to_prompt(self, db_pool):
+        from core.tools import create_default_registry
+        from services.chat import _build_system_prompt
+        from services.agent import build_system_prompt
+
+        registry = create_default_registry(db_pool)
+        prompt = await build_system_prompt(
+            "chat",
+            registry,
+            {},
+            prompt_addenda=[
+                "----- ATTACHED DOCUMENT: Test Doc -----\nBody of the attachment.",
+                "  ",
+                None,
+            ],
+        )
+        assert "----- ATTACHED DOCUMENT: Test Doc -----" in prompt
+        assert prompt.rstrip().endswith("Body of the attachment.")
