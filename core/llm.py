@@ -47,13 +47,41 @@ _CODEX_JWT_CLAIM_PATH = "https://api.openai.com/auth"
 _openai_clients: dict[tuple[str, str, str], Any] = {}
 
 # LLM retry configuration
-_LLM_MAX_RETRIES = 3
+_LLM_MAX_RETRIES = 4
 _LLM_RETRY_BACKOFF_BASE = 2  # seconds
+_LLM_RETRY_MAX_WAIT = 60.0  # seconds; cap for Retry-After honoring
 
 
-async def _retry_on_transient(coro_factory, *, max_retries: int = _LLM_MAX_RETRIES) -> Any:
-    """Retry an LLM call on transient errors (rate limits, server errors, network)."""
+def _codex_http_error(resp: Any, body: bytes) -> RuntimeError:
+    """Build the Codex HTTP error with retry metadata attached, so
+    _retry_on_transient can recognize the status and honor Retry-After."""
+    err = RuntimeError(
+        f"OpenAI Codex request failed: HTTP {resp.status_code}: {body.decode('utf-8', errors='replace')}"
+    )
+    err.status_code = resp.status_code
+    retry_after = resp.headers.get("retry-after")
+    if retry_after:
+        try:
+            err.retry_after = float(retry_after)
+        except ValueError:
+            pass
+    return err
+
+
+async def _retry_on_transient(
+    coro_factory,
+    *,
+    max_retries: int = _LLM_MAX_RETRIES,
+    should_retry: Any | None = None,
+) -> Any:
+    """Retry an LLM call on transient errors (rate limits, server errors, network).
+
+    ``should_retry`` is an optional zero-arg predicate consulted before each
+    retry — streaming callers use it to refuse replay once tokens have
+    already reached the consumer.
+    """
     import asyncio as _asyncio
+    import random as _random
 
     last_exc = None
     for attempt in range(max_retries):
@@ -64,17 +92,23 @@ async def _retry_on_transient(coro_factory, *, max_retries: int = _LLM_MAX_RETRI
             exc_str = str(exc).lower()
             status = getattr(exc, 'status_code', None) or getattr(exc, 'status', None)
             is_transient = (
-                status in (429, 502, 503, 529)
+                status in (429, 500, 502, 503, 504, 529)
                 or 'rate' in exc_str
                 or 'overloaded' in exc_str
                 or 'timeout' in exc_str
                 or 'connection' in exc_str
                 or isinstance(exc, (ConnectionError, TimeoutError, OSError))
             )
+            if should_retry is not None and not should_retry():
+                is_transient = False
             if is_transient and attempt < max_retries - 1:
-                wait = _LLM_RETRY_BACKOFF_BASE ** attempt
+                wait = _LLM_RETRY_BACKOFF_BASE ** attempt + _random.uniform(0.0, 1.0)
+                retry_after = getattr(exc, 'retry_after', None)
+                if retry_after:
+                    wait = max(wait, float(retry_after))
+                wait = min(wait, _LLM_RETRY_MAX_WAIT)
                 logger.warning(
-                    "LLM call failed (attempt %d/%d), retrying in %ds: %s",
+                    "LLM call failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1, max_retries, wait, exc,
                 )
                 await _asyncio.sleep(wait)
@@ -304,9 +338,7 @@ async def _codex_responses_attempt(
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             if resp.status_code < 200 or resp.status_code >= 300:
                 text = await resp.aread()
-                raise RuntimeError(
-                    f"OpenAI Codex request failed: HTTP {resp.status_code}: {text.decode('utf-8', errors='replace')}"
-                )
+                raise _codex_http_error(resp, text)
 
             content_parts: list[str] = []
             tool_calls: list[dict[str, Any]] = []
@@ -1014,7 +1046,9 @@ async def chat_completion(
         return await _retry_on_transient(_do_chat_completion)
 
     if provider == "openai-codex":
-        return await _codex_responses_completion(
+        # Wrapped like every other provider branch: a 429/5xx here was the
+        # one unretried path (it killed live turns during ingestion storms).
+        return await _retry_on_transient(lambda: _codex_responses_completion(
             model=model,
             endpoint=endpoint,
             api_key=api_key,
@@ -1023,7 +1057,7 @@ async def chat_completion(
             temperature=temperature,
             max_tokens=max_tokens,
             on_text_delta=None,
-        )
+        ))
 
     if provider == "anthropic":
         if auth_mode == "setup-token":
@@ -1271,15 +1305,30 @@ async def stream_chat_completion(
         return await _retry_on_transient(_do_stream_completion)
 
     if provider == "openai-codex":
-        return await _codex_responses_completion(
-            model=model,
-            endpoint=endpoint,
-            api_key=api_key,
-            messages=messages,
-            tools=tools,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            on_text_delta=on_text_delta,
+        # A 429/5xx fails before any token reaches the caller and retries
+        # freely; once tokens have streamed, retry is refused so the consumer
+        # never sees the same text twice.
+        delivered = False
+
+        def _marking_delta(text: str):
+            nonlocal delivered
+            delivered = True
+            if on_text_delta is not None:
+                return on_text_delta(text)
+            return None
+
+        return await _retry_on_transient(
+            lambda: _codex_responses_completion(
+                model=model,
+                endpoint=endpoint,
+                api_key=api_key,
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                on_text_delta=_marking_delta if on_text_delta is not None else None,
+            ),
+            should_retry=lambda: not delivered,
         )
 
     if provider == "anthropic":
@@ -1512,9 +1561,7 @@ async def stream_text_completion(
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code < 200 or resp.status_code >= 300:
                     text = await resp.aread()
-                    raise RuntimeError(
-                        f"OpenAI Codex request failed: HTTP {resp.status_code}: {text.decode('utf-8', errors='replace')}"
-                    )
+                    raise _codex_http_error(resp, text)
                 async for event in _iter_sse_events_json(resp):
                     event_type = event.get("type")
                     if event_type == "response.output_text.delta":
