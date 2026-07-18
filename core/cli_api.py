@@ -756,18 +756,10 @@ async def status_payload_rich(
                 if aff:
                     valence = aff.get("valence", 0.0)
                     arousal = aff.get("arousal", 0.0)
-                    # Map valence to a simple mood word
-                    if valence > 0.5:
-                        mood = "enthusiastic" if arousal > 0.5 else "content"
-                    elif valence > 0.2:
-                        mood = "curious" if arousal > 0.3 else "calm"
-                    elif valence > -0.2:
-                        mood = "focused" if arousal > 0.3 else "neutral"
-                    elif valence > -0.5:
-                        mood = "concerned" if arousal > 0.3 else "subdued"
-                    else:
-                        mood = "distressed" if arousal > 0.5 else "withdrawn"
-                    payload["mood"] = mood
+                    # The DB owns the valence/arousal -> mood ladder (db/65).
+                    payload["mood"] = await conn.fetchval(
+                        "SELECT mood_label($1, $2)", float(valence), float(arousal)
+                    )
                     payload["valence"] = round(valence, 2)
                 else:
                     payload["mood"] = "neutral"

@@ -137,9 +137,7 @@ class RabbitMQBridge:
                         "SELECT add_to_working_memory($1::text, INTERVAL '1 day')",
                         str(content),
                     )
-                    await conn.execute(
-                        "UPDATE heartbeat_state SET last_user_contact = CURRENT_TIMESTAMP WHERE id = 1"
-                    )
+                    await conn.execute("SELECT mark_user_contact()")
                 ingested += 1
             except Exception as e:
                 logger.warning("Failed to ingest inbox message to working memory: %s", e)

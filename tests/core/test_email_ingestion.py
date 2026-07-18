@@ -138,8 +138,7 @@ class TestIngestEmailsExecution:
         mock_conn.fetchval = AsyncMock(side_effect=[
             None,       # content_hash check — not a duplicate
             "mem-uuid", # create_episodic_memory
-            None,       # contact email check — doesn't exist
-            "ct-uuid",  # create_contact
+            '{"id": 7, "created": true}',  # upsert_contact (db/65)
         ])
         mock_conn.execute = AsyncMock()
         mock_pool = MagicMock()
@@ -230,7 +229,7 @@ class TestIngestEmailsExecution:
         mock_conn.fetchval = AsyncMock(side_effect=[
             None,                # content_hash check — not duplicate
             "mem-uuid",          # create_episodic_memory
-            existing_contact_id, # contact exists
+            '{"id": 7, "created": false}',  # upsert_contact touches existing (db/65)
         ])
         mock_conn.execute = AsyncMock()
         mock_pool = MagicMock()

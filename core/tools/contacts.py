@@ -327,6 +327,11 @@ class IngestContactsFromEmailHandler(ToolHandler):
 
                 created = 0
                 updated = 0
+                # Parse sender strings Python-side (regex on free text); the
+                # upsert itself is one set-based DB call (db/65).
+                import re
+
+                attendees = []
                 for row in rows:
                     sa = row["source_attribution"]
                     if isinstance(sa, str):
@@ -336,33 +341,20 @@ class IngestContactsFromEmailHandler(ToolHandler):
                     sender = sa.get("sender") or sa.get("from")
                     if not sender:
                         continue
-                    # Try to extract name and email
-                    import re
                     match = re.match(r"(.+?)\s*<(.+?)>", sender)
                     if match:
-                        name, email = match.group(1).strip(), match.group(2).strip()
+                        attendees.append({"name": match.group(1).strip(), "email": match.group(2).strip()})
                     elif "@" in sender:
-                        email = sender.strip()
-                        name = email.split("@")[0]
-                    else:
-                        continue
+                        attendees.append({"email": sender.strip()})
 
-                    # Check if contact exists
-                    existing = await conn.fetchval(
-                        "SELECT id FROM contacts WHERE email = $1", email
+                if attendees:
+                    result_raw = await conn.fetchval(
+                        "SELECT upsert_contacts_from_attendees($1::jsonb, 'email')",
+                        json.dumps(attendees),
                     )
-                    if existing:
-                        await conn.execute(
-                            "SELECT touch_contact($1)",
-                            existing,
-                        )
-                        updated += 1
-                    else:
-                        await conn.fetchval(
-                            "SELECT create_contact($1,$2,$3,$4,$5,$6,$7,$8)",
-                            name, email, None, None, None, None, [], "email",
-                        )
-                        created += 1
+                    result = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
+                    created = int(result.get("created", 0))
+                    updated = int(result.get("updated", 0))
 
             return ToolResult.success_result(
                 {"created": created, "updated": updated, "emails_scanned": len(rows)},
@@ -428,29 +420,14 @@ class IngestContactsFromCalendarHandler(ToolHandler):
                     attendees = sa.get("attendees") or []
                     if isinstance(attendees, str):
                         attendees = json.loads(attendees)
-                    for att in attendees:
-                        email = att.get("email", "") if isinstance(att, dict) else str(att)
-                        if not email or "@" not in email:
-                            continue
-                        name = att.get("displayName", "") if isinstance(att, dict) else email.split("@")[0]
-                        if not name:
-                            name = email.split("@")[0]
-
-                        existing = await conn.fetchval(
-                            "SELECT id FROM contacts WHERE email = $1", email
+                    if attendees:
+                        result_raw = await conn.fetchval(
+                            "SELECT upsert_contacts_from_attendees($1::jsonb, 'calendar')",
+                            json.dumps(attendees),
                         )
-                        if existing:
-                            await conn.execute(
-                                "SELECT touch_contact($1)",
-                                existing,
-                            )
-                            updated += 1
-                        else:
-                            await conn.fetchval(
-                                "SELECT create_contact($1,$2,$3,$4,$5,$6,$7,$8)",
-                                name, email, None, None, None, None, [], "calendar",
-                            )
-                            created += 1
+                        result = json.loads(result_raw) if isinstance(result_raw, str) else (result_raw or {})
+                        created += int(result.get("created", 0))
+                        updated += int(result.get("updated", 0))
 
             return ToolResult.success_result(
                 {"created": created, "updated": updated, "events_scanned": len(rows)},

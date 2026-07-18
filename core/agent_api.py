@@ -90,21 +90,14 @@ def pool_sizes_from_env(default_min: int = 1, default_max: int = 5) -> tuple[int
 
 
 async def get_agent_status(dsn: str | None = None) -> dict[str, Any]:
+    """Thin wrapper: the DB owns the composite status and the AND-policy for
+    'configured' (get_agent_status(), db/65)."""
     dsn = dsn or db_dsn_from_env()
     conn = await _connect_with_retry(dsn, wait_seconds=int(os.getenv("POSTGRES_WAIT_SECONDS", "30")))
     try:
-        configured = await conn.fetchval("SELECT is_agent_configured()")
-        terminated = await conn.fetchval("SELECT is_agent_terminated()")
-        consent = await conn.fetchval("SELECT get_agent_consent_status()")
-        consent_log_id = await conn.fetchval("SELECT get_config('agent.consent_log_id')")
-        has_consent_log = consent_log_id is not None
-        configured = bool(configured) and has_consent_log and consent == "consent"
-        return {
-            "configured": configured,
-            "terminated": bool(terminated),
-            "consent_status": consent,
-            "consent_log_id": consent_log_id,
-        }
+        raw = await conn.fetchval("SELECT get_agent_status()")
+        status = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return dict(status)
     finally:
         await conn.close()
 
@@ -278,84 +271,33 @@ async def apply_agent_config(
     dsn = dsn or db_dsn_from_env()
     conn = await _connect_with_retry(dsn, wait_seconds=_resolve_wait_seconds(wait_seconds))
     try:
-        async with conn.transaction():
-            # Phase 7 (ReduceScopeCreep): Use unified config table with namespaced keys
-            await conn.execute(
-                "SELECT set_config('heartbeat.heartbeat_interval_minutes', $1::jsonb)",
-                str(float(heartbeat_interval_minutes)),
-            )
-            await conn.execute(
-                "SELECT set_config('heartbeat.max_energy', $1::jsonb)",
-                str(float(max_energy)),
-            )
-            await conn.execute(
-                "SELECT set_config('heartbeat.base_regeneration', $1::jsonb)",
-                str(float(base_regeneration)),
-            )
-            await conn.execute(
-                "SELECT set_config('heartbeat.max_active_goals', $1::jsonb)",
-                str(float(max_active_goals)),
-            )
-            await conn.execute(
-                "SELECT set_config('maintenance.maintenance_interval_seconds', $1::jsonb)",
-                str(float(maintenance_interval_seconds)),
-            )
-            if subconscious_interval_seconds is not None:
-                await conn.execute(
-                    "SELECT set_config('maintenance.subconscious_interval_seconds', $1::jsonb)",
-                    str(float(subconscious_interval_seconds)),
-                )
-            if enable_subconscious is not None:
-                await conn.execute(
-                    "SELECT set_config('maintenance.subconscious_enabled', $1::jsonb)",
-                    json.dumps(bool(enable_subconscious)),
-                )
-
-            await conn.execute("SELECT set_config('agent.objectives', $1::jsonb)", json.dumps(objectives))
-            await conn.execute(
-                "SELECT set_config('agent.budget', $1::jsonb)",
-                json.dumps(
-                    {
-                        "max_energy": max_energy,
-                        "base_regeneration": base_regeneration,
-                        "heartbeat_interval_minutes": heartbeat_interval_minutes,
-                        "max_active_goals": max_active_goals,
-                    }
-                ),
-            )
-            await conn.execute("SELECT set_config('agent.guardrails', $1::jsonb)", json.dumps(guardrails))
-            await conn.execute("SELECT set_config('agent.initial_message', $1::jsonb)", json.dumps(initial_message))
-            await conn.execute(
-                "SELECT set_config('agent.tools', $1::jsonb)",
-                json.dumps([{"name": t, "enabled": True} for t in tools]),
-            )
-
-            await conn.execute("SELECT set_config('llm.heartbeat', $1::jsonb)", json.dumps(llm_heartbeat))
-            await conn.execute("SELECT set_config('llm.chat', $1::jsonb)", json.dumps(llm_chat))
-            await conn.execute(
-                "SELECT set_config('llm.subconscious', $1::jsonb)",
-                json.dumps(llm_subconscious or llm_heartbeat),
-            )
-            await conn.execute(
-                "SELECT set_config('user.contact', $1::jsonb)",
-                json.dumps({"channels": contact_channels, "destinations": contact_destinations}),
-            )
-
-            if mark_configured:
-                await conn.execute("SELECT set_config('agent.is_configured', 'true'::jsonb)")
-
-            if enable_autonomy:
-                await conn.execute("UPDATE heartbeat_state SET is_paused = FALSE WHERE id = 1")
-            else:
-                await conn.execute("UPDATE heartbeat_state SET is_paused = TRUE WHERE id = 1")
-
-            try:
-                if enable_maintenance:
-                    await conn.execute("UPDATE maintenance_state SET is_paused = FALSE WHERE id = 1")
-                else:
-                    await conn.execute("UPDATE maintenance_state SET is_paused = TRUE WHERE id = 1")
-            except Exception:
-                pass
+        # Thin wrapper: the DB applies the whole configuration atomically
+        # (apply_agent_config, db/65). This was ~18 sequential set_config
+        # calls threaded through a client transaction.
+        config = {
+            "heartbeat_interval_minutes": heartbeat_interval_minutes,
+            "maintenance_interval_seconds": maintenance_interval_seconds,
+            "subconscious_interval_seconds": subconscious_interval_seconds,
+            "max_energy": max_energy,
+            "base_regeneration": base_regeneration,
+            "max_active_goals": max_active_goals,
+            "objectives": objectives,
+            "guardrails": guardrails,
+            "initial_message": initial_message,
+            "tools": tools,
+            "llm_heartbeat": llm_heartbeat,
+            "llm_chat": llm_chat,
+            "llm_subconscious": llm_subconscious,
+            "contact_channels": contact_channels,
+            "contact_destinations": contact_destinations,
+            "enable_autonomy": enable_autonomy,
+            "enable_maintenance": enable_maintenance,
+            "enable_subconscious": enable_subconscious,
+            "mark_configured": mark_configured,
+        }
+        await conn.execute(
+            "SELECT apply_agent_config($1::jsonb)", json.dumps(config)
+        )
     finally:
         await conn.close()
 

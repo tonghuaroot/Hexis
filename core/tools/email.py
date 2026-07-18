@@ -992,21 +992,14 @@ class IngestEmailsHandler(ToolHandler):
                         else:
                             continue
 
-                        existing_contact = await conn.fetchval(
-                            "SELECT id FROM contacts WHERE email = $1", email
+                        upsert_raw = await conn.fetchval(
+                            "SELECT upsert_contact($1, $2, 'email')", name, email
                         )
-                        if existing_contact:
-                            await conn.execute(
-                                "SELECT touch_contact($1)",
-                                existing_contact,
-                            )
-                            contacts_updated += 1
-                        else:
-                            await conn.fetchval(
-                                "SELECT create_contact($1,$2,$3,$4,$5,$6,$7,$8)",
-                                name, email, None, None, None, None, [], "email",
-                            )
+                        upsert = json.loads(upsert_raw) if isinstance(upsert_raw, str) else (upsert_raw or {})
+                        if upsert.get("created"):
                             contacts_created += 1
+                        elif "id" in upsert:
+                            contacts_updated += 1
 
                     except Exception as e:
                         logger.debug("Failed to ingest email %s: %s", msg_stub.get("id"), e)

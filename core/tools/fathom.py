@@ -249,41 +249,21 @@ class IngestFathomTranscriptHandler(ToolHandler):
                 if not name and not email:
                     continue
 
+                # The DB owns the upsert (db/65): by email when we have one,
+                # approximate-by-name otherwise.
                 if email:
-                    existing = await pool.fetchval(
-                        "SELECT id FROM contacts WHERE email = $1", email
+                    upsert_raw = await pool.fetchval(
+                        "SELECT upsert_contact($1, $2, 'fathom')", name, email
                     )
-                    if existing:
-                        await pool.execute(
-                            "SELECT touch_contact($1)",
-                            existing,
-                        )
-                        contacts_updated += 1
-                    else:
-                        if not name:
-                            name = email.split("@")[0]
-                        await pool.fetchval(
-                            "SELECT create_contact($1,$2,$3,$4,$5,$6,$7,$8)",
-                            name, email, None, None, None, None, [], "fathom",
-                        )
-                        contacts_created += 1
-                elif name:
-                    # No email, try to find by name (approximate)
-                    existing = await pool.fetchval(
-                        "SELECT id FROM contacts WHERE name ILIKE $1", name
+                else:
+                    upsert_raw = await pool.fetchval(
+                        "SELECT upsert_contact_by_name($1, 'fathom')", name
                     )
-                    if existing:
-                        await pool.execute(
-                            "SELECT touch_contact($1)",
-                            existing,
-                        )
-                        contacts_updated += 1
-                    else:
-                        await pool.fetchval(
-                            "SELECT create_contact($1,$2,$3,$4,$5,$6,$7,$8)",
-                            name, None, None, None, None, None, [], "fathom",
-                        )
-                        contacts_created += 1
+                upsert = json.loads(upsert_raw) if isinstance(upsert_raw, str) else (upsert_raw or {})
+                if upsert.get("created"):
+                    contacts_created += 1
+                elif "id" in upsert:
+                    contacts_updated += 1
 
             return ToolResult.success_result(
                 {

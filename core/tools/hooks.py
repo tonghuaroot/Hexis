@@ -322,23 +322,20 @@ class AuditTrailHook(HookHandler):
         try:
             async with self._pool.acquire() as conn:
                 await conn.execute(
-                    """
-                    INSERT INTO tool_executions
-                    (tool_name, arguments, tool_context, call_id, session_id,
-                     success, output, error, error_type, energy_spent, duration_seconds)
-                    VALUES ($1, $2::jsonb, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11)
-                    """,
-                    context.tool_name or "unknown",
-                    args_json,
-                    tool_context,
-                    call_id,
-                    session_id,
-                    success,
-                    output_json,
-                    error,
-                    error_type,
-                    energy_spent,
-                    duration,
+                    "SELECT record_tool_execution($1::jsonb)",
+                    json.dumps({
+                        "tool_name": context.tool_name or "unknown",
+                        "arguments": json.loads(args_json),
+                        "tool_context": tool_context,
+                        "call_id": call_id,
+                        "session_id": session_id,
+                        "success": success,
+                        "output": json.loads(output_json) if output_json else None,
+                        "error": error,
+                        "error_type": error_type,
+                        "energy_spent": energy_spent,
+                        "duration_seconds": duration,
+                    }),
                 )
         except Exception:
             # Audit failures must not crash the tool pipeline
