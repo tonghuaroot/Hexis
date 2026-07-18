@@ -691,7 +691,7 @@ class TestPluginDiscovery:
         from plugins.loader import discover_plugins
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            plugins = discover_plugins(extra_dirs=[Path(tmpdir)])
+            plugins = discover_plugins(extra_dirs=[Path(tmpdir)], include_bundled=False)
             # Only finds plugins with __init__.py
             assert len([p for p in plugins if str(tmpdir) in str(p)]) == 0
 
@@ -704,7 +704,7 @@ class TestPluginDiscovery:
             (plugin_dir / "__init__.py").write_text("# plugin\n")
             (plugin_dir / "plugin.json").write_text('{"id": "my_plugin", "name": "My Plugin"}')
 
-            plugins = discover_plugins(extra_dirs=[Path(tmpdir)])
+            plugins = discover_plugins(extra_dirs=[Path(tmpdir)], include_bundled=False)
             found = [p for p in plugins if "my_plugin" in str(p)]
             assert len(found) == 1
 
@@ -716,7 +716,7 @@ class TestPluginDiscovery:
             hidden.mkdir()
             (hidden / "__init__.py").write_text("# plugin\n")
 
-            plugins = discover_plugins(extra_dirs=[Path(tmpdir)])
+            plugins = discover_plugins(extra_dirs=[Path(tmpdir)], include_bundled=False)
             found = [p for p in plugins if ".hidden_plugin" in str(p)]
             assert len(found) == 0
 
@@ -767,7 +767,7 @@ plugin = SamplePlugin()
                 encoding="utf-8",
             )
 
-            registry = await load_plugins(db_pool, extra_dirs=[Path(tmpdir)])
+            registry = await load_plugins(db_pool, extra_dirs=[Path(tmpdir)], include_bundled=False)
             assert registry.plugin_count() == 1
             handlers = registry.get_tool_handlers()
             assert len(handlers) == 1

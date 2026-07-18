@@ -588,6 +588,7 @@ class ExploreConceptHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="explore_concept",
+            internal=True,  # folded into `associate` (#99); one-release alias
             description=(
                 "Explore memories connected to a specific concept. Shows how different "
                 "memories relate to an idea and what other concepts are connected."
@@ -633,19 +634,20 @@ class ExploreConceptHandler(ToolHandler):
         )
 
 
-class ExploreSubgraphHandler(ToolHandler):
-    """Assemble a dynamic sub-knowledge-graph around seed memories."""
+class AssociateHandler(ToolHandler):
+    """Free association over the memory graph (agent-facing name: associate)."""
 
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec(
-            name="explore_subgraph",
+            name="associate",
             description=(
-                "Assemble a focused sub-knowledge-graph around memories: expand over typed "
-                "relationships (causes, supports, contradicts, derived_from, instance_of, ...) "
-                "to see how they connect -- the belief/causal structure, not a flat list. "
-                "Seed with a query (recalls memories) or explicit memory ids. Use this when a "
-                "question is about how things relate, contradict, or lead to one another."
+                "Follow what something reminds you of: free association through "
+                "your memory's own connections. Start from a question or from "
+                "specific memories and let the associations unfold — what "
+                "supports what, what contradicts, what led to what, what an "
+                "idea connects to. Use this when the question is about how "
+                "things relate rather than what a single memory says."
             ),
             parameters={
                 "type": "object",
@@ -1241,6 +1243,82 @@ class QueueUserMessageHandler(ToolHandler):
             return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
 
 
+class ExploreSubgraphAliasHandler(AssociateHandler):
+    """One-release alias for the old name (internal: hidden, unbound)."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        spec = super().spec
+        spec.name = "explore_subgraph"
+        spec.internal = True
+        return spec
+
+
+class TraceWhyHandler(ToolHandler):
+    """Introspective causation: why do I think/feel this?"""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="trace_why",
+            description=(
+                "Ask yourself why: trace where a memory or belief came from — "
+                "the chain of causes, evidence, and prior experiences behind "
+                "it. Give the memory id (from recall or open_memory) and get "
+                "its ancestry, nearest first."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "string",
+                        "description": "The memory/belief to trace (uuid).",
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "How far back to trace.",
+                        "default": 3,
+                        "minimum": 1,
+                        "maximum": 6,
+                    },
+                },
+                "required": ["memory_id"],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=1,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        try:
+            memory_id = UUID(str(arguments["memory_id"]))
+        except (ValueError, KeyError):
+            return ToolResult.error_result("memory_id must be a uuid", ToolErrorType.INVALID_PARAMS)
+        depth = max(1, min(int(arguments.get("depth") or 3), 6))
+        try:
+            async with context.registry.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT cause_id, cause_content, relationship, distance "
+                    "FROM find_causal_chain($1::uuid, $2)", memory_id, depth,
+                )
+            causes = [
+                {"memory_id": str(r["cause_id"]), "content": r["cause_content"],
+                 "relationship": r["relationship"], "distance": r["distance"]}
+                for r in rows
+            ]
+            display = (
+                f"{len(causes)} step(s) in the chain behind {str(memory_id)[:8]}"
+                if causes else "No recorded causes behind this memory — it may be a root experience."
+            )
+            return ToolResult.success_result({"causes": causes, "count": len(causes)}, display)
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+
 def create_memory_tools() -> list[ToolHandler]:
     """Create memory tool handlers.
 
@@ -1257,9 +1335,11 @@ def create_memory_tools() -> list[ToolHandler]:
         OpenMemoryHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
-        ExploreSubgraphHandler(),
+        AssociateHandler(),
         GetProceduresHandler(),
         GetStrategiesHandler(),
         QueueUserMessageHandler(),
         PonderHandler(),
+        TraceWhyHandler(),
+        ExploreSubgraphAliasHandler(),
     ]

@@ -13,18 +13,8 @@ from __future__ import annotations
 from pathlib import Path
 
 # Shrinks to empty as #99 stage 4 extracts these into plugins/installed/.
-GRANDFATHERED_UNBOUND = {
-    # todoist (plugin extraction pending)
-    "todoist_create_task", "todoist_complete_task", "todoist_list_tasks",
-    # asana
-    "asana_create_task", "asana_list_projects",
-    # hubspot
-    "hubspot_get_deal", "hubspot_list_deals",
-    # fathom
-    "fathom_ingest", "fathom_transcripts",
-    # video generation
-    "generate_video",
-}
+GRANDFATHERED_UNBOUND: set[str] = set()  # emptied by #99 stage 4 — the
+# seven speculative integrations now live in plugins/installed/
 
 
 def _bound_tool_names() -> set[str]:

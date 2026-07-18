@@ -690,16 +690,9 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     from .sessions import create_session_tools
     from .contacts import create_contact_tools
     from .image_gen import create_image_gen_tools
-    from .todoist import create_todoist_tools
-    from .asana import create_asana_tools
     from .usage_query import create_usage_tools
-    from .hubspot import create_hubspot_tools
-    from .youtube import create_youtube_tools
-    from .twitter import create_twitter_tools
     from .brave_search import create_brave_search_tools
     from .firecrawl import create_firecrawl_tools
-    from .fathom import create_fathom_tools
-    from .video_gen import create_video_gen_tools
     from .council import create_council_tools
     from .backup import create_backup_tools
     from .humanizer import create_humanizer_tools
@@ -759,33 +752,12 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     builder.add_all(create_session_tools())
     builder.add_all(create_contact_tools())
     builder.add_all(create_image_gen_tools())
-    builder.add_all(create_todoist_tools(
-        api_key_resolver=_env_resolver("TODOIST_API_KEY"),
-    ))
-    builder.add_all(create_asana_tools(
-        api_key_resolver=_env_resolver("ASANA_ACCESS_TOKEN", "ASANA_API_KEY"),
-    ))
     builder.add_all(create_usage_tools())
-    builder.add_all(create_hubspot_tools(
-        api_key_resolver=_env_resolver("HUBSPOT_API_KEY", "HUBSPOT_ACCESS_TOKEN"),
-    ))
-    builder.add_all(create_youtube_tools(
-        api_key_resolver=_env_resolver("YOUTUBE_API_KEY"),
-    ))
-    builder.add_all(create_twitter_tools(
-        api_key_resolver=_env_resolver("XAI_API_KEY"),
-    ))
     builder.add_all(create_brave_search_tools(
         api_key_resolver=_env_resolver("BRAVE_SEARCH_API_KEY"),
     ))
     builder.add_all(create_firecrawl_tools(
         api_key_resolver=_env_resolver("FIRECRAWL_API_KEY"),
-    ))
-    builder.add_all(create_fathom_tools(
-        api_key_resolver=_env_resolver("FATHOM_API_KEY"),
-    ))
-    builder.add_all(create_video_gen_tools(
-        api_key_resolver=_env_resolver("RUNWAY_API_KEY"),
     ))
     builder.add_all(create_council_tools())
     builder.add_all(create_backup_tools())

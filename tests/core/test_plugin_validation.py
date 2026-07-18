@@ -94,7 +94,7 @@ async def test_loader_skips_invalid_manifest_before_registration(tmp_path, caplo
     )
 
     with caplog.at_level(logging.ERROR):
-        registry = await load_plugins(object(), extra_dirs=[tmp_path])
+        registry = await load_plugins(object(), extra_dirs=[tmp_path], include_bundled=False)
 
     assert registry.plugin_count() == 0
     assert "invalid manifest" in caplog.text
@@ -119,7 +119,7 @@ async def test_loader_skips_invalid_live_config_before_registration(
 
     monkeypatch.setattr("plugins.loader._load_plugin_config", _missing_required_config)
     with caplog.at_level(logging.ERROR):
-        registry = await load_plugins(object(), extra_dirs=[tmp_path])
+        registry = await load_plugins(object(), extra_dirs=[tmp_path], include_bundled=False)
 
     assert registry.plugin_count() == 0
     assert "invalid config plugin.config-test" in caplog.text
@@ -139,7 +139,7 @@ async def test_loader_rejects_plugin_json_runtime_manifest_mismatch(tmp_path, ca
     )
 
     with caplog.at_level(logging.ERROR):
-        registry = await load_plugins(object(), extra_dirs=[tmp_path])
+        registry = await load_plugins(object(), extra_dirs=[tmp_path], include_bundled=False)
 
     assert registry.plugin_count() == 0
     assert "plugin.json must exactly match" in caplog.text
@@ -160,7 +160,7 @@ async def test_loader_validates_plugin_json_before_import(tmp_path, caplog):
     )
 
     with caplog.at_level(logging.ERROR):
-        registry = await load_plugins(object(), extra_dirs=[tmp_path])
+        registry = await load_plugins(object(), extra_dirs=[tmp_path], include_bundled=False)
 
     assert registry.plugin_count() == 0
     assert "invalid plugin.json" in caplog.text

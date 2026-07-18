@@ -121,7 +121,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_step_runs_status
 -- Change legibility (#93): the substrate-change journal the agent reads.
 CREATE TABLE IF NOT EXISTS change_journal (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kind TEXT NOT NULL CHECK (kind IN ('migration', 'code', 'prompt_module', 'config_flip')),
+    kind TEXT NOT NULL CHECK (kind IN ('migration', 'code', 'prompt_module', 'config_flip', 'self_extension')),
     summary TEXT NOT NULL,
     detail JSONB NOT NULL DEFAULT '{}'::jsonb,
     occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP

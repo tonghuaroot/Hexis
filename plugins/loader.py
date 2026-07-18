@@ -40,7 +40,7 @@ class PluginConfigError(ValueError):
     """A plugin's stored configuration does not satisfy its manifest."""
 
 
-def discover_plugins(extra_dirs: list[Path] | None = None) -> list[Path]:
+def discover_plugins(extra_dirs: list[Path] | None = None, *, include_bundled: bool = True) -> list[Path]:
     """
     Discover plugin directories.
 
@@ -50,7 +50,7 @@ def discover_plugins(extra_dirs: list[Path] | None = None) -> list[Path]:
 
     Returns list of plugin directory paths.
     """
-    dirs_to_scan = [_PLUGINS_DIR]
+    dirs_to_scan = [_PLUGINS_DIR] if include_bundled else []
     if extra_dirs:
         dirs_to_scan.extend(extra_dirs)
 
@@ -211,6 +211,8 @@ def _validate_plugin_config(
 async def load_plugins(
     pool: "asyncpg.Pool",
     extra_dirs: list[Path] | None = None,
+    *,
+    include_bundled: bool = True,
 ) -> PluginRegistry:
     """
     Discover and load all plugins.
@@ -223,7 +225,26 @@ async def load_plugins(
         PluginRegistry with all registered capabilities
     """
     registry = PluginRegistry()
-    plugin_dirs = discover_plugins(extra_dirs)
+
+    # Additional plugin directories from DB config (plugin.external_dirs):
+    # a JSON array of absolute paths. Unreadable entries are skipped loudly.
+    dirs = list(extra_dirs or [])
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT get_config('plugin.external_dirs')")
+        if raw:
+            entries = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(entries, list):
+                for entry in entries:
+                    path = Path(str(entry)).expanduser()
+                    if path.is_dir():
+                        dirs.append(path)
+                    else:
+                        logger.warning("plugin.external_dirs entry is not a directory: %s", entry)
+    except Exception:
+        logger.warning("Failed to read plugin.external_dirs", exc_info=True)
+
+    plugin_dirs = discover_plugins(dirs, include_bundled=include_bundled)
 
     if not plugin_dirs:
         logger.debug("No plugins discovered")
@@ -299,6 +320,18 @@ async def load_plugins(
         except Exception:
             logger.exception("Plugin registration failed: %s", manifest.id)
             continue
+
+        # Ownership contract (#99): when the manifest declares owned tools,
+        # runtime registrations must match exactly — loud failure over drift.
+        if manifest.tools:
+            registered_names = {rt.handler.spec.name for rt in api._get_tools()}
+            declared = set(manifest.tools)
+            if registered_names != declared:
+                logger.error(
+                    "Skipping plugin %s: tool ownership mismatch — declared %s, registered %s",
+                    manifest.id, sorted(declared), sorted(registered_names),
+                )
+                continue
 
         # Collect registrations
         tools = [

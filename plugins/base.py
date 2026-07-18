@@ -42,6 +42,10 @@ class PluginManifest:
     version: str = "0.0.0"
     description: str = ""
     config_schema: dict[str, Any] = field(default_factory=dict)
+    # Ownership contract (#99): the tool names this plugin owns. When
+    # non-empty, runtime registrations must match exactly — a mismatch is a
+    # loud load failure, never a silent drift.
+    tools: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PluginManifest":
@@ -62,12 +66,16 @@ class PluginManifest:
         raw_schema = data.get("config_schema", {})
         if not isinstance(raw_schema, dict):
             raise PluginValidationError("config_schema must be a JSON object")
+        raw_tools = data.get("tools", [])
+        if not isinstance(raw_tools, list) or not all(isinstance(x, str) for x in raw_tools):
+            raise PluginValidationError("tools must be a list of tool-name strings")
         manifest = cls(
             id=raw_id,
             name=raw_name,
             version=raw_version,
             description=raw_description,
             config_schema=dict(raw_schema),
+            tools=list(raw_tools),
         )
         manifest.validate()
         return manifest
@@ -114,6 +122,7 @@ class PluginManifest:
             "version": self.version,
             "description": self.description,
             "config_schema": self.config_schema,
+            "tools": list(self.tools),
         }
 
 
