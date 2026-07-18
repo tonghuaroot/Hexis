@@ -151,27 +151,24 @@ class TestBuildSystemPrompt:
 
 class TestRunAgenticHeartbeat:
     @patch("services.heartbeat_agentic.run_agent")
-    async def test_surfaces_pending_hmx_review_in_context(self, mock_run_agent):
+    async def test_surfaces_pending_hmx_review_in_context(self, mock_run_agent, db_pool):
         mock_run_agent.return_value = MagicMock(
             text="Done.", tool_calls_made=[], iterations=1,
             energy_spent=0, timed_out=False, stopped_reason="completed",
         )
-        conn = AsyncMock()
-        conn.fetchval.side_effect = [
-            '{"count": 2, "by_section": {"memories": 2}}',
-            '{"count": 1, "proposals": [{"id": "proposal-1", "name": "release-review"}]}',
-            '{"total": 0, "records": []}',
-            '{"total": 0, "records": []}',
-            "rendered heartbeat prompt",
-        ]
-
-        await run_agentic_heartbeat(
-            conn,
-            pool=MagicMock(),
-            registry=_mock_registry(),
-            heartbeat_id="hb-hmx-review",
-            context=_mock_context(),
-        )
+        ctx = _mock_context()
+        ctx["pending_import_review"] = {"count": 2, "by_section": {"memories": 2}}
+        ctx["pending_skill_proposals"] = {
+            "count": 1, "proposals": [{"id": "proposal-1", "name": "release-review"}],
+        }
+        async with db_pool.acquire() as conn:
+            await run_agentic_heartbeat(
+                conn,
+                pool=MagicMock(),
+                registry=_mock_registry(),
+                heartbeat_id="hb-hmx-review",
+                context=ctx,
+            )
 
         heartbeat_context = mock_run_agent.call_args.kwargs["heartbeat_context"]
         assert heartbeat_context["pending_import_review"] == {
@@ -182,43 +179,29 @@ class TestRunAgenticHeartbeat:
 
     @patch("services.heartbeat_agentic.run_agent")
     async def test_surfaces_pending_protected_replacement_with_action(
-        self, mock_run_agent
+        self, mock_run_agent, db_pool
     ):
         mock_run_agent.return_value = MagicMock(
-            text="Deferred.",
-            tool_calls_made=[],
-            iterations=1,
-            energy_spent=0,
-            timed_out=False,
-            stopped_reason="completed",
+            text="Deferred.", tool_calls_made=[], iterations=1,
+            energy_spent=0, timed_out=False, stopped_reason="completed",
         )
-        conn = AsyncMock()
-        conn.fetchval.side_effect = [
-            '{"count": 0, "by_section": {}}',
-            '{"count": 0, "proposals": []}',
-            json.dumps(
-                {
-                    "total": 1,
-                    "records": [
-                        {
-                            "replacement_id": "replacement-1",
-                            "section": "worldview",
-                            "rationale": "Restore a migrated instance",
-                        }
-                    ],
-                }
-            ),
-            '{"total": 0, "records": []}',
-            "rendered heartbeat prompt",
-        ]
-
-        await run_agentic_heartbeat(
-            conn,
-            pool=MagicMock(),
-            registry=_mock_registry(),
-            heartbeat_id="hb-hmx-protected",
-            context=_mock_context(),
-        )
+        ctx = _mock_context()
+        ctx["pending_protected_replacements"] = {
+            "total": 1,
+            "records": [{
+                "replacement_id": "replacement-1",
+                "section": "worldview",
+                "rationale": "Restore a migrated instance",
+            }],
+        }
+        async with db_pool.acquire() as conn:
+            await run_agentic_heartbeat(
+                conn,
+                pool=MagicMock(),
+                registry=_mock_registry(),
+                heartbeat_id="hb-hmx-protected",
+                context=ctx,
+            )
 
         heartbeat_context = mock_run_agent.call_args.kwargs["heartbeat_context"]
         assert heartbeat_context["pending_protected_replacements"]["total"] == 1
@@ -231,45 +214,31 @@ class TestRunAgenticHeartbeat:
 
     @patch("services.heartbeat_agentic.run_agent")
     async def test_surfaces_open_protected_reversion_as_explicit_choice(
-        self, mock_run_agent
+        self, mock_run_agent, db_pool
     ):
         mock_run_agent.return_value = MagicMock(
-            text="Kept the replacement.",
-            tool_calls_made=[],
-            iterations=1,
-            energy_spent=0,
-            timed_out=False,
-            stopped_reason="completed",
+            text="Kept the replacement.", tool_calls_made=[], iterations=1,
+            energy_spent=0, timed_out=False, stopped_reason="completed",
         )
-        conn = AsyncMock()
-        conn.fetchval.side_effect = [
-            '{"count": 0, "by_section": {}}',
-            '{"count": 0, "proposals": []}',
-            '{"total": 0, "records": []}',
-            json.dumps(
-                {
-                    "total": 1,
-                    "records": [
-                        {
-                            "replacement_id": "replacement-revert-1",
-                            "audit_id": "audit-revert-1",
-                            "section": "identity",
-                            "heartbeats_remaining": 5,
-                            "wall_clock_expires_at": "2026-08-01T00:00:00Z",
-                        }
-                    ],
-                }
-            ),
-            "rendered heartbeat prompt",
-        ]
-
-        await run_agentic_heartbeat(
-            conn,
-            pool=MagicMock(),
-            registry=_mock_registry(),
-            heartbeat_id="hb-hmx-reversion",
-            context=_mock_context(),
-        )
+        ctx = _mock_context()
+        ctx["open_protected_reversions"] = {
+            "total": 1,
+            "records": [{
+                "replacement_id": "replacement-revert-1",
+                "audit_id": "audit-revert-1",
+                "section": "identity",
+                "heartbeats_remaining": 5,
+                "wall_clock_expires_at": "2026-08-01T00:00:00Z",
+            }],
+        }
+        async with db_pool.acquire() as conn:
+            await run_agentic_heartbeat(
+                conn,
+                pool=MagicMock(),
+                registry=_mock_registry(),
+                heartbeat_id="hb-hmx-reversion",
+                context=ctx,
+            )
 
         heartbeat_context = mock_run_agent.call_args.kwargs["heartbeat_context"]
         assert heartbeat_context["open_protected_reversions"]["total"] == 1
@@ -280,7 +249,7 @@ class TestRunAgenticHeartbeat:
         assert "protected_replacement_revert" in user_message
 
     @patch("services.heartbeat_agentic.run_agent")
-    async def test_runs_agent_loop(self, mock_run_agent):
+    async def test_runs_agent_loop(self, mock_run_agent, db_pool):
         """run_agentic_heartbeat creates and runs an AgentLoop via run_agent."""
         mock_run_agent.return_value = MagicMock(
             text="I reflected on my goals.",
@@ -291,17 +260,14 @@ class TestRunAgenticHeartbeat:
             stopped_reason="completed",
         )
 
-        conn = AsyncMock()
-        pool = MagicMock()
-        registry = _mock_registry()
-
-        result = await run_agentic_heartbeat(
-            conn,
-            pool=pool,
-            registry=registry,
-            heartbeat_id="hb-test-001",
-            context=_mock_context(),
-        )
+        async with db_pool.acquire() as conn:
+            result = await run_agentic_heartbeat(
+                conn,
+                pool=MagicMock(),
+                registry=_mock_registry(),
+                heartbeat_id="hb-test-001",
+                context=_mock_context(),
+            )
 
         assert result["completed"] is True
         assert result["energy_spent"] == 1
@@ -310,45 +276,39 @@ class TestRunAgenticHeartbeat:
         mock_run_agent.assert_awaited_once()
 
     @patch("services.heartbeat_agentic.run_agent")
-    async def test_energy_budget_from_context(self, mock_run_agent):
+    async def test_energy_budget_from_context(self, mock_run_agent, db_pool):
         """Energy budget comes from context energy.current."""
         mock_run_agent.return_value = MagicMock(
             text="Done.", tool_calls_made=[], iterations=1,
             energy_spent=0, timed_out=False, stopped_reason="completed",
         )
 
-        conn = AsyncMock()
-        pool = MagicMock()
-        registry = _mock_registry()
-
         ctx = _mock_context()
         ctx["energy"]["current"] = 7
 
-        await run_agentic_heartbeat(
-            conn, pool=pool, registry=registry,
-            heartbeat_id="hb-test-002", context=ctx,
-        )
+        async with db_pool.acquire() as conn:
+            await run_agentic_heartbeat(
+                conn, pool=MagicMock(), registry=_mock_registry(),
+                heartbeat_id="hb-test-002", context=ctx,
+            )
 
         # Check that run_agent got energy_budget=7
         call_kwargs = mock_run_agent.call_args[1]
         assert call_kwargs["energy_budget"] == 7
 
     @patch("services.heartbeat_agentic.run_agent")
-    async def test_timeout_reported(self, mock_run_agent):
+    async def test_timeout_reported(self, mock_run_agent, db_pool):
         """Timeout is reported in result."""
         mock_run_agent.return_value = MagicMock(
             text="Timed out.", tool_calls_made=[], iterations=3,
             energy_spent=5, timed_out=True, stopped_reason="timeout",
         )
 
-        conn = AsyncMock()
-        pool = MagicMock()
-        registry = _mock_registry()
-
-        result = await run_agentic_heartbeat(
-            conn, pool=pool, registry=registry,
-            heartbeat_id="hb-test-003", context=_mock_context(),
-        )
+        async with db_pool.acquire() as conn:
+            result = await run_agentic_heartbeat(
+                conn, pool=MagicMock(), registry=_mock_registry(),
+                heartbeat_id="hb-test-003", context=_mock_context(),
+            )
 
         assert result["completed"] is False
         assert result["timed_out"] is True

@@ -16,8 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from services.heartbeat_agentic import (
-    _has_backlog_tasks,
-    _get_checkpoint_context,
     build_heartbeat_system_prompt,
     finalize_heartbeat,
     run_agentic_heartbeat,
@@ -51,10 +49,46 @@ def _mock_registry(tool_names: list[str] | None = None) -> MagicMock:
 
 
 def _mock_conn(prompt: str = "[heartbeat decision prompt]") -> AsyncMock:
-    """A connection mock whose fetchval returns a string, so the DB-rendered
-    heartbeat prompt (render_heartbeat_decision_prompt_db) yields a real value."""
+    """A connection mock: heartbeat_agentic_plan gets a contract-faithful
+    plan computed from the context (real semantics pinned by the SQL tests);
+    everything else returns the rendered prompt string."""
     conn = AsyncMock()
-    conn.fetchval = AsyncMock(return_value=prompt)
+
+    async def fetchval(query, *args):
+        if "heartbeat_agentic_plan" in query:
+            ctx = json.loads(args[0]) if args and isinstance(args[0], str) else {}
+            backlog = ctx.get("backlog") or {}
+            counts = backlog.get("counts") or {}
+            actionable = backlog.get("actionable") or []
+            has_tasks = bool(actionable) or (
+                (counts.get("todo") or 0) + (counts.get("in_progress") or 0) > 0
+            )
+            energy = (ctx.get("energy") or {}).get("current", 20)
+            parts = []
+            if has_tasks:
+                cp = [
+                    f"### Resuming: {i.get('title', 'Untitled')}\n"
+                    f"- Last step: {i.get('checkpoint', {}).get('step', 'unknown')}\n"
+                    f"- Progress: {i.get('checkpoint', {}).get('progress', '')}\n"
+                    f"- Next action: {i.get('checkpoint', {}).get('next_action', '')}"
+                    for i in actionable
+                    if i.get("status") == "in_progress" and i.get("checkpoint")
+                ]
+                if cp:
+                    parts.append("## Checkpoint Resume\n\n" + "\n\n".join(cp))
+            return {
+                "context": ctx,
+                "has_backlog_tasks": has_tasks,
+                "energy_budget": energy * 2 if has_tasks else energy,
+                "timeout_seconds": 300.0 if has_tasks else 120.0,
+                "max_tokens": 4096 if has_tasks else 2048,
+                "allow_shell": has_tasks,
+                "allow_file_write": has_tasks,
+                "prompt_suffix": "\n\n".join(parts) or None,
+            }
+        return prompt
+
+    conn.fetchval = AsyncMock(side_effect=fetchval)
     return conn
 
 
@@ -92,121 +126,73 @@ def _base_context(**overrides: Any) -> dict[str, Any]:
 
 
 # ============================================================================
-# Unit: _has_backlog_tasks
+# Unit: heartbeat_agentic_plan (SQL owns the gate, scaling, permissions)
 # ============================================================================
 
 
-class TestDetectTaskMode:
-    def test_no_backlog_returns_false(self):
-        ctx = _base_context(backlog={})
-        assert _has_backlog_tasks(ctx) is False
+class TestHeartbeatPlanSQL:
+    async def _plan(self, db_pool, ctx):
+        async with db_pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT heartbeat_agentic_plan($1::jsonb)", json.dumps(ctx)
+            )
+        return json.loads(raw) if isinstance(raw, str) else raw
 
-    def test_empty_counts_returns_false(self):
-        ctx = _base_context(backlog={"counts": {"todo": 0, "in_progress": 0}, "actionable": []})
-        assert _has_backlog_tasks(ctx) is False
+    async def test_no_backlog_baseline_resources(self, db_pool):
+        plan = await self._plan(db_pool, _base_context(backlog={}))
+        assert plan["has_backlog_tasks"] is False
+        assert plan["energy_budget"] == 15
+        assert plan["timeout_seconds"] == 120
+        assert plan["max_tokens"] == 2048
+        assert plan["allow_shell"] is False
+        assert plan["allow_file_write"] is False
 
-    def test_actionable_items_returns_true(self):
+    async def test_backlog_scales_and_grants(self, db_pool):
         ctx = _base_context(backlog={
             "counts": {"todo": 1},
-            "actionable": [{"title": "Deploy config", "priority": "high", "status": "todo"}],
-        })
-        assert _has_backlog_tasks(ctx) is True
-
-    def test_in_progress_count_returns_true(self):
-        ctx = _base_context(backlog={
-            "counts": {"todo": 0, "in_progress": 1},
-            "actionable": [],
-        })
-        assert _has_backlog_tasks(ctx) is True
-
-    def test_non_dict_backlog_returns_false(self):
-        ctx = _base_context(backlog="not a dict")
-        assert _has_backlog_tasks(ctx) is False
-
-    def test_missing_backlog_returns_false(self):
-        ctx = _base_context()
-        del ctx["backlog"]
-        assert _has_backlog_tasks(ctx) is False
-
-    def test_only_done_items_returns_false(self):
-        ctx = _base_context(backlog={
-            "counts": {"done": 5, "todo": 0, "in_progress": 0},
-            "actionable": [],
-        })
-        assert _has_backlog_tasks(ctx) is False
-
-    def test_null_counts_with_actionable_returns_true(self):
-        ctx = _base_context(backlog={
-            "counts": {},
             "actionable": [{"title": "Task", "status": "todo"}],
         })
-        assert _has_backlog_tasks(ctx) is True
+        plan = await self._plan(db_pool, ctx)
+        assert plan["has_backlog_tasks"] is True
+        assert plan["energy_budget"] == 30  # 15 * 2
+        assert plan["timeout_seconds"] == 300
+        assert plan["max_tokens"] == 4096
+        assert plan["allow_shell"] is True
+        assert plan["allow_file_write"] is True
 
+    async def test_done_only_backlog_stays_baseline(self, db_pool):
+        ctx = _base_context(backlog={"counts": {"todo": 0, "in_progress": 0, "done": 4}})
+        plan = await self._plan(db_pool, ctx)
+        assert plan["has_backlog_tasks"] is False
 
-# ============================================================================
-# Unit: _get_checkpoint_context
-# ============================================================================
-
-
-class TestGetCheckpointContext:
-    def test_no_backlog_returns_empty(self):
-        ctx = _base_context(backlog={})
-        assert _get_checkpoint_context(ctx) == ""
-
-    def test_no_in_progress_returns_empty(self):
+    async def test_checkpoint_fragment_in_suffix(self, db_pool):
         ctx = _base_context(backlog={
-            "actionable": [{"title": "Task", "status": "todo", "checkpoint": None}],
-        })
-        assert _get_checkpoint_context(ctx) == ""
-
-    def test_in_progress_without_checkpoint_returns_empty(self):
-        ctx = _base_context(backlog={
-            "actionable": [{"title": "Task", "status": "in_progress"}],
-        })
-        assert _get_checkpoint_context(ctx) == ""
-
-    def test_in_progress_with_checkpoint_returns_context(self):
-        ctx = _base_context(backlog={
+            "counts": {"in_progress": 1},
             "actionable": [{
-                "title": "Deploy config",
+                "title": "Deploy",
                 "status": "in_progress",
-                "checkpoint": {
-                    "step": "step 2",
-                    "progress": "Wrote config file",
-                    "next_action": "Run deploy script",
-                },
+                "checkpoint": {"step": "2", "progress": "built", "next_action": "Push"},
             }],
         })
-        result = _get_checkpoint_context(ctx)
-        assert "## Checkpoint Resume" in result
-        assert "Deploy config" in result
-        assert "step 2" in result
-        assert "Run deploy script" in result
+        plan = await self._plan(db_pool, ctx)
+        assert "Checkpoint Resume" in plan["prompt_suffix"]
+        assert "Deploy" in plan["prompt_suffix"]
+        assert "Push" in plan["prompt_suffix"]
 
-    def test_multiple_checkpoints_included(self):
-        ctx = _base_context(backlog={
-            "actionable": [
-                {
-                    "title": "Task A",
-                    "status": "in_progress",
-                    "checkpoint": {"step": "1", "progress": "done", "next_action": "verify"},
-                },
-                {
-                    "title": "Task B",
-                    "status": "in_progress",
-                    "checkpoint": {"step": "3", "progress": "half", "next_action": "finish"},
-                },
-            ],
-        })
-        result = _get_checkpoint_context(ctx)
-        assert "Task A" in result
-        assert "Task B" in result
-
-    def test_empty_checkpoint_dict_ignored(self):
+    async def test_empty_checkpoint_dict_ignored(self, db_pool):
         ctx = _base_context(backlog={
             "actionable": [{"title": "Task", "status": "in_progress", "checkpoint": {}}],
         })
-        assert _get_checkpoint_context(ctx) == ""
+        plan = await self._plan(db_pool, ctx)
+        assert not (plan.get("prompt_suffix") or "")
+
+    async def test_context_enriched_with_pending_summaries(self, db_pool):
+        plan = await self._plan(db_pool, _base_context())
+        enriched = plan["context"]
+        assert "pending_import_review" in enriched
+        assert "pending_skill_proposals" in enriched
+        assert "pending_protected_replacements" in enriched
+        assert "open_protected_reversions" in enriched
 
 
 # ============================================================================
