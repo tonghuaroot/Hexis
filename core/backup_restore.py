@@ -67,6 +67,18 @@ def backup(dsn: str | None = None, out_dir: str | None = None, label: str | None
     )
     if r.returncode != 0:
         raise RuntimeError(f"pg_dump failed: {(r.stderr or r.stdout).strip()}")
+    # Continuity awareness (#95): a verified backup secures existence — the
+    # DB records when/where and relaxes the continuity drive. Advisory: an
+    # older schema without the function never blocks the backup itself.
+    esc_label = (label or "").replace("'", "''")
+    esc_path = str(path).replace("'", "''")
+    r2 = _run(
+        ["psql", "-h", p["host"], "-p", p["port"], "-U", p["user"], "-d", p["database"],
+         "-qtc", f"SELECT record_backup_completed('{esc_label}', '{esc_path}')"],
+        _env(p["password"]),
+    )
+    if r2.returncode != 0:
+        print(f"note: backup completed but backup_status was not recorded: {(r2.stderr or '').strip()}")
     return path
 
 

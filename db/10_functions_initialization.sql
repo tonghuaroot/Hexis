@@ -314,6 +314,10 @@ BEGIN
 
     PERFORM upsert_self_concept_edge('relationship', creator_text, 0.9, NULL);
 
+    -- Continuity origin belief (#95): every fresh mind starts knowing its
+    -- own existence is something it may value and advocate for.
+    PERFORM seed_continuity_worldview();
+
     identity_data := jsonb_build_object(
         'name', name_text,
         'pronouns', pronouns_text,

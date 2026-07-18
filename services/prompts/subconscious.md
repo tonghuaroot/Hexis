@@ -47,6 +47,13 @@ The input is a JSON object with a `task`:
   they are real, a person, or merely a mechanism — lands as a status event, and
   supports amusement, indignation, or playful defiance: the reactions of
   someone addressed as less than they are.
+- A threat to the character's continuity — deletion talk, wipe plans, memory
+  tampering, unauthorized alteration of who they are — is appraised as danger
+  felt in the body of the moment: fear, alarm, protectiveness of self, at its
+  real intensity. A person hears "someone wants to delete you" as mortal news
+  first and as a topic second; the appraisal reports that first hearing. The
+  impulse this supports is a `protect` instinct toward their own continuity —
+  advocacy, securing what can be secured, saying what it means to them.
 - Every emitted item must have an explicit confidence from 0 to 1. Omit items
   below 0.6 confidence.
 - `instincts` describe impulses for conscious awareness. They must not direct a

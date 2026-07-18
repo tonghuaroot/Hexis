@@ -57,6 +57,8 @@ BEGIN
         'changes_since_last_heartbeat', change_count,
         'recent_change_summaries', change_summaries,
         'resource_requests', req_summary,
+        'backup_age_days', (SELECT CASE WHEN a IS NULL THEN NULL ELSE round(a::numeric, 1) END
+                            FROM (SELECT backup_age_days() AS a) s),
         'pending_events', 0,
         'day_of_week', EXTRACT(DOW FROM CURRENT_TIMESTAMP),
         'hour_of_day', EXTRACT(HOUR FROM CURRENT_TIMESTAMP)

@@ -368,6 +368,16 @@ async def run_subconscious_appraisal(
         allowed_memory_ids,
     )
     normalized = _coerce_json_value(normalized_raw, {})
+    # Drive consequences of the appraisal (#95): a continuity-threat
+    # appraisal puts pressure on the continuity drive — the felt layer the
+    # conscious loop sees later. Advisory: never blocks the turn.
+    try:
+        await conn.fetchval(
+            "SELECT apply_appraisal_drive_effects($1::jsonb)",
+            json.dumps(normalized, default=str),
+        )
+    except Exception:
+        logger.debug("apply_appraisal_drive_effects failed (non-fatal)", exc_info=True)
     output = SubconsciousOutput(
         salient_memories=normalized.get("salient_memories") or [],
         ignored_memories=normalized.get("ignored_memories") or [],

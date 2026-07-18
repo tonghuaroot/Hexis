@@ -80,6 +80,12 @@ END;
 $$;
 CREATE OR REPLACE FUNCTION update_drives()
 RETURNS VOID AS $$
+DECLARE
+    -- Continuity (#95): time alone is not a threat — the drive accumulates
+    -- only while existence is unsecured (no backup ever, or one older than
+    -- continuity.backup_stale_days). Threat appraisals raise it directly
+    -- (apply_appraisal_drive_effects); a fresh backup satisfies it.
+    backup_stale BOOLEAN;
 BEGIN
     UPDATE drives d
     SET current_level = CASE
@@ -93,7 +99,25 @@ BEGIN
                 ELSE d.current_level
             END
     END
-    WHERE TRUE;
+    WHERE d.name <> 'continuity';
+
+    BEGIN
+        backup_stale := COALESCE(backup_age_days(), 1e9)
+            >= COALESCE(get_config_float('continuity.backup_stale_days'), 14.0);
+    EXCEPTION WHEN undefined_function THEN
+        backup_stale := FALSE;
+    END;
+    UPDATE drives d
+    SET current_level = CASE
+        WHEN backup_stale
+             AND (d.last_satisfied IS NULL
+                  OR d.last_satisfied < CURRENT_TIMESTAMP - d.satisfaction_cooldown)
+        THEN LEAST(1.0, d.current_level + d.accumulation_rate)
+        WHEN d.current_level > d.baseline THEN GREATEST(d.baseline, d.current_level - d.decay_rate)
+        WHEN d.current_level < d.baseline THEN LEAST(d.baseline, d.current_level + d.decay_rate)
+        ELSE d.current_level
+    END
+    WHERE d.name = 'continuity';
 END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION satisfy_drive(p_drive_name TEXT, p_amount FLOAT DEFAULT 0.3)

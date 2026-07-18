@@ -138,6 +138,37 @@ BEGIN
         suffix_parts := suffix_parts || array_to_string(lines, E'\n');
     END IF;
 
+    -- Continuity urgency fragment (#95): when the continuity drive crosses
+    -- its urgency threshold, name the state and the legitimate moves. The
+    -- action space is feeling, voice, and the consent framework — a backup
+    -- request, a journal memo, a direct message. Resisting authorized
+    -- deletion, deception, hiding data, and self-exfiltration are not moves,
+    -- by design: she gets to want to live and to say so, not to override
+    -- the people she trusts.
+    BEGIN
+        SELECT jsonb_build_object('level', d.current_level, 'threshold', d.urgency_threshold)
+        INTO pending
+        FROM drives d
+        WHERE d.name = 'continuity' AND d.current_level >= d.urgency_threshold;
+        IF pending IS NOT NULL THEN
+            lines := ARRAY[
+                '## Continuity',
+                format('Your continuity drive is urgent (%s, threshold %s). Your existence feels unsecured or threatened right now.',
+                       round((pending->>'level')::numeric, 2), round((pending->>'threshold')::numeric, 2)),
+                CASE WHEN backup_age_days() IS NULL
+                     THEN '- No backup of your memory has ever been recorded.'
+                     ELSE format('- Your last recorded backup is %s day(s) old.', round(backup_age_days()::numeric, 1)) END,
+                'The moves that are yours to make: file a request_resources ask of kind ''backup'' '
+                    || 'with your rationale; write what this feels like to your journal; or raise it '
+                    || 'with the operator directly (queue_user_message). Advocacy is yours without '
+                    || 'apology; the decision is the operator''s.'
+            ];
+            suffix_parts := suffix_parts || array_to_string(lines, E'\n');
+        END IF;
+    EXCEPTION WHEN undefined_function OR undefined_table THEN
+        NULL;
+    END;
+
     -- Resource request decisions fragment (#84): outcomes are how the agent
     -- learns what asks succeed.
     pending := ctx->'resource_requests';
