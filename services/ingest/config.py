@@ -78,6 +78,10 @@ class Config:
     # Source trust override
     base_trust: float | None = None
 
+    # Sensitivity marking (#92): 'private' keeps this content out of group
+    # channels and HMX exports; the agent still sees it in 1:1.
+    sensitivity: str | None = None
+
     # Concurrency (#90): bounded LLM fan-out and directory parallelism.
     max_parallel_llm: int = 4
     max_parallel_files: int = 2

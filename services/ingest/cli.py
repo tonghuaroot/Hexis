@@ -130,6 +130,7 @@ def _build_config_from_args(args: argparse.Namespace) -> Config:
         min_importance_floor=getattr(args, "min_importance", None),
         permanent=getattr(args, "permanent", False),
         base_trust=getattr(args, "base_trust", None),
+        sensitivity=getattr(args, "sensitivity", None),
         verbose=not getattr(args, "quiet", False),
         # DB-owned policy (#91); dataclass defaults cover absent keys.
         **db_settings,
@@ -367,6 +368,11 @@ Examples:
     ingest_p.add_argument("--min-importance", type=float, help="Minimum importance floor")
     ingest_p.add_argument("--permanent", action="store_true", help="Mark memories as permanent (no decay)")
     ingest_p.add_argument("--base-trust", type=float, help="Base trust level for source")
+    ingest_p.add_argument(
+        "--sensitivity", choices=["private"], default=None,
+        help="Mark resulting memories private: excluded from group-channel "
+             "recall and default HMX export",
+    )
 
     _add_common_args(ingest_p, env_defaults)
 

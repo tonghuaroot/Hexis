@@ -526,7 +526,12 @@ BEGIN
         p_result := NULL,
         p_emotional_valence := 0.0,
         p_importance := 0.6,
+        -- Sensitivity pass-through (#92): callers marking a turn private
+        -- keep the resulting memory out of group recall and default export.
         p_source_attribution := jsonb_build_object('kind', 'conversation', 'observed_at', CURRENT_TIMESTAMP)
+            || CASE WHEN NULLIF(p_context->>'sensitivity', '') IS NOT NULL
+                    THEN jsonb_build_object('sensitivity', p_context->>'sensitivity')
+                    ELSE '{}'::jsonb END
     );
 
     RETURN memory_id;

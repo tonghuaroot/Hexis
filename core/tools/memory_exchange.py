@@ -157,6 +157,7 @@ class ExportMemoriesHandler(ToolHandler):
                         "items": {"type": "string", "enum": sorted(PROTECTED_SECTIONS)},
                     },
                     "include_raw": {"type": "boolean", "default": False},
+                    "include_sensitive": {"type": "boolean", "default": False},
                     "include_config": {"type": "boolean", "default": False},
                     "include_in_flight_work": {"type": "boolean"},
                     "include_audit_records": {"type": "boolean"},
@@ -212,6 +213,7 @@ class ExportMemoriesHandler(ToolHandler):
                     since=since,
                     until=until,
                     redaction_policy=str(arguments.get("redaction") or "none"),
+                    include_sensitive=bool(arguments.get("include_sensitive", False)),
                 )
             output_format = str(arguments.get("format") or "json")
             if resolved_output:

@@ -136,13 +136,15 @@ DECLARE
     v_full_content TEXT;
     v_importance FLOAT;
     v_valence FLOAT;
+    v_private BOOLEAN;
     v_orig UUID;
 BEGIN
     SELECT array_agg(id ORDER BY created_at),
            string_agg(content, E'\n\n---\n\n' ORDER BY created_at),
            max(importance),
-           avg((metadata->>'emotional_valence')::float)
-      INTO v_ids, v_full_content, v_importance, v_valence
+           avg((metadata->>'emotional_valence')::float),
+           bool_or(source_attribution->>'sensitivity' = 'private')
+      INTO v_ids, v_full_content, v_importance, v_valence, v_private
       FROM memories
       WHERE id = ANY(p_ids) AND status = 'active' AND type = 'episodic'
         AND NOT is_memory_protected(id);
@@ -155,7 +157,12 @@ BEGIN
         'episodic', v_full_content,
         (get_embedding(ARRAY[left(v_full_content, 8000)]))[1],
         LEAST(1.0, COALESCE(v_importance, 0.5)),
-        jsonb_build_object('kind', 'consolidation', 'source', 'rest'),
+        -- Sensitivity propagates from source to derivation (#92): one
+        -- private memory in the group marks the merged gist private.
+        jsonb_build_object('kind', 'consolidation', 'source', 'rest')
+            || CASE WHEN v_private
+                    THEN jsonb_build_object('sensitivity', 'private')
+                    ELSE '{}'::jsonb END,
         NULL,
         jsonb_build_object('consolidation', jsonb_build_object(
             'role', 'merged', 'source_ids', to_jsonb(v_ids), 'summarized', false))
@@ -233,10 +240,22 @@ DECLARE
     v_lesson_emb vector;
     v_dup UUID;
     v_created INT := 0;
+    -- Sensitivity propagates from source to derivation (#92): lessons
+    -- distilled from a private memory are themselves private.
+    v_lesson_attr JSONB;
 BEGIN
     IF COALESCE(btrim(p_summary), '') = '' THEN
         RAISE EXCEPTION 'summary must not be empty';
     END IF;
+
+    SELECT jsonb_build_object('kind', 'distillation', 'from', p_id::text)
+           || CASE WHEN m.source_attribution->>'sensitivity' = 'private'
+                   THEN jsonb_build_object('sensitivity', 'private')
+                   ELSE '{}'::jsonb END
+      INTO v_lesson_attr
+      FROM memories m WHERE m.id = p_id;
+    v_lesson_attr := COALESCE(
+        v_lesson_attr, jsonb_build_object('kind', 'distillation', 'from', p_id::text));
 
     UPDATE memories m SET
         content = p_summary,
@@ -268,13 +287,13 @@ BEGIN
                 p_pattern_description := COALESCE(lesson->>'pattern', 'consolidated lesson'),
                 p_confidence_score := 0.7,
                 p_importance := 0.6,
-                p_source_attribution := jsonb_build_object('kind', 'distillation', 'from', p_id::text));
+                p_source_attribution := v_lesson_attr);
         ELSE
             v_lesson_id := create_semantic_memory(
                 p_content := lesson->>'content',
                 p_confidence := 0.7,
                 p_importance := 0.55,
-                p_source_attribution := jsonb_build_object('kind', 'distillation', 'from', p_id::text));
+                p_source_attribution := v_lesson_attr);
         END IF;
 
         BEGIN

@@ -434,6 +434,8 @@ class IngestionPipeline:
             payload["section_hash"] = section_hash
         if self.config.base_trust is not None:
             payload["trust"] = float(self.config.base_trust)
+        if self.config.sensitivity:
+            payload["sensitivity"] = str(self.config.sensitivity)
         return payload
 
     async def _create_archive_encounter(self, doc: DocumentInfo) -> str | None:

@@ -178,6 +178,11 @@ BEGIN
             'observed_at', unit.turn_at,
             'trust', 0.75
         );
+        -- Sensitivity propagates from source to derivation (#92): a fact
+        -- extracted from a private turn is itself private.
+        IF unit.source_attribution->>'sensitivity' = 'private' THEN
+            source := source || jsonb_build_object('sensitivity', 'private');
+        END IF;
 
         IF routed->>'decision' = 'duplicate' AND routed->>'matched_memory_id' IS NOT NULL THEN
             PERFORM revise_memory_confidence(

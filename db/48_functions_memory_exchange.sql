@@ -16,7 +16,11 @@ SET check_function_bodies = off;
 CREATE OR REPLACE FUNCTION hmx_export_memories(
     p_types TEXT[] DEFAULT NULL,
     p_since TIMESTAMPTZ DEFAULT NULL,
-    p_until TIMESTAMPTZ DEFAULT NULL
+    p_until TIMESTAMPTZ DEFAULT NULL,
+    -- Sensitivity egress control (#92): private-marked memories travel only
+    -- when the caller opts in — port/duplicate (her whole brain moving house)
+    -- pass TRUE; telepathy/analysis default FALSE.
+    p_include_sensitive BOOLEAN DEFAULT FALSE
 ) RETURNS JSONB AS $$
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'id', m.id,
@@ -40,6 +44,8 @@ CREATE OR REPLACE FUNCTION hmx_export_memories(
     WHERE m.status IN ('active', 'archived')
       AND m.type::text = ANY(COALESCE(p_types, ARRAY['episodic','semantic','procedural','strategic']))
       AND m.type::text NOT IN ('worldview', 'goal')
+      AND (p_include_sensitive
+           OR COALESCE(m.source_attribution->>'sensitivity', '') <> 'private')
       AND (p_since IS NULL OR m.created_at >= p_since)
       AND (p_until IS NULL OR m.created_at <= p_until);
 $$ LANGUAGE sql STABLE;
@@ -319,7 +325,10 @@ $$ LANGUAGE sql STABLE;
 
 -- Raw conversation units are explicitly opt-in because they can contain the
 -- most sensitive verbatim user content. Embeddings are never exported.
-CREATE OR REPLACE FUNCTION hmx_export_raw_units() RETURNS JSONB AS $$
+CREATE OR REPLACE FUNCTION hmx_export_raw_units(
+    -- Sensitivity egress control (#92) — same opt-in as hmx_export_memories.
+    p_include_sensitive BOOLEAN DEFAULT FALSE
+) RETURNS JSONB AS $$
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'id', u.id,
         'user_text', u.user_text,
@@ -336,7 +345,9 @@ CREATE OR REPLACE FUNCTION hmx_export_raw_units() RETURNS JSONB AS $$
         ), '[]'::jsonb)
     ) ORDER BY u.turn_at, u.id), '[]'::jsonb)
     FROM subconscious_units u
-    WHERE u.status <> 'redacted';
+    WHERE u.status <> 'redacted'
+      AND (p_include_sensitive
+           OR COALESCE(u.source_attribution->>'sensitivity', '') <> 'private');
 $$ LANGUAGE sql STABLE;
 
 -- Configuration is also opt-in. Verification material and credentials stay

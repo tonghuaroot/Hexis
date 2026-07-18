@@ -71,6 +71,29 @@ class TestChannelMessage:
         assert msg.metadata["is_private"] is True
         assert msg.timestamp == ts
 
+    def test_is_group_from_metadata(self):
+        """is_group (#92) drives exclude_sensitive recall in group rooms:
+        explicit is_group wins, is_private implies its inverse, and the
+        default is a 1:1 conversation."""
+        from channels.base import ChannelMessage
+
+        def msg(metadata):
+            return ChannelMessage(
+                channel_type="telegram",
+                channel_id="chat-1",
+                sender_id="user-1",
+                sender_name="Alice",
+                content="Hello",
+                message_id="msg-1",
+                metadata=metadata,
+            )
+
+        assert msg({"is_group": True}).is_group is True
+        assert msg({"is_group": False}).is_group is False
+        assert msg({"is_private": True}).is_group is False
+        assert msg({"is_private": False}).is_group is True
+        assert msg({}).is_group is False
+
 
 class TestChannelCapabilities:
     def test_defaults(self):
@@ -503,6 +526,35 @@ class TestChannelConversation:
                 )
                 assert [r["direction"] for r in rows] == ["inbound", "outbound"]
             finally:
+                await self._cleanup(conn, sender_id)
+
+    async def test_group_flag_reaches_chat_turn(self, db_pool, monkeypatch):
+        """A group-room message threads is_group into chat_turn (#92), which
+        drives hydrate(exclude_sensitive=True) so private memories stay out
+        of shared rooms."""
+        import services.chat
+        from channels.base import ChannelMessage
+        from channels.conversation import process_channel_message
+
+        sender_id = f"{self._TEST_PREFIX}group_{id(self)}"
+        chat_turn_mock = AsyncMock(return_value={"assistant": "ok", "history": []})
+        monkeypatch.setattr(services.chat, "chat_turn", chat_turn_mock)
+
+        msg = ChannelMessage(
+            channel_type="test",
+            channel_id="test-channel-4",
+            sender_id=sender_id,
+            sender_name="TestBot",
+            content="Hello from the group",
+            message_id="test-msg-4",
+            metadata={"is_group": True},
+        )
+        try:
+            chunks = await process_channel_message(msg, db_pool)
+            assert chunks == ["ok"]
+            assert chat_turn_mock.await_args.kwargs["is_group"] is True
+        finally:
+            async with db_pool.acquire() as conn:
                 await self._cleanup(conn, sender_id)
 
 

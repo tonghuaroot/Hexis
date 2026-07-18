@@ -39,6 +39,8 @@ async def _process_job(pool, job: dict[str, Any], *, config_override=None) -> No
         config = await _build_ingest_config(pool, mode=IngestionMode(mode_value))
     config.verbose = False
     config.cancel_check = lambda: cancel_flag["set"]
+    if str(payload.get("sensitivity") or "").strip().lower() == "private":
+        config.sensitivity = "private"
     pipeline = IngestionPipeline(config)
 
     async def _ingest() -> int:

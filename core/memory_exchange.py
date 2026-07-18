@@ -582,7 +582,7 @@ def build_envelope(
 # ---------------------------------------------------------------------------
 
 _SECTION_FN = {
-    "memories": "hmx_export_memories($1::text[], $2::timestamptz, $3::timestamptz)",
+    "memories": "hmx_export_memories($1::text[], $2::timestamptz, $3::timestamptz, $4::boolean)",
     "episodes": "hmx_export_episodes()",
     "relationships": "hmx_export_relationships()",
     "narrative": "hmx_export_narrative()",
@@ -594,7 +594,7 @@ _SECTION_FN = {
     "clusters": "hmx_export_clusters()",
     "in_flight_work": "hmx_export_in_flight_work()",
     "audit_records": "hmx_export_audit_records()",
-    "raw_units": "hmx_export_raw_units()",
+    "raw_units": "hmx_export_raw_units($1::boolean)",
     "config": "hmx_export_config()",
 }
 
@@ -822,6 +822,7 @@ async def export_hmx(
     until: Any = None,
     redaction_policy: str = "none",
     consent_scope: str = "unspecified",
+    include_sensitive: bool = False,
 ) -> dict[str, Any]:
     """Produce a complete HMX envelope from the live database.
 
@@ -859,10 +860,24 @@ async def export_hmx(
     )
     export_id = envelope["export_id"]
 
+    # Sensitivity policy (#92), mirroring the protected-section intent split:
+    # port/duplicate move the whole brain, so private-marked rows always
+    # travel; telepathy/analysis are egress to someone else, so they require
+    # an explicit opt-in.
+    sensitive_included = include_sensitive or intent in ("port", "duplicate")
+
     for section in plan.sections:
         if section == "memories":
             raw = await conn.fetchval(
-                f"SELECT {_SECTION_FN['memories']}", types, since, until
+                f"SELECT {_SECTION_FN['memories']}",
+                types,
+                since,
+                until,
+                sensitive_included,
+            )
+        elif section == "raw_units":
+            raw = await conn.fetchval(
+                f"SELECT {_SECTION_FN['raw_units']}", sensitive_included
             )
         else:
             raw = await conn.fetchval(f"SELECT {_SECTION_FN[section]}")
@@ -880,6 +895,11 @@ async def export_hmx(
         envelope["section_digests"] = digests
 
     export_warnings = list(plan.warnings)
+    if include_sensitive and intent not in ("port", "duplicate"):
+        export_warnings.append(
+            f"private-marked memories included in a {intent} export by explicit "
+            "opt-in; the receiver sees content the owner marked private"
+        )
     in_flight = envelope["sections"].get("in_flight_work") or {}
     if in_flight.get("consolidation_tasks") and "raw_units" not in envelope["sections"]:
         export_warnings.append(

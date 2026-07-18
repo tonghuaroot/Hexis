@@ -7,6 +7,8 @@ import {
   Eye,
   EyeOff,
   FileText,
+  Lock,
+  LockOpen,
   Send,
   Settings2,
   Trash2,
@@ -37,6 +39,9 @@ type PastedAttachment = {
   title: string;
   content: string;
   wordCount: number;
+  // "private" keeps the ingested memories out of group-channel recall and
+  // default HMX export (#92); toggled per-chip before sending.
+  sensitivity: "private" | null;
 };
 
 // Pastes longer than this become attachments (matching the Claude/ChatGPT
@@ -307,12 +312,23 @@ export default function ChatPage() {
         title: attachmentTitle(pasted),
         content: pasted,
         wordCount: pasted.split(/\s+/).filter(Boolean).length,
+        sensitivity: null,
       },
     ]);
   };
 
   const removeAttachment = (id: string) => {
     setAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+  };
+
+  const toggleAttachmentPrivacy = (id: string) => {
+    setAttachments((prev) =>
+      prev.map((attachment) =>
+        attachment.id === id
+          ? { ...attachment, sensitivity: attachment.sensitivity === "private" ? null : "private" }
+          : attachment
+      )
+    );
   };
 
   const handleSend = async () => {
@@ -333,11 +349,14 @@ export default function ChatPage() {
             content: attachment.content,
             title: attachment.title,
             mode: "fast",
+            sensitivity: attachment.sensitivity ?? undefined,
           }),
         });
         if (res.ok) {
           ingestNotes.push(
-            `[Attached document "${attachment.title}" (${attachment.wordCount} words) — being ingested into memory]`
+            `[Attached document "${attachment.title}" (${attachment.wordCount} words) — being ingested into memory${
+              attachment.sensitivity === "private" ? " as private (kept out of group conversations and exports)" : ""
+            }]`
           );
         } else {
           const detail = await res.text();
@@ -733,6 +752,28 @@ export default function ChatPage() {
                     <FileText size={13} className="flex-none text-[var(--teal)]" />
                     <span className="max-w-56 truncate font-medium">{attachment.title}</span>
                     <span className="text-[var(--ink-soft)]">{attachment.wordCount.toLocaleString()} words</span>
+                    <button
+                      type="button"
+                      aria-label={
+                        attachment.sensitivity === "private"
+                          ? `Make attachment ${attachment.title} shareable`
+                          : `Mark attachment ${attachment.title} private`
+                      }
+                      title={
+                        attachment.sensitivity === "private"
+                          ? "Private: kept out of group conversations and exports. Click to make shareable."
+                          : "Shareable. Click to keep out of group conversations and exports."
+                      }
+                      onClick={() => toggleAttachmentPrivacy(attachment.id)}
+                      className={`flex flex-none items-center gap-1 rounded p-0.5 ${
+                        attachment.sensitivity === "private"
+                          ? "text-[var(--teal)]"
+                          : "text-[var(--ink-soft)] hover:bg-[var(--outline)] hover:text-[var(--foreground)]"
+                      }`}
+                    >
+                      {attachment.sensitivity === "private" ? <Lock size={12} /> : <LockOpen size={12} />}
+                      {attachment.sensitivity === "private" ? <span className="font-medium">Private</span> : null}
+                    </button>
                     <button
                       type="button"
                       aria-label={`Remove attachment ${attachment.title}`}

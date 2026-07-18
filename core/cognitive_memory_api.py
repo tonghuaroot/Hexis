@@ -284,6 +284,7 @@ class CognitiveMemory:
         subgraph_budget: int = 40,
         subgraph_rel_types: list[str] | None = None,
         session_id: UUID | str | None = None,
+        exclude_sensitive: bool = False,
     ) -> HydratedContext:
         """
         Hydrate a query with relevant context for RAG prompt augmentation.
@@ -308,7 +309,7 @@ class CognitiveMemory:
 
         async def _fetch_memories():
             async with self._pool.acquire() as conn:
-                recalled = await self._recall_recmem(conn, query, memory_limit, session_id=session_id)
+                recalled = await self._recall_recmem(conn, query, memory_limit, session_id=session_id, exclude_sensitive=exclude_sensitive)
                 relevant_worldview = []
                 if include_worldview:
                     relevant_worldview = await self._recall_memories(
@@ -723,6 +724,7 @@ class CognitiveMemory:
         epi_limit: int | None = None,
         sem_limit: int | None = None,
         session_id: UUID | str | None = None,
+        exclude_sensitive: bool = False,
     ) -> list[Memory]:
         async with self._pool.acquire() as conn:
             return await self._recall_recmem(
@@ -1369,6 +1371,7 @@ class CognitiveMemory:
         epi_limit: int | None = None,
         sem_limit: int | None = None,
         session_id: UUID | str | None = None,
+        exclude_sensitive: bool = False,
     ) -> list[Memory]:
         # Per-tier budgets are config-owned (#76): memory.recmem_sub/epi/sem_limit
         # seed the ceilings; the caller's overall limit still scales below them.
@@ -1387,7 +1390,8 @@ class CognitiveMemory:
                 $2::int,
                 $3::int,
                 $4::int,
-                $5::uuid
+                $5::uuid,
+                $6::boolean
             )
             """,
             query,
@@ -1395,6 +1399,7 @@ class CognitiveMemory:
             int(epi_limit if epi_limit is not None else max(1, min(limit, cfg["epi"]))),
             int(sem_limit if sem_limit is not None else max(1, min(limit * 2, cfg["sem"]))),
             _uuid_text_or_none(session_id),
+            exclude_sensitive,
         )
 
         derived_sources: set[UUID] = set()

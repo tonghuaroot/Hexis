@@ -601,6 +601,10 @@ async def run_agent(
                     include_emotional_state=True,
                     include_goals=True,
                     include_drives=True,
+                    # Sensitivity enforcement (#92): a group room never
+                    # receives private-marked memories — the channel prompt's
+                    # promise, made mechanical at the recall layer.
+                    exclude_sensitive=is_group,
                 )
                 memory_context = await render_chat_memory_context_db(conn, context, max_memories=10)
 
@@ -846,6 +850,10 @@ async def stream_agent(
                     include_emotional_state=True,
                     include_goals=True,
                     include_drives=True,
+                    # Sensitivity enforcement (#92): a group room never
+                    # receives private-marked memories — the channel prompt's
+                    # promise, made mechanical at the recall layer.
+                    exclude_sensitive=is_group,
                 )
                 memory_context = await render_chat_memory_context_db(conn, context, max_memories=10)
 

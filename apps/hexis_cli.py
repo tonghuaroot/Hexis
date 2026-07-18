@@ -643,6 +643,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-raw", action="store_true", help="Include sensitive raw source units"
     )
     hmx_export.add_argument(
+        "--include-sensitive",
+        action="store_true",
+        help="Include private-marked memories in telepathy/analysis exports "
+        "(port/duplicate always carry them)",
+    )
+    hmx_export.add_argument(
         "--include-config", action="store_true", help="Include non-secret configuration"
     )
     hmx_export.add_argument(

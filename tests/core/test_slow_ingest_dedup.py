@@ -39,6 +39,7 @@ def _make_pipeline(plan: list[dict[str, Any]]) -> MagicMock:
     pipeline._create_encounter_memory = AsyncMock(return_value="encounter-1")
     store = pipeline.store = AsyncMock()
     store.client = object()  # already "connected"
+    store.get_receipts.return_value = {}  # fresh document: no receipts yet
     store.fetch_appraisal_context.return_value = {
         "worldview": [], "emotional_state": {}, "goals": [],
     }

@@ -50,6 +50,24 @@ async def _build_ingest_config(pool, **overrides: Any) -> "Config":
     return Config(**defaults)
 
 
+# Sensitivity marking (#92): "private" keeps the resulting memories out of
+# group-channel recall and default HMX export.
+_SENSITIVITY_PROPERTY = {
+    "type": "string",
+    "enum": ["private"],
+    "description": (
+        "Mark the resulting memories private: excluded from group-channel "
+        "recall and default HMX export."
+    ),
+}
+
+
+def _sensitivity_override(arguments: dict[str, Any]) -> dict[str, Any]:
+    if str(arguments.get("sensitivity") or "").strip().lower() == "private":
+        return {"sensitivity": "private"}
+    return {}
+
+
 class FastIngestHandler(ToolHandler):
     """Fast (shallow) content ingestion.
 
@@ -77,6 +95,7 @@ class FastIngestHandler(ToolHandler):
                         "type": "string",
                         "description": "Optional title for the content.",
                     },
+                    "sensitivity": _SENSITIVITY_PROPERTY,
                 },
                 "required": ["path"],
             },
@@ -109,7 +128,7 @@ class FastIngestHandler(ToolHandler):
             )
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.FAST)
+        config = await _build_ingest_config(pool, mode=IngestionMode.FAST, **_sensitivity_override(arguments))
         pipeline = IngestionPipeline(config)
 
         try:
@@ -165,6 +184,7 @@ class SlowIngestHandler(ToolHandler):
                         "type": "string",
                         "description": "Optional title for the content.",
                     },
+                    "sensitivity": _SENSITIVITY_PROPERTY,
                 },
                 "required": ["path"],
             },
@@ -207,7 +227,7 @@ class SlowIngestHandler(ToolHandler):
             )
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.SLOW)
+        config = await _build_ingest_config(pool, mode=IngestionMode.SLOW, **_sensitivity_override(arguments))
         pipeline = IngestionPipeline(config)
 
         try:
@@ -290,6 +310,7 @@ class HybridIngestHandler(ToolHandler):
                         "type": "string",
                         "description": "Optional title for the content.",
                     },
+                    "sensitivity": _SENSITIVITY_PROPERTY,
                 },
                 "required": ["path"],
             },
@@ -332,7 +353,7 @@ class HybridIngestHandler(ToolHandler):
             )
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.HYBRID)
+        config = await _build_ingest_config(pool, mode=IngestionMode.HYBRID, **_sensitivity_override(arguments))
         pipeline = IngestionPipeline(config)
 
         try:
@@ -411,6 +432,7 @@ class GitIngestHandler(ToolHandler):
                         "type": "string",
                         "description": "Branch to clone (default: repo default branch).",
                     },
+                    "sensitivity": _SENSITIVITY_PROPERTY,
                 },
                 "required": ["url"],
             },
@@ -444,7 +466,7 @@ class GitIngestHandler(ToolHandler):
         branch = arguments.get("branch")
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.FAST)
+        config = await _build_ingest_config(pool, mode=IngestionMode.FAST, **_sensitivity_override(arguments))
         pipeline = IngestionPipeline(config)
         tmpdir = tempfile.mkdtemp(prefix="hexis_git_")
 
@@ -592,6 +614,7 @@ class URLIngestHandler(ToolHandler):
                         "type": "string",
                         "description": "Optional title for the content (auto-detected if omitted).",
                     },
+                    "sensitivity": _SENSITIVITY_PROPERTY,
                 },
                 "required": ["url"],
             },
@@ -651,7 +674,7 @@ class URLIngestHandler(ToolHandler):
 
         # The pipeline ingests text directly now (#89) — no temp-file dance.
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=mode)
+        config = await _build_ingest_config(pool, mode=mode, **_sensitivity_override(arguments))
         pipeline = IngestionPipeline(config)
         try:
             count = await pipeline.ingest_text(

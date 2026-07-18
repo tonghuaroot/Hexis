@@ -141,6 +141,9 @@ class IngestTextRequest(BaseModel):
     content: str
     title: str | None = None
     mode: str = "fast"
+    # Sensitivity marking (#92): "private" keeps the resulting memories out
+    # of group-channel recall and default HMX export.
+    sensitivity: str | None = None
 
 
 class OpenAIChatMessage(BaseModel):
@@ -807,6 +810,9 @@ async def ingest_text(req: IngestTextRequest):
     mode_value = (req.mode or "fast").lower()
     if mode_value not in ("fast", "slow", "hybrid"):
         raise HTTPException(status_code=422, detail="mode must be fast, slow, or hybrid")
+    sensitivity = (req.sensitivity or "").strip().lower() or None
+    if sensitivity not in (None, "private"):
+        raise HTTPException(status_code=422, detail="sensitivity must be omitted or 'private'")
     if _pool is None:
         raise HTTPException(status_code=503, detail="database not ready")
 
@@ -823,7 +829,12 @@ async def ingest_text(req: IngestTextRequest):
     async with _pool.acquire() as conn:
         job_id = await conn.fetchval(
             "SELECT enqueue_ingestion_job('text', $1::jsonb, $2, $3)",
-            json.dumps({"title": title, "mode": mode_value, "source_type": "pasted_text"}),
+            json.dumps({
+                "title": title,
+                "mode": mode_value,
+                "source_type": "pasted_text",
+                "sensitivity": sensitivity,
+            }),
             content,
             content_hash,
         )

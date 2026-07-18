@@ -166,6 +166,12 @@ BEGIN
                 0.8)
         )
     );
+    -- Sensitivity marking (#92): rides the attribution so recall/export can
+    -- filter mechanically; visible to the agent herself in 1:1.
+    IF NULLIF(p_context->>'sensitivity', '') IS NOT NULL THEN
+        source_attribution := source_attribution
+            || jsonb_build_object('sensitivity', p_context->>'sensitivity');
+    END IF;
     raw := recmem_ingest_turn(
         p_user_text,
         p_assistant_text,

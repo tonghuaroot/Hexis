@@ -163,6 +163,7 @@ async def process_channel_message(
             session_id=session_id,
             pool=pool,
             user_label=msg.sender_name,
+            is_group=msg.is_group,
         )
 
         assistant_text = result.get("assistant", "")
@@ -269,6 +270,7 @@ async def stream_channel_message(
             session_id=session_id,
             pool=pool,
             user_label=msg.sender_name,
+            is_group=msg.is_group,
         ):
             collected.append(token)
             await coalescer.push(token)

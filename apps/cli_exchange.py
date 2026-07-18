@@ -381,6 +381,7 @@ async def run_export(dsn: str, args: Any) -> int:
             since=since,
             until=until,
             redaction_policy=args.redaction,
+            include_sensitive=getattr(args, "include_sensitive", False),
         )
     finally:
         await conn.close()

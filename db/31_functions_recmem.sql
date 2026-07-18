@@ -907,6 +907,15 @@ BEGIN
         'observed_at', CURRENT_TIMESTAMP,
         'trust', 0.9
     );
+    -- Sensitivity propagates from source to derivation (#92): one private
+    -- turn in a scene marks the whole scene memory private.
+    IF EXISTS (
+        SELECT 1 FROM subconscious_units u
+        WHERE u.id = ANY(task.source_unit_ids)
+          AND u.source_attribution->>'sensitivity' = 'private'
+    ) THEN
+        source_attr := source_attr || jsonb_build_object('sensitivity', 'private');
+    END IF;
 
     FOR item IN SELECT value FROM jsonb_array_elements(COALESCE(p_episodes, '[]'::jsonb))
     LOOP
@@ -1066,7 +1075,11 @@ CREATE OR REPLACE FUNCTION recmem_recall_context(
     p_k_sub INT DEFAULT 10,
     p_k_epi INT DEFAULT 5,
     p_k_sem INT DEFAULT 10,
-    p_session_id UUID DEFAULT NULL
+    p_session_id UUID DEFAULT NULL,
+    -- Sensitivity enforcement (#92): group channels and other shared
+    -- surfaces recall with this TRUE; the agent's own 1:1 recall keeps
+    -- everything. The prompt's privacy promise, made mechanical.
+    p_exclude_sensitive BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE (
     tier TEXT,
     item_id UUID,
@@ -1123,6 +1136,8 @@ BEGIN
         WHERE s.status = 'active'
           AND s.embedding_status = 'embedded'
           AND s.embedding IS NOT NULL
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(s.source_attribution->>'sensitivity', '') <> 'private')
         ORDER BY s.embedding <=> query_embedding
         LIMIT GREATEST(COALESCE(p_k_sub, 10), 0)
     ),
@@ -1146,6 +1161,8 @@ BEGIN
           AND s.session_id = p_session_id
           AND s.status = 'active'
           AND s.embedding_status <> 'embedded'
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(s.source_attribution->>'sensitivity', '') <> 'private')
         ORDER BY s.created_at DESC
         LIMIT 3
     ),
@@ -1180,6 +1197,8 @@ BEGIN
         WHERE m.status = 'active'
           AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
           AND m.type = 'episodic'
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(m.source_attribution->>'sensitivity', '') <> 'private')
         GROUP BY m.id
         ORDER BY m.embedding <=> query_embedding
         LIMIT GREATEST(COALESCE(p_k_epi, 5), 0)
@@ -1215,6 +1234,8 @@ BEGIN
         WHERE m.status = 'active'
           AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
           AND m.type = 'semantic'
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(m.source_attribution->>'sensitivity', '') <> 'private')
         GROUP BY m.id
         ORDER BY m.embedding <=> query_embedding
         LIMIT GREATEST(COALESCE(p_k_sem, 10), 0)

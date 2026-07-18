@@ -12,6 +12,7 @@ DECLARE
     observed_at TIMESTAMPTZ;
     trust FLOAT;
     content_hash TEXT;
+    sensitivity TEXT;
 BEGIN
     IF p_source IS NULL OR jsonb_typeof(p_source) <> 'object' THEN
         RETURN '{}'::jsonb;
@@ -22,6 +23,9 @@ BEGIN
     label := NULLIF(p_source->>'label', '');
     author := NULLIF(p_source->>'author', '');
     content_hash := NULLIF(p_source->>'content_hash', '');
+    -- Sensitivity survives normalization (#92): 'private' is the one defined
+    -- level; it keeps the memory out of group recall and default export.
+    sensitivity := CASE WHEN p_source->>'sensitivity' = 'private' THEN 'private' END;
 
     BEGIN
         observed_at := (p_source->>'observed_at')::timestamptz;
@@ -43,7 +47,8 @@ BEGIN
             'author', author,
             'observed_at', observed_at,
             'trust', trust,
-            'content_hash', content_hash
+            'content_hash', content_hash,
+            'sensitivity', sensitivity
         )
     );
     END;

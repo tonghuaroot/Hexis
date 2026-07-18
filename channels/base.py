@@ -54,6 +54,18 @@ class ChannelMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @property
+    def is_group(self) -> bool:
+        """Whether this message arrived in a group context (#92): adapters
+        record it in metadata; the conversation handler threads it into
+        recall so private memories stay out of shared rooms."""
+        meta = self.metadata or {}
+        if "is_group" in meta:
+            return bool(meta.get("is_group"))
+        if "is_private" in meta:
+            return not bool(meta.get("is_private"))
+        return False
+
     def __post_init__(self) -> None:
         """Convert raw dicts in attachments to Attachment instances."""
         from .media import Attachment as Att
