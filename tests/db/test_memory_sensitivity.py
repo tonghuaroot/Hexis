@@ -249,3 +249,72 @@ async def test_hmx_export_requires_opt_in_for_private(db_pool):
     assert private_content in opted_memories
     assert unit_content not in default_units
     assert unit_content in opted_units
+
+
+async def test_recall_tool_excludes_private_in_group_context(db_pool):
+    """#96 stopgap: the conscious recall tool respects the same wall hydrate
+    enforces — group context excludes private memories on both retriever
+    arms (hybrid and structured)."""
+    private_content = f"private tool probe {get_test_identifier('sensitivity')}"
+    public_content = f"public tool probe {get_test_identifier('sensitivity')}"
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await _seed_memory(conn, private_content, sensitivity="private",
+                               query_text="tool probe search")
+            await _seed_memory(conn, public_content, query_text="tool probe search")
+
+            hybrid_group = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('recall', $1::jsonb)",
+                json.dumps({"query": "tool probe search", "exclude_sensitive": True}),
+            ))
+            hybrid_private = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('recall', $1::jsonb)",
+                json.dumps({"query": "tool probe search"}),
+            ))
+            structured_group = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('recall', $1::jsonb)",
+                json.dumps({"query": "tool probe search", "min_importance": 0.1,
+                            "exclude_sensitive": True}),
+            ))
+        finally:
+            await tr.rollback()
+
+    group_text = json.dumps(hybrid_group)
+    assert public_content in group_text
+    assert private_content not in group_text
+    assert private_content in json.dumps(hybrid_private)  # 1:1 keeps everything
+    structured_text = json.dumps(structured_group)
+    assert public_content in structured_text
+    assert private_content not in structured_text
+
+
+async def test_search_history_excludes_private_in_group_context(db_pool):
+    marker = get_test_identifier("sensitivity")
+    private_content = f"secret diary line {marker}"
+    public_content = f"shareable history line {marker}"
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await _seed_unit(conn, private_content, sensitivity="private")
+            await _seed_unit(conn, public_content)
+
+            group_rows = await conn.fetch(
+                "SELECT content FROM search_cross_session_history($1, 20, "
+                "ARRAY['turn','memory']::text[], NULL, NULL, NULL, TRUE)", marker,
+            )
+            all_rows = await conn.fetch(
+                "SELECT content FROM search_cross_session_history($1, 20)", marker,
+            )
+        finally:
+            await tr.rollback()
+
+    group_text = " || ".join(r["content"] for r in group_rows)
+    all_text = " || ".join(r["content"] for r in all_rows)
+    assert public_content in group_text
+    assert private_content not in group_text
+    assert private_content in all_text

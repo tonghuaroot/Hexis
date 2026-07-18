@@ -199,6 +199,9 @@ class ToolExecutionContext:
     session_id: str | None = None
     energy_available: int | None = None
     workspace_path: str | None = None
+    # Group-context turn (#92/#96): recall-class tools exclude private
+    # memories when the audience is a shared room.
+    is_group: bool = False
 
     # Policy flags (can be overridden per-context)
     allow_network: bool = True

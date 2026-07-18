@@ -94,6 +94,7 @@ class AgentLoopConfig:
 
     # Session
     session_id: str | None = None
+    is_group: bool = False
     heartbeat_id: str | None = None
 
     # Callbacks
@@ -679,6 +680,7 @@ class AgentLoop:
             tool_context=cfg.tool_context,
             call_id=call_id,
             session_id=cfg.session_id,
+            is_group=cfg.is_group,
             heartbeat_id=cfg.heartbeat_id,
             energy_available=remaining_energy,
             allow_network=True,

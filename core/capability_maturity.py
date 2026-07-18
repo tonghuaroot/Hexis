@@ -348,7 +348,7 @@ async def capability_maturity_scorecard(conn) -> dict[str, Any]:
     """Read live deployment truth and score five end-to-end capabilities."""
     facts = await conn.fetchrow("""
         SELECT
-            to_regprocedure('public.search_cross_session_history(text,integer,text[],timestamp with time zone,timestamp with time zone,uuid)') IS NOT NULL AS has_history_search,
+            to_regprocedure('public.search_cross_session_history(text,integer,text[],timestamp with time zone,timestamp with time zone,uuid,boolean)') IS NOT NULL AS has_history_search,
             (SELECT count(*) FROM memories WHERE status = 'active') AS active_memories,
             (SELECT count(DISTINCT session_id) FROM subconscious_units WHERE status = 'active' AND session_id IS NOT NULL) AS history_sessions,
             (SELECT count(*) FROM memory_source_units) AS linked_memory_sources,

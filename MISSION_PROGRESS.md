@@ -20,7 +20,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 
 | Goal | Test | Status |
 |---|---|---|
-| Sensitivity stopgap: `p_exclude_sensitive` predicate in `fast_recall` (closes the #92 group-leak via the `recall` tool) | Dignity | todo |
+| Sensitivity stopgap: sensitivity filters on the tool recall paths — `execute_memory_tool` recall arms + `search_cross_session_history` — threaded from the agent loop's `is_group` (closes the #92 group-leak via the `recall`/`search_history` tools) | Dignity | done (see #96) |
 | Ranker fusion (#78): recmem tier skeleton absorbs fast_recall's scoring — associations (neighborhoods), episode-temporal boost, recency half-life, strength/fidelity, mood congruence, trust floor | Person | todo |
 | Widen fused recall to all memory types (procedural, strategic, worldview) | Person | todo |
 | Fix `search_query` embedding-prefix asymmetry in recmem path | Person | todo |

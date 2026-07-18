@@ -1,367 +1,152 @@
--- DB-native tool execution helpers for tools that do not need Python side effects.
+-- Sensitivity stopgap for the tool recall paths (#96, Batch 1a).
+-- Hydrate has enforced the #92 privacy predicate since migration 0076, but
+-- the agent's conscious recall and search_history tools bypassed it: a
+-- group-room turn could surface private-marked memories through the tool
+-- path. This closes both surfaces while the ranker fusion is built:
+--   * execute_memory_tool's recall branch filters both retriever arms when
+--     the turn is group-context (exclude_sensitive arg, threaded from the
+--     agent loop's is_group).
+--   * search_cross_session_history gains p_exclude_sensitive predicates on
+--     the turn and memory arms (signature change — old 6-param form dropped
+--     to keep positional calls unambiguous; the capability probe is updated
+--     in core/capability_maturity.py).
 SET search_path = public, ag_catalog, "$user";
 
--- Memory-count budgets (WS6): counts protect context and cost; relevance is
--- governed by min_score, never by a hardcoded N.
-INSERT INTO config (key, value, description) VALUES
-    ('memory.recall_default_limit', '5'::jsonb,
-     'Default memory count for recall when the caller does not specify one'),
-    ('memory.recall_max_limit', '50'::jsonb,
-     'Ceiling on recall count — a context/cost budget, not a knowledge limit'),
-    ('memory.hydrate_memory_limit', '10'::jsonb,
-     'Default memory count for RAG hydration'),
-    ('memory.context_section_limits', '{"recent": 20, "self": 25, "relationship": 15, "contradiction": 5, "emotional_pattern": 5, "trigger": 5}'::jsonb,
-     'Per-section caps for subconscious/hydration context assembly')
-ON CONFLICT (key) DO NOTHING;
+DROP FUNCTION IF EXISTS search_cross_session_history(
+    TEXT, INT, TEXT[], TIMESTAMPTZ, TIMESTAMPTZ, UUID);
 
-CREATE OR REPLACE FUNCTION tool_success(
-    p_output JSONB,
-    p_display_output TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT jsonb_build_object('success', true, 'output', COALESCE(p_output, '{}'::jsonb), 'display_output', p_display_output);
-$$;
-
-CREATE OR REPLACE FUNCTION tool_error(
-    p_error TEXT,
-    p_error_type TEXT DEFAULT 'execution_failed'
-) RETURNS JSONB
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT jsonb_build_object('success', false, 'error', COALESCE(p_error, 'Tool failed'), 'error_type', COALESCE(p_error_type, 'execution_failed'));
-$$;
-
-CREATE OR REPLACE FUNCTION execute_goals_tool(
-    p_args JSONB
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
+CREATE OR REPLACE FUNCTION search_cross_session_history(
+    p_query TEXT,
+    p_limit INT DEFAULT 20,
+    p_sources TEXT[] DEFAULT ARRAY['turn', 'memory']::TEXT[],
+    p_created_after TIMESTAMPTZ DEFAULT NULL,
+    p_created_before TIMESTAMPTZ DEFAULT NULL,
+    p_exclude_session_id UUID DEFAULT NULL,
+    -- Sensitivity enforcement (#92/#96): group contexts search with this
+    -- TRUE; the operator and 1:1 recall keep everything.
+    p_exclude_sensitive BOOLEAN DEFAULT FALSE
+) RETURNS TABLE (
+    source_kind TEXT,
+    item_id UUID,
+    session_id UUID,
+    content TEXT,
+    user_text TEXT,
+    assistant_text TEXT,
+    memory_type TEXT,
+    occurred_at TIMESTAMPTZ,
+    rank FLOAT,
+    source_unit_ids UUID[],
+    source_attribution JSONB,
+    metadata JSONB
+) AS $$
 DECLARE
-    action TEXT := COALESCE(p_args->>'action', '');
-    title TEXT;
-    goal_id UUID;
-    priority TEXT;
-    source_value TEXT;
-    snapshot JSONB;
-    rows_json JSONB;
+    -- Browse mode (#68): a time window with no keywords means "everything in
+    -- the window, newest first" — '*' and '' count as no keywords. Without a
+    -- window either, there is nothing to anchor on and we return empty.
+    browse_mode BOOLEAN :=
+        NULLIF(trim(COALESCE(p_query, '')), '') IS NULL
+        OR trim(COALESCE(p_query, '')) = '*';
+    -- Preview-grain rows are cheap, so browse affords a higher ceiling (#76).
+    browse_cap INT := CASE
+        WHEN NULLIF(trim(COALESCE(p_query, '')), '') IS NULL
+          OR trim(COALESCE(p_query, '')) = '*'
+        THEN GREATEST(COALESCE(get_config_int('memory.history_browse_max'), 200), 1)
+        ELSE 100 END;
 BEGIN
-    IF action NOT IN ('create', 'update_priority', 'add_progress', 'list') THEN
-        RETURN tool_error(format('Invalid action %L', action), 'invalid_params');
+    IF browse_mode AND p_created_after IS NULL AND p_created_before IS NULL THEN
+        RETURN;
     END IF;
-    IF action = 'create' THEN
-        title := NULLIF(btrim(COALESCE(p_args->>'title', '')), '');
-        IF title IS NULL THEN
-            RETURN tool_error('Title is required for create', 'invalid_params');
-        END IF;
-        priority := COALESCE(NULLIF(p_args->>'priority', ''), 'queued');
-        IF priority NOT IN ('active', 'queued', 'backburner', 'completed', 'abandoned') THEN
-            priority := 'queued';
-        END IF;
-        source_value := COALESCE(NULLIF(p_args->>'source', ''), 'curiosity');
-        IF source_value NOT IN ('curiosity', 'user_request', 'identity', 'derived', 'external') THEN
-            source_value := 'curiosity';
-        END IF;
-        goal_id := create_goal(title, p_args->>'description', source_value::goal_source, priority::goal_priority);
-        RETURN tool_success(
-            jsonb_build_object('goal_id', goal_id::text, 'title', title, 'priority', priority),
-            format('Created goal: %s (%s)', title, priority)
-        );
-    ELSIF action = 'update_priority' THEN
-        priority := COALESCE(p_args->>'priority', '');
-        IF NULLIF(p_args->>'goal_id', '') IS NULL THEN
-            RETURN tool_error('goal_id is required for update_priority', 'invalid_params');
-        END IF;
-        IF priority NOT IN ('active', 'queued', 'backburner', 'completed', 'abandoned') THEN
-            RETURN tool_error(format('Invalid priority %L', priority), 'invalid_params');
-        END IF;
-        BEGIN
-            goal_id := (p_args->>'goal_id')::uuid;
-        EXCEPTION WHEN invalid_text_representation THEN
-            RETURN tool_error(format('Invalid goal_id: %s', p_args->>'goal_id'), 'invalid_params');
-        END;
-        PERFORM change_goal_priority(goal_id, priority::goal_priority, COALESCE(p_args->>'reason', ''));
-        RETURN tool_success(jsonb_build_object('goal_id', goal_id::text, 'new_priority', priority, 'reason', COALESCE(p_args->>'reason', '')), format('Updated goal %s... to %s', left(goal_id::text, 8), priority));
-    ELSIF action = 'add_progress' THEN
-        IF NULLIF(p_args->>'goal_id', '') IS NULL THEN
-            RETURN tool_error('goal_id is required for add_progress', 'invalid_params');
-        END IF;
-        IF NULLIF(btrim(COALESCE(p_args->>'note', '')), '') IS NULL THEN
-            RETURN tool_error('note is required for add_progress', 'invalid_params');
-        END IF;
-        BEGIN
-            goal_id := (p_args->>'goal_id')::uuid;
-        EXCEPTION WHEN invalid_text_representation THEN
-            RETURN tool_error(format('Invalid goal_id: %s', p_args->>'goal_id'), 'invalid_params');
-        END;
-        PERFORM add_goal_progress(goal_id, p_args->>'note');
-        RETURN tool_success(jsonb_build_object('goal_id', goal_id::text, 'note', p_args->>'note'), format('Added progress to goal %s...', left(goal_id::text, 8)));
-    ELSE
-        priority := NULLIF(p_args->>'priority', '');
-        IF priority IS NOT NULL AND priority IN ('active', 'queued', 'backburner', 'completed', 'abandoned') THEN
-            SELECT COALESCE(jsonb_agg(to_jsonb(g)), '[]'::jsonb) INTO rows_json
-            FROM get_goals_by_priority(priority::goal_priority) g;
-            RETURN tool_success(jsonb_build_object('goals', rows_json, 'count', jsonb_array_length(rows_json)));
-        END IF;
-        snapshot := get_goals_snapshot();
-        RETURN tool_success(COALESCE(snapshot, '{}'::jsonb));
-    END IF;
-EXCEPTION WHEN OTHERS THEN
-    RETURN tool_error(SQLERRM);
+
+    RETURN QUERY
+    WITH query_doc AS (
+        SELECT websearch_to_tsquery('english', CASE WHEN browse_mode THEN '' ELSE p_query END) AS query
+    ),
+    turn_hits AS (
+        SELECT
+            'turn'::TEXT AS source_kind,
+            s.id AS item_id,
+            s.session_id,
+            -- Browse grain (#76): a timeline scan reads previews, not
+            -- transcripts — open_memory / a keyword search fetch verbatim.
+            CASE WHEN browse_mode AND length(s.content) > 280
+                 THEN left(s.content, 280) || ' …'
+                 ELSE s.content END AS content,
+            -- The content preview IS the browse surface: the raw halves stay
+            -- home, or a 200-row page still weighs a megabyte.
+            CASE WHEN browse_mode THEN NULL ELSE s.user_text END AS user_text,
+            CASE WHEN browse_mode THEN NULL ELSE s.assistant_text END AS assistant_text,
+            NULL::TEXT AS memory_type,
+            s.turn_at AS occurred_at,
+            CASE WHEN browse_mode THEN 0.0 ELSE ts_rank_cd(to_tsvector('english', s.content), q.query, 32) END::FLOAT AS rank,
+            ARRAY[s.id]::UUID[] AS source_unit_ids,
+            s.source_attribution,
+            s.metadata
+        FROM subconscious_units s
+        CROSS JOIN query_doc q
+        WHERE 'turn' = ANY(COALESCE(p_sources, ARRAY['turn', 'memory']::TEXT[]))
+          AND (browse_mode OR numnode(q.query) > 0)
+          AND s.status = 'active'
+          AND (p_exclude_session_id IS NULL OR s.session_id IS DISTINCT FROM p_exclude_session_id)
+          AND (p_created_after IS NULL OR s.turn_at >= p_created_after)
+          AND (p_created_before IS NULL OR s.turn_at < p_created_before)
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(s.source_attribution->>'sensitivity', '') <> 'private')
+          AND (browse_mode OR to_tsvector('english', s.content) @@ q.query)
+        ORDER BY rank DESC, occurred_at DESC, item_id
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap)
+    ),
+    memory_hits AS (
+        SELECT
+            'memory'::TEXT AS source_kind,
+            m.id AS item_id,
+            (
+                SELECT su.session_id
+                FROM memory_source_units msu
+                JOIN subconscious_units su ON su.id = msu.subconscious_unit_id
+                WHERE msu.memory_id = m.id AND su.session_id IS NOT NULL
+                ORDER BY su.turn_at DESC, su.id
+                LIMIT 1
+            ) AS session_id,
+            m.content,
+            NULL::TEXT AS user_text,
+            NULL::TEXT AS assistant_text,
+            m.type::TEXT AS memory_type,
+            m.created_at AS occurred_at,
+            CASE WHEN browse_mode THEN 0.0 ELSE ts_rank_cd(to_tsvector('english', m.content), q.query, 32) END::FLOAT AS rank,
+            COALESCE(
+                (
+                    SELECT array_agg(msu.subconscious_unit_id ORDER BY msu.created_at, msu.subconscious_unit_id)
+                    FROM memory_source_units msu
+                    WHERE msu.memory_id = m.id
+                ),
+                '{}'::UUID[]
+            ) AS source_unit_ids,
+            m.source_attribution,
+            m.metadata
+        FROM memories m
+        CROSS JOIN query_doc q
+        WHERE 'memory' = ANY(COALESCE(p_sources, ARRAY['turn', 'memory']::TEXT[]))
+          AND (browse_mode OR numnode(q.query) > 0)
+          AND m.status = 'active'
+          AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
+          AND (p_created_after IS NULL OR m.created_at >= p_created_after)
+          AND (p_created_before IS NULL OR m.created_at < p_created_before)
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(m.source_attribution->>'sensitivity', '') <> 'private')
+          AND (browse_mode OR to_tsvector('english', m.content) @@ q.query)
+        ORDER BY rank DESC, occurred_at DESC, item_id
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap)
+    )
+    SELECT hits.*
+    FROM (
+        SELECT * FROM turn_hits
+        UNION ALL
+        SELECT * FROM memory_hits
+    ) hits
+    ORDER BY hits.rank DESC, hits.occurred_at DESC, hits.source_kind, hits.item_id
+    LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap);
 END;
-$$;
-
-CREATE OR REPLACE FUNCTION record_backlog_user_change(
-    p_action TEXT,
-    p_title TEXT,
-    p_item_id UUID
-) RETURNS VOID
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    INSERT INTO memories (type, content, embedding, importance, trust_level, metadata)
-    VALUES (
-        'episodic',
-        format('User %s backlog item: %s', p_action, p_title),
-        array_fill(0.1, ARRAY[embedding_dimension()])::vector,
-        0.6,
-        1.0,
-        jsonb_build_object('backlog_item_id', p_item_id::text, 'action', p_action, 'source', 'user_backlog_change')
-    );
-EXCEPTION WHEN OTHERS THEN
-    NULL;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION execute_backlog_tool(
-    p_args JSONB,
-    p_context JSONB DEFAULT '{}'::jsonb
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    action TEXT := COALESCE(p_args->>'action', '');
-    item_id UUID;
-    row_data backlog%ROWTYPE;
-    rows_json JSONB;
-    fields JSONB := '{}'::jsonb;
-    is_user BOOLEAN := COALESCE(p_context->>'tool_context', 'chat') IN ('chat', 'mcp');
-BEGIN
-    IF action NOT IN ('create', 'update', 'delete', 'list', 'get', 'set_status', 'set_checkpoint') THEN
-        RETURN tool_error(format('Invalid action %L', action), 'invalid_params');
-    END IF;
-    IF action = 'create' THEN
-        IF NULLIF(btrim(COALESCE(p_args->>'title', '')), '') IS NULL THEN
-            RETURN tool_error('Title is required for create', 'invalid_params');
-        END IF;
-        SELECT * INTO row_data
-        FROM create_backlog_item(
-            p_args->>'title',
-            COALESCE(p_args->>'description', ''),
-            CASE WHEN p_args->>'priority' IN ('urgent', 'high', 'normal', 'low') THEN p_args->>'priority' ELSE 'normal' END,
-            CASE WHEN p_args->>'owner' IN ('agent', 'user', 'shared') THEN p_args->>'owner' ELSE 'agent' END,
-            CASE WHEN is_user THEN 'user' ELSE 'agent' END,
-            COALESCE(ARRAY(SELECT jsonb_array_elements_text(COALESCE(p_args->'tags', '[]'::jsonb))), ARRAY[]::TEXT[]),
-            NULLIF(p_args->>'parent_id', '')::uuid
-        );
-        IF is_user THEN
-            PERFORM record_backlog_user_change('created', row_data.title, row_data.id);
-        END IF;
-        RETURN tool_success(jsonb_build_object('item_id', row_data.id::text, 'title', row_data.title, 'priority', row_data.priority, 'owner', row_data.owner, 'created_by', row_data.created_by), format('Created backlog item: %s (%s)', row_data.title, row_data.priority));
-    ELSIF action = 'list' THEN
-        SELECT COALESCE(jsonb_agg(to_jsonb(b)), '[]'::jsonb)
-        INTO rows_json
-        FROM list_backlog(
-            CASE WHEN p_args->>'status_filter' IN ('todo', 'in_progress', 'done', 'blocked', 'cancelled') THEN p_args->>'status_filter' ELSE NULL END,
-            CASE WHEN p_args->>'priority_filter' IN ('urgent', 'high', 'normal', 'low') THEN p_args->>'priority_filter' ELSE NULL END,
-            CASE WHEN p_args->>'owner_filter' IN ('agent', 'user', 'shared') THEN p_args->>'owner_filter' ELSE NULL END
-        ) b;
-        RETURN tool_success(jsonb_build_object('items', rows_json, 'count', jsonb_array_length(rows_json)));
-    END IF;
-
-    IF NULLIF(p_args->>'item_id', '') IS NULL THEN
-        RETURN tool_error(format('item_id is required for %s', action), 'invalid_params');
-    END IF;
-    BEGIN
-        item_id := (p_args->>'item_id')::uuid;
-    EXCEPTION WHEN invalid_text_representation THEN
-        RETURN tool_error(format('Invalid item_id: %s', p_args->>'item_id'), 'invalid_params');
-    END;
-
-    IF action = 'get' THEN
-        SELECT * INTO row_data FROM get_backlog_item(item_id);
-        IF row_data.id IS NULL THEN
-            RETURN tool_error(format('Backlog item %s not found', item_id), 'execution_failed');
-        END IF;
-        RETURN tool_success(to_jsonb(row_data));
-    ELSIF action = 'delete' THEN
-        SELECT * INTO row_data FROM get_backlog_item(item_id);
-        IF NOT delete_backlog_item(item_id) THEN
-            RETURN tool_error(format('Backlog item %s not found', item_id), 'execution_failed');
-        END IF;
-        IF is_user AND row_data.title IS NOT NULL THEN
-            PERFORM record_backlog_user_change('deleted', row_data.title, item_id);
-        END IF;
-        RETURN tool_success(jsonb_build_object('item_id', item_id::text, 'deleted', true), format('Deleted backlog item %s...', left(item_id::text, 8)));
-    ELSIF action = 'set_status' THEN
-        IF p_args->>'status' NOT IN ('todo', 'in_progress', 'done', 'blocked', 'cancelled') THEN
-            RETURN tool_error(format('Invalid status %L', p_args->>'status'), 'invalid_params');
-        END IF;
-        fields := jsonb_build_object('status', p_args->>'status');
-    ELSIF action = 'set_checkpoint' THEN
-        IF NOT p_args ? 'checkpoint' THEN
-            RETURN tool_error('checkpoint data is required for set_checkpoint', 'invalid_params');
-        END IF;
-        fields := jsonb_build_object('checkpoint', p_args->'checkpoint');
-    ELSE
-        FOR fields IN SELECT jsonb_object_agg(key, value)
-        FROM jsonb_each(p_args)
-        WHERE key IN ('title', 'description', 'priority', 'owner', 'status', 'tags')
-        LOOP
-            fields := COALESCE(fields, '{}'::jsonb);
-        END LOOP;
-        IF fields = '{}'::jsonb THEN
-            RETURN tool_error('No fields to update. Provide at least one of: title, description, priority, owner, status, tags.', 'invalid_params');
-        END IF;
-    END IF;
-
-    SELECT * INTO row_data FROM update_backlog_item(item_id, fields);
-    IF row_data.id IS NULL THEN
-        RETURN tool_error(format('Backlog item %s not found', item_id), 'execution_failed');
-    END IF;
-    IF is_user THEN
-        PERFORM record_backlog_user_change(CASE WHEN action = 'set_status' THEN format('changed status to %L on', p_args->>'status') ELSE 'updated' END, row_data.title, item_id);
-    END IF;
-    RETURN tool_success(
-        CASE action
-            WHEN 'set_status' THEN jsonb_build_object('item_id', row_data.id::text, 'title', row_data.title, 'new_status', row_data.status)
-            WHEN 'set_checkpoint' THEN jsonb_build_object('item_id', row_data.id::text, 'title', row_data.title, 'checkpoint_saved', true)
-            ELSE jsonb_build_object('item_id', row_data.id::text, 'title', row_data.title, 'status', row_data.status, 'priority', row_data.priority, 'owner', row_data.owner)
-        END,
-        CASE action
-            WHEN 'set_status' THEN format('Set %s to %s', row_data.title, row_data.status)
-            WHEN 'set_checkpoint' THEN format('Saved checkpoint for %s', row_data.title)
-            ELSE format('Updated backlog item %s...', left(item_id::text, 8))
-        END
-    );
-EXCEPTION WHEN OTHERS THEN
-    RETURN tool_error(SQLERRM);
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION contact_row_json(c contacts)
-RETURNS JSONB
-LANGUAGE sql
-IMMUTABLE
-AS $$
-    SELECT jsonb_build_object(
-        'id', c.id,
-        'name', c.name,
-        'email', c.email,
-        'company', c.company,
-        'role', c.role,
-        'phone', c.phone,
-        'notes', c.notes,
-        'tags', to_jsonb(c.tags),
-        'source', c.source,
-        'first_seen', c.first_seen,
-        'last_touch', c.last_touch
-    );
-$$;
-
-CREATE OR REPLACE FUNCTION execute_contact_tool(
-    p_tool_name TEXT,
-    p_args JSONB
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    row_data contacts%ROWTYPE;
-    rows_json JSONB;
-    contact_id BIGINT;
-    keep_id BIGINT;
-    remove_id BIGINT;
-    query TEXT;
-    limit_value INT;
-    updated BOOLEAN;
-BEGIN
-    limit_value := LEAST(GREATEST(COALESCE(NULLIF(p_args->>'limit', '')::int, 20), 1), 100);
-    IF p_tool_name = 'search_contacts' THEN
-        query := NULLIF(btrim(COALESCE(p_args->>'query', '')), '');
-        IF query IS NULL THEN
-            SELECT COALESCE(jsonb_agg(contact_row_json(c)), '[]'::jsonb) INTO rows_json FROM recent_contacts(limit_value) c;
-        ELSE
-            SELECT COALESCE(jsonb_agg(contact_row_json(c)), '[]'::jsonb) INTO rows_json FROM search_contacts(query, limit_value) c;
-        END IF;
-        RETURN tool_success(jsonb_build_object('count', jsonb_array_length(rows_json), 'contacts', rows_json), format('Found %s contact(s)', jsonb_array_length(rows_json)));
-    ELSIF p_tool_name = 'get_contact' THEN
-        IF p_args ? 'id' THEN
-            SELECT * INTO row_data FROM contacts WHERE id = (p_args->>'id')::bigint;
-        ELSIF NULLIF(p_args->>'email', '') IS NOT NULL THEN
-            SELECT * INTO row_data FROM get_contact_by_email(p_args->>'email');
-        ELSE
-            RETURN tool_error('Provide either id or email.', 'invalid_params');
-        END IF;
-        IF row_data.id IS NULL THEN
-            RETURN tool_success('{"found": false}'::jsonb);
-        END IF;
-        RETURN tool_success(jsonb_build_object('found', true, 'contact', contact_row_json(row_data)));
-    ELSIF p_tool_name = 'create_contact' THEN
-        IF NULLIF(btrim(COALESCE(p_args->>'name', '')), '') IS NULL THEN
-            RETURN tool_error('Name is required.', 'invalid_params');
-        END IF;
-        contact_id := create_contact(
-            p_args->>'name',
-            p_args->>'email',
-            p_args->>'company',
-            p_args->>'role',
-            p_args->>'phone',
-            p_args->>'notes',
-            COALESCE(ARRAY(SELECT jsonb_array_elements_text(COALESCE(p_args->'tags', '[]'::jsonb))), ARRAY[]::TEXT[]),
-            COALESCE(NULLIF(p_args->>'source', ''), 'manual')
-        );
-        RETURN tool_success(jsonb_build_object('id', contact_id, 'name', p_args->>'name'), format('Created contact #%s: %s', contact_id, p_args->>'name'));
-    ELSIF p_tool_name = 'update_contact' THEN
-        contact_id := NULLIF(p_args->>'id', '')::bigint;
-        IF contact_id IS NULL THEN
-            RETURN tool_error('Contact ID is required.', 'invalid_params');
-        END IF;
-        updated := update_contact(
-            contact_id,
-            p_args->>'name',
-            p_args->>'email',
-            p_args->>'company',
-            p_args->>'role',
-            p_args->>'phone',
-            p_args->>'notes',
-            CASE WHEN p_args ? 'tags' THEN ARRAY(SELECT jsonb_array_elements_text(COALESCE(p_args->'tags', '[]'::jsonb))) ELSE NULL END
-        );
-        IF NOT updated THEN
-            RETURN tool_error(format('Contact #%s not found.', contact_id), 'execution_failed');
-        END IF;
-        PERFORM touch_contact(contact_id);
-        RETURN tool_success(jsonb_build_object('id', contact_id, 'updated', true), format('Updated contact #%s', contact_id));
-    ELSIF p_tool_name = 'merge_contacts' THEN
-        keep_id := NULLIF(p_args->>'keep_id', '')::bigint;
-        remove_id := NULLIF(p_args->>'remove_id', '')::bigint;
-        IF keep_id IS NULL OR remove_id IS NULL THEN
-            RETURN tool_error('Both keep_id and remove_id are required.', 'invalid_params');
-        END IF;
-        IF keep_id = remove_id THEN
-            RETURN tool_error('Cannot merge a contact with itself.', 'invalid_params');
-        END IF;
-        IF NOT merge_contacts(keep_id, remove_id) THEN
-            RETURN tool_error(format('Contact #%s not found.', remove_id), 'execution_failed');
-        END IF;
-        RETURN tool_success(jsonb_build_object('keep_id', keep_id, 'removed_id', remove_id, 'merged', true), format('Merged contact #%s into #%s', remove_id, keep_id));
-    END IF;
-    RETURN tool_error(format('Unsupported contact tool: %s', p_tool_name), 'invalid_params');
-EXCEPTION WHEN OTHERS THEN
-    RETURN tool_error(SQLERRM);
-END;
-$$;
+$$ LANGUAGE plpgsql STABLE;
 
 CREATE OR REPLACE FUNCTION execute_memory_tool(
     p_tool_name TEXT,

@@ -162,7 +162,10 @@ CREATE OR REPLACE FUNCTION search_cross_session_history(
     p_sources TEXT[] DEFAULT ARRAY['turn', 'memory']::TEXT[],
     p_created_after TIMESTAMPTZ DEFAULT NULL,
     p_created_before TIMESTAMPTZ DEFAULT NULL,
-    p_exclude_session_id UUID DEFAULT NULL
+    p_exclude_session_id UUID DEFAULT NULL,
+    -- Sensitivity enforcement (#92/#96): group contexts search with this
+    -- TRUE; the operator and 1:1 recall keep everything.
+    p_exclude_sensitive BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE (
     source_kind TEXT,
     item_id UUID,
@@ -227,6 +230,8 @@ BEGIN
           AND (p_exclude_session_id IS NULL OR s.session_id IS DISTINCT FROM p_exclude_session_id)
           AND (p_created_after IS NULL OR s.turn_at >= p_created_after)
           AND (p_created_before IS NULL OR s.turn_at < p_created_before)
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(s.source_attribution->>'sensitivity', '') <> 'private')
           AND (browse_mode OR to_tsvector('english', s.content) @@ q.query)
         ORDER BY rank DESC, occurred_at DESC, item_id
         LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap)
@@ -267,6 +272,8 @@ BEGIN
           AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
           AND (p_created_after IS NULL OR m.created_at >= p_created_after)
           AND (p_created_before IS NULL OR m.created_at < p_created_before)
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(m.source_attribution->>'sensitivity', '') <> 'private')
           AND (browse_mode OR to_tsvector('english', m.content) @@ q.query)
         ORDER BY rank DESC, occurred_at DESC, item_id
         LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap)

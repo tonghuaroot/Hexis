@@ -159,7 +159,7 @@ async def test_migrate_existing_database_preserves_data():
             )
             assert await conn.fetchval(
                 "SELECT to_regprocedure("
-                "'public.search_cross_session_history(text,integer,text[],timestamp with time zone,timestamp with time zone,uuid)'"
+                "'public.search_cross_session_history(text,integer,text[],timestamp with time zone,timestamp with time zone,uuid,boolean)'"
                 ") IS NOT NULL"
             )
             assert await conn.fetchval(

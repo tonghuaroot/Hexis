@@ -754,6 +754,7 @@ async def run_agent(
             temperature=0.7,
             max_tokens=effective_max_tokens,
             session_id=session_id,
+            is_group=is_group,
             allowed_tool_names=set(skill_selection.allowed_tool_names),
         )
     else:
@@ -963,6 +964,7 @@ async def stream_agent(
         temperature=effective_temperature,
         max_tokens=effective_max_tokens,
         session_id=session_id,
+        is_group=is_group,
         on_approval=on_approval,
         allowed_tool_names=set(skill_selection.allowed_tool_names),
     )

@@ -141,7 +141,12 @@ class RecallHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        db_result = await _try_db_memory_tool("recall", arguments, context)
+        args = dict(arguments)
+        if context.is_group:
+            # Group rooms recall without private memories (#92/#96) — the
+            # same wall hydrate already enforces, applied to the tool path.
+            args["exclude_sensitive"] = True
+        db_result = await _try_db_memory_tool("recall", args, context)
         if db_result is not None:
             return db_result
         # execute_memory_tool (db/38) owns this tool; the former Python
@@ -229,6 +234,8 @@ class SearchHistoryHandler(ToolHandler):
         # validation, browse-vs-keyword limits, shaping, the truncation
         # note — is owned by execute_memory_tool (db/38).
         args = dict(arguments)
+        if context.is_group:
+            args["exclude_sensitive"] = True
         if args.pop("exclude_current_session", True) and context.session_id:
             try:
                 args["exclude_session_id"] = str(UUID(str(context.session_id)))
