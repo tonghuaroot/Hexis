@@ -74,106 +74,6 @@ class SubconsciousOutput:
     consolidation_observations: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _parse_subconscious_output(
-    doc: dict[str, Any],
-    *,
-    allowed_memory_ids: set[str] | None = None,
-) -> SubconsciousOutput:
-    """Parse raw JSON from the subconscious LLM call into a structured output."""
-
-    def _as_list(val: Any) -> list[dict[str, Any]]:
-        if isinstance(val, list):
-            return [v for v in val if isinstance(v, dict)]
-        return []
-
-    def _confidence_filtered(val: Any) -> list[dict[str, Any]]:
-        kept: list[dict[str, Any]] = []
-        for item in _as_list(val):
-            try:
-                confidence = float(item.get("confidence"))
-            except (TypeError, ValueError):
-                continue
-            if confidence < 0.6:
-                continue
-            normalized = dict(item)
-            normalized["confidence"] = min(1.0, confidence)
-            kept.append(normalized)
-        return kept
-
-    def _clamp_number(value: Any, low: float, high: float) -> float | None:
-        try:
-            return min(high, max(low, float(value)))
-        except (TypeError, ValueError):
-            return None
-
-    def _memory_references(val: Any) -> list[dict[str, Any]]:
-        kept = _confidence_filtered(val)
-        if allowed_memory_ids is None:
-            return kept
-        return [item for item in kept if str(item.get("memory_id") or "") in allowed_memory_ids]
-
-    emotional = doc.get("emotional_observations")
-    if emotional is None:
-        emotional = doc.get("emotional_patterns")
-    consolidation = doc.get("consolidation_observations")
-    if consolidation is None:
-        consolidation = doc.get("consolidation_suggestions")
-
-    salient = [item for item in _memory_references(doc.get("salient_memories")) if str(item.get("reason") or "").strip()]
-    ignored = [item for item in _memory_references(doc.get("ignored_memories")) if str(item.get("reason") or "").strip()]
-    expansions = [
-        item
-        for item in _confidence_filtered(doc.get("memory_expansions"))
-        if str(item.get("query") or "").strip() and str(item.get("reason") or "").strip()
-    ]
-    instincts: list[dict[str, Any]] = []
-    for item in _confidence_filtered(doc.get("instincts")):
-        intensity = _clamp_number(item.get("intensity"), 0.0, 1.0)
-        if intensity is None or not str(item.get("impulse") or "").strip() or not str(item.get("reason") or "").strip():
-            continue
-        item["intensity"] = intensity
-        instincts.append(item)
-
-    emotional_state: dict[str, Any] = {}
-    emotional_raw = doc.get("emotional_state")
-    if isinstance(emotional_raw, dict):
-        try:
-            emotional_confidence = float(emotional_raw.get("confidence"))
-        except (TypeError, ValueError):
-            emotional_confidence = 0.0
-        if emotional_confidence >= 0.6:
-            emotion = str(emotional_raw.get("primary_emotion") or "").strip()
-            valence = _clamp_number(emotional_raw.get("valence"), -1.0, 1.0)
-            arousal = _clamp_number(emotional_raw.get("arousal"), 0.0, 1.0)
-            intensity = _clamp_number(emotional_raw.get("intensity"), 0.0, 1.0)
-            if emotion and valence is not None and arousal is not None and intensity is not None:
-                emotional_state = {
-                    "primary_emotion": emotion,
-                    "valence": valence,
-                    "arousal": arousal,
-                    "intensity": intensity,
-                    "confidence": min(1.0, emotional_confidence),
-                }
-
-    response = str(doc.get("subconscious_response") or "").strip()[:500]
-    if not (salient or expansions or instincts or emotional_state):
-        response = ""
-
-    return SubconsciousOutput(
-        salient_memories=salient,
-        ignored_memories=ignored,
-        memory_expansions=expansions,
-        instincts=instincts,
-        emotional_state=emotional_state,
-        subconscious_response=response,
-        narrative_observations=_as_list(doc.get("narrative_observations")),
-        relationship_observations=_as_list(doc.get("relationship_observations")),
-        contradiction_observations=_as_list(doc.get("contradiction_observations")),
-        emotional_observations=_as_list(emotional),
-        consolidation_observations=_as_list(consolidation),
-    )
-
-
 async def render_subconscious_signals_db(conn: "asyncpg.Connection", output: SubconsciousOutput) -> str:
     """Render the '## Subconscious Signals' block via the DB-owned renderer.
 
@@ -395,57 +295,30 @@ async def run_subconscious_appraisal(
             clipped += "\n[truncated for subconscious appraisal; full context is provided to the main turn]"
         payload["additional_context"] = clipped
 
-    # The appraisal must see the character's identity and values (#59): when
-    # hydration left them empty (or was absent), fall back to the DB context.
-    if not payload.get("identity") or not payload.get("worldview"):
-        try:
-            ctx_raw = await conn.fetchval("SELECT gather_turn_context()")
-            ctx = _coerce_json_value(ctx_raw, {})
-            if not payload.get("identity"):
-                payload["identity"] = (ctx.get("identity") or [])[:5]
-            if not payload.get("worldview"):
-                payload["worldview"] = (ctx.get("worldview") or [])[:5]
-        except Exception as e:
-            logger.debug("Identity/worldview fallback failed: %s", e)
-
-    # Get emotional state from DB
+    # One round-trip for everything the payload needs from the DB (db/67
+    # get_appraisal_db_context): identity/worldview fallback (#59), affect,
+    # goals, relationships, dopamine. Hydrated values win where present.
     try:
-        affect_raw = await conn.fetchval("SELECT get_current_affective_state()")
-        affect = _coerce_json_value(affect_raw, {})
-        if affect:
-            payload["emotional_state"] = affect
+        db_ctx_raw = await conn.fetchval("SELECT get_appraisal_db_context()")
+        db_ctx = _coerce_json_value(db_ctx_raw, {})
+        if not payload.get("identity"):
+            payload["identity"] = db_ctx.get("identity") or []
+        if not payload.get("worldview"):
+            payload["worldview"] = db_ctx.get("worldview") or []
+        if db_ctx.get("emotional_state"):
+            payload["emotional_state"] = db_ctx["emotional_state"]
         elif hydrated_context is not None and hydrated_context.emotional_state:
             payload["emotional_state"] = hydrated_context.emotional_state
+        if db_ctx.get("goals") and not payload.get("goals"):
+            payload["goals"] = db_ctx["goals"]
+        if db_ctx.get("relationships"):
+            payload["relationships"] = db_ctx["relationships"]
+        if db_ctx.get("dopamine_state"):
+            payload["dopamine_state"] = db_ctx["dopamine_state"]
     except Exception as e:
-        logger.debug("Failed to fetch current affective state: %s", e)
+        logger.debug("Appraisal DB context unavailable: %s", e)
         if hydrated_context is not None and hydrated_context.emotional_state:
             payload["emotional_state"] = hydrated_context.emotional_state
-
-    # Get active goals
-    try:
-        goals_raw = await conn.fetchval("SELECT get_active_goals()")
-        goals = _coerce_json_value(goals_raw, [])
-        if goals and not payload.get("goals"):
-            payload["goals"] = goals
-    except Exception as e:
-        logger.debug("Failed to fetch active goals: %s", e)
-
-    try:
-        relationships_raw = await conn.fetchval("SELECT get_relationships_context(8)")
-        relationships = _coerce_json_value(relationships_raw, [])
-        if isinstance(relationships, list) and relationships:
-            payload["relationships"] = relationships[:8]
-    except Exception as e:
-        logger.debug("Failed to fetch relationship context: %s", e)
-
-    # Get dopamine/reward state — modulates instinct intensity and emotional response
-    try:
-        da_raw = await conn.fetchval("SELECT get_dopamine_state()")
-        da_state = _coerce_json_value(da_raw, {})
-        if da_state:
-            payload["dopamine_state"] = da_state
-    except Exception as e:
-        logger.debug("Failed to fetch dopamine state: %s", e)
 
     user_prompt = "Context (JSON):\n" + _bounded_subconscious_json(payload)
 
@@ -478,10 +351,30 @@ async def run_subconscious_appraisal(
             raw_response=raw,
         )
 
-    allowed_memory_ids = {
+    allowed_memory_ids = sorted({
         str(memory.get("memory_id")) for memory in payload.get("relevant_memories", []) if isinstance(memory, dict) and memory.get("memory_id")
-    }
-    output = _parse_subconscious_output(doc, allowed_memory_ids=allowed_memory_ids)
+    })
+    # Normalization is DB-owned (db/67 normalize_inline_appraisal): confidence
+    # thresholds, clamps, and allow-listing run in SQL with config knobs.
+    normalized_raw = await conn.fetchval(
+        "SELECT normalize_inline_appraisal($1::jsonb, $2::text[])",
+        json.dumps(doc, default=str),
+        allowed_memory_ids,
+    )
+    normalized = _coerce_json_value(normalized_raw, {})
+    output = SubconsciousOutput(
+        salient_memories=normalized.get("salient_memories") or [],
+        ignored_memories=normalized.get("ignored_memories") or [],
+        memory_expansions=normalized.get("memory_expansions") or [],
+        instincts=normalized.get("instincts") or [],
+        emotional_state=normalized.get("emotional_state") or {},
+        subconscious_response=normalized.get("subconscious_response") or "",
+        narrative_observations=normalized.get("narrative_observations") or [],
+        relationship_observations=normalized.get("relationship_observations") or [],
+        contradiction_observations=normalized.get("contradiction_observations") or [],
+        emotional_observations=normalized.get("emotional_observations") or [],
+        consolidation_observations=normalized.get("consolidation_observations") or [],
+    )
     output.provider = str(llm_config.get("provider") or "")
     output.model = str(llm_config.get("model") or "")
     output.request_messages = request_messages

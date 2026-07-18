@@ -13,19 +13,36 @@ from core.cognitive_memory_api import (
     MemoryType,
     _deduplicate_memories,
 )
-from services.agent import _parse_subconscious_output, run_subconscious_appraisal
+from services.agent import run_subconscious_appraisal
 
 
 class _Conn:
-    async def fetchval(self, query, *_args):
-        if "get_current_affective_state" in query:
-            return {"primary_emotion": "warm", "valence": 0.4, "arousal": 0.3}
-        if "get_active_goals" in query:
-            return []
-        if "get_relationships_context" in query:
-            return [{"entity": "Eric", "strength": 0.9}]
-        if "get_dopamine_state" in query:
-            return {"tonic": 0.5, "effective": 0.5}
+    async def fetchval(self, query, *args):
+        if "get_appraisal_db_context" in query:
+            return {
+                "emotional_state": {"primary_emotion": "warm", "valence": 0.4, "arousal": 0.3},
+                "relationships": [{"entity": "Eric", "strength": 0.9}],
+                "dopamine_state": {"tonic": 0.5, "effective": 0.5},
+            }
+        if "normalize_inline_appraisal" in query:
+            # Delegate parity to the DB tests; here the doc passes through
+            # with the allow-list applied, mirroring db/67 for clean input.
+            import json as _json_mod
+
+            doc = _json_mod.loads(args[0])
+            allowed = set(args[1] or [])
+            doc["salient_memories"] = [
+                m for m in doc.get("salient_memories", [])
+                if not allowed or m.get("memory_id") in allowed
+            ]
+            for key in ("ignored_memories", "memory_expansions", "instincts",
+                        "narrative_observations", "relationship_observations",
+                        "contradiction_observations", "emotional_observations",
+                        "consolidation_observations"):
+                doc.setdefault(key, [])
+            doc.setdefault("emotional_state", {})
+            doc.setdefault("subconscious_response", "")
+            return doc
         return None
 
 
@@ -129,43 +146,43 @@ async def test_failed_appraisal_retains_request_and_error_trace():
     assert output.raw_response == {"error": "provider unavailable"}
 
 
-def test_parser_rejects_low_confidence_and_hallucinated_memory_ids():
-    allowed = str(uuid4())
-    output = _parse_subconscious_output(
-        {
-            "salient_memories": [
-                {"memory_id": allowed, "reason": "grounded", "confidence": 0.8},
-                {"memory_id": str(uuid4()), "reason": "invented", "confidence": 0.9},
-            ],
-            "memory_expansions": [
-                {"query": "useful", "reason": "gap", "confidence": 0.7},
-                {"query": "weak", "reason": "guess", "confidence": 0.4},
-            ],
-            "instincts": [
-                {
-                    "impulse": "approach",
-                    "intensity": 3,
-                    "reason": "evidence",
-                    "confidence": 0.8,
-                }
-            ],
-            "emotional_state": {
-                "primary_emotion": "warmth",
-                "valence": 2,
-                "arousal": -1,
-                "intensity": 0.5,
-                "confidence": 0.8,
-            },
-            "subconscious_response": "grounded synthesis",
-        },
-        allowed_memory_ids={allowed},
-    )
+@pytest.mark.asyncio(loop_scope="session")
+async def test_normalizer_rejects_low_confidence_and_hallucinated_memory_ids(db_pool):
+    """Normalization is DB-owned (db/67): thresholds, clamps, allow-listing."""
+    import json as _json_mod
 
-    assert [item["memory_id"] for item in output.salient_memories] == [allowed]
-    assert [item["query"] for item in output.memory_expansions] == ["useful"]
-    assert output.instincts[0]["intensity"] == 1.0
-    assert output.emotional_state["valence"] == 1.0
-    assert output.emotional_state["arousal"] == 0.0
+    allowed = str(uuid4())
+    doc = {
+        "salient_memories": [
+            {"memory_id": allowed, "reason": "grounded", "confidence": 0.8},
+            {"memory_id": str(uuid4()), "reason": "invented", "confidence": 0.9},
+        ],
+        "memory_expansions": [
+            {"query": "useful", "reason": "gap", "confidence": 0.7},
+            {"query": "weak", "reason": "guess", "confidence": 0.4},
+        ],
+        "instincts": [
+            {"impulse": "approach", "intensity": 3, "reason": "evidence", "confidence": 0.8}
+        ],
+        "emotional_state": {
+            "primary_emotion": "warmth", "valence": 2, "arousal": -1,
+            "intensity": 0.5, "confidence": 0.8,
+        },
+        "subconscious_response": "grounded synthesis",
+    }
+    async with db_pool.acquire() as conn:
+        raw = await conn.fetchval(
+            "SELECT normalize_inline_appraisal($1::jsonb, $2::text[])",
+            _json_mod.dumps(doc), [allowed],
+        )
+    out = _json_mod.loads(raw) if isinstance(raw, str) else raw
+
+    assert [item["memory_id"] for item in out["salient_memories"]] == [allowed]
+    assert [item["query"] for item in out["memory_expansions"]] == ["useful"]
+    assert out["instincts"][0]["intensity"] == 1.0
+    assert out["emotional_state"]["valence"] == 1.0
+    assert out["emotional_state"]["arousal"] == 0.0
+    assert out["subconscious_response"] == "grounded synthesis"
 
 
 def test_duplicate_memory_content_only_occupies_one_context_slot():
