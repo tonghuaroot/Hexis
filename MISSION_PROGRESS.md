@@ -24,9 +24,9 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Ranker fusion (#78): recmem tier skeleton absorbs fast_recall's scoring — associations, episode binding, recency, strength, mood congruence, trust floor, activation-boost term, retrieval provenance; per-type seed scans guarantee tier representation; fast_recall is a wrapper, upgrading the whole db/05 family transitively | Person | done (see #96) |
 | Widen fused recall to all memory types (procedural, strategic, worldview, goal — the knowledge tier) | Person | done (see #96) |
 | Fix `search_query` embedding-prefix asymmetry in recmem path | Person | done (already fixed pre-fusion; verified) |
-| Repoint every caller (db/38 tools, MCP server, db/09, db/17, db/45) at the unified function; `fast_recall` → thin wrapper → removed | Substrate | todo |
+| Repoint every caller at the unified function: `fast_recall` is now a thin wrapper (db/05 family + all downstream upgraded transitively); final removal deferred one release | Substrate | done (see #96) |
 | Metamemory surface: thin/empty recall carries {feeling, familiarity, TOT partials}; familiar-but-blocked auto-files incubation ('I'll let it simmer'); low familiarity reads honestly; default relevance floor (memory.recall_min_score) makes honest failure possible at all | Person | done (see #96) |
-| Retrieval eval (seeded fixture corpus, before/after fusion) so recall quality cannot regress silently | Experience Bar | todo |
+| Retrieval eval: seeded corpus pins home-turf ranking, knowledge-tier reachability, association expansion, mood congruence, activation boost (tests/db/test_retrieval_eval.py) | Experience Bar | done (see #96) |
 
 ## Batch 2 — Both north stars, visible in days
 
