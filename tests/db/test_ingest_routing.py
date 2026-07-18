@@ -147,8 +147,9 @@ async def test_ingest_persist_extractions_atomic_pass(db_pool):
 
 
 async def test_slow_ingest_persist_facts_trust_and_edges(db_pool):
-    """3.2 pushdown: acceptance multiplier from config; contested facts gain
-    CONTESTED_BECAUSE edges; duplicates corroborate."""
+    """3.2 pushdown + #83: contested facts gain CONTESTED_BECAUSE edges;
+    duplicates corroborate; trust derives from sources (stance is never a
+    multiplier)."""
     import json as _json_mod
 
     async with db_pool.acquire() as conn:

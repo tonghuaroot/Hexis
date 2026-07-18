@@ -300,16 +300,14 @@ class TestSlowIngestAssessment:
         assert "rejection_reasons" in result
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_trust_multipliers_are_config(self, db_pool):
-        """The acceptance multipliers moved to config (db/66)."""
-        import json as _json
-
+    async def test_trust_multipliers_retired(self, db_pool):
+        """#83 sources-are-authority: the acceptance multiplier is gone —
+        stance lives in edges/metadata; trust derives from sources."""
         async with db_pool.acquire() as conn:
             raw = await conn.fetchval(
                 "SELECT get_config('memory.slow_ingest_trust_multipliers')"
             )
-            mult = _json.loads(raw) if isinstance(raw, str) else raw
-            assert mult == {"accept": 1.0, "contest": 0.4, "question": 0.7}
+        assert raw is None
 
 
 # ---------------------------------------------------------------------------

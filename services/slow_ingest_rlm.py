@@ -312,7 +312,8 @@ async def run_slow_ingest(
         # The whole fact-persistence pass is atomic in the DB (db/66
         # slow_ingest_persist_facts): routing, corroboration via the audited
         # belief-revision policy, creation, and every edge kind. Trust
-        # multipliers live in config (memory.slow_ingest_trust_multipliers).
+        # derives from source attributions (#83); the acceptance stance is
+        # recorded as edges and metadata.
         worldview_edge_ids = [
             wv.get("memory_id") or wv.get("id") for wv in worldview_stubs[:3]
         ]

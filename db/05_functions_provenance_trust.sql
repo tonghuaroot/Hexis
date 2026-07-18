@@ -776,12 +776,25 @@ BEGIN
         RETURN;
     END IF;
 
-    IF mtype <> 'semantic' THEN
-        RETURN;
-    END IF;
     -- Protected memories (e.g. origin documents) keep their seeded trust:
     -- confidence may still be revised, but derived trust is pinned.
     IF COALESCE((mem_metadata->>'protected')::boolean, FALSE) THEN
+        RETURN;
+    END IF;
+
+    -- Sources are authority (#83) for worldview too: a belief's trust is its
+    -- source's trust — a row may never assert more trust than its provenance
+    -- carries.
+    IF mtype = 'worldview' THEN
+        UPDATE memories
+        SET trust_level = LEAST(1.0, GREATEST(0.0, COALESCE(
+                (source_attribution->>'trust')::float, 0.5))),
+            trust_updated_at = CURRENT_TIMESTAMP
+        WHERE id = p_memory_id;
+        RETURN;
+    END IF;
+
+    IF mtype <> 'semantic' THEN
         RETURN;
     END IF;
     conf := COALESCE((mem_metadata->>'confidence')::float, 0.5);

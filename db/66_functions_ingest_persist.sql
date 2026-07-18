@@ -220,14 +220,10 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- 3.2: slow-ingest fact persistence, atomic. Serves both the slow path and
--- the hybrid path (which passes empty connection/worldview arrays). The
--- acceptance -> trust multipliers move from a Python dict to config.
-INSERT INTO config (key, value, description) VALUES
-    ('memory.slow_ingest_trust_multipliers',
-     '{"accept": 1.0, "contest": 0.4, "question": 0.7}'::jsonb,
-     'Trust multiplier applied to a chunk''s trust_assessment by acceptance stance')
-ON CONFLICT (key) DO NOTHING;
-
+-- the hybrid path (which passes empty connection/worldview arrays).
+-- Sources are authority (#83): trust derives from the source attributions;
+-- the acceptance stance is recorded as edges (CONTESTED_BECAUSE) and
+-- metadata, never as a trust multiplier.
 CREATE OR REPLACE FUNCTION slow_ingest_persist_facts(
     p_facts JSONB,
     p_assessment JSONB,
@@ -240,12 +236,8 @@ CREATE OR REPLACE FUNCTION slow_ingest_persist_facts(
 ) RETURNS JSONB AS $$
 DECLARE
     acceptance TEXT := COALESCE(p_assessment->>'acceptance', 'question');
-    trust_assessment FLOAT := COALESCE((p_assessment->>'trust_assessment')::float, 0.5);
     importance FLOAT := COALESCE((p_assessment->>'importance')::float, 0.5);
     impact TEXT := COALESCE(p_assessment->>'worldview_impact', 'neutral');
-    trust_mult FLOAT := COALESCE(
-        (get_config('memory.slow_ingest_trust_multipliers')->>acceptance)::float, 0.7);
-    base_trust FLOAT := trust_assessment * trust_mult;
     valid_facts TEXT[];
     plan JSONB;
     planned JSONB;
@@ -267,7 +259,8 @@ BEGIN
     END IF;
 
     plan := ingest_route_extractions(
-        (SELECT jsonb_agg(jsonb_build_object('content', f, 'confidence', trust_assessment))
+        (SELECT jsonb_agg(jsonb_build_object('content', f, 'confidence',
+                COALESCE((p_assessment->>'trust_assessment')::float, 0.5)))
          FROM unnest(valid_facts) f),
         0.0);
 
@@ -294,8 +287,10 @@ BEGIN
 
         BEGIN
             memory_id := create_semantic_memory(
-                fact, trust_assessment, ARRAY['ingested_fact'], ARRAY[]::text[],
-                jsonb_build_array(p_source), importance, p_source, base_trust);
+                fact,
+                COALESCE((p_assessment->>'trust_assessment')::float, 0.5),
+                ARRAY['ingested_fact'], ARRAY[]::text[],
+                jsonb_build_array(p_source), importance, p_source, NULL);
             created_ids := created_ids || memory_id;
 
             IF p_encounter_id IS NOT NULL THEN

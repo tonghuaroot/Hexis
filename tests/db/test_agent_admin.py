@@ -205,3 +205,30 @@ async def test_apply_channel_config_rejects_unknowns(db_pool):
             await conn.fetchval(
                 "SELECT apply_channel_config('discord', '{\"webhook\": \"x\"}'::jsonb)"
             )
+
+
+async def test_worldview_trust_derives_from_source(db_pool):
+    """#83 sources-are-authority: a worldview row may never assert more trust
+    than its provenance carries; sync_memory_trust converges it."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            row_id = await conn.fetchval(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level, status, source_attribution)
+                VALUES ('worldview', 'Trust-authority pin belief',
+                        array_fill(0.1, ARRAY[embedding_dimension()])::vector,
+                        0.8, 0.97, 'active',
+                        '{"kind": "internal", "trust": 0.5}'::jsonb)
+                RETURNING id
+                """
+            )
+            await conn.execute("SELECT sync_memory_trust($1)", row_id)
+            converged = await conn.fetchval(
+                "SELECT trust_level FROM memories WHERE id = $1", row_id
+            )
+        finally:
+            await tr.rollback()
+
+    assert abs(converged - 0.5) < 1e-9
