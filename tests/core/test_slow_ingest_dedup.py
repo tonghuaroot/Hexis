@@ -76,59 +76,25 @@ async def _run(pipeline) -> dict[str, Any]:
         )
 
 
-async def test_duplicate_becomes_evidence_not_new_memory():
-    plan = [
-        {"index": 0, "decision": "duplicate", "matched_memory_id": "existing-1"},
-        {"index": 1, "decision": "related", "matched_memory_id": "existing-2"},
-        {"index": 2, "decision": "create", "matched_memory_id": None},
-    ]
-    pipeline = _make_pipeline(plan)
+async def test_slow_path_delegates_to_atomic_sql_pass():
+    """The wrapper makes ONE persist_slow_facts call (db/66) carrying the
+    facts, assessment, source, encounter, and edge targets — routing,
+    corroboration, creation, and every edge kind are DB-owned."""
+    pipeline = _make_pipeline([])
+    pipeline.store.persist_slow_facts.return_value = {
+        "created": ["new-memory-1", "new-memory-2"],
+        "corroborated": 1,
+    }
     result = await _run(pipeline)
 
-    # The duplicate corroborates the matched memory via the evidence policy...
-    pipeline.store.add_evidence.assert_called_once()
-    kwargs = pipeline.store.add_evidence.call_args
-    assert kwargs.args[0] == "existing-1"
-    assert kwargs.args[1] == "supports"
-    assert kwargs.kwargs["evidence_memory_id"] == "encounter-1"
-    assert kwargs.kwargs["context"] == "slow_ingest"
-
-    # ...and only the related + create facts become new memories.
-    assert pipeline.store.create_semantic_memory.call_count == 2
-    assert result["memories_created"] == 2
-
-    # The related fact gains an ASSOCIATED edge to its router match.
-    associated = [
-        c for c in pipeline.store.connect_memories.call_args_list
-        if c.args[1] == "existing-2"
+    pipeline.store.persist_slow_facts.assert_called_once()
+    call = pipeline.store.persist_slow_facts.call_args
+    assert call.args[0] == [
+        "fact zero is long enough",
+        "fact one is long enough",
+        "fact two is long enough",
     ]
-    assert len(associated) == 1
-
-
-async def test_corroboration_failure_is_logged_not_swallowed(caplog):
-    plan = [
-        {"index": 0, "decision": "duplicate", "matched_memory_id": "existing-1"},
-        {"index": 1, "decision": "create", "matched_memory_id": None},
-        {"index": 2, "decision": "create", "matched_memory_id": None},
-    ]
-    pipeline = _make_pipeline(plan)
-    pipeline.store.add_evidence.side_effect = RuntimeError("db unavailable")
-
-    with caplog.at_level(logging.ERROR, logger="ingest"):
-        result = await _run(pipeline)
-
-    # The document still processes; the failure is loudly visible.
+    assert call.args[1]["acceptance"] == "accept"
+    assert call.kwargs["encounter_id"] == "encounter-1"
+    assert call.kwargs["context"] == "slow_ingest"
     assert result["memories_created"] == 2
-    assert any("corroboration failed" in r.message for r in caplog.records)
-
-
-async def test_router_failure_falls_back_to_creating_all_facts(caplog):
-    pipeline = _make_pipeline([])
-    pipeline.store.route_texts.side_effect = RuntimeError("router down")
-
-    with caplog.at_level(logging.ERROR, logger="ingest"):
-        result = await _run(pipeline)
-
-    assert result["memories_created"] == 3
-    pipeline.store.add_evidence.assert_not_called()
-    assert any("fact routing failed" in r.message for r in caplog.records)

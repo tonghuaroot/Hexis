@@ -79,13 +79,6 @@ def _safe_assessment(raw: Any) -> dict[str, Any]:
 # Trust multipliers for acceptance levels
 # ---------------------------------------------------------------------------
 
-_TRUST_MULTIPLIERS = {
-    "accept": 1.0,
-    "contest": 0.4,
-    "question": 0.7,
-}
-
-
 # ---------------------------------------------------------------------------
 # Per-chunk RLM runner
 # ---------------------------------------------------------------------------
@@ -298,8 +291,6 @@ async def run_slow_ingest(
 
         # Create semantic memories from extracted facts
         acceptance = assessment["acceptance"]
-        trust_mult = _TRUST_MULTIPLIERS.get(acceptance, 0.7)
-        base_trust = assessment.get("trust_assessment", 0.5) * trust_mult
 
         # Build enriched source payload
         chunk_source = dict(source_info)
@@ -318,132 +309,24 @@ async def run_slow_ingest(
             fact for fact in facts
             if fact and isinstance(fact, str) and len(fact.strip()) >= 10
         ]
-        # Dedup/related/create routing is DB-owned (db/41). Near-duplicates are
-        # corroborating evidence for the matched memory (#34) — merged source,
-        # audited confidence revision, SUPPORTS edge from the encounter — never
-        # silently dropped or re-created.
-        fact_confidence = assessment.get("trust_assessment", 0.5)
-        try:
-            plan = pipeline.store.route_texts([(f, fact_confidence) for f in valid_facts])
-        except Exception:
-            logger.exception("slow ingest fact routing failed; treating all facts as new")
-            plan = []
-        plan_by_index = {p.get("index"): p for p in plan if isinstance(p, dict)}
-
-        for fact_index, fact in enumerate(valid_facts):
-            routed = plan_by_index.get(fact_index, {})
-            decision = routed.get("decision")
-            matched_id = routed.get("matched_memory_id")
-
-            if decision == "duplicate" and matched_id:
-                try:
-                    pipeline.store.add_evidence(
-                        str(matched_id),
-                        "supports",
-                        chunk_source,
-                        evidence_memory_id=encounter_id,
-                        context="slow_ingest",
-                    )
-                except Exception:
-                    logger.exception("slow ingest corroboration failed for memory %s", matched_id)
-                continue
-
-            # Create semantic memory
-            try:
-                memory_id = pipeline.store.create_semantic_memory(
-                    content=fact,
-                    confidence=assessment.get("trust_assessment", 0.5),
-                    category="ingested_fact",
-                    related_concepts=[],
-                    source=chunk_source,
-                    importance=assessment.get("importance", 0.5),
-                    trust=base_trust,
-                )
-                if memory_id:
-                    memories_created.append(memory_id)
-
-                    # Link to encounter
-                    if encounter_id:
-                        try:
-                            pipeline.store.connect_memories(
-                                memory_id,
-                                encounter_id,
-                                RelationshipType.DERIVED_FROM,
-                                confidence=0.9,
-                            )
-                        except Exception:
-                            pass
-
-                    # Router said this fact is related to an existing memory
-                    if decision == "related" and matched_id:
-                        try:
-                            pipeline.store.connect_memories(
-                                memory_id,
-                                str(matched_id),
-                                RelationshipType.ASSOCIATED,
-                                confidence=0.6,
-                            )
-                        except Exception:
-                            pass
-
-                    # Link to referenced existing memories
-                    for conn_id in connection_ids:
-                        if conn_id and isinstance(conn_id, str):
-                            try:
-                                pipeline.store.connect_memories(
-                                    memory_id,
-                                    conn_id,
-                                    RelationshipType.ASSOCIATED,
-                                    confidence=0.7,
-                                )
-                            except Exception:
-                                pass
-
-                    # Worldview edges
-                    impact = assessment.get("worldview_impact", "neutral")
-                    if impact == "supports":
-                        for wv in worldview_stubs[:3]:
-                            wv_id = wv.get("memory_id") or wv.get("id")
-                            if wv_id:
-                                try:
-                                    pipeline.store.connect_memories(
-                                        memory_id,
-                                        str(wv_id),
-                                        RelationshipType.SUPPORTS,
-                                        confidence=0.7,
-                                    )
-                                except Exception:
-                                    pass
-                    elif impact == "contradicts":
-                        for wv in worldview_stubs[:3]:
-                            wv_id = wv.get("memory_id") or wv.get("id")
-                            if wv_id:
-                                try:
-                                    pipeline.store.connect_memories(
-                                        memory_id,
-                                        str(wv_id),
-                                        RelationshipType.CONTRADICTS,
-                                        confidence=0.7,
-                                    )
-                                except Exception:
-                                    pass
-
-                    # CONTESTED_BECAUSE edges for rejection reasons
-                    if acceptance == "contest" and rejection_reason_ids:
-                        for reason_id in rejection_reason_ids:
-                            if reason_id and isinstance(reason_id, str):
-                                try:
-                                    pipeline.store.connect_memories(
-                                        memory_id,
-                                        reason_id,
-                                        RelationshipType.CONTESTED_BECAUSE,
-                                        confidence=0.8,
-                                    )
-                                except Exception:
-                                    pass
-
-            except Exception as e:
-                logger.error("Failed to create memory for fact: %s", e)
+        # The whole fact-persistence pass is atomic in the DB (db/66
+        # slow_ingest_persist_facts): routing, corroboration via the audited
+        # belief-revision policy, creation, and every edge kind. Trust
+        # multipliers live in config (memory.slow_ingest_trust_multipliers).
+        worldview_edge_ids = [
+            wv.get("memory_id") or wv.get("id") for wv in worldview_stubs[:3]
+        ]
+        result = pipeline.store.persist_slow_facts(
+            valid_facts,
+            assessment,
+            chunk_source,
+            encounter_id=encounter_id,
+            connection_ids=connection_ids,
+            worldview_ids=worldview_edge_ids,
+            rejection_reason_ids=rejection_reason_ids,
+            context="slow_ingest",
+        )
+        memories_created.extend(str(m) for m in (result.get("created") or []))
 
     duration = time.perf_counter() - time_start
     logger.info(
@@ -601,8 +484,6 @@ async def run_hybrid_ingest(
 
             # Create memories from slow assessment (same logic as run_slow_ingest)
             acceptance = assessment["acceptance"]
-            trust_mult = _TRUST_MULTIPLIERS.get(acceptance, 0.7)
-            base_trust = assessment.get("trust_assessment", 0.5) * trust_mult
 
             chunk_source = dict(source_info)
             chunk_source["conscious_analysis"] = assessment.get("analysis", "")
@@ -616,79 +497,17 @@ async def run_hybrid_ingest(
                 fact for fact in assessment.get("extracted_facts", [])
                 if fact and isinstance(fact, str) and len(fact.strip()) >= 10
             ]
-            hybrid_confidence = assessment.get("trust_assessment", 0.5)
-            try:
-                hybrid_plan = pipeline.store.route_texts(
-                    [(f, hybrid_confidence) for f in hybrid_facts]
-                )
-            except Exception:
-                logger.exception("hybrid slow fact routing failed; treating all facts as new")
-                hybrid_plan = []
-            hybrid_plan_by_index = {
-                p.get("index"): p for p in hybrid_plan if isinstance(p, dict)
-            }
-
-            for fact_index, fact in enumerate(hybrid_facts):
-                routed = hybrid_plan_by_index.get(fact_index, {})
-                decision = routed.get("decision")
-                matched_id = routed.get("matched_memory_id")
-
-                if decision == "duplicate" and matched_id:
-                    try:
-                        pipeline.store.add_evidence(
-                            str(matched_id),
-                            "supports",
-                            chunk_source,
-                            evidence_memory_id=encounter_id,
-                            context="hybrid_ingest",
-                        )
-                    except Exception:
-                        logger.exception(
-                            "hybrid ingest corroboration failed for memory %s", matched_id
-                        )
-                    continue
-
-                try:
-                    memory_id = pipeline.store.create_semantic_memory(
-                        content=fact,
-                        confidence=assessment.get("trust_assessment", 0.5),
-                        category="ingested_fact",
-                        related_concepts=[],
-                        source=chunk_source,
-                        importance=assessment.get("importance", 0.5),
-                        trust=base_trust,
-                    )
-                    if memory_id:
-                        memories_created.append(memory_id)
-                        if encounter_id:
-                            try:
-                                pipeline.store.connect_memories(
-                                    memory_id, encounter_id,
-                                    RelationshipType.DERIVED_FROM, confidence=0.9,
-                                )
-                            except Exception:
-                                pass
-                        if decision == "related" and matched_id:
-                            try:
-                                pipeline.store.connect_memories(
-                                    memory_id, str(matched_id),
-                                    RelationshipType.ASSOCIATED, confidence=0.6,
-                                )
-                            except Exception:
-                                pass
-                        # CONTESTED_BECAUSE edges
-                        if acceptance == "contest":
-                            for reason_id in assessment.get("rejection_reasons", []):
-                                if reason_id and isinstance(reason_id, str):
-                                    try:
-                                        pipeline.store.connect_memories(
-                                            memory_id, reason_id,
-                                            RelationshipType.CONTESTED_BECAUSE, confidence=0.8,
-                                        )
-                                    except Exception:
-                                        pass
-                except Exception as e:
-                    logger.error("Failed to create slow memory: %s", e)
+            hybrid_result = pipeline.store.persist_slow_facts(
+                hybrid_facts,
+                assessment,
+                chunk_source,
+                encounter_id=encounter_id,
+                connection_ids=None,
+                worldview_ids=None,
+                rejection_reason_ids=assessment.get("rejection_reasons", []),
+                context="hybrid_ingest",
+            )
+            memories_created.extend(str(m) for m in (hybrid_result.get("created") or []))
 
         else:
             # Fast path: use pre-extracted facts from Phase 1

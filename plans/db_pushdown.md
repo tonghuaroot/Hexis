@@ -229,3 +229,17 @@ Highest value per unit effort; every item below is drift risk today.
 Every schema change ships as `db/migrations/NNNN_*.sql` + baseline mirror per
 `db/migrations/README.md`; every deletion needs its tests repointed at the SQL
 function it duplicated (parity tests become golden-output tests against SQL).
+
+## Findings during execution (2026-07-17, Tranche 2 + 3.1/3.2)
+
+- **Trust multiplier is cosmetic**: `slow_ingest`'s acceptance→trust
+  multiplier (now config `memory.slow_ingest_trust_multipliers`) has no
+  observable effect — provenance triggers recompute `memories.trust_level`
+  from source attribution, and always did (the Python path passed the same
+  multiplied value into the same function). Either the triggers should
+  respect an explicit seed, or the multiplier should scale the SOURCE trust.
+  Needs a design call before "fixing".
+- **Router-failure fallback removed intentionally**: the old Python caught a
+  routing failure and created ALL facts without dedup. In SQL, router and
+  creator share one transaction — a router failure now fails the pass loudly
+  instead of silently bypassing dedup.

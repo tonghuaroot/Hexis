@@ -299,12 +299,17 @@ class TestSlowIngestAssessment:
         assert "extracted_facts" in result
         assert "rejection_reasons" in result
 
-    def test_trust_multipliers(self):
-        from services.slow_ingest_rlm import _TRUST_MULTIPLIERS
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_trust_multipliers_are_config(self, db_pool):
+        """The acceptance multipliers moved to config (db/66)."""
+        import json as _json
 
-        assert _TRUST_MULTIPLIERS["accept"] == 1.0
-        assert _TRUST_MULTIPLIERS["contest"] == 0.4
-        assert _TRUST_MULTIPLIERS["question"] == 0.7
+        async with db_pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT get_config('memory.slow_ingest_trust_multipliers')"
+            )
+            mult = _json.loads(raw) if isinstance(raw, str) else raw
+            assert mult == {"accept": 1.0, "contest": 0.4, "question": 0.7}
 
 
 # ---------------------------------------------------------------------------

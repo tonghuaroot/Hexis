@@ -1692,6 +1692,48 @@ class MemoryStore:
         result = json.loads(raw) if isinstance(raw, str) else raw
         return result if isinstance(result, dict) else {}
 
+    def persist_slow_facts(
+        self,
+        facts: list[str],
+        assessment: dict[str, Any],
+        source: dict[str, Any],
+        *,
+        encounter_id: str | None,
+        connection_ids: list[str] | None = None,
+        worldview_ids: list[str] | None = None,
+        rejection_reason_ids: list[str] | None = None,
+        context: str = "slow_ingest",
+    ) -> dict[str, Any]:
+        """Atomic slow/hybrid ingest fact persistence (db/66
+        slow_ingest_persist_facts): route -> corroborate/create -> provenance,
+        association, worldview, and contested edges."""
+        if self.client is None:
+            self.connect()
+
+        def _uuids(vals):
+            out = []
+            for v in vals or []:
+                try:
+                    out.append(str(UUID(str(v))))
+                except (ValueError, AttributeError, TypeError):
+                    continue
+            return out
+
+        raw = self._fetchval(
+            "SELECT slow_ingest_persist_facts($1::jsonb, $2::jsonb, $3::jsonb,"
+            " $4::uuid, $5::uuid[], $6::uuid[], $7::uuid[], $8::text)",
+            json.dumps(list(facts)),
+            json.dumps(assessment),
+            json.dumps(source),
+            encounter_id,
+            _uuids(connection_ids),
+            _uuids(worldview_ids),
+            _uuids(rejection_reason_ids),
+            context,
+        )
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        return result if isinstance(result, dict) else {}
+
     def apply_ingest_decay(self, memory_id: str, intensity: float, permanent: bool) -> None:
         """Decay policy is DB-owned (db/66 decay_rate_for_intensity)."""
         if self.client is None:

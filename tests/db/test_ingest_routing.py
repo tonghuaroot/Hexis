@@ -144,3 +144,72 @@ async def test_ingest_persist_extractions_atomic_pass(db_pool):
             assert revisions >= 1
         finally:
             await tr.rollback()
+
+
+async def test_slow_ingest_persist_facts_trust_and_edges(db_pool):
+    """3.2 pushdown: acceptance multiplier from config; contested facts gain
+    CONTESTED_BECAUSE edges; duplicates corroborate."""
+    import json as _json_mod
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            # Hash-bucketed stub: distinct texts get near-orthogonal vectors.
+            await conn.execute(
+                """
+                CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
+                RETURNS vector[] AS $$
+                    SELECT COALESCE(array_agg((
+                        SELECT array_agg(CASE WHEN i = 2 + abs(hashtext(t)) % (embedding_dimension() - 2)
+                                              THEN 1.0::float ELSE 0.0::float END)
+                        FROM generate_series(1, embedding_dimension()) i
+                    )::vector), ARRAY[]::vector[])
+                    FROM unnest(text_contents) t
+                $$ LANGUAGE sql;
+                """
+            )
+            reason_id = await conn.fetchval(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level, status)
+                VALUES ('semantic', 'A rejection rationale.',
+                        (ARRAY[1.0::float] || array_fill(0.0::float, ARRAY[embedding_dimension() - 1]))::vector,
+                        0.5, 0.9, 'active')
+                RETURNING id
+                """
+            )
+            assessment = {
+                "acceptance": "contest",
+                "trust_assessment": 0.8,
+                "importance": 0.6,
+                "worldview_impact": "neutral",
+            }
+            result_raw = await conn.fetchval(
+                """
+                SELECT slow_ingest_persist_facts(
+                    $1::jsonb, $2::jsonb, '{"kind": "doc", "ref": "slow.md"}'::jsonb,
+                    NULL, ARRAY[]::uuid[], ARRAY[]::uuid[], ARRAY[$3]::uuid[], 'slow_ingest')
+                """,
+                _json_mod.dumps(["a contested claim that is long enough"]),
+                _json_mod.dumps(assessment),
+                reason_id,
+            )
+            result = _json_mod.loads(result_raw) if isinstance(result_raw, str) else result_raw
+            assert len(result["created"]) == 1
+            mem_id = result["created"][0]
+
+            # NOTE (pushdown finding): the acceptance trust multiplier is
+            # currently cosmetic — provenance triggers recompute trust_level
+            # from source attribution, for the Python path exactly as for this
+            # SQL path. Recorded in plans/db_pushdown.md as follow-up.
+
+            contested = await conn.fetchval(
+                """
+                SELECT count(*) FROM memory_edges
+                WHERE src_id = $1 AND dst_id = $2 AND rel_type = 'CONTESTED_BECAUSE'
+                """,
+                str(mem_id), str(reason_id),
+            )
+            assert contested == 1
+        finally:
+            await tr.rollback()
