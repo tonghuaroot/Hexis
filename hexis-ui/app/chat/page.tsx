@@ -371,7 +371,9 @@ export default function ChatPage() {
           if (eventType === "trace") {
             const request = asString(payload.kind) === "llm_request";
             appendLog({
-              id: asString(payload.id) || crypto.randomUUID(),
+              // Request/response traces share payload.id for correlation, so
+              // the log entry mints its own key; the pair id stays in raw.
+              id: crypto.randomUUID(),
               category: "model",
               title: request ? "Model request" : "Model response",
               detail: `${asString(payload.provider, "provider")}/${asString(payload.model, "model")} · iteration ${String(payload.iteration ?? "-")}`,
@@ -385,7 +387,7 @@ export default function ChatPage() {
             const logKind = asString(payload.kind).toLowerCase();
             const title = asString(payload.title) || logKind || "Activity";
             appendLog({
-              id: asString(payload.id) || crypto.randomUUID(),
+              id: crypto.randomUUID(),
               category: logKind.includes("memory") || title.toLowerCase().includes("memory") ? "memory" : "tool",
               title,
               detail,

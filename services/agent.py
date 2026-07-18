@@ -193,19 +193,19 @@ def _memory_to_subconscious_context(memory: "Memory", content_budget: int) -> di
     }
 
 
-def _bounded_subconscious_json(payload: dict[str, Any]) -> str:
+def _bounded_subconscious_json(payload: dict[str, Any], total_chars: int = _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS) -> str:
     """Serialize valid JSON while keeping the inline appraisal lightweight."""
 
     def encode() -> str:
         return json.dumps(payload, default=str, ensure_ascii=False)
 
     encoded = encode()
-    if len(encoded) <= _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+    if len(encoded) <= total_chars:
         return encoded
 
     additional = payload.get("additional_context")
     if isinstance(additional, str):
-        excess = len(encoded) - _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS
+        excess = len(encoded) - total_chars
         keep = max(0, len(additional) - excess - 100)
         payload["additional_context"] = additional[:keep].rstrip() + (
             "\n[truncated for subconscious appraisal; full context is provided to the main turn]" if keep else ""
@@ -214,33 +214,33 @@ def _bounded_subconscious_json(payload: dict[str, Any]) -> str:
 
     for key in ("relationships", "urgent_drives", "worldview", "identity"):
         values = payload.get(key)
-        while len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS and isinstance(values, list) and values:
+        while len(encoded) > total_chars and isinstance(values, list) and values:
             values.pop()
             encoded = encode()
 
     memories = payload.get("relevant_memories")
-    while len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS and isinstance(memories, list) and len(memories) > 1:
+    while len(encoded) > total_chars and isinstance(memories, list) and len(memories) > 1:
         memories.pop()
         encoded = encode()
 
-    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+    if len(encoded) > total_chars:
         payload.pop("goals", None)
         encoded = encode()
 
-    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS and isinstance(memories, list) and memories:
+    if len(encoded) > total_chars and isinstance(memories, list) and memories:
         memory = memories[0]
         content = str(memory.get("content") or "")
-        excess = len(encoded) - _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS
+        excess = len(encoded) - total_chars
         memory["content"] = content[: max(0, len(content) - excess - 30)].rstrip() + " [truncated]"
         encoded = encode()
 
-    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+    if len(encoded) > total_chars:
         user_message = str(payload.get("user_message") or "")
-        excess = len(encoded) - _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS
+        excess = len(encoded) - total_chars
         payload["user_message"] = user_message[: max(0, len(user_message) - excess - 30)].rstrip() + " [truncated]"
         encoded = encode()
 
-    if len(encoded) > _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS:
+    if len(encoded) > total_chars:
         payload.clear()
         payload.update(
             {
@@ -277,12 +277,27 @@ async def run_subconscious_appraisal(
         "user_message": user_message,
         "relevant_memories": [],
     }
+    # One round-trip for everything the payload needs from the DB (db/67
+    # get_appraisal_db_context): identity/worldview fallback (#59), affect,
+    # goals, relationships, dopamine, and the config-owned payload budgets.
+    # Hydrated values win where present.
+    db_ctx: dict[str, Any] = {}
+    try:
+        db_ctx_raw = await conn.fetchval("SELECT get_appraisal_db_context()")
+        db_ctx = _coerce_json_value(db_ctx_raw, {})
+    except Exception as e:
+        logger.debug("Appraisal DB context unavailable: %s", e)
+    limits = db_ctx.get("limits") or {}
+    context_chars = int(limits.get("context_chars") or _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS)
+    memory_chars = int(limits.get("memory_chars") or 1200)
+    memory_limit = int(limits.get("memory_limit") or 10)
+
     if hydrated_context is not None:
-        remaining = _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS
-        for memory in hydrated_context.memories[:10]:
+        remaining = context_chars
+        for memory in hydrated_context.memories[:memory_limit]:
             if remaining <= 0:
                 break
-            content_budget = min(1200, remaining)
+            content_budget = min(memory_chars, remaining)
             payload["relevant_memories"].append(_memory_to_subconscious_context(memory, content_budget))
             remaining -= min(len(memory.content), content_budget)
         payload["identity"] = hydrated_context.identity[:5]
@@ -290,37 +305,28 @@ async def run_subconscious_appraisal(
         payload["goals"] = hydrated_context.goals or {}
         payload["urgent_drives"] = hydrated_context.urgent_drives[:5]
     elif memory_context:
-        clipped = memory_context[:_SUBCONSCIOUS_MEMORY_CONTEXT_CHARS]
-        if len(memory_context) > _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS:
+        clipped = memory_context[:context_chars]
+        if len(memory_context) > context_chars:
             clipped += "\n[truncated for subconscious appraisal; full context is provided to the main turn]"
         payload["additional_context"] = clipped
 
-    # One round-trip for everything the payload needs from the DB (db/67
-    # get_appraisal_db_context): identity/worldview fallback (#59), affect,
-    # goals, relationships, dopamine. Hydrated values win where present.
-    try:
-        db_ctx_raw = await conn.fetchval("SELECT get_appraisal_db_context()")
-        db_ctx = _coerce_json_value(db_ctx_raw, {})
-        if not payload.get("identity"):
-            payload["identity"] = db_ctx.get("identity") or []
-        if not payload.get("worldview"):
-            payload["worldview"] = db_ctx.get("worldview") or []
-        if db_ctx.get("emotional_state"):
-            payload["emotional_state"] = db_ctx["emotional_state"]
-        elif hydrated_context is not None and hydrated_context.emotional_state:
-            payload["emotional_state"] = hydrated_context.emotional_state
-        if db_ctx.get("goals") and not payload.get("goals"):
-            payload["goals"] = db_ctx["goals"]
-        if db_ctx.get("relationships"):
-            payload["relationships"] = db_ctx["relationships"]
-        if db_ctx.get("dopamine_state"):
-            payload["dopamine_state"] = db_ctx["dopamine_state"]
-    except Exception as e:
-        logger.debug("Appraisal DB context unavailable: %s", e)
-        if hydrated_context is not None and hydrated_context.emotional_state:
-            payload["emotional_state"] = hydrated_context.emotional_state
+    if not payload.get("identity"):
+        payload["identity"] = db_ctx.get("identity") or []
+    if not payload.get("worldview"):
+        payload["worldview"] = db_ctx.get("worldview") or []
+    if db_ctx.get("emotional_state"):
+        payload["emotional_state"] = db_ctx["emotional_state"]
+    elif hydrated_context is not None and hydrated_context.emotional_state:
+        payload["emotional_state"] = hydrated_context.emotional_state
+    if db_ctx.get("goals") and not payload.get("goals"):
+        payload["goals"] = db_ctx["goals"]
+    if db_ctx.get("relationships"):
+        payload["relationships"] = db_ctx["relationships"]
+    if db_ctx.get("dopamine_state"):
+        payload["dopamine_state"] = db_ctx["dopamine_state"]
 
-    user_prompt = "Context (JSON):\n" + _bounded_subconscious_json(payload)
+    total_chars = int(limits.get("total_chars") or _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS)
+    user_prompt = "Context (JSON):\n" + _bounded_subconscious_json(payload, total_chars)
 
     request_messages = [
         {"role": "system", "content": load_subconscious_prompt().strip()},

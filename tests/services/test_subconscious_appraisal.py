@@ -255,3 +255,40 @@ async def test_streaming_chat_runs_subconscious_once_before_multi_iteration_loop
     assert observed == {"energy_budget": None, "iterations": 3}
     assert sum(event.event == AgentEvent.LLM_RESPONSE for event in events) == 3
     subconscious.assert_awaited_once()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_appraisal_db_context_runs_against_real_schema(db_pool):
+    """Regression pin: 0054 shipped referencing a function that did not
+    exist, every live call threw, and the caller's advisory except silently
+    emptied the appraisal's identity/worldview/relationships channels. The
+    mocks in this file could never catch that — this test runs the real SQL."""
+    import json
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level, status)
+                VALUES ('worldview', 'Appraisal context worldview pin',
+                        array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.9, 0.9, 'active')
+                """
+            )
+            await conn.fetchval(
+                "SELECT create_goal('Appraisal context goal pin', NULL, 'curiosity', 'active', NULL, NULL)"
+            )
+            raw = await conn.fetchval("SELECT get_appraisal_db_context()")
+        finally:
+            await tr.rollback()
+
+    ctx = json.loads(raw) if isinstance(raw, str) else raw
+    # Shape: the channels exist (worldview slots fill from seeded beliefs by
+    # stability, so the pin memory need not surface — the goal must).
+    assert isinstance(ctx.get("identity"), list)
+    assert isinstance(ctx.get("worldview"), list)
+    goals = ctx.get("goals") or {}
+    assert any(
+        g.get("title") == "Appraisal context goal pin" for g in goals.get("active", [])
+    )
