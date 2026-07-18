@@ -94,6 +94,7 @@ DECLARE
     metadata JSONB;
     session_uuid UUID;
     v_source_identity TEXT;
+    affect_ctx JSONB;
     raw JSONB;
     raw_unit_id UUID;
     promoted_memory_id UUID;
@@ -128,6 +129,28 @@ BEGIN
         estimate_conversation_importance(p_user_text, p_assistant_text)
     );
     metadata := COALESCE(p_context->'metadata', '{"type":"conversation"}'::jsonb);
+
+    -- Affect is stamped at turn time (#81): prefer this turn's appraisal
+    -- (passed by the caller), else snapshot the current affective state —
+    -- extraction later copies this onto created memories so they carry the
+    -- moment's feeling, never the sweep-time mood.
+    IF jsonb_typeof(p_context->'emotional_state') = 'object' THEN
+        affect_ctx := jsonb_build_object(
+            'valence', LEAST(1.0, GREATEST(-1.0, COALESCE(NULLIF(p_context#>>'{emotional_state,valence}', '')::float, 0.0))),
+            'arousal', LEAST(1.0, GREATEST(0.0, COALESCE(NULLIF(p_context#>>'{emotional_state,arousal}', '')::float, 0.5))),
+            'intensity', LEAST(1.0, GREATEST(0.0, COALESCE(NULLIF(p_context#>>'{emotional_state,intensity}', '')::float, 0.5))),
+            'primary_emotion', COALESCE(NULLIF(p_context#>>'{emotional_state,primary_emotion}', ''), 'neutral'),
+            'source', 'appraisal');
+    ELSE
+        affect_ctx := (SELECT jsonb_build_object(
+            'valence', COALESCE(NULLIF(s->>'valence', '')::float, 0.0),
+            'arousal', COALESCE(NULLIF(s->>'arousal', '')::float, 0.5),
+            'intensity', COALESCE(NULLIF(s->>'intensity', '')::float, 0.5),
+            'primary_emotion', COALESCE(NULLIF(s->>'primary_emotion', ''), 'neutral'),
+            'source', 'state_snapshot')
+            FROM get_current_affective_state() s(s));
+    END IF;
+    metadata := metadata || jsonb_build_object('emotional_context', affect_ctx);
     source_attribution := COALESCE(
         p_context->'source_attribution',
         jsonb_build_object(

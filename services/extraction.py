@@ -56,7 +56,16 @@ async def run_conscious_extraction_step(conn) -> dict[str, Any]:
         system = await conn.fetchval(
             "SELECT content FROM prompt_modules WHERE key = 'conscious_extraction'"
         )
-        user_payload = "\n\n---\n\n".join(_format_unit(row) for row in rows)
+        # The extractor knows who "I" is and who the user is (#56/#82) — the
+        # DB's label resolution, so facts carry real names and a first-person
+        # self.
+        labels_raw = await conn.fetchval("SELECT get_turn_labels()")
+        labels = json.loads(labels_raw) if isinstance(labels_raw, str) else (labels_raw or {})
+        naming = (
+            f"You are {labels.get('agent_label', 'Assistant')}. "
+            f"The user in these conversations is {labels.get('user_label', 'User')}."
+        )
+        user_payload = naming + "\n\n---\n\n" + "\n\n---\n\n".join(_format_unit(row) for row in rows)
         doc, _raw = await chat_json(
             llm_config=llm_config,
             messages=[

@@ -173,7 +173,7 @@ BEGIN
             'ref', 'subconscious_unit:' || unit_id::text,
             'label', CASE WHEN fact_kind = 'self_observation'
                           THEN 'heartbeat self-observation'
-                          ELSE 'conversation with ' || COALESCE(unit.source_identity, 'user') END,
+                          ELSE 'conversation with ' || COALESCE(unit.source_identity, get_turn_labels()->>'user_label') END,
             'author', unit.source_identity,
             'observed_at', unit.turn_at,
             'trust', 0.75
@@ -212,6 +212,16 @@ BEGIN
                 NULL,
                 NULL
             );
+        END IF;
+        -- The memory carries the TURN's feeling, not the sweep-time mood
+        -- (#81): the unit's turn-stamped affect overrides the creation
+        -- trigger's current-state snapshot.
+        IF jsonb_typeof(unit.metadata->'emotional_context') = 'object' THEN
+            UPDATE memories
+            SET metadata = metadata || jsonb_build_object(
+                    'emotional_context', unit.metadata->'emotional_context',
+                    'emotional_valence', COALESCE(NULLIF(unit.metadata#>>'{emotional_context,valence}', '')::float, 0.0))
+            WHERE id = new_id;
         END IF;
         PERFORM link_memory_to_source_unit(new_id, unit_id, 'extraction');
         IF routed->>'decision' = 'related' AND routed->>'matched_memory_id' IS NOT NULL THEN

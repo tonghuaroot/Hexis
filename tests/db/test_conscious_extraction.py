@@ -6,6 +6,7 @@ re-storing, and failures retry then park.
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 
@@ -277,3 +278,94 @@ async def test_empty_extraction_is_success_and_failures_retry_then_park(db_pool)
             assert attempts == 3
         finally:
             await tr.rollback()
+
+
+async def test_get_turn_labels_resolves_configured_names(db_pool):
+    """#56/#82: one label authority for turn rendering, extraction context,
+    and source labels — config first, init-profile fallback, generic last."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT set_config('agent.name', '\"Nova\"'::jsonb)")
+            await conn.execute("SELECT set_config('agent.user_name', '\"Ada\"'::jsonb)")
+            labels = json.loads(await conn.fetchval("SELECT get_turn_labels()"))
+            rendered = await conn.fetchval(
+                "SELECT format_recmem_turn('hi there', 'hello', NULL)"
+            )
+        finally:
+            await tr.rollback()
+
+    assert labels == {"user_label": "Ada", "agent_label": "Nova"}
+    assert rendered.startswith("Ada: hi there")
+    assert "Nova: hello" in rendered
+
+
+async def test_extraction_prompt_speaks_first_person(db_pool):
+    """#82: the seeded extraction prompt instructs first-person self-memories."""
+    async with db_pool.acquire() as conn:
+        content = await conn.fetchval(
+            "SELECT content FROM prompt_modules WHERE key = 'conscious_extraction'"
+        )
+    assert "Facts about **myself** are first person" in content
+    assert "One self, one voice" in content
+
+
+async def test_promise_turn_clears_extraction_floor(db_pool):
+    """#58: a promise scores importance 0.8, above the 0.6 extraction floor —
+    the unit is claimed for extraction, never skipped."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute(
+                """
+                CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
+                RETURNS vector[] AS $$
+                    SELECT COALESCE(array_agg(array_fill(0.1, ARRAY[embedding_dimension()])::vector), ARRAY[]::vector[])
+                    FROM unnest(text_contents)
+                $$ LANGUAGE sql;
+                """
+            )
+            result = json.loads(await conn.fetchval(
+                """SELECT record_chat_turn_memory(
+                    'Will you keep this between us?',
+                    'I promise I''ll tell you mine too.',
+                    $1, NULL, '{}'::jsonb)""",
+                str(uuid.uuid4()),
+            ))
+            importance = await conn.fetchval(
+                "SELECT importance FROM subconscious_units WHERE id = $1::uuid",
+                result["raw_unit_id"],
+            )
+            floor = await conn.fetchval(
+                "SELECT COALESCE(get_config_float('extraction.min_importance'), 0.6)"
+            )
+            claimed = await conn.fetch("SELECT id FROM claim_conscious_extraction_batch()")
+            claimed_ids = {str(row["id"]) for row in claimed}
+            status = await conn.fetchval(
+                "SELECT extraction_status FROM subconscious_units WHERE id = $1::uuid",
+                result["raw_unit_id"],
+            )
+        finally:
+            await tr.rollback()
+
+    assert importance >= floor, f"promise turn importance {importance} fell below floor {floor}"
+    assert result["raw_unit_id"] in claimed_ids or status != "skipped"
+
+
+async def test_conscious_extraction_is_the_sole_semantic_minter(db_pool):
+    """#57: conversation-sourced semantic facts have exactly one minter.
+    RecMem consolidation is scoped to episodic (semantic_refine retired in
+    0ca04bc); no recmem-named function references create_semantic_memory."""
+    async with db_pool.acquire() as conn:
+        offenders = await conn.fetch(
+            """
+            SELECT p.proname FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = 'public'
+              AND p.proname LIKE '%recmem%'
+              AND p.prosrc LIKE '%create_semantic_memory%'
+            """
+        )
+    assert offenders == [], f"recmem functions minting semantic rows: {[r['proname'] for r in offenders]}"

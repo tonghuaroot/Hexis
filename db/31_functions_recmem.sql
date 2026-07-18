@@ -12,21 +12,34 @@ ON CONFLICT (key) DO NOTHING;
 -- channels that know who is talking (platform sender names) pass p_user_label;
 -- the owner-name default covers the single-user paths, and the extraction
 -- prompt treats either as overridable by the conversation's own evidence.
+-- The one place turn labels are resolved (#56/#82): the agent's own name and
+-- the user's, from config with init-profile fallback. Everything that names
+-- the participants — turn rendering, extraction context, source labels —
+-- reads this.
+CREATE OR REPLACE FUNCTION get_turn_labels()
+RETURNS JSONB AS $$
+    SELECT jsonb_build_object(
+        'user_label', COALESCE(
+            NULLIF(get_config_text('agent.user_name'), ''),
+            NULLIF(get_init_profile()#>>'{user,name}', ''),
+            'User'),
+        'agent_label', COALESCE(
+            NULLIF(get_config_text('agent.name'), ''),
+            NULLIF(get_init_profile()#>>'{agent,name}', ''),
+            'Assistant'));
+$$ LANGUAGE sql STABLE;
+
 CREATE OR REPLACE FUNCTION format_recmem_turn(
     p_user_text TEXT,
     p_assistant_text TEXT,
     p_user_label TEXT DEFAULT NULL
 ) RETURNS TEXT AS $$
 DECLARE
+    labels JSONB := get_turn_labels();
     user_label TEXT := COALESCE(
         NULLIF(trim(COALESCE(p_user_label, '')), ''),
-        NULLIF(get_config_text('agent.user_name'), ''),
-        NULLIF(get_init_profile()#>>'{user,name}', ''),
-        'User');
-    agent_label TEXT := COALESCE(
-        NULLIF(get_config_text('agent.name'), ''),
-        NULLIF(get_init_profile()#>>'{agent,name}', ''),
-        'Assistant');
+        labels->>'user_label');
+    agent_label TEXT := labels->>'agent_label';
 BEGIN
     RETURN format(
         '%s: %s%s%s: %s',

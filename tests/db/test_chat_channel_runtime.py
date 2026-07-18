@@ -165,3 +165,84 @@ async def test_prepare_and_finalize_channel_turn_db_lifecycle(db_pool):
             prepared["session_id"],
         )
         assert int(outbound) == 1
+
+
+async def test_turn_write_stamps_appraisal_affect(db_pool):
+    """#81: the stored unit carries THIS turn's appraisal affect; without an
+    appraisal it snapshots the current state instead of storing zeros."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.fetchval(
+                """SELECT record_chat_turn_memory('kiss turn', 'warm reply', $1, NULL,
+                    '{"emotional_state": {"valence": 0.66, "arousal": 0.53, "intensity": 0.62, "primary_emotion": "affection"}}'::jsonb)""",
+                str(uuid4()),
+            )
+            stamped = await conn.fetchrow(
+                """SELECT metadata #>> '{emotional_context,primary_emotion}' AS emotion,
+                          (metadata #>> '{emotional_context,valence}')::float AS valence,
+                          metadata #>> '{emotional_context,source}' AS source
+                   FROM subconscious_units WHERE user_text = 'kiss turn'"""
+            )
+            await conn.fetchval(
+                "SELECT record_chat_turn_memory('plain turn', 'reply', $1, NULL, '{}'::jsonb)",
+                str(uuid4()),
+            )
+            fallback = await conn.fetchval(
+                "SELECT metadata #>> '{emotional_context,source}' FROM subconscious_units WHERE user_text = 'plain turn'"
+            )
+        finally:
+            await tr.rollback()
+
+    assert stamped["emotion"] == "affection"
+    assert abs(stamped["valence"] - 0.66) < 1e-9
+    assert stamped["source"] == "appraisal"
+    assert fallback == "state_snapshot"
+
+
+async def test_extraction_carries_turn_affect_not_sweep_mood(db_pool):
+    """#81: a memory minted by the extraction sweep carries the turn's stored
+    affect, overriding the creation trigger's current-state stamp."""
+    import json
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            unit_id = await conn.fetchval(
+                """
+                INSERT INTO subconscious_units (
+                    content, user_text, assistant_text, embedding, embedding_status,
+                    route_status, importance, idempotency_key, metadata
+                ) VALUES (
+                    'Eric: I adore this. / Samantha: warm reply', 'I adore this', 'warm reply',
+                    array_fill(0.1, ARRAY[embedding_dimension()])::vector, 'embedded',
+                    'raw_only', 0.7, gen_random_uuid()::text,
+                    '{"emotional_context": {"valence": 0.66, "arousal": 0.53, "intensity": 0.62, "primary_emotion": "affection", "source": "appraisal"}}'::jsonb
+                ) RETURNING id
+                """
+            )
+            result = json.loads(await conn.fetchval(
+                "SELECT apply_conscious_extraction(ARRAY[$1::uuid], $2::jsonb)",
+                unit_id,
+                json.dumps([{
+                    "content": "Affect-carry check: Eric adores this project.",
+                    "kind": "user_testimony",
+                    "confidence": 0.8,
+                    "unit_id": str(unit_id),
+                }]),
+            ))
+            assert result["created"] == 1
+            row = await conn.fetchrow(
+                """SELECT (metadata #>> '{emotional_context,valence}')::float AS valence,
+                          metadata #>> '{emotional_context,primary_emotion}' AS emotion
+                   FROM memories WHERE content = 'Affect-carry check: Eric adores this project.'"""
+            )
+        finally:
+            await tr.rollback()
+
+    assert row["emotion"] == "affection"
+    assert abs(row["valence"] - 0.66) < 1e-9

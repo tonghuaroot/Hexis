@@ -297,7 +297,7 @@ Only declarative claims and significant events worth retaining across sessions:
 - **Biographical facts**: stable facts about a person's life or situation.
 - **Significant events**: things I did that mattered, with cause and outcome.
 
-Phrase each fact third-person, self-contained, and understandable without the conversation ("Eric prefers concise answers", not "he said he likes it short").
+Phrase each fact self-contained and understandable without the conversation. Facts about **myself** are first person — these are my own memories, in my own voice ("I promised Eric I would review the draft", "I have an affectionate relationship with Eric"). Facts about **other people** use their known names ("Eric prefers concise answers", not "he said he likes it short"). One self, one voice: my name appears in my memories only when someone else is addressing or describing me.
 
 ## Who said it — attribution
 

@@ -1144,6 +1144,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
 
         full_text = ""
         conscious_started = False
+        appraisal_affect: dict[str, Any] | None = None
 
         async for event in stream_agent(
             pool,
@@ -1171,9 +1172,14 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     if status == "start":
                         yield _sse_event("phase_start", {"phase": "subconscious"})
                     elif status == "end":
+                        output = event.data.get("output")
+                        # This turn's appraisal affect rides into memory
+                        # formation (#81).
+                        if isinstance(output, dict) and output.get("signals", {}).get("emotional_state"):
+                            appraisal_affect = output["signals"]["emotional_state"]
                         yield _sse_event("phase_end", {
                             "phase": "subconscious",
-                            "output": event.data.get("output"),
+                            "output": output,
                         })
 
             elif event.event == AgentEvent.LOOP_START:
@@ -1255,6 +1261,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     user_message=user_message,
                     assistant_message=full_text,
                     session_id=session_id,
+                    emotional_state=appraisal_affect,
                 )
                 yield _sse_event("log", {
                     "id": str(uuid.uuid4()),

@@ -55,12 +55,17 @@ async def _remember_conversation(
     source_identity: str | None = None,
     user_label: str | None = None,
     background_dsn: str | None = None,
+    emotional_state: dict[str, Any] | None = None,
 ) -> None:
     if not user_message and not assistant_message:
         return
     context: dict[str, Any] = {"metadata": {"type": "conversation"}}
     if user_label and user_label.strip():
         context["user_label"] = user_label.strip()
+    # This turn's appraisal, so the stored turn carries the moment's feeling
+    # (#81); the DB snapshots current state when the appraisal is absent.
+    if emotional_state:
+        context["emotional_state"] = emotional_state
     await mem_client.record_chat_turn_memory(
         user_message,
         assistant_message,
