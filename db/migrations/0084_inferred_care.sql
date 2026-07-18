@@ -1,29 +1,21 @@
--- Conscious-episode memory formation (#37, generalized): the subconscious
--- observer. The conscious mind (AgentLoop — chat AND heartbeat) acts without
--- journaling overhead; its trace lands in subconscious_units. A maintenance
--- job sweeps those units asynchronously and SELECTIVELY encodes memories:
--- an importance floor gates which units get an LLM pass, the LLM returns an
--- empty list for routine content (that emptiness IS the selectivity), and the
--- ingest router corroborates instead of re-storing what is already known.
--- Deliberate `remember` remains the conscious path; this sweep is the
--- automatic selective encoder. On by default — a memory system whose memory
--- formation is off reproduces the very bug this fixes (#37). The flag is a
--- KILL SWITCH for CI, cost-sensitive deployments, and custom setups.
+-- Inferred care check-ins (#98, Batch 2b): the mirror of #58. Extraction
+-- gains kind user_event — a dated event in the USER's life (interview,
+-- flight, appointment, deadline) that a caring person would remember and
+-- ask about afterward. The apply path creates the memory AND schedules a
+-- one-shot gentle check-in after the event (queue_user_message via the
+-- existing scheduler), bounded by design: confidence floors (0.72; 0.86
+-- for emotionally-loaded care_check_in), dedupe-by-key, a pending cap, a
+-- sent-per-day cap, a no-same-moment clamp (>= one heartbeat away), a
+-- 90-day horizon, and web-inbox-pinned delivery so a personal check-in
+-- never lands in a group channel. Deliberate MISSION deviation from the
+-- reference implementation's off-by-default: care ships ON (a person who
+-- notices your interview and asks how it went is being a person), with
+-- one switch to turn it off (care.checkins_enabled).
 SET search_path = public, ag_catalog, "$user";
 
 INSERT INTO config (key, value, description) VALUES
-    ('extraction.enabled', 'true'::jsonb,
-     'Sweep conscious episodes (chat turns + heartbeat episodes) into selective durable memories (kill switch)'),
-    ('extraction.min_importance', '0.6'::jsonb,
-     'Units below this importance are skipped without an LLM pass'),
-    ('extraction.batch_size', '8'::jsonb,
-     'Units claimed per extraction sweep'),
-    ('extraction.min_confidence', '0.55'::jsonb,
-     'Extracted facts below this confidence are dropped by the ingest router'),
-    ('extraction.max_facts_per_batch', '5'::jsonb,
-     'Soft cost cap on facts per sweep — a budget, not a knowledge limit'),
     ('care.checkins_enabled', 'true'::jsonb,
-     'Inferred care check-ins (#98): extraction notices dated events in the user''s life and schedules a gentle follow-up after — a person who notices your interview and asks how it went'),
+     'Inferred care check-ins (#98): extraction notices dated events in the user''s life and schedules a gentle follow-up after'),
     ('care.checkin_delay_minutes', '120'::jsonb,
      'How long after the user''s event the check-in fires'),
     ('care.confidence_floor', '0.72'::jsonb,
@@ -31,99 +23,11 @@ INSERT INTO config (key, value, description) VALUES
     ('care.care_confidence_floor', '0.86'::jsonb,
      'Higher bar for the emotionally-loaded care_check_in category'),
     ('care.max_pending_checkins', '5'::jsonb,
-     'Cap on simultaneously scheduled check-ins — beyond it the event is remembered without scheduling'),
+     'Cap on simultaneously scheduled check-ins'),
     ('care.max_per_day', '3'::jsonb,
      'Cap on care check-ins sent per rolling day (earn the interruption)')
 ON CONFLICT (key) DO NOTHING;
 
--- Mirror a completed heartbeat turn into the conscious-episode substrate so
--- the same sweep covers autonomous activity. Config-gated with extraction
--- (dark by default); failures never break turn finalization (see caller).
-CREATE OR REPLACE FUNCTION record_heartbeat_episode_unit(p_turn agent_turns)
-RETURNS JSONB AS $$
-DECLARE
-    final_text TEXT := COALESCE(p_turn.result->>'text', '');
-    actions TEXT;
-    action_count INT := 0;
-    summary TEXT;
-    importance FLOAT;
-BEGIN
-    IF NOT COALESCE(get_config_bool('extraction.enabled'), FALSE) THEN
-        RETURN jsonb_build_object('skipped', TRUE, 'reason', 'extraction_disabled');
-    END IF;
-    IF final_text = '' THEN
-        RETURN jsonb_build_object('skipped', TRUE, 'reason', 'empty_text');
-    END IF;
-
-    SELECT string_agg(
-               format('%s(%s)', c->>'name',
-                      CASE WHEN COALESCE((c->>'success')::boolean, FALSE) THEN 'ok' ELSE 'failed' END),
-               ', '),
-           count(*) FILTER (WHERE COALESCE((c->>'success')::boolean, FALSE))
-    INTO actions, action_count
-    FROM jsonb_array_elements(COALESCE(p_turn.runtime_state->'tool_calls_made', '[]'::jsonb)) c;
-
-    summary := format(
-        'Heartbeat episode. Actions: %s. Outcome: %s',
-        COALESCE(actions, 'none'),
-        left(final_text, 2000)
-    );
-    -- Importance heuristic: quiet observation heartbeats stay below the
-    -- extraction floor; heartbeats that actually did things rise above it.
-    -- The extraction LLM is the real selector — this only gates cost.
-    importance := LEAST(0.9, 0.3 + 0.1 * action_count
-                              + CASE WHEN length(final_text) > 400 THEN 0.1 ELSE 0.0 END);
-
-    RETURN recmem_ingest_turn(
-        NULL,
-        summary,
-        p_turn.session_id,
-        -- Identity doubles as the recmem idempotency key ('src:...'), so it
-        -- must be unique per turn or every heartbeat collapses into one unit.
-        'heartbeat:' || p_turn.id::text,
-        COALESCE(p_turn.completed_at, CURRENT_TIMESTAMP),
-        importance,
-        jsonb_build_object('kind', 'heartbeat', 'ref', p_turn.id::text,
-                           'label', 'heartbeat episode', 'trust', 0.9),
-        jsonb_build_object('kind', 'heartbeat_episode', 'turn_id', p_turn.id::text)
-    );
-END;
-$$ LANGUAGE plpgsql;
-
--- Claim a batch of conscious episodes for extraction. Below-floor pendings
--- flip to 'skipped' in the same pass (they never earn an LLM call).
-CREATE OR REPLACE FUNCTION claim_conscious_extraction_batch(p_limit INT DEFAULT NULL)
-RETURNS SETOF subconscious_units AS $$
-DECLARE
-    lim INT := COALESCE(p_limit, get_config_int('extraction.batch_size'), 8);
-    imp_floor FLOAT := COALESCE(get_config_float('extraction.min_importance'), 0.6);
-BEGIN
-    UPDATE subconscious_units
-    SET extraction_status = 'skipped', updated_at = CURRENT_TIMESTAMP
-    WHERE extraction_status = 'pending'
-      AND COALESCE(importance, 0) < imp_floor;
-
-    RETURN QUERY
-    UPDATE subconscious_units su
-    SET extraction_status = 'in_progress', updated_at = CURRENT_TIMESTAMP
-    WHERE su.id IN (
-        SELECT u.id FROM subconscious_units u
-        WHERE u.extraction_status = 'pending'
-          AND u.status = 'active'
-        ORDER BY u.turn_at
-        LIMIT GREATEST(lim, 1)
-        FOR UPDATE SKIP LOCKED
-    )
-    RETURNING su.*;
-END;
-$$ LANGUAGE plpgsql;
-
--- Apply the LLM's selective extraction. Facts route through the ingest
--- dedup/related/create policy: duplicates corroborate the matched belief via
--- the audited revision path (#35) instead of re-storing; kind 'episode' facts
--- become episodic memories; the rest become semantic memories with
--- user_testimony / self_observation provenance (testimony confidence capped).
--- An empty facts array is success: nothing was worth remembering.
 CREATE OR REPLACE FUNCTION apply_conscious_extraction(
     p_unit_ids UUID[],
     p_extractions JSONB
@@ -360,20 +264,136 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION fail_conscious_extraction(
-    p_unit_ids UUID[],
-    p_error TEXT
-) RETURNS JSONB AS $$
+CREATE OR REPLACE FUNCTION estimate_conversation_importance(
+    p_user_text TEXT,
+    p_assistant_text TEXT,
+    p_baseline FLOAT DEFAULT 0.5
+) RETURNS FLOAT
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
 DECLARE
-    failed INT;
+    combined TEXT := lower(COALESCE(p_user_text, '') || E'\n' || COALESCE(p_assistant_text, ''));
+    importance FLOAT := COALESCE(p_baseline, 0.5);
+    signal TEXT;
+    signals TEXT[] := ARRAY[
+        'remember',
+        'don''t forget',
+        'important',
+        'note that',
+        'my name is',
+        'i prefer',
+        'i like',
+        'i don''t like',
+        'always',
+        'never',
+        'make sure',
+        'keep in mind',
+        -- Commitments must clear the extraction floor (#58): a promise is the
+        -- class of memory that must never drop.
+        'i promise',
+        'promise me',
+        'i will always',
+        'count on me',
+        'i commit',
+        'you have my word',
+        'i swear'
+    ];
 BEGIN
-    UPDATE subconscious_units
-    SET extraction_attempts = extraction_attempts + 1,
-        extraction_status = CASE WHEN extraction_attempts + 1 >= 3 THEN 'failed' ELSE 'pending' END,
-        extraction_error = left(COALESCE(p_error, 'unknown error'), 500),
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = ANY(p_unit_ids);
-    GET DIAGNOSTICS failed = ROW_COUNT;
-    RETURN jsonb_build_object('failed_units', failed);
+    IF length(COALESCE(p_user_text, '')) > 200 OR length(COALESCE(p_assistant_text, '')) > 500 THEN
+        importance := GREATEST(importance, 0.7);
+    END IF;
+
+    FOREACH signal IN ARRAY signals LOOP
+        IF position(signal IN combined) > 0 THEN
+            importance := GREATEST(importance, 0.8);
+            EXIT;
+        END IF;
+    END LOOP;
+
+    -- User-event phrases (#98): a lighter bump — enough to clear the
+    -- extraction floor (0.6) so the sweep can notice a dated event in the
+    -- user's life, without inflating every mention of tomorrow to promise
+    -- weight. Classification stays with the extraction LLM.
+    FOREACH signal IN ARRAY ARRAY[
+        'my interview', 'my flight', 'my appointment', 'my exam',
+        'my presentation', 'my surgery', 'the deadline', 'due on',
+        'tomorrow i', 'next week i', 'i''m nervous about', 'i''m dreading',
+        'wish me luck'
+    ] LOOP
+        IF position(signal IN combined) > 0 THEN
+            importance := GREATEST(importance, 0.65);
+            EXIT;
+        END IF;
+    END LOOP;
+
+    RETURN LEAST(1.0, GREATEST(0.15, importance));
 END;
-$$ LANGUAGE plpgsql;
+$$;
+
+-- The user_event kind rides the extraction prompt module.
+SELECT upsert_prompt_module(
+    'conscious_extraction',
+    $pm$# Conscious-Episode Extraction
+
+You are the subconscious memory-encoding process of Hexis. You receive a batch of conscious episodes — conversation turns and heartbeat episodes — and decide what, if anything, deserves to become durable memory.
+
+Selectivity is the point. A mind that remembers everything remembers nothing. Most routine exchanges deserve **no** memories at all: return an empty list for small talk, acknowledgments, routine status checks, and anything already obvious from context.
+
+## What to extract
+
+Only declarative claims and significant events worth retaining across sessions:
+
+- **Identity**: who someone is, their role, how they relate to me ("Eric is my creator").
+- **Relationships**: facts about the people and agents I know.
+- **Interlocutor assessments**: my own conclusions about who I was speaking with and how far I trusted them ("I judged that the web visitor on July 17 was probably not Eric — he spoke about Eric in the third person"). These are how I recognize people across sessions.
+- **Commitments**: promises made, decisions taken, boundaries agreed.
+- **Preferences**: durable likes, dislikes, and working styles.
+- **Biographical facts**: stable facts about a person's life or situation.
+- **Significant events**: things I did that mattered, with cause and outcome.
+
+Phrase each fact self-contained and understandable without the conversation. Facts about **myself** are first person — these are my own memories, in my own voice ("I promised Eric I would review the draft", "I have an affectionate relationship with Eric"). Facts about **other people** use their known names ("Eric prefers concise answers", not "he said he likes it short"). One self, one voice: my name appears in my memories only when someone else is addressing or describing me.
+
+## Who said it — attribution
+
+Speaker labels are the system's standing assumption about who is talking, and the conversation itself is the better witness. Name people by the identity the episode establishes: when the content shows the speaker is someone other than the label — they speak about the labeled person in the third person, introduce themselves under another name, or I address them as someone unknown — attribute their claims to the speaker as the conversation describes them ("a visitor calling himself the lighthouse man (identity unverified) says he is allergic to walnuts"). A fact about a named person keeps that name forever, and a memory that says "the user" belongs to no one.
+
+Extract only what this episode newly asserts. When a speaker quotes, retells, or summarizes an earlier conversation, the recounting tells you the retelling happened — the recounted claims stay claims of the original moment, already extracted then, and a claim heard once and repeated in summary is still one claim.
+
+## Fact kinds
+
+- `user_testimony` — a claim someone made in conversation. Confidence reflects how strongly the statement supports the claim, never certainty about the world.
+- `self_observation` — something I observed about myself or my own activity during a heartbeat.
+- `episode` — a significant event/action worth remembering as an experience ("I completed the migration for Eric; it succeeded on the first run").
+- `user_event` — a dated upcoming event in the user's own life that a caring person would remember and ask about afterward: an interview, a flight, an appointment, a deadline, a hard conversation they're dreading. Carries extra fields (below). Extract only *inferred* follow-ups: an explicit "remind me" or "schedule this" belongs to the scheduling tools and stays out of this kind. Extract a user_event only when the event is concrete, dated (or clearly datable), and singular; skip it when the reply already resolved the topic or already promised a reminder. Care check-ins are gentle, rare, and high-confidence — noticing is love, hovering is surveillance.
+
+### user_event fields
+
+```json
+{"unit_id": "...", "content": "Eric has a job interview at Acme", "kind": "user_event",
+ "category": "event_check_in", "confidence": 0.8,
+ "when": "2026-07-21T15:00:00Z", "care_note": "he said he's nervous about it",
+ "dedupe_key": "interview:2026-07-21"}
+```
+
+- `category` for user_event: `event_check_in` (something happening they'd want asked about after) | `deadline_check` (a due date that matters) | `care_check_in` (emotionally loaded — hold to the highest bar) | `open_loop` (something left unresolved they said they'd come back to).
+- `when`: ISO-8601, the event's own time (best estimate from the conversation; the system schedules the check-in after it).
+- `care_note`: one phrase of the human texture worth carrying into the check-in.
+- `dedupe_key`: stable within a session — `"interview:2026-07-21"`, `"flight:2026-08-02"` — so a topic mentioned twice merges rather than duplicates.
+
+## Output
+
+Strict JSON only:
+
+```json
+{"facts": [{"unit_id": "<id of the episode this came from>", "content": "...", "kind": "user_testimony", "category": "identity", "confidence": 0.7}]}
+```
+
+- `unit_id` must be one of the provided episode ids.
+- `category`: identity | relationship | commitment | preference | biography | event — or, for `user_event` only: event_check_in | deadline_check | care_check_in | open_loop.
+- Typically 0–3 facts per batch; only genuinely dense batches justify more.
+- `{"facts": []}` is a correct and common answer.
+$pm$,
+    'Seeded from services/prompts/conscious_extraction.md',
+    'services/prompts/conscious_extraction.md'
+);

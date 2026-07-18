@@ -73,6 +73,22 @@ BEGIN
         END IF;
     END LOOP;
 
+    -- User-event phrases (#98): a lighter bump — enough to clear the
+    -- extraction floor (0.6) so the sweep can notice a dated event in the
+    -- user's life, without inflating every mention of tomorrow to promise
+    -- weight. Classification stays with the extraction LLM.
+    FOREACH signal IN ARRAY ARRAY[
+        'my interview', 'my flight', 'my appointment', 'my exam',
+        'my presentation', 'my surgery', 'the deadline', 'due on',
+        'tomorrow i', 'next week i', 'i''m nervous about', 'i''m dreading',
+        'wish me luck'
+    ] LOOP
+        IF position(signal IN combined) > 0 THEN
+            importance := GREATEST(importance, 0.65);
+            EXIT;
+        END IF;
+    END LOOP;
+
     RETURN LEAST(1.0, GREATEST(0.15, importance));
 END;
 $$;

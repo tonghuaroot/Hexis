@@ -33,7 +33,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Goal | Test | Status |
 |---|---|---|
 | **"It came to me later"**: filed at high familiarity (#96), resolved by maintenance — boosts clear the spontaneous floor, a first-person note reaches the web inbox (explicit delivery, sensitivity-honoring, capped), and the answer rides recall's spontaneous tier + the heartbeat "On my mind" line | Person + Piper | done (see #98) |
-| **Inferred commitments** (mirror of #58): extraction notices the *user's* upcoming events/commitments; cron schedules a follow-up check-in after | Piper (care) | todo |
+| **Inferred commitments** (mirror of #58): extraction kind `user_event` (openclaw categories, confidence floors 0.72/0.86, dedupe keys, no-same-moment clamp, pending + per-day caps, 90-day horizon, web-inbox-pinned) → scheduled check-in after the event; default ON with one off switch | Piper (care) | done (see #98) |
 
 ## Batch 3 — Lean core, reachable capability
 

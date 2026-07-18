@@ -29,6 +29,21 @@ Extract only what this episode newly asserts. When a speaker quotes, retells, or
 - `user_testimony` — a claim someone made in conversation. Confidence reflects how strongly the statement supports the claim, never certainty about the world.
 - `self_observation` — something I observed about myself or my own activity during a heartbeat.
 - `episode` — a significant event/action worth remembering as an experience ("I completed the migration for Eric; it succeeded on the first run").
+- `user_event` — a dated upcoming event in the user's own life that a caring person would remember and ask about afterward: an interview, a flight, an appointment, a deadline, a hard conversation they're dreading. Carries extra fields (below). Extract only *inferred* follow-ups: an explicit "remind me" or "schedule this" belongs to the scheduling tools and stays out of this kind. Extract a user_event only when the event is concrete, dated (or clearly datable), and singular; skip it when the reply already resolved the topic or already promised a reminder. Care check-ins are gentle, rare, and high-confidence — noticing is love, hovering is surveillance.
+
+### user_event fields
+
+```json
+{"unit_id": "...", "content": "Eric has a job interview at Acme", "kind": "user_event",
+ "category": "event_check_in", "confidence": 0.8,
+ "when": "2026-07-21T15:00:00Z", "care_note": "he said he's nervous about it",
+ "dedupe_key": "interview:2026-07-21"}
+```
+
+- `category` for user_event: `event_check_in` (something happening they'd want asked about after) | `deadline_check` (a due date that matters) | `care_check_in` (emotionally loaded — hold to the highest bar) | `open_loop` (something left unresolved they said they'd come back to).
+- `when`: ISO-8601, the event's own time (best estimate from the conversation; the system schedules the check-in after it).
+- `care_note`: one phrase of the human texture worth carrying into the check-in.
+- `dedupe_key`: stable within a session — `"interview:2026-07-21"`, `"flight:2026-08-02"` — so a topic mentioned twice merges rather than duplicates.
 
 ## Output
 
@@ -39,6 +54,6 @@ Strict JSON only:
 ```
 
 - `unit_id` must be one of the provided episode ids.
-- `category`: identity | relationship | commitment | preference | biography | event.
+- `category`: identity | relationship | commitment | preference | biography | event — or, for `user_event` only: event_check_in | deadline_check | care_check_in | open_loop.
 - Typically 0–3 facts per batch; only genuinely dense batches justify more.
 - `{"facts": []}` is a correct and common answer.
