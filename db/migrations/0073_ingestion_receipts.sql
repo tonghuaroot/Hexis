@@ -1,92 +1,52 @@
--- Atomic ingest persistence (plans/db_pushdown.md 3.1 + the 2.6 helpers).
--- The post-LLM persistence loop — route -> corroborate/create -> concept
--- links -> worldview edges -> provenance edges -> decay — ran as a Python
--- saga: a mid-loop failure left half-written memory state, and the worldview
--- hint threshold / decay bands were Python literals. One function, one
--- transaction, config-owned knobs.
+-- Ingestion receipts (#85/#90 stage 1): completion is recorded per section
+-- in a dedicated table, atomically with persistence — never asserted by the
+-- encounter memory's mere existence. This stage is inert to current Python
+-- (the persist hook fires only when p_source carries section_hash); the
+-- pipeline adopts it in the receipt-ordering stage.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
-    ('memory.ingest_decay_base', '0.01'::jsonb,
-     'Base decay rate for ingested memories; intensity bands scale it'),
-    ('memory.ingest_worldview_hint_threshold', '0.7'::jsonb,
-     'Minimum similarity for an extraction hint to link a worldview memory')
-ON CONFLICT (key) DO NOTHING;
+CREATE TABLE IF NOT EXISTS ingestion_receipts (
+    doc_ref TEXT NOT NULL,
+    section_hash TEXT NOT NULL,
+    memory_id UUID,
+    memories_created INT NOT NULL DEFAULT 0,
+    source_path TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (doc_ref, section_hash)
+);
 
--- 2.6: intensity -> decay-rate bands (flat < 0.1 decays 3x faster; vivid
--- > 0.6 decays half as fast), base config-owned.
-CREATE OR REPLACE FUNCTION decay_rate_for_intensity(
-    p_intensity FLOAT
-) RETURNS FLOAT AS $$
-DECLARE
-    base FLOAT := COALESCE(get_config_float('memory.ingest_decay_base'), 0.01);
-    i FLOAT := COALESCE(p_intensity, 0.0);
-BEGIN
-    RETURN CASE
-        WHEN i < 0.1 THEN base * 3.0
-        WHEN i < 0.3 THEN base * 1.5
-        WHEN i > 0.6 THEN base * 0.5
-        ELSE base
-    END;
-END;
-$$ LANGUAGE plpgsql STABLE;
+CREATE OR REPLACE FUNCTION record_ingestion_receipt(
+    p_doc_ref TEXT,
+    p_section_hash TEXT,
+    p_memory_id UUID DEFAULT NULL,
+    p_memories_created INT DEFAULT 0,
+    p_source_path TEXT DEFAULT NULL
+) RETURNS VOID AS $$
+    INSERT INTO ingestion_receipts (doc_ref, section_hash, memory_id, memories_created, source_path)
+    VALUES (p_doc_ref, p_section_hash, p_memory_id, COALESCE(p_memories_created, 0), p_source_path)
+    ON CONFLICT (doc_ref, section_hash) DO NOTHING;
+$$ LANGUAGE sql;
 
--- 2.6: resolve an extraction's supports/contradicts hint to a worldview
--- memory by embedding similarity.
-CREATE OR REPLACE FUNCTION find_worldview_by_hint(
-    p_hint TEXT,
-    p_threshold FLOAT DEFAULT NULL
-) RETURNS UUID AS $$
-DECLARE
-    threshold FLOAT := COALESCE(p_threshold,
-        get_config_float('memory.ingest_worldview_hint_threshold'), 0.7);
-    hint_emb vector;
-    found UUID;
-BEGIN
-    IF NULLIF(trim(COALESCE(p_hint, '')), '') IS NULL THEN
-        RETURN NULL;
-    END IF;
+-- Receipt lookup: the receipts table UNION'd with the legacy whole-document
+-- memory-attribution receipts, so documents ingested before this table still
+-- skip. Returns {hash: memory_id-or-null}.
+CREATE OR REPLACE FUNCTION get_ingestion_receipts(
+    p_doc_ref TEXT,
+    p_hashes TEXT[]
+) RETURNS JSONB AS $$
+    SELECT COALESCE(jsonb_object_agg(hash, memory_id), '{}'::jsonb) FROM (
+        SELECT r.section_hash AS hash, r.memory_id
+        FROM ingestion_receipts r
+        WHERE r.doc_ref = p_doc_ref AND r.section_hash = ANY(p_hashes)
+        UNION
+        SELECT m.source_attribution->>'content_hash' AS hash, m.id AS memory_id
+        FROM memories m
+        WHERE m.source_attribution->>'ref' = p_doc_ref
+          AND m.source_attribution->>'content_hash' = ANY(p_hashes)
+    ) hits;
+$$ LANGUAGE sql STABLE;
 
-    BEGIN
-        hint_emb := (get_embedding(ARRAY[ensure_embedding_prefix(p_hint, 'search_query')]))[1];
-    EXCEPTION WHEN OTHERS THEN
-        RETURN NULL;
-    END;
 
-    SELECT m.id INTO found
-    FROM memories m
-    WHERE m.type = 'worldview'
-      AND m.status = 'active'
-      AND (1 - (m.embedding <=> hint_emb)) >= threshold
-    ORDER BY m.embedding <=> hint_emb
-    LIMIT 1;
-
-    RETURN found;
-END;
-$$ LANGUAGE plpgsql;
-
--- Hints arrive as a string or a list of strings; normalize to one text.
-CREATE OR REPLACE FUNCTION _ingest_hint_text(p_hint JSONB)
-RETURNS TEXT AS $$
-BEGIN
-    IF p_hint IS NULL OR p_hint = 'null'::jsonb THEN
-        RETURN NULL;
-    END IF;
-    IF jsonb_typeof(p_hint) = 'array' THEN
-        RETURN NULLIF(trim((
-            SELECT string_agg(value, ' ')
-            FROM jsonb_array_elements_text(p_hint)
-            WHERE NULLIF(trim(value), '') IS NOT NULL
-        )), '');
-    END IF;
-    RETURN NULLIF(trim(p_hint #>> '{}'), '');
-END;
-$$ LANGUAGE plpgsql IMMUTABLE;
-
--- 3.1: the whole post-LLM persistence pass, atomic.
--- p_extractions: [{content, confidence, importance, category, concepts[],
---                  connections[], supports, contradicts}]
--- p_options: {min_confidence, min_importance_floor, base_trust, permanent}
 CREATE OR REPLACE FUNCTION ingest_persist_extractions(
     p_extractions JSONB,
     p_source JSONB,
@@ -231,11 +191,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- 3.2: slow-ingest fact persistence, atomic. Serves both the slow path and
--- the hybrid path (which passes empty connection/worldview arrays).
--- Sources are authority (#83): trust derives from the source attributions;
--- the acceptance stance is recorded as edges (CONTESTED_BECAUSE) and
--- metadata, never as a trust multiplier.
 CREATE OR REPLACE FUNCTION slow_ingest_persist_facts(
     p_facts JSONB,
     p_assessment JSONB,

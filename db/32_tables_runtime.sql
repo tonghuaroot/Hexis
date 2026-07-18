@@ -129,3 +129,43 @@ CREATE TABLE IF NOT EXISTS change_journal (
 
 CREATE INDEX IF NOT EXISTS idx_change_journal_occurred
     ON change_journal (occurred_at DESC);
+
+-- Per-section ingestion receipts (#85/#90): completion, not intent.
+CREATE TABLE IF NOT EXISTS ingestion_receipts (
+    doc_ref TEXT NOT NULL,
+    section_hash TEXT NOT NULL,
+    memory_id UUID,
+    memories_created INT NOT NULL DEFAULT 0,
+    source_path TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (doc_ref, section_hash)
+);
+
+-- Durable ingestion jobs (#87): background ingestion survives restarts.
+CREATE TABLE IF NOT EXISTS ingestion_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kind TEXT NOT NULL CHECK (kind IN ('text', 'url')),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'cancelled')),
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    content TEXT,
+    content_hash TEXT,
+    progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result JSONB,
+    error TEXT,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    attempts INT NOT NULL DEFAULT 0,
+    max_attempts INT NOT NULL DEFAULT 3,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_pending
+    ON ingestion_jobs (next_attempt_at, created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_in_progress
+    ON ingestion_jobs (claimed_at) WHERE status = 'in_progress';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ingestion_jobs_active_hash
+    ON ingestion_jobs (content_hash) WHERE status IN ('pending', 'in_progress');
