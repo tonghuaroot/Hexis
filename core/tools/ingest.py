@@ -34,6 +34,8 @@ async def _build_ingest_config(pool, **overrides: Any) -> "Config":
     from core.llm_config import resolve_llm_config
     from services.ingest import Config
 
+    from services.ingest.config import load_ingest_settings
+
     dsn = db_dsn_from_env()
     llm_config = await resolve_llm_config(pool, "llm.chat", fallback_key="llm")
 
@@ -41,6 +43,9 @@ async def _build_ingest_config(pool, **overrides: Any) -> "Config":
         "dsn": dsn,
         "llm_config": llm_config,
     }
+    # DB-owned policy (#91); explicit overrides still win.
+    async with pool.acquire() as conn:
+        defaults.update(await load_ingest_settings(conn))
     defaults.update(overrides)
     return Config(**defaults)
 

@@ -37,6 +37,7 @@ class IngestLLM:
         from core.llm import normalize_llm_config
 
         self._cfg = normalize_llm_config(config.llm_config)
+        self._config_ref = config
         self.call_count = 0
 
     async def complete(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
@@ -64,8 +65,15 @@ class IngestLLM:
         return result.get("content", "")
 
     async def complete_json(self, messages: list[dict[str, str]], temperature: float = 0.2) -> dict[str, Any]:
-        text = await self.complete(messages, temperature=temperature)
-        return self._parse_json(text)
+        # One (config-owned) re-ask when the completion parses to nothing —
+        # transient HTTP/network retry already lives at the provider layer.
+        retries = max(0, int(getattr(self._config_ref, "llm_json_retries", 1)))
+        for attempt in range(retries + 1):
+            text = await self.complete(messages, temperature=temperature)
+            parsed = self._parse_json(text)
+            if parsed or attempt >= retries:
+                return parsed
+        return {}
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:

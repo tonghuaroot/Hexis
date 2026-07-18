@@ -38,12 +38,17 @@ class _StubLLM:
         self.completions += 1
         if self.fail_on_call is not None and self.completions >= self.fail_on_call:
             raise RuntimeError("stub LLM crash")
+        import hashlib as _hashlib
+
         text = str(messages[-1].get("content", ""))
         part = next((f"Part {i}" for i in range(1, 4) if f"Part {i}" in text), "Part ?")
+        # Content-derived uniqueness: identical fact text across tests would
+        # route as corroboration (dedup) instead of creation.
+        sig = _hashlib.sha256(text.encode()).hexdigest()[:10]
         return {
             "items": [
                 {
-                    "content": f"Resume-pin fact from {part}.",
+                    "content": f"Stub fact {sig} from {part}.",
                     "confidence": 0.9,
                     "importance": 0.6,
                 }
@@ -57,11 +62,15 @@ async def _make_pipeline(db_pool, fail_on_call=None):
     async with db_pool.acquire() as conn:
         await conn.execute(
             """
+            -- Distinct texts land on distinct AXES (near-orthogonal) so the
+            -- similarity router treats them as different claims; a shared
+            -- direction would dedup everything to the first fact.
             CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
             RETURNS vector[] AS $$
                 SELECT COALESCE(array_agg((
-                    ARRAY[2.0 + abs(hashtext(t)) % 100 / 100.0::float] ||
-                    array_fill(0.1::float, ARRAY[embedding_dimension() - 1])
+                    array_fill(0.01::float, ARRAY[2 + abs(hashtext(t)) % (embedding_dimension() - 2)]) ||
+                    ARRAY[1.0::float] ||
+                    array_fill(0.01::float, ARRAY[embedding_dimension() - 3 - abs(hashtext(t)) % (embedding_dimension() - 2)])
                 )::vector), ARRAY[]::vector[])
                 FROM unnest(text_contents) t
             $$ LANGUAGE sql;
@@ -127,3 +136,77 @@ async def test_crash_resumes_and_completes(db_pool):
     await pipeline3.close()
     assert count3 == 0
     assert calls3 == 0, "a completed document must not reach the LLM again"
+
+
+async def test_worker_step_processes_enqueued_job(db_pool):
+    """#87 end to end: enqueue a text job -> one worker step (stub LLM) ->
+    completed with memories + receipts; a failing job backs off."""
+    import json as _json
+
+    from services.ingest.jobs import run_ingestion_jobs_step
+
+    # Success path
+    pipeline_cfg_source = await _make_pipeline(db_pool)
+    stub_config = pipeline_cfg_source.config
+    await pipeline_cfg_source.close()
+    stub_config.llm_config = {"provider": "openai", "model": "stub", "api_key": "stub"}
+
+    async with db_pool.acquire() as conn:
+        job_id = await conn.fetchval(
+            "SELECT enqueue_ingestion_job('text', $1::jsonb, $2, $3)",
+            _json.dumps({"title": "Worker job pin", "mode": "fast"}),
+            "# Worker job doc\n\n" + DOC,
+            "worker-job-hash-1",
+        )
+
+    # Patch IngestLLM inside the pipeline the job builds: config_override
+    # carries our stub llm wiring via a pre-built Config whose pipeline gets
+    # stubbed after construction — simplest: monkeypatch IngestionPipeline.
+    from services.ingest import pipeline as pipeline_mod
+
+    real_init = pipeline_mod.IngestionPipeline.__init__
+
+    def _stubbed_init(self, config):
+        real_init(self, config)
+        self.llm = _StubLLM()
+        self.appraiser.llm = self.llm
+        self.extractor.llm = self.llm
+
+    pipeline_mod.IngestionPipeline.__init__ = _stubbed_init
+    try:
+        processed = await run_ingestion_jobs_step(db_pool, config_override=stub_config)
+    finally:
+        pipeline_mod.IngestionPipeline.__init__ = real_init
+
+    assert processed == 1
+    async with db_pool.acquire() as conn:
+        job = _json.loads(await conn.fetchval("SELECT get_ingestion_job($1::uuid)", job_id))
+    assert job["status"] == "completed"
+    assert job["result"]["memories_created"] >= 1
+
+    # Failure path: crash LLM -> job backs off to pending with error recorded.
+    async with db_pool.acquire() as conn:
+        fail_id = await conn.fetchval(
+            "SELECT enqueue_ingestion_job('text', $1::jsonb, $2, $3)",
+            _json.dumps({"title": "Worker fail pin", "mode": "fast"}),
+            "# Failing job doc\n\n" + DOC.replace("Sentence", "Line"),
+            "worker-job-hash-2",
+        )
+
+    def _failing_init(self, config):
+        real_init(self, config)
+        self.llm = _StubLLM(fail_on_call=1)
+        self.appraiser.llm = self.llm
+        self.extractor.llm = self.llm
+
+    pipeline_mod.IngestionPipeline.__init__ = _failing_init
+    try:
+        await run_ingestion_jobs_step(db_pool, config_override=stub_config)
+    finally:
+        pipeline_mod.IngestionPipeline.__init__ = real_init
+
+    async with db_pool.acquire() as conn:
+        failed = _json.loads(await conn.fetchval("SELECT get_ingestion_job($1::uuid)", fail_id))
+    assert failed["status"] == "pending"  # backed off, not terminal
+    assert "stub LLM crash" in failed["error"]
+    assert failed["attempts"] == 1

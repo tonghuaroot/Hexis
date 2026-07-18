@@ -459,6 +459,16 @@ class MaintenanceWorker:
             if not result.get("skipped"):
                 logger.info(f"Reconsolidation step: {result}")
 
+    async def _run_ingestion_jobs(self) -> None:
+        """Durable ingestion jobs (#87): the queue table is the state — no
+        state-doc gate, matching outbox delivery."""
+        try:
+            from services.ingest.jobs import run_ingestion_jobs_step
+
+            await run_ingestion_jobs_step(self.pool)
+        except Exception:
+            logger.exception("ingestion job step failed")
+
     async def _run_recmem_if_enabled(self) -> None:
         if not self.pool:
             return
@@ -566,6 +576,7 @@ class MaintenanceWorker:
                     await self._run_extraction_if_enabled()
                     await self._run_origin_seed_if_enabled()
                     await self._run_skill_improvement_if_due()
+                    await self._run_ingestion_jobs()
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")
                 await asyncio.sleep(POLL_INTERVAL)

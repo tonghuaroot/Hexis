@@ -793,26 +793,6 @@ async def chat(req: ChatRequest):
     )
 
 
-async def _run_text_ingest(content: str, title: str, mode_value: str) -> None:
-    """Background ingestion of pasted text via the async pipeline (#88/#89:
-    no temp file, no executor). Stage 6 replaces this task with a durable
-    job the maintenance worker processes."""
-    from core.tools.ingest import _build_ingest_config
-    from services.ingest import IngestionMode, IngestionPipeline
-
-    try:
-        config = await _build_ingest_config(_pool, mode=IngestionMode(mode_value))
-        config.verbose = False
-        pipeline = IngestionPipeline(config)
-        try:
-            count = await pipeline.ingest_text(content, title=title, source_type="pasted_text")
-            logger.info("Pasted-text ingest '%s': %s memories created", title, count)
-        finally:
-            await pipeline.close()
-    except Exception:
-        logger.exception("Pasted-text ingest failed for '%s'", title)
-
-
 @app.post("/api/ingest/text")
 async def ingest_text(req: IngestTextRequest):
     """Ingest pasted text as a document (the UI's large-paste attachment path).
@@ -835,13 +815,40 @@ async def ingest_text(req: IngestTextRequest):
         first_line = next((ln.strip() for ln in content.splitlines() if ln.strip()), "")
         title = (first_line[:80] or "Pasted text")
 
-    asyncio.create_task(_run_text_ingest(content, title, mode_value))
+    # Durable job (#87): survives restarts, retries with backoff, resumes
+    # partial documents via receipts. The maintenance worker is the consumer.
+    import hashlib as _hashlib
+
+    content_hash = _hashlib.sha256(content.encode("utf-8")).hexdigest()
+    async with _pool.acquire() as conn:
+        job_id = await conn.fetchval(
+            "SELECT enqueue_ingestion_job('text', $1::jsonb, $2, $3)",
+            json.dumps({"title": title, "mode": mode_value, "source_type": "pasted_text"}),
+            content,
+            content_hash,
+        )
     return {
         "accepted": True,
+        "job_id": str(job_id),
         "title": title,
         "mode": mode_value,
         "word_count": len(content.split()),
     }
+
+
+@app.get("/api/ingest/jobs/{job_id}")
+async def ingest_job_status(job_id: str):
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="database not ready")
+    try:
+        parsed = uuid.UUID(job_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="job_id must be a uuid")
+    async with _pool.acquire() as conn:
+        raw = await conn.fetchval("SELECT get_ingestion_job($1::uuid)", parsed)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return json.loads(raw) if isinstance(raw, str) else raw
 
 
 @app.get("/v1/models")

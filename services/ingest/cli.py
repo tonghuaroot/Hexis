@@ -80,8 +80,11 @@ def _load_llm_config_from_db(args: argparse.Namespace) -> dict[str, Any] | None:
             try:
                 from core.llm_config import load_llm_config
 
+                from .config import load_ingest_settings
+
                 cfg = await load_llm_config(conn, "llm.chat", fallback_key="llm")
-                return cfg
+                # DB-owned ingest policy rides along (#91).
+                return {"llm": cfg, "settings": await load_ingest_settings(conn)}
             finally:
                 await conn.close()
         except Exception:
@@ -96,7 +99,9 @@ def _build_config_from_args(args: argparse.Namespace) -> Config:
     Priority: CLI flags > DB config (with full credential resolution) > defaults.
     """
     # Load fully-resolved config from DB (handles OAuth, etc.)
-    db_llm = _load_llm_config_from_db(args) or {}
+    db_loaded = _load_llm_config_from_db(args) or {}
+    db_llm = db_loaded.get("llm") or {}
+    db_settings = db_loaded.get("settings") or {}
 
     # CLI overrides (only if explicitly set — None means "not provided")
     cli_endpoint = getattr(args, "endpoint", None)
@@ -126,6 +131,8 @@ def _build_config_from_args(args: argparse.Namespace) -> Config:
         permanent=getattr(args, "permanent", False),
         base_trust=getattr(args, "base_trust", None),
         verbose=not getattr(args, "quiet", False),
+        # DB-owned policy (#91); dataclass defaults cover absent keys.
+        **db_settings,
     )
 
 

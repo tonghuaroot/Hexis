@@ -669,3 +669,33 @@ class TestEmailReaderParse:
         assert "[Email]" in result
         assert "[Subject: Test Email]" in result
         assert "Hello Bob" in result
+
+
+class TestIngestPolicyConfig:
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_settings_hydrate_from_db(self, db_pool):
+        """#91: ingest.* config keys reach the Config; explicit overrides win."""
+        from core.tools.ingest import _build_ingest_config
+        from services.ingest import IngestionMode
+
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                await conn.execute(
+                    "SELECT set_config('ingest.max_parallel_llm', '7'::jsonb)"
+                )
+                await conn.execute(
+                    "SELECT set_config('ingest.max_facts_per_section', '11'::jsonb)"
+                )
+            finally:
+                # set_config must be visible to the builder's own conn —
+                # commit inside the fixture DB (module-scoped, disposable).
+                await tr.commit()
+
+        config = await _build_ingest_config(
+            db_pool, mode=IngestionMode.FAST, max_facts_per_section=3
+        )
+        assert config.max_parallel_llm == 7          # from DB
+        assert config.max_facts_per_section == 3     # explicit override wins
+        assert config.deep_max_words == 2000         # seeded default

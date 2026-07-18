@@ -156,10 +156,17 @@ class IngestionPipeline:
         ]
         if self.config.verbose:
             _emit(self.config, f"Found {len(files)} files to process")
-        total = 0
-        for file_path in files:
-            total += await self.ingest_file(file_path)
-        return total
+
+        # Bounded file concurrency (#90); per-file work is already parallel
+        # inside, so this multiplies modestly, not explosively.
+        file_slots = asyncio.Semaphore(max(1, self.config.max_parallel_files))
+
+        async def _one(file_path: Path) -> int:
+            async with file_slots:
+                return await self.ingest_file(file_path)
+
+        counts = await asyncio.gather(*[_one(f) for f in files])
+        return sum(counts)
 
     async def ingest_url(self, url: str, title: str | None = None) -> int:
         """Ingest content from a URL."""
@@ -311,16 +318,21 @@ class IngestionPipeline:
             raise RuntimeError("Ingestion cancelled")
         max_items = self.config.max_facts_per_section
 
+        # Bounded LLM fan-out (#90): the rate-limit stampede bound — a large
+        # document no longer launches every section's calls at once.
+        llm_slots = asyncio.Semaphore(max(1, self.config.max_parallel_llm))
+
         if use_deep:
             # Small docs: each section gets its own appraisal + extraction,
             # gathered on the caller's loop (#88 — the asyncio.run island died).
             async def _appraise_and_extract(s: Section) -> tuple[Appraisal, list[Extraction]]:
-                sample = self._sample_content(s.content)
-                apr = await self.appraiser.appraise(content=sample, context=base_context, mode=mode)
-                exts = await self.extractor.extract(
-                    section=s, doc=doc, appraisal=apr, mode=mode, max_items=max_items,
-                )
-                return apr, exts
+                async with llm_slots:
+                    sample = self._sample_content(s.content)
+                    apr = await self.appraiser.appraise(content=sample, context=base_context, mode=mode)
+                    exts = await self.extractor.extract(
+                        section=s, doc=doc, appraisal=apr, mode=mode, max_items=max_items,
+                    )
+                    return apr, exts
 
             deep_results = await asyncio.gather(
                 *[_appraise_and_extract(s) for s in active_sections]
@@ -343,12 +355,16 @@ class IngestionPipeline:
         else:
             # Larger docs: shared appraisal, parallel extraction only
             appraisal = overall_appraisal if overall_appraisal is not None else Appraisal()
-            section_extractions = await asyncio.gather(*[
-                self.extractor.extract(
-                    section=s, doc=doc, appraisal=appraisal, mode=mode, max_items=max_items,
-                )
-                for s in active_sections
-            ])
+
+            async def _bounded_extract(s: Section) -> list[Extraction]:
+                async with llm_slots:
+                    return await self.extractor.extract(
+                        section=s, doc=doc, appraisal=appraisal, mode=mode, max_items=max_items,
+                    )
+
+            section_extractions = await asyncio.gather(
+                *[_bounded_extract(s) for s in active_sections]
+            )
             for section, extractions in zip(active_sections, section_extractions):
                 s_hash = section_hash_by_id[id(section)]
                 if not extractions:

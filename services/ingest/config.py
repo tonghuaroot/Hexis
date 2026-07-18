@@ -78,6 +78,14 @@ class Config:
     # Source trust override
     base_trust: float | None = None
 
+    # Concurrency (#90): bounded LLM fan-out and directory parallelism.
+    max_parallel_llm: int = 4
+    max_parallel_files: int = 2
+
+    # Retry: one re-ask when a completion parses to empty JSON. Transient
+    # HTTP/network retry lives at the provider layer (core/llm.py).
+    llm_json_retries: int = 1
+
     # Processing
     verbose: bool = True
     log: Optional[Callable[[str], None]] = None
@@ -238,3 +246,33 @@ def _extract_title(content: str, file_path: Path) -> str:
         if line.strip():
             return line.strip()[:120]
     return file_path.stem
+
+
+# Config keys the DB owns (#91): tuning ingestion means set_config, never a
+# rebuild. Explicit Config(...) arguments and CLI flags still override.
+INGEST_CONFIG_KEYS = {
+    "deep_max_words": "ingest.deep_max_words",
+    "max_section_chars": "ingest.max_section_chars",
+    "chunk_overlap": "ingest.chunk_overlap",
+    "max_facts_per_section": "ingest.max_facts_per_section",
+    "min_confidence_threshold": "ingest.min_confidence_threshold",
+    "max_parallel_llm": "ingest.max_parallel_llm",
+    "max_parallel_files": "ingest.max_parallel_files",
+    "llm_json_retries": "ingest.llm_json_retries",
+}
+
+
+async def load_ingest_settings(conn) -> dict[str, Any]:
+    """Read the ingest.* policy keys from config; absent keys fall back to
+    the dataclass defaults (which mirror the seeded values)."""
+    import json as _json
+
+    settings: dict[str, Any] = {}
+    for field_name, key in INGEST_CONFIG_KEYS.items():
+        raw = await conn.fetchval("SELECT get_config($1)", key)
+        if raw is None:
+            continue
+        value = _json.loads(raw) if isinstance(raw, str) else raw
+        if value is not None:
+            settings[field_name] = value
+    return settings
