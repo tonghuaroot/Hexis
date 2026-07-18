@@ -54,7 +54,14 @@ async def _ensure_table(conn: asyncpg.Connection) -> str:
     if await conn.fetchval(
         "SELECT to_regclass('ag_catalog.schema_migrations') IS NOT NULL"
     ):
-        return "ag_catalog.schema_migrations"
+        # Self-heal (#77 homecoming): the ledger belongs in public. Only the
+        # runner can move its own table — a migration moving it mid-run pulls
+        # the floor out from under the INSERT that records that migration.
+        await conn.execute(
+            "ALTER TABLE ag_catalog.schema_migrations SET SCHEMA public"
+        )
+        logger.info("moved schema_migrations from ag_catalog to public (#77)")
+        return "public.schema_migrations"
 
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS public.schema_migrations (
