@@ -134,6 +134,13 @@ class ChannelOutboxConsumer:
 
         # I.2: Check for domain-based delivery routing from cron delivery info
         delivery_info = payload.get("delivery") or body.get("delivery")
+
+        # Web-inbox tee: the dashboard is one more delivery endpoint hooked to
+        # this queue, like any external system. Every user-bound message gets a
+        # copy there (config-gated), so the UI can show it even when no chat
+        # platform is configured. Silent deliveries stay silent everywhere.
+        if not (isinstance(delivery_info, dict) and delivery_info.get("mode") == "silent"):
+            await self._deliver_web_inbox(body)
         if isinstance(delivery_info, dict) and delivery_info.get("mode") == "channel":
             # Override delivery to route to specific channel+topic
             payload["target_channel"] = delivery_info.get("channel", "")
@@ -163,6 +170,25 @@ class ChannelOutboxConsumer:
                     return
             # Default: last_active
             await self._deliver_last_active(message, content, payload, outbox_msg_id)
+
+    async def _deliver_web_inbox(self, body: dict[str, Any]) -> None:
+        """Tee the queue body into the web dashboard inbox (db/76).
+
+        Advisory by design: a failure here never blocks routing to the other
+        endpoints, and the gate is DB config (channel.web_inbox.enabled).
+        """
+        try:
+            async with self._pool.acquire() as conn:
+                enabled = await conn.fetchval(
+                    "SELECT COALESCE(get_config_bool('channel.web_inbox.enabled'), TRUE)"
+                )
+                if not enabled:
+                    return
+                await conn.fetchval(
+                    "SELECT web_inbox_deliver($1::jsonb)", json.dumps(body, default=str)
+                )
+        except Exception:
+            logger.warning("Web inbox delivery failed (non-fatal)", exc_info=True)
 
     async def _deliver_by_domain(
         self,

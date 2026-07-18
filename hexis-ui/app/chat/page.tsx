@@ -6,7 +6,9 @@ import {
   Database,
   Eye,
   EyeOff,
+  Check,
   FileText,
+  Inbox,
   Lock,
   LockOpen,
   Send,
@@ -16,7 +18,8 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useGatewayEvents } from "../hooks/use-gateway-events";
 import Image from "next/image";
 import { Card } from "../components/ui/card";
 import { Badge } from "../components/ui/badge";
@@ -42,6 +45,34 @@ type PastedAttachment = {
   // "private" keeps the ingested memories out of group-channel recall and
   // default HMX export (#92); toggled per-chip before sending.
   sensitivity: "private" | null;
+};
+
+// The agent's outbox is her always-available way to reach the user; the
+// channel worker tees every user-bound message into web_inbox (db/76), and
+// this page shows that feed plus resource requests awaiting a decision.
+type InboxMessage = {
+  id: string;
+  kind: string | null;
+  intent: string | null;
+  message: string;
+  delivered_at: string;
+  read_at: string | null;
+};
+
+type PendingRequest = {
+  id: string;
+  kind: string;
+  target_key: string | null;
+  requested_value: unknown;
+  rationale: string;
+  duration: string | null;
+  requested_at: string;
+};
+
+type InboxData = {
+  unread: number;
+  messages: InboxMessage[];
+  pending_requests: PendingRequest[];
 };
 
 // Pastes longer than this become attachments (matching the Claude/ChatGPT
@@ -159,12 +190,19 @@ export default function ChatPage() {
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [historyDraft, setHistoryDraft] = useState("");
   const [showInspector, setShowInspector] = useState(false);
+  const [showInbox, setShowInbox] = useState(false);
+  const [inbox, setInbox] = useState<InboxData>({ unread: 0, messages: [], pending_requests: [] });
+  const [decideBusy, setDecideBusy] = useState<string | null>(null);
+  const [decideNotes, setDecideNotes] = useState<Record<string, string>>({});
+  const [decideNotice, setDecideNotice] = useState<string | null>(null);
   const [activityFilters, setActivityFilters] = useState<Set<LogEvent["category"]>>(
     new Set(["subconscious", "model", "tool", "memory", "error"]),
   );
   const scrollRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const inboxBadgeCount = inbox.unread + inbox.pending_requests.length;
 
   const historyPayload = useMemo(
     () =>
@@ -179,6 +217,81 @@ export default function ChatPage() {
     const saved = loadSession();
     if (saved.length > 0) setMessages(saved);
   }, []);
+
+  const loadInbox = useCallback(async () => {
+    try {
+      const res = await fetch("/api/outbox", { cache: "no-store" });
+      if (res.ok) setInbox(await res.json());
+    } catch {
+      // The badge just stays stale until the next poll.
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(loadInbox, 0);
+    return () => window.clearTimeout(timer);
+  }, [loadInbox]);
+  useGatewayEvents(loadInbox);
+
+  // Reading is opening the panel: unread messages on screen get their
+  // receipt recorded (DB-side, so every window agrees).
+  useEffect(() => {
+    if (!showInbox) return;
+    const unreadIds = inbox.messages.filter((m) => !m.read_at).map((m) => m.id);
+    if (unreadIds.length === 0) return;
+    void fetch("/api/outbox", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: unreadIds }),
+    }).then(() => loadInbox());
+  }, [showInbox, inbox.messages, loadInbox]);
+
+  const replyToInboxMessage = (message: InboxMessage) => {
+    const quoted = message.message
+      .slice(0, 400)
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n");
+    setShowInbox(false);
+    setInput((current) => `${quoted}\n\n${current}`);
+    textareaRef.current?.focus();
+  };
+
+  const decideRequest = async (request: PendingRequest, decision: "granted" | "denied") => {
+    setDecideBusy(request.id);
+    setDecideNotice(null);
+    try {
+      const res = await fetch("/api/requests/decide", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: request.id,
+          decision,
+          note: decideNotes[request.id] || undefined,
+        }),
+      });
+      const result = await res.json();
+      if (!res.ok) {
+        setDecideNotice(result.error || "The decision could not be recorded.");
+      } else {
+        const applied =
+          result.applied === "config"
+            ? " — config applied and journaled"
+            : result.applied === "energy"
+              ? ` — energy now ${result.new_energy}`
+              : "";
+        setDecideNotice(
+          `Request ${request.id.slice(0, 8)} ${decision}${applied}. ` +
+            `${agentStatus.agent_name || "The agent"} will see this at her next heartbeat.`
+        );
+        await loadInbox();
+      }
+    } catch (err: unknown) {
+      setDecideNotice(err instanceof Error ? err.message : "The decision could not be recorded.");
+    } finally {
+      setDecideBusy(null);
+    }
+  };
 
   // Save session on message change
   useEffect(() => {
@@ -697,6 +810,20 @@ export default function ChatPage() {
               </details>
               <button
                 type="button"
+                aria-label={showInbox ? "Hide inbox" : `Show inbox${inboxBadgeCount > 0 ? ` (${inboxBadgeCount} waiting)` : ""}`}
+                title={showInbox ? "Hide inbox" : "Messages and requests from the agent"}
+                onClick={() => setShowInbox((value) => !value)}
+                className={`relative flex h-9 w-9 items-center justify-center rounded-md ${showInbox ? "bg-[var(--surface-strong)] text-[var(--foreground)]" : "text-[var(--ink-soft)] hover:bg-[var(--surface-strong)]"}`}
+              >
+                <Inbox size={17} />
+                {inboxBadgeCount > 0 ? (
+                  <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--teal)] px-1 text-[10px] font-semibold text-white">
+                    {inboxBadgeCount > 9 ? "9+" : inboxBadgeCount}
+                  </span>
+                ) : null}
+              </button>
+              <button
+                type="button"
                 aria-label={showInspector ? "Hide activity" : "Show activity"}
                 title={showInspector ? "Hide activity" : "Show activity"}
                 onClick={() => setShowInspector((value) => !value)}
@@ -745,6 +872,26 @@ export default function ChatPage() {
           </div>
 
           <div className="border-t border-[var(--outline)] bg-white px-4 py-3 sm:px-6">
+            {!showInbox && inboxBadgeCount > 0 ? (
+              <div className="mx-auto mb-2 max-w-3xl">
+                <button
+                  type="button"
+                  onClick={() => setShowInbox(true)}
+                  className="flex w-full items-center gap-2 rounded-md border border-[var(--teal)]/40 bg-[var(--teal)]/5 px-3 py-2 text-left text-xs hover:bg-[var(--teal)]/10"
+                >
+                  <Inbox size={14} className="flex-none text-[var(--teal)]" />
+                  <span>
+                    {agentStatus.agent_name || "The agent"} has{" "}
+                    {inbox.unread > 0 ? `${inbox.unread} unread message${inbox.unread === 1 ? "" : "s"}` : ""}
+                    {inbox.unread > 0 && inbox.pending_requests.length > 0 ? " and " : ""}
+                    {inbox.pending_requests.length > 0
+                      ? `${inbox.pending_requests.length} request${inbox.pending_requests.length === 1 ? "" : "s"} awaiting your decision`
+                      : ""}
+                    {" — open the inbox."}
+                  </span>
+                </button>
+              </div>
+            ) : null}
             {attachments.length > 0 ? (
               <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
                 {attachments.map((attachment) => (
@@ -806,7 +953,107 @@ export default function ChatPage() {
           </div>
         </section>
 
-        {showInspector ? (
+        {showInbox ? (
+          <aside className="fixed inset-y-14 right-0 z-20 flex w-full flex-col border-l border-[var(--outline)] bg-[#f8faf8] sm:w-[390px] lg:static lg:inset-auto lg:w-[380px]">
+            <div className="flex h-16 items-center justify-between border-b border-[var(--outline)] px-4">
+              <div>
+                <h2 className="text-sm font-semibold">Inbox</h2>
+                <p className="text-xs text-[var(--ink-soft)]">
+                  {agentStatus.agent_name || "The agent"}&apos;s always-available line to you
+                </p>
+              </div>
+              <button type="button" title="Close inbox" aria-label="Close inbox" onClick={() => setShowInbox(false)} className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--surface-strong)]"><X size={17} /></button>
+            </div>
+            <div className="flex-1 space-y-3 overflow-y-auto p-4">
+              {decideNotice ? (
+                <p className="rounded-md border border-[var(--outline)] bg-white px-3 py-2 text-xs">{decideNotice}</p>
+              ) : null}
+
+              {inbox.pending_requests.length > 0 ? (
+                <div>
+                  <h3 className="text-xs font-semibold uppercase text-[var(--ink-soft)]">Awaiting your decision</h3>
+                  <div className="mt-2 space-y-3">
+                    {inbox.pending_requests.map((request) => (
+                      <div key={request.id} className="rounded-lg border border-[var(--teal)]/40 bg-white p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <Badge variant="accent">{request.kind.replace("_", " ")}</Badge>
+                          <span className="text-[10px] text-[var(--ink-soft)]">{String(request.requested_at).slice(0, 16).replace("T", " ")}</span>
+                        </div>
+                        {request.target_key ? (
+                          <p className="mt-2 font-mono text-xs">
+                            {request.target_key} = {JSON.stringify(request.requested_value)}
+                          </p>
+                        ) : request.requested_value != null ? (
+                          <p className="mt-2 font-mono text-xs">requested: {JSON.stringify(request.requested_value)}</p>
+                        ) : null}
+                        <p className="mt-2 text-sm leading-6">{request.rationale}</p>
+                        {request.duration ? (
+                          <p className="mt-1 text-xs text-[var(--ink-soft)]">For: {request.duration}</p>
+                        ) : null}
+                        <input
+                          type="text"
+                          placeholder="Optional note she will read with the decision"
+                          value={decideNotes[request.id] || ""}
+                          onChange={(event) => setDecideNotes((current) => ({ ...current, [request.id]: event.target.value }))}
+                          className="mt-3 w-full rounded-md border border-[var(--outline)] px-2 py-1.5 text-xs outline-none focus:border-[var(--teal)]"
+                        />
+                        <div className="mt-2 flex gap-2">
+                          <button
+                            type="button"
+                            disabled={decideBusy === request.id}
+                            onClick={() => decideRequest(request, "granted")}
+                            className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--teal)] px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-40"
+                          >
+                            <Check size={13} /> Approve
+                          </button>
+                          <button
+                            type="button"
+                            disabled={decideBusy === request.id}
+                            onClick={() => decideRequest(request, "denied")}
+                            className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--outline)] px-3 py-1.5 text-xs font-semibold text-[var(--foreground)] hover:bg-[var(--surface-strong)] disabled:opacity-40"
+                          >
+                            <X size={13} /> Deny
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div>
+                <h3 className="text-xs font-semibold uppercase text-[var(--ink-soft)]">Messages</h3>
+                {inbox.messages.length === 0 ? (
+                  <p className="mt-2 text-xs text-[var(--ink-soft)]">
+                    Nothing yet. When {agentStatus.agent_name || "the agent"} reaches out on her own — from a heartbeat, a reminder, a request — it lands here.
+                  </p>
+                ) : (
+                  <div className="mt-2 space-y-3">
+                    {inbox.messages.map((message) => (
+                      <div key={message.id} className={`rounded-lg border p-3 ${message.read_at ? "border-[var(--outline)] bg-white" : "border-[var(--teal)]/50 bg-[var(--teal)]/5"}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-semibold">{agentStatus.agent_name || "Agent"}</span>
+                          <span className="flex items-center gap-2 text-[10px] text-[var(--ink-soft)]">
+                            {message.intent ? <Badge variant="muted">{message.intent}</Badge> : null}
+                            {String(message.delivered_at).slice(0, 16).replace("T", " ")}
+                          </span>
+                        </div>
+                        <p className="mt-2 whitespace-pre-wrap text-sm leading-6">{message.message}</p>
+                        <button
+                          type="button"
+                          onClick={() => replyToInboxMessage(message)}
+                          className="mt-2 rounded-md border border-[var(--outline)] px-2.5 py-1 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--surface-strong)]"
+                        >
+                          Reply
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </aside>
+        ) : showInspector ? (
           <aside className="fixed inset-y-14 right-0 z-20 flex w-full flex-col border-l border-[var(--outline)] bg-[#f8faf8] sm:w-[390px] lg:static lg:inset-auto lg:w-[380px]">
             <div className="flex h-16 items-center justify-between border-b border-[var(--outline)] px-4">
               <div><h2 className="text-sm font-semibold">Activity</h2><p className="text-xs text-[var(--ink-soft)]">{filteredEvents.length} events</p></div>
