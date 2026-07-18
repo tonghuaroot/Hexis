@@ -260,6 +260,23 @@ type GoalForm = {
   priority: string;
 };
 
+// The agent lives in its person's timezone, not UTC (#79): every tier sends
+// the browser's zone; the DB validates and never overwrites an explicit
+// non-UTC choice. Advisory — a failure never blocks init.
+async function seedTimezone(): Promise<void> {
+  try {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!timezone) return;
+    await fetch("/api/init/timezone", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timezone }),
+    });
+  } catch {
+    // advisory only
+  }
+}
+
 async function postJson<T>(url: string, payload?: unknown): Promise<T> {
   const res = await fetch(url, {
     method: "POST",
@@ -645,6 +662,7 @@ export default function Home() {
     setError(null);
     try {
       await postJson("/api/init/defaults", { user_name: userName || "User" });
+      await seedTimezone();
       await loadStatus();
       setStage("consent");
     } catch (err: unknown) {
@@ -675,6 +693,7 @@ export default function Home() {
         character_filename: selectedCharacter.filename,
         portrait: selectedCharacter.image,
       });
+      await seedTimezone();
       await loadStatus();
       setStage("consent");
     } catch (err: unknown) {
@@ -746,6 +765,7 @@ export default function Home() {
         relationship: { type: relationship.type || "partner", purpose: relationship.purpose || null },
       });
 
+      await seedTimezone();
       await loadStatus();
       setStage("consent");
     } catch (err: unknown) {

@@ -1668,3 +1668,29 @@ END;
 $$ LANGUAGE plpgsql;
 
 SET check_function_bodies = on;
+
+-- One timezone step for every init frontend (init convergence, #79): the
+-- CLI sends the host zone, the web wizard sends the browser zone, and the
+-- agent lives in its person's time instead of UTC. Validated against the
+-- server's zone catalog; an explicit non-UTC choice is never overwritten.
+CREATE OR REPLACE FUNCTION init_set_timezone(
+    p_timezone TEXT
+) RETURNS BOOLEAN AS $$
+DECLARE
+    tz TEXT := NULLIF(trim(COALESCE(p_timezone, '')), '');
+BEGIN
+    IF tz IS NULL THEN
+        RETURN FALSE;
+    END IF;
+    IF COALESCE(NULLIF(get_config_text('agent.timezone'), ''), 'UTC') <> 'UTC' THEN
+        RETURN FALSE;
+    END IF;
+    BEGIN
+        PERFORM CURRENT_TIMESTAMP AT TIME ZONE tz;
+    EXCEPTION WHEN OTHERS THEN
+        RETURN FALSE;
+    END;
+    PERFORM set_config('agent.timezone', to_jsonb(tz));
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;

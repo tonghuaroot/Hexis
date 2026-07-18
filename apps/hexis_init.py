@@ -1101,20 +1101,16 @@ def _host_timezone_name() -> str:
 
 
 async def _set_local_timezone(conn: Any) -> None:
-    """Seed agent.timezone from the machine running init, once."""
+    """Seed agent.timezone from the machine running init, once.
+
+    Validation, idempotency, and the keep-explicit-choice rule live in the DB
+    (init_set_timezone) so every init frontend shares one timezone step.
+    """
     try:
-        existing = await conn.fetchval("SELECT get_config_text('agent.timezone')")
-        if existing and existing.strip() and existing.strip() != "UTC":
-            return
         tz_name = _host_timezone_name()
         if not tz_name:
             return
-        # Validate against the DB before storing: get_temporal_context falls
-        # back to UTC on a bad name, but a silently broken value helps nobody.
-        await conn.fetchval("SELECT CURRENT_TIMESTAMP AT TIME ZONE $1", tz_name)
-        await conn.execute(
-            "SELECT set_config('agent.timezone', to_jsonb($1::text))", tz_name
-        )
+        await conn.fetchval("SELECT init_set_timezone($1)", tz_name)
     except Exception:
         pass
 
