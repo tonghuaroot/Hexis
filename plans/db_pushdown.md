@@ -243,3 +243,27 @@ function it duplicated (parity tests become golden-output tests against SQL).
   routing failure and created ALL facts without dedup. In SQL, router and
   creator share one transaction — a router failure now fails the pass loudly
   instead of silently bypassing dedup.
+
+## Findings during execution (2026-07-18, 3.6/3.7 + 3.12/3.13 + Tranche 4 + session-new)
+
+Shipped: 3.6 (0054), 3.7 (0055), persona render (0056), search_history
+dispatch (0057), turn source identity (0058), apply_channel_config (0059),
+model_costs (0060), council personas (0061), external-call prompts (0062),
+read-shapers (0063), channel shapers (0064). Audit 515 → ~460.
+
+- **Three tools were broken on every call** and the pushdown surfaced them:
+  `get_procedures`/`get_strategies` filtered `fast_recall` on a column it
+  does not return; the channel `/status` and `/energy` commands read
+  `heartbeat_state.max_energy` / `energy_regen_rate` / `last_heartbeat`
+  (none exist — the truth is config + `last_heartbeat_at`); the channel
+  `/goals` command filtered `status IN ('active','queued')` where 'queued'
+  is not a memory_status (priority lives in metadata). All fixed in the SQL
+  ports (0063/0064) with regression tests.
+- **`heartbeat_agentic_plan` enrichment is gap-fill**: an injected context
+  value wins over the DB read — production passes no pending-summary keys so
+  the DB reads stand, and tests inject state without seeding HMX tables.
+- **manage_schedule stats + ingest status summaries** listed under 3.12 were
+  already DB-owned by earlier tranches (plan line refs were stale).
+- **Remaining**: 4.4 humanizer patterns (per-pattern Python↔Postgres regex
+  dialect verification — do it fresh, not as a tail-end item); deferred
+  sagas 3.3-3.5/3.8/3.10/3.11/3.14/3.15; trust-multiplier design call.

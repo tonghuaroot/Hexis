@@ -239,27 +239,10 @@ class ChannelOutboxConsumer:
         sender_id = str(payload.get("sender_id") or payload.get("target_user") or "")
 
         async with self._pool.acquire() as conn:
-            if sender_id:
-                row = await conn.fetchrow(
-                    """
-                    SELECT channel_type, channel_id, sender_id
-                    FROM channel_sessions
-                    WHERE sender_id = $1
-                    ORDER BY last_active DESC NULLS LAST
-                    LIMIT 1
-                    """,
-                    sender_id,
-                )
-            else:
-                # No specific sender — use the globally most recent session
-                row = await conn.fetchrow(
-                    """
-                    SELECT channel_type, channel_id, sender_id
-                    FROM channel_sessions
-                    ORDER BY last_active DESC NULLS LAST
-                    LIMIT 1
-                    """,
-                )
+            raw = await conn.fetchval(
+                "SELECT resolve_last_active_target($1)", sender_id or None
+            )
+        row = json.loads(raw) if isinstance(raw, str) else raw
 
         if not row:
             logger.warning("No active session found for last_active delivery")
@@ -284,14 +267,8 @@ class ChannelOutboxConsumer:
     ) -> None:
         """Send to all active channel sessions."""
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT DISTINCT channel_type, channel_id, sender_id
-                FROM channel_sessions
-                WHERE last_active > CURRENT_TIMESTAMP - INTERVAL '7 days'
-                ORDER BY channel_type, channel_id
-                """,
-            )
+            raw = await conn.fetchval("SELECT list_broadcast_targets()")
+        rows = json.loads(raw) if isinstance(raw, str) else (raw or [])
 
         for row in rows:
             channel_type = row["channel_type"]

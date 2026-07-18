@@ -124,39 +124,10 @@ def parse_command(text: str) -> tuple[str, str] | None:
 
 
 async def _handle_status(args: str, pool: asyncpg.Pool) -> str:
-    """Show agent status."""
+    """Show agent status (rendered by channel_status_summary in the DB)."""
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT current_energy, max_energy, heartbeat_count,
-                       last_heartbeat, is_paused
-                FROM heartbeat_state WHERE id = 1
-                """
-            )
-            if not row:
-                return "Agent status unavailable."
-
-            session_count = await conn.fetchval("SELECT COUNT(*) FROM channel_sessions") or 0
-            recent_msgs = await conn.fetchval(
-                "SELECT COUNT(*) FROM channel_messages WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'"
-            ) or 0
-
-        energy = f"{row['current_energy']:.1f}/{row['max_energy']:.1f}"
-        heartbeats = row["heartbeat_count"] or 0
-        paused = "yes" if row["is_paused"] else "no"
-        last_hb = str(row["last_heartbeat"])[:19] if row["last_heartbeat"] else "never"
-
-        lines = [
-            "**Agent Status**",
-            f"Energy: {energy}",
-            f"Heartbeats: {heartbeats}",
-            f"Last heartbeat: {last_hb}",
-            f"Paused: {paused}",
-            f"Channel sessions: {session_count}",
-            f"Messages (last 1h): {recent_msgs}",
-        ]
-        return "\n".join(lines)
+            return await conn.fetchval("SELECT channel_status_summary()")
     except Exception:
         logger.exception("Status command failed")
         return "Failed to retrieve status."
@@ -192,65 +163,20 @@ async def _handle_recall(args: str, pool: asyncpg.Pool) -> str:
 
 
 async def _handle_goals(args: str, pool: asyncpg.Pool) -> str:
-    """List active goals."""
+    """List active goals (rendered by channel_goals_summary in the DB)."""
     try:
         async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT content, importance, status
-                FROM memories
-                WHERE type = 'goal' AND status IN ('active', 'queued')
-                ORDER BY importance DESC
-                LIMIT 10
-                """
-            )
-
-        if not rows:
-            return "No active goals."
-
-        lines = ["**Active Goals**\n"]
-        for i, row in enumerate(rows, 1):
-            content = row["content"][:100]
-            if len(row["content"]) > 100:
-                content += "..."
-            status = row["status"]
-            importance = f"{row['importance']:.1f}" if row["importance"] else "?"
-            lines.append(f"{i}. [{status}] (imp: {importance}) {content}")
-        return "\n".join(lines)
+            return await conn.fetchval("SELECT channel_goals_summary()")
     except Exception:
         logger.exception("Goals command failed")
         return "Failed to retrieve goals."
 
 
 async def _handle_energy(args: str, pool: asyncpg.Pool) -> str:
-    """Show energy details."""
+    """Show energy details (rendered by channel_energy_summary in the DB)."""
     try:
         async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT current_energy, max_energy, energy_regen_rate
-                FROM heartbeat_state WHERE id = 1
-                """
-            )
-            if not row:
-                return "Energy info unavailable."
-
-        current = row["current_energy"]
-        maximum = row["max_energy"]
-        regen = row["energy_regen_rate"] or 10
-        pct = (current / maximum * 100) if maximum > 0 else 0
-
-        # Visual bar
-        bar_len = 20
-        filled = int(pct / 100 * bar_len)
-        bar = "█" * filled + "░" * (bar_len - filled)
-
-        lines = [
-            "**Energy**",
-            f"[{bar}] {current:.1f}/{maximum:.1f} ({pct:.0f}%)",
-            f"Regen rate: +{regen}/hour",
-        ]
-        return "\n".join(lines)
+            return await conn.fetchval("SELECT channel_energy_summary()")
     except Exception:
         logger.exception("Energy command failed")
         return "Failed to retrieve energy info."
