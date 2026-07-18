@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.usage import (
-    estimate_cost,
     extract_usage,
     record_usage,
     record_llm_usage,
@@ -175,39 +174,127 @@ class TestUsageExtraction:
 
 
 class TestCostEstimation:
-    """Test estimate_cost() for known models."""
+    """estimate_api_cost() (SQL, model_costs table) — the price list is data."""
 
-    def test_claude_opus(self):
-        """Claude Opus 4.6 cost estimation."""
-        cost = estimate_cost("anthropic", "claude-opus-4-6", 1_000_000, 100_000)
+    async def _cost(self, db_pool, model, inp, out, cache_read=0, cache_write=0):
+        async with db_pool.acquire() as conn:
+            value = await conn.fetchval(
+                "SELECT estimate_api_cost($1, $2, $3, $4, $5)",
+                model, inp, out, cache_read, cache_write,
+            )
+        return float(value) if value is not None else None
+
+    async def test_claude_opus(self, db_pool):
+        cost = await self._cost(db_pool, "claude-opus-4-6", 1_000_000, 100_000)
         # input: 1M * 15 / 1M = 15, output: 100K * 75 / 1M = 7.5
         assert cost is not None
         assert abs(cost - 22.5) < 0.01
 
-    def test_gpt4o(self):
-        """GPT-4o cost estimation."""
-        cost = estimate_cost("openai", "gpt-4o", 1_000_000, 100_000)
+    async def test_gpt4o(self, db_pool):
+        cost = await self._cost(db_pool, "gpt-4o", 1_000_000, 100_000)
         # input: 1M * 2.5 / 1M = 2.5, output: 100K * 10 / 1M = 1.0
         assert cost is not None
         assert abs(cost - 3.5) < 0.01
 
-    def test_unknown_model(self):
-        """Unknown models return None."""
-        cost = estimate_cost("ollama", "llama3.2:latest", 1000, 500)
-        assert cost is None
+    async def test_unknown_model(self, db_pool):
+        """Unknown models price NULL (local Ollama stays free)."""
+        assert await self._cost(db_pool, "llama3.2:latest", 1000, 500) is None
 
-    def test_partial_match(self):
-        """Model names with date suffixes match via prefix."""
-        cost = estimate_cost("anthropic", "claude-sonnet-4-5-20250929-v2", 1000, 500)
+    async def test_partial_match(self, db_pool):
+        """Model ids with date suffixes match via longest prefix."""
+        cost = await self._cost(db_pool, "claude-sonnet-4-5-20250929-v2", 1000, 500)
         assert cost is not None
 
-    def test_cache_tokens(self):
-        """Cache tokens are included in cost calculation."""
-        cost_no_cache = estimate_cost("anthropic", "claude-opus-4-6", 1000, 500)
-        cost_with_cache = estimate_cost("anthropic", "claude-opus-4-6", 1000, 500, cache_read_tokens=500)
+    async def test_cache_tokens(self, db_pool):
+        cost_no_cache = await self._cost(db_pool, "claude-opus-4-6", 1000, 500)
+        cost_with_cache = await self._cost(
+            db_pool, "claude-opus-4-6", 1000, 500, cache_read=500
+        )
         assert cost_no_cache is not None
         assert cost_with_cache is not None
         assert cost_with_cache > cost_no_cache
+
+    async def test_record_api_usage_self_costs(self, db_pool):
+        """A NULL caller cost is filled from the price table at insert."""
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                row_id = await conn.fetchval(
+                    "SELECT record_api_usage('anthropic', 'claude-opus-4-6', 'chat', 1000000, 100000)"
+                )
+                cost = await conn.fetchval(
+                    "SELECT cost_usd FROM api_usage WHERE id = $1", row_id
+                )
+                assert abs(float(cost) - 22.5) < 0.01
+            finally:
+                await tr.rollback()
+
+
+# ---------------------------------------------------------------------------
+# H.2  —  Usage extraction + cost estimation (Python)
+# ---------------------------------------------------------------------------
+
+
+class TestUsageExtraction:
+    """Test extract_usage() for various provider response formats."""
+
+    def test_anthropic_response(self):
+        """Extract usage from an Anthropic Messages response."""
+        raw = MagicMock()
+        raw.usage = MagicMock()
+        raw.usage.input_tokens = 1500
+        raw.usage.output_tokens = 300
+        raw.usage.cache_read_input_tokens = 200
+        raw.usage.cache_creation_input_tokens = 100
+        result = extract_usage("anthropic", raw)
+        assert result["input_tokens"] == 1500
+        assert result["output_tokens"] == 300
+        assert result["cache_read_tokens"] == 200
+        assert result["cache_write_tokens"] == 100
+
+    def test_openai_response(self):
+        """Extract usage from an OpenAI Chat Completions response."""
+        raw = MagicMock()
+        raw.usage = MagicMock()
+        raw.usage.prompt_tokens = 800
+        raw.usage.completion_tokens = 200
+        raw.usage.prompt_tokens_details = MagicMock()
+        raw.usage.prompt_tokens_details.cached_tokens = 100
+        # Remove input_tokens to force OpenAI path
+        del raw.usage.input_tokens
+        result = extract_usage("openai", raw)
+        assert result["input_tokens"] == 800
+        assert result["output_tokens"] == 200
+        assert result["cache_read_tokens"] == 100
+
+    def test_gemini_response(self):
+        """Extract usage from a Gemini response."""
+        raw = MagicMock(spec=[])
+        raw.usage_metadata = MagicMock()
+        raw.usage_metadata.prompt_token_count = 600
+        raw.usage_metadata.candidates_token_count = 150
+        raw.usage_metadata.cached_content_token_count = 0
+        result = extract_usage("gemini", raw)
+        assert result["input_tokens"] == 600
+        assert result["output_tokens"] == 150
+
+    def test_none_response(self):
+        """Returns zeros for None response (e.g. streaming without raw)."""
+        result = extract_usage("any", None)
+        assert result == {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+
+    def test_dict_response(self):
+        """Extract usage from dict-style responses."""
+        raw = {"usage": {"input_tokens": 400, "output_tokens": 100}}
+        result = extract_usage("generic", raw)
+        assert result["input_tokens"] == 400
+        assert result["output_tokens"] == 100
 
 
 # ---------------------------------------------------------------------------

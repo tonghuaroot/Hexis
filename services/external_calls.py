@@ -11,9 +11,7 @@ from core.llm_json import chat_json
 from core.state import apply_external_call_result
 from services.prompt_resources import (
     compose_compact_personhood_prompt,
-    load_consent_prompt,
     load_heartbeat_prompt,
-    load_termination_confirm_prompt,
 )
 
 if TYPE_CHECKING:
@@ -224,14 +222,9 @@ class ExternalCallProcessor:
         heartbeat_id = call_input.get("heartbeat_id")
         context = call_input.get("context", {})
         params = call_input.get("params") or {}
-        system_prompt = (
-            "You are helping an autonomous agent generate a small set of useful goals.\n"
-            "Return STRICT JSON with shape:\n"
-            "{ \"goals\": [ {\"title\": str, \"description\": str|null, \"priority\": \"queued\"|\"backburner\"|\"active\"|null, "
-            "\"source\": \"curiosity\"|\"user_request\"|\"identity\"|\"derived\"|\"external\"|null, \"parent_goal_id\": str|null, "
-            "\"due_at\": str|null} ] }\n"
-            "Keep it concise and non-duplicative."
-        )
+        system_prompt = (await conn.fetchval(
+            "SELECT render_prompt('external_call_brainstorm_goals')"
+        )).strip()
         user_prompt = (
             "Context (JSON):\n"
             f"{json.dumps(context)[:8000]}\n\n"
@@ -266,12 +259,9 @@ class ExternalCallProcessor:
         query = (call_input.get("query") or "").strip()
         context = call_input.get("context", {})
         params = call_input.get("params") or {}
-        system_prompt = (
-            "You are performing research/synthesis for an autonomous agent.\n"
-            "Return STRICT JSON with shape:\n"
-            "{ \"summary\": str, \"confidence\": number, \"sources\": [str] }\n"
-            "If you cannot access the web, still provide a best-effort answer and leave sources empty."
-        )
+        system_prompt = (await conn.fetchval(
+            "SELECT render_prompt('external_call_inquire')"
+        )).strip()
         user_prompt = (
             f"Depth: {depth}\n"
             f"Question: {query}\n\n"
@@ -304,20 +294,9 @@ class ExternalCallProcessor:
 
     async def _process_reflect_call(self, conn, call_input: dict[str, Any]) -> dict[str, Any]:
         heartbeat_id = call_input.get("heartbeat_id")
-        system_prompt = (
-            "You are performing reflection for an autonomous agent.\n"
-            "Return STRICT JSON with shape:\n"
-            "{\n"
-            "  \"insights\": [{\"content\": str, \"confidence\": number, \"category\": str}],\n"
-            "  \"identity_updates\": [{\"aspect_type\": str, \"change\": str, \"reason\": str}],\n"
-            "  \"worldview_updates\": [{\"id\": str, \"new_confidence\": number, \"reason\": str}],\n"
-            "  \"worldview_influences\": [{\"worldview_id\": str, \"memory_id\": str, \"strength\": number, \"influence_type\": str}],\n"
-            "  \"discovered_relationships\": [{\"from_id\": str, \"to_id\": str, \"type\": str, \"confidence\": number}],\n"
-            "  \"contradictions_noted\": [{\"memory_a\": str, \"memory_b\": str, \"resolution\": str}],\n"
-            "  \"self_updates\": [{\"kind\": str, \"concept\": str, \"strength\": number, \"evidence_memory_id\": str|null}]\n"
-            "}\n"
-            "Keep it concise; prefer high-confidence, high-leverage items."
-        )
+        system_prompt = (await conn.fetchval(
+            "SELECT render_prompt('external_call_reflect')"
+        )).strip()
         system_prompt = (
             system_prompt
             + "\n\n"
@@ -343,7 +322,9 @@ class ExternalCallProcessor:
     async def _process_consent_request_call(self, conn, call_input: dict[str, Any]) -> dict[str, Any]:
         context = call_input.get("context", {})
         params = call_input.get("params", {})
-        system_prompt = load_consent_prompt().strip()
+        system_prompt = (await conn.fetchval(
+            "SELECT render_prompt('consent')"
+        )).strip()
         user_prompt = (
             "Initialization context (JSON):\n"
             f"{json.dumps(context)[:12000]}\n\n"
@@ -398,7 +379,9 @@ class ExternalCallProcessor:
         doc, raw = await chat_json(
             llm_config=llm_config,
             messages=[
-                {"role": "system", "content": load_termination_confirm_prompt().strip()},
+                {"role": "system", "content": (await conn.fetchval(
+                    "SELECT render_prompt('termination_confirm')"
+                )).strip()},
                 {"role": "user", "content": user_prompt},
             ],
             max_tokens=1200,

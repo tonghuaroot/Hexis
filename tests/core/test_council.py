@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.tools.council import (
-    COUNCIL_PERSONAS,
     AggregateSignalsHandler,
     ListCouncilPersonasHandler,
     RunCouncilHandler,
@@ -17,6 +16,14 @@ from core.tools.council import (
 from core.tools.base import ToolCategory, ToolContext, ToolExecutionContext
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
+
+EXPECTED_PERSONAS = {
+    "growth_strategist",
+    "revenue_guardian",
+    "skeptical_operator",
+    "creative_innovator",
+    "customer_advocate",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -36,33 +43,21 @@ def _make_context(pool=None):
 
 
 # ---------------------------------------------------------------------------
-# F.1 -- COUNCIL_PERSONAS dict
+# F.1 -- Council persona catalog (DB data)
 # ---------------------------------------------------------------------------
 
 
 class TestCouncilPersonas:
-    """Verify the COUNCIL_PERSONAS constant."""
+    """The persona catalog is DB data: prompt_modules council.persona.*."""
 
-    def test_has_five_personas(self):
-        assert len(COUNCIL_PERSONAS) == 5
-
-    def test_expected_keys(self):
-        expected = {
-            "growth_strategist",
-            "revenue_guardian",
-            "skeptical_operator",
-            "creative_innovator",
-            "customer_advocate",
-        }
-        assert set(COUNCIL_PERSONAS.keys()) == expected
-
-    def test_each_has_name_and_system_prompt(self):
-        for key, persona in COUNCIL_PERSONAS.items():
-            assert "name" in persona, f"{key} missing 'name'"
-            assert "system_prompt" in persona, f"{key} missing 'system_prompt'"
-            assert isinstance(persona["name"], str)
-            assert isinstance(persona["system_prompt"], str)
-            assert len(persona["system_prompt"]) > 10
+    async def test_db_catalog_shape(self, db_pool):
+        async with db_pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT get_council_personas()")
+        personas = json.loads(raw) if isinstance(raw, str) else raw
+        assert set(personas.keys()) == EXPECTED_PERSONAS
+        for key, persona in personas.items():
+            assert isinstance(persona["name"], str), key
+            assert len(persona["system_prompt"]) > 10, key
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +88,9 @@ class TestListCouncilPersonasSpec:
 class TestListCouncilPersonasExecution:
     """Verify list_council_personas execution."""
 
-    async def test_returns_all_five(self):
+    async def test_returns_all_five(self, db_pool):
         handler = ListCouncilPersonasHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({}, ctx)
 
         assert result.success
@@ -103,17 +98,17 @@ class TestListCouncilPersonasExecution:
         assert data["count"] == 5
         assert len(data["personas"]) == 5
 
-    async def test_persona_keys_match(self):
+    async def test_persona_keys_match(self, db_pool):
         handler = ListCouncilPersonasHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({}, ctx)
 
         data = json.loads(result.output)
-        assert set(data["personas"].keys()) == set(COUNCIL_PERSONAS.keys())
+        assert set(data["personas"].keys()) == EXPECTED_PERSONAS
 
-    async def test_each_persona_has_fields(self):
+    async def test_each_persona_has_fields(self, db_pool):
         handler = ListCouncilPersonasHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({}, ctx)
 
         data = json.loads(result.output)
@@ -162,9 +157,9 @@ class TestRunCouncilSpec:
 class TestRunCouncilExecution:
     """Verify run_council execution."""
 
-    async def test_default_all_five_personas(self):
+    async def test_default_all_five_personas(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({"topic": "Should we expand into APAC?"}, ctx)
 
         assert result.success
@@ -173,9 +168,9 @@ class TestRunCouncilExecution:
         assert len(data["council"]) == 5
         assert data["topic"] == "Should we expand into APAC?"
 
-    async def test_custom_persona_list(self):
+    async def test_custom_persona_list(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({
             "topic": "Pricing decision",
             "personas": ["revenue_guardian", "customer_advocate"],
@@ -189,9 +184,9 @@ class TestRunCouncilExecution:
         assert "customer_advocate" in included
         assert "growth_strategist" not in included
 
-    async def test_single_persona(self):
+    async def test_single_persona(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({
             "topic": "Risk assessment",
             "personas": ["skeptical_operator"],
@@ -202,9 +197,9 @@ class TestRunCouncilExecution:
         assert data["persona_count"] == 1
         assert data["council"][0]["persona_key"] == "skeptical_operator"
 
-    async def test_invalid_persona_returns_error(self):
+    async def test_invalid_persona_returns_error(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({
             "topic": "test",
             "personas": ["nonexistent_persona"],
@@ -213,9 +208,9 @@ class TestRunCouncilExecution:
         assert not result.success
         assert "nonexistent_persona" in result.error
 
-    async def test_mixed_valid_invalid_personas_returns_error(self):
+    async def test_mixed_valid_invalid_personas_returns_error(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({
             "topic": "test",
             "personas": ["growth_strategist", "bad_persona"],
@@ -224,24 +219,24 @@ class TestRunCouncilExecution:
         assert not result.success
         assert "bad_persona" in result.error
 
-    async def test_empty_topic_returns_error(self):
+    async def test_empty_topic_returns_error(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({"topic": ""}, ctx)
 
         assert not result.success
         assert "required" in result.error.lower()
 
-    async def test_missing_topic_returns_error(self):
+    async def test_missing_topic_returns_error(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({}, ctx)
 
         assert not result.success
 
-    async def test_context_included_in_prompt(self):
+    async def test_context_included_in_prompt(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({
             "topic": "Go/no-go decision",
             "context": "Revenue is $5M ARR with 30% margins",
@@ -253,9 +248,9 @@ class TestRunCouncilExecution:
             assert "Revenue is $5M ARR" in entry["full_prompt"]
             assert "Go/no-go decision" in entry["full_prompt"]
 
-    async def test_council_entry_structure(self):
+    async def test_council_entry_structure(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({"topic": "Structure test"}, ctx)
 
         assert result.success
@@ -266,18 +261,18 @@ class TestRunCouncilExecution:
             assert "system_prompt" in entry
             assert "full_prompt" in entry
 
-    async def test_instructions_present(self):
+    async def test_instructions_present(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({"topic": "test"}, ctx)
 
         data = json.loads(result.output)
         assert "instructions" in data
         assert len(data["instructions"]) > 0
 
-    async def test_outputs_analysis_and_moderator_report(self):
+    async def test_outputs_analysis_and_moderator_report(self, db_pool):
         handler = RunCouncilHandler()
-        ctx = _make_context()
+        ctx = _make_context(db_pool)
         result = await handler.execute({"topic": "Expansion plan"}, ctx)
 
         assert result.success
@@ -288,7 +283,7 @@ class TestRunCouncilExecution:
             assert "analysis" in entry
             assert isinstance(entry["analysis"], str)
 
-    async def test_collects_signals_when_db_available(self):
+    async def test_collects_signals_when_db_available(self, db_pool):
         handler = RunCouncilHandler()
         mock_conn = AsyncMock()
 
@@ -302,6 +297,12 @@ class TestRunCouncilExecution:
             return []
 
         mock_conn.fetch = AsyncMock(side_effect=_fetch_side_effect)
+        mock_conn.fetchval = AsyncMock(return_value=json.dumps({
+            "growth_strategist": {
+                "name": "Growth Strategist",
+                "system_prompt": "You are a growth strategist for this test.",
+            }
+        }))
         mock_pool = MagicMock()
         mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
         mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)

@@ -19,69 +19,6 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Per-million-token cost table (USD).
-# Updated Feb 2026.  Add new models as needed.
-# ---------------------------------------------------------------------------
-
-_MODEL_COSTS: dict[str, dict[str, float]] = {
-    # Anthropic ----------------------------------------------------------
-    "claude-opus-4-6":         {"input": 15.0,  "output": 75.0,  "cache_read": 1.5,   "cache_write": 18.75},
-    "claude-opus-4-5":         {"input": 15.0,  "output": 75.0,  "cache_read": 1.5,   "cache_write": 18.75},
-    "claude-sonnet-4-5":       {"input": 3.0,   "output": 15.0,  "cache_read": 0.3,   "cache_write": 3.75},
-    "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0, "cache_read": 0.3,   "cache_write": 3.75},
-    "claude-3-5-sonnet":       {"input": 3.0,   "output": 15.0,  "cache_read": 0.3,   "cache_write": 3.75},
-    "claude-3-5-haiku":        {"input": 0.8,   "output": 4.0,   "cache_read": 0.08,  "cache_write": 1.0},
-    "claude-haiku-4-5":        {"input": 0.8,   "output": 4.0,   "cache_read": 0.08,  "cache_write": 1.0},
-    "claude-haiku-4-5-20251001": {"input": 0.8,  "output": 4.0,  "cache_read": 0.08,  "cache_write": 1.0},
-    # OpenAI -------------------------------------------------------------
-    "gpt-4o":                  {"input": 2.5,   "output": 10.0,  "cache_read": 1.25,  "cache_write": 0.0},
-    "gpt-4o-mini":             {"input": 0.15,  "output": 0.6,   "cache_read": 0.075, "cache_write": 0.0},
-    "gpt-4-turbo":             {"input": 10.0,  "output": 30.0,  "cache_read": 0.0,   "cache_write": 0.0},
-    "o3":                      {"input": 10.0,  "output": 40.0,  "cache_read": 2.5,   "cache_write": 0.0},
-    "o3-mini":                 {"input": 1.1,   "output": 4.4,   "cache_read": 0.55,  "cache_write": 0.0},
-    "o4-mini":                 {"input": 1.1,   "output": 4.4,   "cache_read": 0.55,  "cache_write": 0.0},
-    # Gemini -------------------------------------------------------------
-    "gemini-2.5-pro":          {"input": 1.25,  "output": 10.0,  "cache_read": 0.315, "cache_write": 0.0},
-    "gemini-2.5-flash":        {"input": 0.15,  "output": 0.6,   "cache_read": 0.0375,"cache_write": 0.0},
-    "gemini-2.0-flash":        {"input": 0.1,   "output": 0.4,   "cache_read": 0.025, "cache_write": 0.0},
-    # Grok ---------------------------------------------------------------
-    "grok-3":                  {"input": 3.0,   "output": 15.0,  "cache_read": 0.0,   "cache_write": 0.0},
-    "grok-3-mini":             {"input": 0.3,   "output": 0.5,   "cache_read": 0.0,   "cache_write": 0.0},
-}
-
-
-def estimate_cost(
-    provider: str,
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
-) -> float | None:
-    """Estimate cost in USD from token counts.
-
-    Returns None if the model is not in the cost table (e.g. local Ollama).
-    """
-    costs = _MODEL_COSTS.get(model)
-    if costs is None:
-        # Try partial match (model id may have a date suffix)
-        for key, val in _MODEL_COSTS.items():
-            if model.startswith(key) or key.startswith(model):
-                costs = val
-                break
-    if costs is None:
-        return None
-
-    total = (
-        input_tokens * costs["input"]
-        + output_tokens * costs["output"]
-        + cache_read_tokens * costs.get("cache_read", 0)
-        + cache_write_tokens * costs.get("cache_write", 0)
-    ) / 1_000_000
-    return round(total, 6)
-
-
-# ---------------------------------------------------------------------------
 # Usage extraction from raw provider responses
 # ---------------------------------------------------------------------------
 
@@ -183,13 +120,8 @@ async def record_usage(
         logger.debug("Usage pool not set — skipping recording")
         return
 
-    if cost_usd is None:
-        cost_usd = estimate_cost(
-            provider, model,
-            input_tokens, output_tokens,
-            cache_read_tokens, cache_write_tokens,
-        )
-
+    # A NULL cost self-prices inside record_api_usage from the model_costs
+    # table — the DB owns the price list.
     try:
         await p.fetchval(
             "SELECT record_api_usage($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",

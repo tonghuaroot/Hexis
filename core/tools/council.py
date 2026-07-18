@@ -4,7 +4,7 @@ Hexis Tools System - Multi-Agent Council
 Provides tools for multi-perspective analysis through council personas,
 orchestrated deliberation, and signal aggregation from system events.
 
-F.1 - Agent Personas/Roles (COUNCIL_PERSONAS dict)
+F.1 - Agent Personas/Roles (prompt_modules council.persona.*)
 F.2 - Council Orchestration Tool (RunCouncilHandler)
 F.3 - Signal Aggregation Tool (AggregateSignalsHandler)
 """
@@ -33,51 +33,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# F.1 -- Built-in council personas
+# F.1 -- Council personas (DB-owned: prompt_modules council.persona.*)
 # ---------------------------------------------------------------------------
 
-COUNCIL_PERSONAS: dict[str, dict[str, str]] = {
-    "growth_strategist": {
-        "name": "Growth Strategist",
-        "system_prompt": (
-            "You are a growth strategist. Focus on market expansion, "
-            "user acquisition, revenue growth opportunities, and "
-            "scalability. Be optimistic but data-driven."
-        ),
-    },
-    "revenue_guardian": {
-        "name": "Revenue Guardian",
-        "system_prompt": (
-            "You are a revenue guardian. Focus on profitability, unit "
-            "economics, pricing strategy, and financial sustainability. "
-            "Be conservative and metrics-focused."
-        ),
-    },
-    "skeptical_operator": {
-        "name": "Skeptical Operator",
-        "system_prompt": (
-            "You are a skeptical operator. Challenge assumptions, "
-            "identify risks, point out what could go wrong, and ensure "
-            "operational feasibility. Play devil's advocate."
-        ),
-    },
-    "creative_innovator": {
-        "name": "Creative Innovator",
-        "system_prompt": (
-            "You are a creative innovator. Think outside the box, "
-            "propose unconventional solutions, and explore novel "
-            "approaches. Focus on differentiation and user delight."
-        ),
-    },
-    "customer_advocate": {
-        "name": "Customer Advocate",
-        "system_prompt": (
-            "You are a customer advocate. Represent the user's "
-            "perspective, focus on user experience, pain points, "
-            "satisfaction, and long-term loyalty."
-        ),
-    },
-}
+
+async def load_council_personas(context: "ToolExecutionContext") -> dict[str, dict[str, str]]:
+    """Fetch the persona catalog from get_council_personas() (db/33)."""
+    pool = context.registry.pool if context.registry else None
+    if pool is None:
+        raise RuntimeError("Council personas require a database-backed registry")
+    async with pool.acquire() as conn:
+        raw = await conn.fetchval("SELECT get_council_personas()")
+    personas = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    if not personas:
+        raise RuntimeError("No council personas are seeded (prompt_modules council.persona.*)")
+    return personas
 
 
 # ---------------------------------------------------------------------------
@@ -112,12 +82,10 @@ class ListCouncilPersonasHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        personas_summary: dict[str, dict[str, str]] = {}
-        for key, persona in COUNCIL_PERSONAS.items():
-            personas_summary[key] = {
-                "name": persona["name"],
-                "system_prompt": persona["system_prompt"],
-            }
+        try:
+            personas_summary = await load_council_personas(context)
+        except Exception as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.EXECUTION_FAILED)
 
         return ToolResult(
             success=True,
@@ -202,25 +170,29 @@ class RunCouncilHandler(ToolHandler):
         extra_context: str = arguments.get("context", "")
         signal_limit: int = max(1, min(int(arguments.get("signal_limit", 10) or 10), 30))
 
-        # Resolve persona keys
+        # Resolve persona keys against the DB catalog
+        try:
+            personas = await load_council_personas(context)
+        except Exception as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.EXECUTION_FAILED)
         if requested_personas:
-            invalid = [p for p in requested_personas if p not in COUNCIL_PERSONAS]
+            invalid = [p for p in requested_personas if p not in personas]
             if invalid:
                 return ToolResult.error_result(
                     f"Unknown persona(s): {', '.join(invalid)}. "
-                    f"Valid keys: {', '.join(sorted(COUNCIL_PERSONAS.keys()))}",
+                    f"Valid keys: {', '.join(sorted(personas.keys()))}",
                     ToolErrorType.INVALID_PARAMS,
                 )
             selected_keys = requested_personas
         else:
-            selected_keys = list(COUNCIL_PERSONAS.keys())
+            selected_keys = list(personas.keys())
 
         signals = await self._collect_signals(context, limit=signal_limit)
 
         # Build the council configuration
         council_analyses: list[dict[str, str]] = []
         for key in selected_keys:
-            persona = COUNCIL_PERSONAS[key]
+            persona = personas[key]
             prompt_parts = [persona["system_prompt"]]
             if signals:
                 prompt_parts.append(
