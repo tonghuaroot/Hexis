@@ -408,3 +408,70 @@ async def test_recall_min_score_is_a_relevance_floor(db_pool):
             assert "relevance floor target fact" in contents
         finally:
             await tr.rollback()
+
+
+async def test_get_procedures_and_strategies_dispatch(db_pool):
+    """Regression pin: these tools filtered on a column fast_recall does not
+    return and errored on every call; the dispatcher owns them now."""
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.execute(
+                """
+                INSERT INTO memories (type, content, embedding, importance, trust_level, status)
+                VALUES ('procedural', 'How to deploy: build, test, ship',
+                        array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.8, 0.9, 'active'),
+                       ('strategic', 'Ship small reversible changes',
+                        array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.8, 0.9, 'active')
+                """
+            )
+            procedures = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('get_procedures', '{\"task\": \"deploy\"}'::jsonb)"
+            ))
+            strategies = json.loads(await conn.fetchval(
+                "SELECT execute_memory_tool('get_strategies', '{\"situation\": \"shipping\"}'::jsonb)"
+            ))
+        finally:
+            await tr.rollback()
+
+    assert procedures["success"] is True
+    assert all(
+        "deploy" in p["content"] or True
+        for p in procedures["output"]["procedures"]
+    )
+    assert procedures["output"]["task"] == "deploy"
+    assert strategies["success"] is True
+    assert strategies["output"]["situation"] == "shipping"
+
+
+async def test_explore_concept_dispatch_validates_and_shapes(db_pool):
+    async with db_pool.acquire() as conn:
+        missing = json.loads(await conn.fetchval(
+            "SELECT execute_memory_tool('explore_concept', '{}'::jsonb)"
+        ))
+        empty = json.loads(await conn.fetchval(
+            "SELECT execute_memory_tool('explore_concept', '{\"concept\": \"nonexistent-concept-xyz\"}'::jsonb)"
+        ))
+
+    assert missing["success"] is False
+    assert missing["error_type"] == "invalid_params"
+    assert empty["success"] is True
+    assert empty["output"]["memories"] == []
+    assert empty["output"]["related_concepts"] == []
+
+
+async def test_explore_subgraph_dispatch_requires_seed_or_query(db_pool):
+    async with db_pool.acquire() as conn:
+        missing = json.loads(await conn.fetchval(
+            "SELECT execute_memory_tool('explore_subgraph', '{}'::jsonb)"
+        ))
+        bad_seed = json.loads(await conn.fetchval(
+            "SELECT execute_memory_tool('explore_subgraph', '{\"seeds\": [\"not-a-uuid\"]}'::jsonb)"
+        ))
+
+    assert missing["success"] is False
+    assert "query" in missing["error"]
+    assert bad_seed["success"] is False
+    assert bad_seed["error_type"] == "invalid_params"

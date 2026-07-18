@@ -94,7 +94,7 @@ class TestListCouncilPersonasExecution:
         result = await handler.execute({}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["count"] == 5
         assert len(data["personas"]) == 5
 
@@ -103,7 +103,7 @@ class TestListCouncilPersonasExecution:
         ctx = _make_context(db_pool)
         result = await handler.execute({}, ctx)
 
-        data = json.loads(result.output)
+        data = result.output
         assert set(data["personas"].keys()) == EXPECTED_PERSONAS
 
     async def test_each_persona_has_fields(self, db_pool):
@@ -111,7 +111,7 @@ class TestListCouncilPersonasExecution:
         ctx = _make_context(db_pool)
         result = await handler.execute({}, ctx)
 
-        data = json.loads(result.output)
+        data = result.output
         for key, persona in data["personas"].items():
             assert "name" in persona
             assert "system_prompt" in persona
@@ -163,7 +163,7 @@ class TestRunCouncilExecution:
         result = await handler.execute({"topic": "Should we expand into APAC?"}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["persona_count"] == 5
         assert len(data["council"]) == 5
         assert data["topic"] == "Should we expand into APAC?"
@@ -177,7 +177,7 @@ class TestRunCouncilExecution:
         }, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["persona_count"] == 2
         included = data["personas_included"]
         assert "revenue_guardian" in included
@@ -193,7 +193,7 @@ class TestRunCouncilExecution:
         }, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["persona_count"] == 1
         assert data["council"][0]["persona_key"] == "skeptical_operator"
 
@@ -243,7 +243,7 @@ class TestRunCouncilExecution:
         }, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         for entry in data["council"]:
             assert "Revenue is $5M ARR" in entry["full_prompt"]
             assert "Go/no-go decision" in entry["full_prompt"]
@@ -254,7 +254,7 @@ class TestRunCouncilExecution:
         result = await handler.execute({"topic": "Structure test"}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         for entry in data["council"]:
             assert "persona_key" in entry
             assert "persona_name" in entry
@@ -266,7 +266,7 @@ class TestRunCouncilExecution:
         ctx = _make_context(db_pool)
         result = await handler.execute({"topic": "test"}, ctx)
 
-        data = json.loads(result.output)
+        data = result.output
         assert "instructions" in data
         assert len(data["instructions"]) > 0
 
@@ -276,7 +276,7 @@ class TestRunCouncilExecution:
         result = await handler.execute({"topic": "Expansion plan"}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert isinstance(data.get("moderator_report"), str)
         assert data["moderator_report"]
         for entry in data["council"]:
@@ -316,7 +316,7 @@ class TestRunCouncilExecution:
         }, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["signals"]
         assert data["signals"][0].startswith("Event[")
         assert data["persona_count"] == 1
@@ -370,7 +370,7 @@ class TestAggregateSignalsExecution:
         result = await handler.execute({"days": 1, "limit": 5}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert "events" in data
         assert "memories" in data
         assert "goals" in data
@@ -389,7 +389,7 @@ class TestAggregateSignalsExecution:
         }, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["domain_filter"] == "chat"
 
     async def test_default_params(self, db_pool):
@@ -399,7 +399,7 @@ class TestAggregateSignalsExecution:
         result = await handler.execute({}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["time_window_days"] == 7
 
     async def test_summary_structure(self, db_pool):
@@ -409,7 +409,7 @@ class TestAggregateSignalsExecution:
         result = await handler.execute({}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         summary = data["summary"]
         assert "total_signals" in summary
         assert "event_sources" in summary
@@ -431,71 +431,44 @@ class TestAggregateSignalsExecution:
         result = await handler.execute({"days": 0}, ctx)
 
         assert result.success
-        data = json.loads(result.output)
+        data = result.output
         assert data["time_window_days"] == 1
 
-    async def test_mock_pool_with_events(self):
-        """Test with a mock pool returning synthetic data."""
-        from contextlib import asynccontextmanager
-        from datetime import datetime, timezone
+    async def test_seeded_rows_counted(self, db_pool):
+        """SQL-level: seeded event + memory + goal all appear in the snapshot."""
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO gateway_events (source, status, session_key, payload)
+                    VALUES ('chat', 'completed', 'sess-agg-test', '{"message": "hello"}'::jsonb)
+                    """
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO memories (type, content, embedding, importance, trust_level, status)
+                    VALUES ('episodic', 'User asked about pricing',
+                            array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.7, 0.9, 'active'),
+                           ('goal', 'Increase user retention by 20%',
+                            array_fill(0.1, ARRAY[embedding_dimension()])::vector, 0.9, 0.9, 'active')
+                    """
+                )
+                raw = await conn.fetchval(
+                    "SELECT aggregate_signals_tool('{\"days\": 7, \"limit\": 20}'::jsonb)"
+                )
+            finally:
+                await tr.rollback()
 
-        mock_conn = AsyncMock()
-
-        # Mock rows as simple dicts wrapped in a list
-        event_row = {
-            "id": 1,
-            "source": "chat",
-            "status": "completed",
-            "session_key": "sess-1",
-            "payload": '{"message": "hello"}',
-            "created_at": datetime(2026, 2, 10, tzinfo=timezone.utc),
-            "completed_at": datetime(2026, 2, 10, tzinfo=timezone.utc),
-        }
-        mem_row = {
-            "id": "00000000-0000-0000-0000-000000000001",
-            "content": "User asked about pricing",
-            "importance": 0.7,
-            "created_at": datetime(2026, 2, 10, tzinfo=timezone.utc),
-            "metadata": None,
-        }
-        goal_row = {
-            "id": "00000000-0000-0000-0000-000000000002",
-            "content": "Increase user retention by 20%",
-            "importance": 0.9,
-            "metadata": None,
-            "created_at": datetime(2026, 2, 9, tzinfo=timezone.utc),
-        }
-
-        # Use simple dicts as mock rows (dict supports __getitem__)
-        async def mock_fetch(query, *args):
-            if "gateway_events" in query:
-                return [event_row]
-            elif "episodic" in query:
-                return [mem_row]
-            elif "goal" in query:
-                return [goal_row]
-            return []
-
-        mock_conn.fetch = mock_fetch
-
-        # Build a mock pool with a proper async context manager for acquire()
-        @asynccontextmanager
-        async def mock_acquire():
-            yield mock_conn
-
-        mock_pool = MagicMock()
-        mock_pool.acquire = mock_acquire
-
-        handler = AggregateSignalsHandler()
-        ctx = _make_context(pool=mock_pool)
-        result = await handler.execute({"days": 7, "limit": 20}, ctx)
-
-        assert result.success
-        data = json.loads(result.output)
-        assert data["events"]["count"] == 1
-        assert data["memories"]["count"] == 1
-        assert data["goals"]["count"] == 1
-        assert data["summary"]["total_signals"] == 3
+        payload = json.loads(raw)
+        assert payload["success"] is True
+        data = payload["output"]
+        assert data["events"]["count"] >= 1
+        assert data["memories"]["count"] >= 1
+        assert data["goals"]["count"] >= 1
+        assert data["summary"]["total_signals"] >= 3
+        assert "chat" in data["summary"]["event_sources"]
 
 
 # ---------------------------------------------------------------------------

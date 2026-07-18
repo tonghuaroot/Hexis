@@ -89,10 +89,10 @@ class ListCouncilPersonasHandler(ToolHandler):
 
         return ToolResult(
             success=True,
-            output=json.dumps({
+            output={
                 "count": len(personas_summary),
                 "personas": personas_summary,
-            }),
+            },
             energy_spent=0,
         )
 
@@ -226,7 +226,7 @@ class RunCouncilHandler(ToolHandler):
 
         return ToolResult(
             success=True,
-            output=json.dumps({
+            output={
                 "topic": topic,
                 "persona_count": len(council_analyses),
                 "personas_included": [a["persona_key"] for a in council_analyses],
@@ -237,7 +237,7 @@ class RunCouncilHandler(ToolHandler):
                     "Council analyses were run in parallel and reconciled via a "
                     "moderator pass. Use moderator_report as the synthesis."
                 ),
-            }),
+            },
             energy_spent=5,
         )
 
@@ -505,142 +505,30 @@ class AggregateSignalsHandler(ToolHandler):
                 "Database pool not available.",
                 ToolErrorType.MISSING_CONFIG,
             )
-
-        domain: str | None = arguments.get("domain")
-        days: int = max(1, arguments.get("days", 7))
-        limit: int = max(1, min(arguments.get("limit", 20), 100))
-
-        events: list[dict[str, Any]] = []
-        memories: list[dict[str, Any]] = []
-        goals: list[dict[str, Any]] = []
-
-        async with pool.acquire() as conn:
-            # ----- Gateway events -----
-            try:
-                if domain:
-                    event_rows = await conn.fetch(
-                        """
-                        SELECT id, source::text, status::text, session_key,
-                               payload, created_at, completed_at
-                        FROM gateway_events
-                        WHERE created_at >= now() - make_interval(days => $1)
-                          AND source::text = $2
-                        ORDER BY created_at DESC
-                        LIMIT $3
-                        """,
-                        days, domain, limit,
-                    )
-                else:
-                    event_rows = await conn.fetch(
-                        """
-                        SELECT id, source::text, status::text, session_key,
-                               payload, created_at, completed_at
-                        FROM gateway_events
-                        WHERE created_at >= now() - make_interval(days => $1)
-                        ORDER BY created_at DESC
-                        LIMIT $2
-                        """,
-                        days, limit,
-                    )
-
-                for row in event_rows:
-                    events.append({
-                        "id": row["id"],
-                        "source": row["source"],
-                        "status": row["status"],
-                        "session_key": row["session_key"],
-                        "payload_keys": list(
-                            json.loads(row["payload"]).keys()
-                        ) if row["payload"] else [],
-                        "created_at": row["created_at"].isoformat()
-                            if row["created_at"] else None,
-                    })
-            except Exception as exc:
-                logger.debug("Failed to query gateway_events: %s", exc)
-
-            # ----- Recent episodic memories -----
-            try:
-                mem_rows = await conn.fetch(
-                    """
-                    SELECT id, content, importance, created_at,
-                           metadata
-                    FROM memories
-                    WHERE type = 'episodic'
-                      AND status = 'active'
-                      AND created_at >= now() - make_interval(days => $1)
-                    ORDER BY created_at DESC
-                    LIMIT $2
-                    """,
-                    days, limit,
+        try:
+            async with pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT aggregate_signals_tool($1::jsonb)", json.dumps(arguments)
                 )
-                for row in mem_rows:
-                    memories.append({
-                        "id": str(row["id"]),
-                        "content": (row["content"] or "")[:300],
-                        "importance": float(row["importance"])
-                            if row["importance"] is not None else None,
-                        "created_at": row["created_at"].isoformat()
-                            if row["created_at"] else None,
-                    })
-            except Exception as exc:
-                logger.debug("Failed to query episodic memories: %s", exc)
-
-            # ----- Active goals -----
-            try:
-                goal_rows = await conn.fetch(
-                    """
-                    SELECT id, content, importance, metadata, created_at
-                    FROM memories
-                    WHERE type = 'goal'
-                      AND status = 'active'
-                    ORDER BY importance DESC NULLS LAST
-                    LIMIT $1
-                    """,
-                    limit,
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(payload, dict) and "success" in payload:
+                if payload.get("success"):
+                    return ToolResult.success_result(
+                        payload.get("output"),
+                        display_output=payload.get("display_output"),
+                    )
+                return ToolResult.error_result(
+                    payload.get("error") or "Signal aggregation failed",
+                    ToolErrorType.EXECUTION_FAILED,
                 )
-                for row in goal_rows:
-                    goals.append({
-                        "id": str(row["id"]),
-                        "content": (row["content"] or "")[:300],
-                        "importance": float(row["importance"])
-                            if row["importance"] is not None else None,
-                        "created_at": row["created_at"].isoformat()
-                            if row["created_at"] else None,
-                    })
-            except Exception as exc:
-                logger.debug("Failed to query goals: %s", exc)
-
-        snapshot = {
-            "time_window_days": days,
-            "domain_filter": domain,
-            "events": {
-                "count": len(events),
-                "items": events,
-            },
-            "memories": {
-                "count": len(memories),
-                "items": memories,
-            },
-            "goals": {
-                "count": len(goals),
-                "items": goals,
-            },
-            "summary": {
-                "total_signals": len(events) + len(memories) + len(goals),
-                "event_sources": list(
-                    set(e["source"] for e in events)
-                ) if events else [],
-                "highest_importance_goal": (
-                    goals[0]["content"][:100] if goals else None
-                ),
-            },
-        }
-
-        return ToolResult(
-            success=True,
-            output=json.dumps(snapshot, default=str),
-            energy_spent=3,
-        )
+            return ToolResult.error_result(
+                "Signal aggregation failed: unexpected payload", ToolErrorType.EXECUTION_FAILED
+            )
+        except Exception as exc:
+            logger.exception("Signal aggregation failed")
+            return ToolResult.error_result(
+                f"Signal aggregation failed: {exc}", ToolErrorType.EXECUTION_FAILED
+            )
 
 
 # ---------------------------------------------------------------------------

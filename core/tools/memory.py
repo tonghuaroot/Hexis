@@ -617,58 +617,13 @@ class ExploreConceptHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        concept = arguments["concept"]
-        include_related = arguments.get("include_related", True)
-        limit = arguments.get("limit", 5)
-
-        try:
-            async with context.registry.pool.acquire() as conn:
-                # Find memories linked to concept
-                rows = await conn.fetch(
-                    """
-                    SELECT memory_id, memory_content, memory_type, memory_importance, link_strength
-                    FROM find_memories_by_concept($1, $2)
-                    """,
-                    concept,
-                    limit,
-                )
-
-                memories = [
-                    {
-                        "memory_id": str(row["memory_id"]),
-                        "content": row["memory_content"],
-                        "type": row["memory_type"],
-                        "importance": row["memory_importance"],
-                        "concept_strength": row["link_strength"],
-                    }
-                    for row in rows
-                ]
-
-                related_concepts = []
-                if include_related and memories:
-                    memory_ids = [m["memory_id"] for m in memories]
-                    related_rows = await conn.fetch(
-                        """
-                        SELECT name, shared_memories
-                        FROM find_related_concepts_for_memories($1::uuid[], $2, 10)
-                        """,
-                        memory_ids,
-                        concept,
-                    )
-                    related_concepts = [dict(r) for r in related_rows]
-
-            return ToolResult.success_result(
-                output={
-                    "concept": concept,
-                    "memories": memories,
-                    "related_concepts": related_concepts,
-                    "count": len(memories),
-                },
-                display_output=f"Found {len(memories)} memories for concept '{concept}'",
-            )
-
-        except Exception as e:
-            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+        db_result = await _try_db_memory_tool("explore_concept", arguments, context)
+        if db_result is not None:
+            return db_result
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class ExploreSubgraphHandler(ToolHandler):
@@ -728,50 +683,13 @@ class ExploreSubgraphHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        seeds = arguments.get("seeds")
-        query = arguments.get("query")
-        rel_types = arguments.get("rel_types")
-        depth = arguments.get("depth", 2)
-        budget = arguments.get("budget", 30)
-
-        try:
-            async with context.registry.pool.acquire() as conn:
-                if seeds:
-                    seed_ids = [str(s) for s in seeds]
-                elif query:
-                    rows = await conn.fetch("SELECT memory_id FROM fast_recall($1, 10)", query)
-                    seed_ids = [str(r["memory_id"]) for r in rows]
-                else:
-                    return ToolResult.error_result(
-                        "Provide 'query' or 'seeds'.", ToolErrorType.INVALID_PARAMS
-                    )
-
-                if not seed_ids:
-                    return ToolResult.success_result(
-                        output={"nodes": [], "edges": [], "rendered": None},
-                        display_output="No seed memories found.",
-                    )
-
-                sg = await conn.fetchval(
-                    "SELECT build_context_subgraph($1::uuid[], $2, $3::text[], $4)",
-                    seed_ids, depth, rel_types, budget,
-                )
-                rendered = await conn.fetchval("SELECT render_subgraph($1::jsonb)", sg)
-
-            sg_obj = json.loads(sg) if isinstance(sg, str) else (sg or {})
-            nodes = sg_obj.get("nodes", [])
-            edges = sg_obj.get("edges", [])
-            return ToolResult.success_result(
-                output={"nodes": nodes, "edges": edges, "rendered": rendered},
-                display_output=(
-                    rendered
-                    if rendered
-                    else f"No typed connections among {len(seed_ids)} seed memory(ies)."
-                ),
-            )
-
-        except Exception as e:
-            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+        db_result = await _try_db_memory_tool("explore_subgraph", arguments, context)
+        if db_result is not None:
+            return db_result
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class GetProceduresHandler(ToolHandler):
@@ -812,36 +730,13 @@ class GetProceduresHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        task = arguments["task"]
-        limit = arguments.get("limit", 3)
-
-        try:
-            async with context.registry.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT * FROM fast_recall($1, $2)
-                    WHERE type = 'procedural'
-                    """,
-                    task,
-                    limit * 2,  # Fetch more to filter
-                )
-
-                procedures = [
-                    {
-                        "memory_id": str(row["id"]),
-                        "content": row["content"],
-                        "similarity": row.get("similarity"),
-                    }
-                    for row in rows[:limit]
-                ]
-
-            return ToolResult.success_result(
-                output={"procedures": procedures, "count": len(procedures), "task": task},
-                display_output=f"Found {len(procedures)} procedures for '{task}'",
-            )
-
-        except Exception as e:
-            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+        db_result = await _try_db_memory_tool("get_procedures", arguments, context)
+        if db_result is not None:
+            return db_result
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class GetStrategiesHandler(ToolHandler):
@@ -882,36 +777,13 @@ class GetStrategiesHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        situation = arguments["situation"]
-        limit = arguments.get("limit", 3)
-
-        try:
-            async with context.registry.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """
-                    SELECT * FROM fast_recall($1, $2)
-                    WHERE type = 'strategic'
-                    """,
-                    situation,
-                    limit * 2,
-                )
-
-                strategies = [
-                    {
-                        "memory_id": str(row["id"]),
-                        "content": row["content"],
-                        "similarity": row.get("similarity"),
-                    }
-                    for row in rows[:limit]
-                ]
-
-            return ToolResult.success_result(
-                output={"strategies": strategies, "count": len(strategies), "situation": situation},
-                display_output=f"Found {len(strategies)} strategies for '{situation}'",
-            )
-
-        except Exception as e:
-            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+        db_result = await _try_db_memory_tool("get_strategies", arguments, context)
+        if db_result is not None:
+            return db_result
+        return ToolResult.error_result(
+            "execute_memory_tool dispatch failed (database unavailable or errored)",
+            ToolErrorType.EXECUTION_FAILED,
+        )
 
 
 class CreateGoalHandler(ToolHandler):

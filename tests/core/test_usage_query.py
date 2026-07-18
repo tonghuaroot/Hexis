@@ -45,115 +45,80 @@ class TestQueryUsageSpec:
         assert "source" in props
 
 
-class TestQueryUsageSummary:
-    @pytest.mark.asyncio
-    async def test_summary_view(self):
+class TestQueryUsageViews:
+    """query_usage_tool (SQL) owns the view shaping; seeded in-transaction."""
+
+    async def _seeded_view(self, db_pool, args):
+        import json
+
+        async with db_pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                for source, cost in (("chat", 1.25), ("heartbeat", 0.75)):
+                    await conn.fetchval(
+                        "SELECT record_api_usage('anthropic', 'claude-opus-4-6', 'chat', 1000, 500, 0, 0, $1, NULL, $2)",
+                        cost, source,
+                    )
+                raw = await conn.fetchval(
+                    "SELECT query_usage_tool($1::jsonb)", json.dumps(args)
+                )
+            finally:
+                await tr.rollback()
+        return json.loads(raw)
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_summary_view(self, db_pool):
+        payload = await self._seeded_view(db_pool, {"view": "summary", "period": "week"})
+        assert payload["success"] is True
+        out = payload["output"]
+        assert out["period"] == "week"
+        assert out["total_calls"] >= 2
+        assert out["total_cost_usd"] >= 2.0
+        assert any(m["model"] == "claude-opus-4-6" for m in out["by_model"])
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_summary_view_source_filter(self, db_pool):
+        payload = await self._seeded_view(
+            db_pool, {"view": "summary", "period": "week", "source": "heartbeat"}
+        )
+        assert payload["success"] is True
+        assert payload["output"]["total_calls"] == 1
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_daily_view(self, db_pool):
+        payload = await self._seeded_view(db_pool, {"view": "daily", "period": "week"})
+        assert payload["success"] is True
+        daily = payload["output"]["daily"]
+        assert daily and daily[0]["calls"] >= 2
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_top_models_view(self, db_pool):
+        payload = await self._seeded_view(db_pool, {"view": "top_models", "period": "week"})
+        assert payload["success"] is True
+        ranked = payload["output"]["top_models"]
+        assert ranked[0]["model"] == "anthropic/claude-opus-4-6"
+        assert ranked[0]["cost_usd"] >= 2.0
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_handler_dispatches(self, db_pool):
         handler = QueryUsageHandler()
-        ctx = _make_context()
-
-        mock_conn = AsyncMock()
-        mock_conn.fetch = AsyncMock(return_value=[
-            {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "operation": "chat",
-                "call_count": 50,
-                "total_input_tokens": 100000,
-                "total_output_tokens": 50000,
-                "total_cache_read": 0,
-                "total_cache_write": 0,
-                "total_tokens": 150000,
-                "total_cost": 3.75,
-            },
-        ])
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-        ctx.registry.pool = mock_pool
-
-        result = await handler.execute({"view": "summary", "period": "week"}, ctx)
-
+        registry = MagicMock()
+        registry.pool = db_pool
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="usage-dispatch",
+            registry=registry,
+        )
+        result = await handler.execute({"view": "summary", "period": "day"}, ctx)
         assert result.success
-        assert result.output["total_cost_usd"] == 3.75
-        assert result.output["total_calls"] == 50
-        assert len(result.output["by_model"]) == 1
-
-    @pytest.mark.asyncio
-    async def test_daily_view(self):
-        handler = QueryUsageHandler()
-        ctx = _make_context()
-
-        mock_conn = AsyncMock()
-        mock_conn.fetch = AsyncMock(return_value=[
-            {
-                "day": "2026-02-13",
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "call_count": 10,
-                "total_tokens": 50000,
-                "total_cost": 1.25,
-            },
-            {
-                "day": "2026-02-12",
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "call_count": 8,
-                "total_tokens": 40000,
-                "total_cost": 1.00,
-            },
-        ])
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-        ctx.registry.pool = mock_pool
-
-        result = await handler.execute({"view": "daily", "period": "week"}, ctx)
-
-        assert result.success
-        assert len(result.output["daily"]) == 2
-
-    @pytest.mark.asyncio
-    async def test_top_models_view(self):
-        handler = QueryUsageHandler()
-        ctx = _make_context()
-
-        mock_conn = AsyncMock()
-        mock_conn.fetch = AsyncMock(return_value=[
-            {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "operation": "chat",
-                "call_count": 50,
-                "total_tokens": 150000,
-                "total_cost": 3.75,
-            },
-            {
-                "provider": "openai",
-                "model": "gpt-4o",
-                "operation": "chat",
-                "call_count": 20,
-                "total_tokens": 80000,
-                "total_cost": 0.60,
-            },
-        ])
-        mock_pool = MagicMock()
-        mock_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
-        mock_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
-        ctx.registry.pool = mock_pool
-
-        result = await handler.execute({"view": "top_models"}, ctx)
-
-        assert result.success
-        assert len(result.output["top_models"]) == 2
-        # Should be ranked by cost descending
-        assert result.output["top_models"][0]["model"] == "anthropic/claude-opus-4-6"
+        assert result.output["period"] == "day"
+        assert "Usage (day):" in (result.display_output or "")
 
 
-class TestUsageFactory:
+class TestUsageToolFactory:
     def test_factory_count(self):
-        tools = create_usage_tools()
-        assert len(tools) == 1
+        assert len(create_usage_tools()) == 1
 
     def test_factory_name(self):
-        tools = create_usage_tools()
-        assert tools[0].spec.name == "query_usage"
+        assert create_usage_tools()[0].spec.name == "query_usage"
