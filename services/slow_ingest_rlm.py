@@ -249,14 +249,28 @@ async def run_slow_ingest(
 
     source_info = pipeline._source_payload(doc)
 
-    # Create encounter memory
-    encounter_appraisal = Appraisal(
-        primary_emotion="curious",
-        intensity=0.4,
-        curiosity=0.6,
-        summary=f"Beginning conscious reading of '{doc.title}'.",
+    # Receipt gate (#85): doc-complete skips; receipted chunks resume; the
+    # enc: sentinel reuses the encounter across attempts.
+    doc_ref = doc.content_hash
+    chunk_hashes = {section.index: _hash_text(section.content) for section in sections}
+    receipts = await pipeline.store.get_receipts(
+        doc_ref, [doc_ref, f"enc:{doc_ref}"] + list(chunk_hashes.values())
     )
-    encounter_id = await pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.SLOW)
+    if doc_ref in receipts:
+        return {"memories_created": 0, "chunks_processed": 0, "assessments": [], "skipped": True}
+
+    encounter_id = receipts.get(f"enc:{doc_ref}")
+    if encounter_id is None:
+        encounter_appraisal = Appraisal(
+            primary_emotion="curious",
+            intensity=0.4,
+            curiosity=0.6,
+            summary=f"Beginning conscious reading of '{doc.title}'.",
+        )
+        encounter_id = await pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.SLOW)
+        await pipeline.store.record_receipt(
+            doc_ref, f"enc:{doc_ref}", memory_id=encounter_id, source_path=doc.path
+        )
 
     memories_created: list[str] = []
     assessments: list[dict[str, Any]] = []
@@ -266,6 +280,8 @@ async def run_slow_ingest(
     for section in sections:
         if pipeline._skip_section(section.title):
             continue
+        if chunk_hashes[section.index] in receipts:
+            continue  # resumed: this chunk already persisted
 
         chunk_result = await run_slow_ingest_chunk(
             chunk_text=section.content,
@@ -294,6 +310,7 @@ async def run_slow_ingest(
 
         # Build enriched source payload
         chunk_source = dict(source_info)
+        chunk_source["section_hash"] = chunk_hashes[section.index]
         chunk_source["conscious_analysis"] = assessment.get("analysis", "")
         chunk_source["acceptance"] = acceptance
         if acceptance == "contest":
@@ -328,6 +345,11 @@ async def run_slow_ingest(
             context="slow_ingest",
         )
         memories_created.extend(str(m) for m in (result.get("created") or []))
+
+    # Doc-complete: the final receipt — every earlier crash point resumes.
+    await pipeline.store.record_receipt(
+        doc_ref, doc_ref, memories_created=len(memories_created), source_path=doc.path
+    )
 
     duration = time.perf_counter() - time_start
     logger.info(
@@ -383,13 +405,30 @@ async def run_hybrid_ingest(
 
     source_info = pipeline._source_payload(doc)
 
-    encounter_appraisal = Appraisal(
-        primary_emotion="curious",
-        intensity=0.4,
-        curiosity=0.6,
-        summary=f"Beginning hybrid reading of '{doc.title}'.",
+    # Receipt gate (#85), same shape as the slow path.
+    doc_ref = doc.content_hash
+    chunk_hashes = {section.index: _hash_text(section.content) for section in sections}
+    receipts = await pipeline.store.get_receipts(
+        doc_ref, [doc_ref, f"enc:{doc_ref}"] + list(chunk_hashes.values())
     )
-    encounter_id = await pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.HYBRID)
+    if doc_ref in receipts:
+        return {
+            "memories_created": 0, "chunks_processed": 0, "slow_chunks": 0,
+            "fast_chunks": 0, "assessments": [], "skipped": True,
+        }
+
+    encounter_id = receipts.get(f"enc:{doc_ref}")
+    if encounter_id is None:
+        encounter_appraisal = Appraisal(
+            primary_emotion="curious",
+            intensity=0.4,
+            curiosity=0.6,
+            summary=f"Beginning hybrid reading of '{doc.title}'.",
+        )
+        encounter_id = await pipeline._create_encounter_memory(doc, encounter_appraisal, IngestionMode.HYBRID)
+        await pipeline.store.record_receipt(
+            doc_ref, f"enc:{doc_ref}", memory_id=encounter_id, source_path=doc.path
+        )
 
     # Phase 1: Fast pass -- use the pipeline's KnowledgeExtractor to score all chunks
     fast_extractions: dict[int, list[Extraction]] = {}
@@ -487,6 +526,7 @@ async def run_hybrid_ingest(
             acceptance = assessment["acceptance"]
 
             chunk_source = dict(source_info)
+            chunk_source["section_hash"] = chunk_hashes[section.index]
             chunk_source["conscious_analysis"] = assessment.get("analysis", "")
             chunk_source["acceptance"] = acceptance
             if acceptance == "contest":
@@ -516,8 +556,13 @@ async def run_hybrid_ingest(
             extractions = fast_extractions.get(section.index, [])
             created = await pipeline._create_semantic_memories(
                 doc, encounter_id, appraisal, extractions,
+                section_hash=chunk_hashes[section.index],
             )
             memories_created.extend(created)
+
+    await pipeline.store.record_receipt(
+        doc_ref, doc_ref, memories_created=len(memories_created), source_path=doc.path
+    )
 
     duration = time.perf_counter() - time_start
     logger.info(

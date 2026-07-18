@@ -27,9 +27,11 @@ CREATE OR REPLACE FUNCTION record_ingestion_receipt(
     ON CONFLICT (doc_ref, section_hash) DO NOTHING;
 $$ LANGUAGE sql;
 
--- Receipt lookup: the receipts table UNION'd with the legacy whole-document
--- memory-attribution receipts, so documents ingested before this table still
--- skip. Returns {hash: memory_id-or-null}.
+-- Receipt lookup: the receipts table, with the legacy whole-document
+-- memory-attribution fallback ONLY for documents that predate the table —
+-- a new-era document always has table rows (the enc: sentinel lands with
+-- the encounter), so its encounter attribution can never resurrect the
+-- receipt-before-work skip (#85).
 CREATE OR REPLACE FUNCTION get_ingestion_receipts(
     p_doc_ref TEXT,
     p_hashes TEXT[]
@@ -41,7 +43,8 @@ CREATE OR REPLACE FUNCTION get_ingestion_receipts(
         UNION
         SELECT m.source_attribution->>'content_hash' AS hash, m.id AS memory_id
         FROM memories m
-        WHERE m.source_attribution->>'ref' = p_doc_ref
+        WHERE NOT EXISTS (SELECT 1 FROM ingestion_receipts r WHERE r.doc_ref = p_doc_ref)
+          AND m.source_attribution->>'ref' = p_doc_ref
           AND m.source_attribution->>'content_hash' = ANY(p_hashes)
     ) hits;
 $$ LANGUAGE sql STABLE;

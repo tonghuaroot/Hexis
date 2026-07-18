@@ -31,6 +31,7 @@ from .config import (
     _extract_title,
     _hash_text,
     _infer_source_type,
+    _normalize_mode,
     _should_cancel,
     _word_count,
 )
@@ -247,12 +248,23 @@ class IngestionPipeline:
         metrics.mode = mode.value
         metrics.source_type = doc.source_type
 
-        if await self.store.has_receipt(doc.content_hash):
-            if self.config.verbose:
-                _emit(self.config, f"  Already ingested (hash={doc.content_hash[:8]}...). Skipping.")
-            return 0
-
         sections = self.sectioner.split(content, section_path)
+        section_hashes = [_hash_text(s.content) for s in sections]
+
+        # Receipt gate (#85): completion is asserted by receipts, never by the
+        # encounter's existence. Doc-complete row -> skip; receipted sections
+        # drop out (resume); the enc: sentinel hands back the encounter.
+        doc_ref = doc.content_hash
+        receipts = await self.store.get_receipts(
+            doc_ref, [doc_ref, f"enc:{doc_ref}"] + section_hashes
+        )
+        if doc_ref in receipts:
+            if self.config.verbose:
+                _emit(self.config, f"  Already ingested (hash={doc_ref[:8]}...). Skipping.")
+            return 0
+        done_sections = {h for h in section_hashes if h in receipts}
+        if done_sections and self.config.verbose:
+            _emit(self.config, f"  Resuming: {len(done_sections)}/{len(sections)} sections already ingested.")
         if self.config.verbose:
             _emit(self.config, f"  Mode: {mode.value} | Words: {doc.word_count} | Sections: {len(sections)}")
 
@@ -275,13 +287,26 @@ class IngestionPipeline:
             metrics.appraisal_emotion = overall_appraisal.primary_emotion
             metrics.appraisal_intensity = overall_appraisal.intensity
 
-        encounter_id = await self._create_encounter_memory(doc, overall_appraisal, mode)
+        encounter_id = receipts.get(f"enc:{doc_ref}")
+        if encounter_id is None:
+            encounter_id = await self._create_encounter_memory(doc, overall_appraisal, mode)
+            # The enc: sentinel is a receipt for the encounter only — never a
+            # doc-complete claim (#85: a crash from here on RESUMES).
+            await self.store.record_receipt(
+                doc_ref, f"enc:{doc_ref}",
+                memory_id=encounter_id, source_path=doc.path,
+            )
 
         created_ids: list[str] = []
         total_extractions = 0
         dedup_count = 0
 
-        active_sections = [s for s in sections if not self._skip_section(s.title)]
+        section_hash_by_id = dict(zip((id(s) for s in sections), section_hashes))
+        active_sections = [
+            s for s in sections
+            if not self._skip_section(s.title)
+            and section_hash_by_id[id(s)] not in done_sections
+        ]
         if _should_cancel(self.config):
             raise RuntimeError("Ingestion cancelled")
         max_items = self.config.max_facts_per_section
@@ -306,10 +331,13 @@ class IngestionPipeline:
                 metrics.appraisal_arousal = appraisal.arousal
                 metrics.appraisal_emotion = appraisal.primary_emotion
                 metrics.appraisal_intensity = appraisal.intensity
+                s_hash = section_hash_by_id[id(section)]
                 if not extractions:
+                    await self.store.record_receipt(doc_ref, s_hash, source_path=doc.path)
                     continue
                 total_extractions += len(extractions)
-                new_memories = await self._create_semantic_memories(doc, encounter_id, appraisal, extractions)
+                new_memories = await self._create_semantic_memories(
+                    doc, encounter_id, appraisal, extractions, section_hash=s_hash)
                 dedup_count += len(extractions) - len(new_memories)
                 created_ids.extend(new_memories)
         else:
@@ -322,10 +350,13 @@ class IngestionPipeline:
                 for s in active_sections
             ])
             for section, extractions in zip(active_sections, section_extractions):
+                s_hash = section_hash_by_id[id(section)]
                 if not extractions:
+                    await self.store.record_receipt(doc_ref, s_hash, source_path=doc.path)
                     continue
                 total_extractions += len(extractions)
-                new_memories = await self._create_semantic_memories(doc, encounter_id, appraisal, extractions)
+                new_memories = await self._create_semantic_memories(
+                    doc, encounter_id, appraisal, extractions, section_hash=s_hash)
                 dedup_count += len(extractions) - len(new_memories)
                 created_ids.extend(new_memories)
 
@@ -341,6 +372,12 @@ class IngestionPipeline:
         metrics.llm_calls = self.llm.call_count - llm_calls_start
         metrics.duration_seconds = time.time() - metrics.start_time
         await self.store.store_metrics(metrics)
+
+        # Doc-complete: the final receipt — everything before it is resumable.
+        await self.store.record_receipt(
+            doc_ref, doc_ref,
+            memories_created=len(created_ids), source_path=doc.path,
+        )
 
         return len(created_ids)
 
@@ -365,7 +402,7 @@ class IngestionPipeline:
             pass
         return ctx
 
-    def _source_payload(self, doc: DocumentInfo) -> dict[str, Any]:
+    def _source_payload(self, doc: DocumentInfo, *, section_hash: str | None = None) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         payload = {
             "kind": doc.source_type,
@@ -375,6 +412,10 @@ class IngestionPipeline:
             "content_hash": doc.content_hash,
             "path": doc.path,
         }
+        if section_hash is not None:
+            # The persist functions record the section receipt atomically
+            # with persistence when this key rides the source (#85/#90).
+            payload["section_hash"] = section_hash
         if self.config.base_trust is not None:
             payload["trust"] = float(self.config.base_trust)
         return payload
@@ -437,12 +478,15 @@ class IngestionPipeline:
         encounter_id: str | None,
         appraisal: Appraisal,
         extractions: list[Extraction],
+        *,
+        section_hash: str | None = None,
     ) -> list[str]:
         """Thin wrapper: the whole post-LLM persistence pass runs atomically
         in the DB (db/66 ingest_persist_extractions) — routing, corroboration
         via the audited belief-revision policy, creation, concept links,
-        worldview-hint edges, provenance edges, and decay."""
-        source = self._source_payload(doc)
+        worldview-hint edges, provenance edges, decay, and the section
+        receipt (#85)."""
+        source = self._source_payload(doc, section_hash=section_hash)
         result = await self.store.persist_extractions(
             extractions,
             source,

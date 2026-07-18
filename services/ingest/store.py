@@ -75,15 +75,32 @@ class MemoryStore:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(sql, *params)
 
-    async def has_receipt(self, content_hash: str) -> bool:
+    async def get_receipts(self, doc_ref: str, hashes: list[str]) -> dict[str, Any]:
+        """Receipt lookup (#85/#90): the ingestion_receipts table UNION'd with
+        legacy whole-document attributions, via SQL get_ingestion_receipts."""
         if self.client is None:
             await self.connect()
-        assert self.client is not None
-        try:
-            receipts = await self.client.get_ingestion_receipts(content_hash, [content_hash])
-        except Exception:
-            return False
-        return bool(receipts)
+        raw = await self._fetchval(
+            "SELECT get_ingestion_receipts($1, $2::text[])", doc_ref, hashes
+        )
+        doc = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        return doc if isinstance(doc, dict) else {}
+
+    async def record_receipt(
+        self,
+        doc_ref: str,
+        section_hash: str,
+        *,
+        memory_id: str | None = None,
+        memories_created: int = 0,
+        source_path: str | None = None,
+    ) -> None:
+        if self.client is None:
+            await self.connect()
+        await self._exec(
+            "SELECT record_ingestion_receipt($1, $2, $3::uuid, $4, $5)",
+            doc_ref, section_hash, memory_id, memories_created, source_path,
+        )
 
     async def set_affective_state(self, appraisal: Appraisal) -> None:
         if self.client is None:
