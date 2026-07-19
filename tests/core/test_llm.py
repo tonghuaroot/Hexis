@@ -37,7 +37,6 @@ def test_normalize_provider_new_aliases():
 
 
 def test_normalize_endpoint_defaults():
-    assert llm.normalize_endpoint("ollama", None) == "http://localhost:11434/v1"
     assert llm.normalize_endpoint("openai", "  ") is None
     assert llm.normalize_endpoint("openai", " https://example.com ") == "https://example.com"
 

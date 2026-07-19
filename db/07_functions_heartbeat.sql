@@ -141,7 +141,10 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION get_config(p_key TEXT)
 RETURNS JSONB AS $$
-    SELECT value FROM config WHERE key = p_key;
+    SELECT COALESCE(
+        (SELECT value FROM config WHERE key = p_key),
+        (SELECT value FROM config_defaults WHERE key = p_key)
+    );
 $$ LANGUAGE sql STABLE;
 CREATE OR REPLACE FUNCTION get_config_by_prefixes(p_prefixes TEXT[])
 RETURNS TABLE (
@@ -153,9 +156,20 @@ BEGIN
         RETURN;
     END IF;
     RETURN QUERY
-    SELECT c.key, c.value
-    FROM config c
-    WHERE c.key LIKE ANY(ARRAY(SELECT p || '%' FROM unnest(p_prefixes) p));
+    WITH keys AS (
+        SELECT c.key
+        FROM config c
+        WHERE c.key LIKE ANY(ARRAY(SELECT p || '%' FROM unnest(p_prefixes) p))
+        UNION
+        SELECT d.key
+        FROM config_defaults d
+        WHERE d.key LIKE ANY(ARRAY(SELECT p || '%' FROM unnest(p_prefixes) p))
+    )
+    SELECT k.key, COALESCE(c.value, d.value) AS value
+    FROM keys k
+    LEFT JOIN config c ON c.key = k.key
+    LEFT JOIN config_defaults d ON d.key = k.key
+    ORDER BY k.key;
 END;
 $$ LANGUAGE plpgsql STABLE;
 CREATE OR REPLACE FUNCTION delete_config_key(p_key TEXT)
@@ -167,22 +181,26 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION get_config_text(p_key TEXT)
 RETURNS TEXT AS $$
+    WITH val AS (
+        SELECT get_config(p_key) AS value
+    )
     SELECT CASE
         WHEN jsonb_typeof(value) = 'string' THEN value #>> '{}'
         ELSE value::text
-    END FROM config WHERE key = p_key;
+    END
+    FROM val;
 $$ LANGUAGE sql STABLE;
 CREATE OR REPLACE FUNCTION get_config_float(p_key TEXT)
 RETURNS FLOAT AS $$
-    SELECT (value #>> '{}')::float FROM config WHERE key = p_key;
+    SELECT (get_config(p_key) #>> '{}')::float;
 $$ LANGUAGE sql STABLE;
 CREATE OR REPLACE FUNCTION get_config_int(p_key TEXT)
 RETURNS INT AS $$
-    SELECT (value #>> '{}')::int FROM config WHERE key = p_key;
+    SELECT (get_config(p_key) #>> '{}')::int;
 $$ LANGUAGE sql STABLE;
 CREATE OR REPLACE FUNCTION get_config_bool(p_key TEXT)
 RETURNS BOOLEAN AS $$
-    SELECT COALESCE((value #>> '{}')::boolean, FALSE) FROM config WHERE key = p_key;
+    SELECT COALESCE((get_config(p_key) #>> '{}')::boolean, FALSE);
 $$ LANGUAGE sql STABLE;
 CREATE OR REPLACE FUNCTION get_agent_consent_status()
 RETURNS TEXT AS $$

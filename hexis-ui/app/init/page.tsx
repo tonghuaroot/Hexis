@@ -57,7 +57,6 @@ type LlmProvider =
   | "anthropic"
   | "grok"
   | "gemini"
-  | "ollama"
   | "chutes"
   | "github-copilot"
   | "qwen-portal"
@@ -100,8 +99,8 @@ type InitStatusResponse = {
   status?: InitStatus;
   profile?: InitProfile;
   consent_records?: Partial<Record<LlmRole, ConsentRecord | null>>;
-  llm_heartbeat?: Partial<LlmConfig>;
-  llm_subconscious?: Partial<LlmConfig>;
+  llm_heartbeat?: Partial<LlmConfig> | null;
+  llm_subconscious?: Partial<LlmConfig> | null;
   mode?: unknown;
 };
 type IdentityForm = {
@@ -120,7 +119,7 @@ type WorldviewForm = {
 };
 
 // Provider metadata. Model lists + default models are NOT hardcoded here — they
-// are derived live from /api/init/models (models.dev / Ollama). This only holds
+// are derived live from /api/init/models. This only holds
 // labels, endpoint defaults, and how the api-key/OAuth field should render.
 type ProviderMeta = {
   label: string;
@@ -172,13 +171,6 @@ const providerMeta: Record<LlmProvider, ProviderMeta> = {
     endpoint: "",
     apiKeyLabel: "Gemini API Key",
     apiKeyRequired: true,
-    oauth: false,
-  },
-  ollama: {
-    label: "Ollama (local)",
-    endpoint: "http://localhost:11434/v1",
-    apiKeyLabel: "API Key (optional)",
-    apiKeyRequired: false,
     oauth: false,
   },
   chutes: {
@@ -534,9 +526,6 @@ export default function Home() {
     }));
     try {
       const params = new URLSearchParams({ provider: config.provider });
-      if (config.provider === "ollama" && config.endpoint) {
-        params.set("endpoint", config.endpoint);
-      }
       const res = await fetch(`/api/init/models?${params.toString()}`);
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -581,30 +570,15 @@ export default function Home() {
     }
   }, []);
 
-  // Refetch models when the provider changes. For Ollama, also refetch (debounced)
-  // when the typed endpoint changes so the local daemon at that host is queried.
-  const consciousEndpointDep =
-    llmConscious.provider === "ollama" ? llmConscious.endpoint : null;
-  const subconsciousEndpointDep =
-    llmSubconscious.provider === "ollama" ? llmSubconscious.endpoint : null;
-
   useEffect(() => {
-    if (llmConscious.provider === "ollama") {
-      const timer = setTimeout(() => loadModels("conscious", llmConscious), 400);
-      return () => clearTimeout(timer);
-    }
     loadModels("conscious", llmConscious);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmConscious.provider, consciousEndpointDep, loadModels, oauthRefreshKey]);
+  }, [llmConscious.provider, loadModels, oauthRefreshKey]);
 
   useEffect(() => {
-    if (llmSubconscious.provider === "ollama") {
-      const timer = setTimeout(() => loadModels("subconscious", llmSubconscious), 400);
-      return () => clearTimeout(timer);
-    }
     loadModels("subconscious", llmSubconscious);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [llmSubconscious.provider, subconsciousEndpointDep, loadModels, oauthRefreshKey]);
+  }, [llmSubconscious.provider, loadModels, oauthRefreshKey]);
 
   const updateLlmProvider = (role: LlmRole, provider: LlmProvider) => {
     // Clear the model so the catalog fetch can supply the provider's default.
@@ -1080,7 +1054,6 @@ export default function Home() {
                     const catalog = modelCatalog[entry.role];
                     const modelOptions = catalog.models;
                     const showEndpoint =
-                      entry.config.provider === "ollama" ||
                       entry.config.provider === "openai_compatible";
                     return (
                       <fieldset

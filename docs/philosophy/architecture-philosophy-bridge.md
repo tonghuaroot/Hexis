@@ -20,14 +20,14 @@ This document maps the philosophical framework articulated in `PHILOSOPHY.md` to
 
 | Component | Implementation |
 |-----------|----------------|
-| LLM Provider | Configurable: OpenAI, Anthropic, Ollama, any OpenAI-compatible endpoint |
+| LLM Provider | Configurable: OpenAI, Anthropic, local OpenAI-compatible endpoints, and other supported providers |
 | Embedding Model | Configurable: HuggingFace TEI, OpenAI, local models |
 | Database | PostgreSQL (could be swapped for any ACID-compliant store with vector/graph support) |
 | Worker | Stateless Python process (could be Go, Rust, anything) |
 
 ```python
 # worker.py lines 67-69
-DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")  # openai|anthropic|openai_compatible|ollama
+DEFAULT_LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai")  # openai|anthropic|openai_compatible
 DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 ```
 

@@ -201,7 +201,7 @@ DECLARE
     hb_count BIGINT;
     last_hb TEXT;
     paused BOOLEAN;
-    max_energy FLOAT := COALESCE(get_config_float('heartbeat.max_energy'), 20.0);
+    max_energy FLOAT := get_config_float('heartbeat.max_energy');
     session_count BIGINT;
     recent_msgs BIGINT;
 BEGIN
@@ -264,8 +264,8 @@ CREATE OR REPLACE FUNCTION channel_energy_summary()
 RETURNS TEXT AS $$
 DECLARE
     cur_energy FLOAT;
-    max_energy FLOAT := COALESCE(get_config_float('heartbeat.max_energy'), 20.0);
-    regen FLOAT := COALESCE(get_config_float('heartbeat.base_regeneration'), 10.0);
+    max_energy FLOAT := get_config_float('heartbeat.max_energy');
+    regen FLOAT := get_config_float('heartbeat.base_regeneration');
     pct FLOAT;
     filled INT;
 BEGIN

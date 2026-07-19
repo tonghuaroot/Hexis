@@ -50,8 +50,6 @@ def test_model_catalog_provider_mapping():
     assert slugs["gemini"] == "google"
     assert slugs["grok"] == "xai"
     assert slugs["anthropic"] == "anthropic"
-    # ollama is fetched locally (/api/tags), not via models.dev
-    assert "ollama" not in slugs
 
 
 def test_model_menu_filter_and_suppress():

@@ -9,7 +9,6 @@ export type LlmProviderName =
   | "anthropic"
   | "grok"
   | "gemini"
-  | "ollama"
   | "openai_compatible";
 
 export type ResolvedLlmConfig = {
@@ -60,7 +59,7 @@ export async function callLlm(params: {
   if (config.provider === "gemini") {
     return callGemini({ ...config, system, user, temperature, maxTokens });
   }
-  // openai, grok, ollama, openai_compatible all use OpenAI-compatible API
+  // openai, grok, and openai_compatible use OpenAI-compatible API
   return callOpenAICompatible({
     ...config,
     system,

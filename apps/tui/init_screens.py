@@ -54,7 +54,6 @@ _DEFAULT_MODELS: dict[str, str] = {
     "openai-codex": "gpt-5.2",
     "grok": "grok-3",
     "gemini": "gemini-2.5-flash",
-    "ollama": "llama3.1",
     "chutes": "deepseek-ai/DeepSeek-V3-0324",
     "github-copilot": "gpt-4o",
     "qwen-portal": "qwen-max-latest",
@@ -70,7 +69,6 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
     "openai-codex": "",
     "grok": "XAI_API_KEY",
     "gemini": "GEMINI_API_KEY",
-    "ollama": "",
     "chutes": "",
     "github-copilot": "",
     "qwen-portal": "",
@@ -86,7 +84,6 @@ _PROVIDER_OPTIONS: list[tuple[str, str]] = [
     ("Anthropic (API key)", "anthropic"),
     ("Grok (xAI)", "grok"),
     ("Gemini", "gemini"),
-    ("Ollama (local)", "ollama"),
     ("Chutes (OAuth)", "chutes"),
     ("GitHub Copilot (OAuth)", "github-copilot"),
     ("Qwen Portal (OAuth)", "qwen-portal"),
@@ -470,7 +467,7 @@ class LLMConfigScreen(Screen):
                 "double-check the spelling (custom names are fine).",
                 style=Style(color=COLORS["warn"])))
             return
-        if provider not in _OAUTH_PROVIDERS and provider != "ollama":
+        if provider not in _OAUTH_PROVIDERS:
             key_env = self.query_one("#api-key-env", Input).value.strip()
             if key_env and not _os.getenv(key_env):
                 status.update(Text(

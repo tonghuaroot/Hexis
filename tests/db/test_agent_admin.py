@@ -62,6 +62,47 @@ async def test_apply_agent_config_is_atomic_and_complete(db_pool):
             await tr.rollback()
 
 
+async def test_apply_agent_config_uses_config_defaults_for_missing_budget(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            for key in (
+                "heartbeat.heartbeat_interval_minutes",
+                "heartbeat.max_energy",
+                "heartbeat.base_regeneration",
+                "heartbeat.max_active_goals",
+                "maintenance.maintenance_interval_seconds",
+            ):
+                await conn.execute("SELECT delete_config_key($1)", key)
+
+            await conn.execute(
+                "SELECT apply_agent_config($1::jsonb)",
+                json.dumps(
+                    {
+                        "objectives": [],
+                        "guardrails": [],
+                        "tools": [],
+                        "enable_autonomy": False,
+                        "enable_maintenance": False,
+                    }
+                ),
+            )
+
+            budget = _json(await conn.fetchval("SELECT get_config('agent.budget')"))
+            assert budget == {
+                "max_energy": 20,
+                "base_regeneration": 10,
+                "heartbeat_interval_minutes": 60,
+                "max_active_goals": 3,
+            }
+            assert await conn.fetchval(
+                "SELECT get_config_float('maintenance.maintenance_interval_seconds')"
+            ) == 60.0
+        finally:
+            await tr.rollback()
+
+
 async def test_get_agent_status_and_policy(db_pool):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()

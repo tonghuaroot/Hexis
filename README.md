@@ -63,7 +63,7 @@ Treat those statements as unverified.
 | **Autonomous heartbeat** | The agent wakes on its own, reviews goals, reflects, and reaches out when it has something to say |
 | **Energy budget** | Every action costs energy; autonomy is intentional, not unbounded |
 | **Identity & worldview** | Persistent values, boundaries, emotional state, and beliefs that resist casual overwrite |
-| **Any LLM** | OpenAI, Anthropic, Grok, Gemini, Ollama, GitHub Copilot, Chutes, Qwen, MiniMax, or any OpenAI-compatible endpoint |
+| **Any LLM** | OpenAI, Anthropic, Grok, Gemini, GitHub Copilot, Chutes, Qwen, MiniMax, or any OpenAI-compatible endpoint |
 | **80+ tools, 17 skills** | Skills are the capability catalog; they can bind MCP servers, lazily connected on first use |
 | **Messaging channels** | Discord, Telegram, Slack, Signal, WhatsApp, iMessage, Matrix |
 | **Character cards** | 11 presets in chara_card_v2 format with portraits, or bring your own |
@@ -74,8 +74,8 @@ Treat those statements as unverified.
 **Before you run anything**, you need:
 
 - [Docker Desktop](https://docs.docker.com/get-docker/) — installed **and running**
-- [Ollama](https://ollama.com/download) — installed **and running** (`ollama serve` if it isn't already); `hexis init` pulls a ~300M-parameter embedding model through it
 - Python 3.10+
+- The local embedding sidecar; `hexis init` starts it and downloads the ~300M-parameter model on first use
 - For the default path below: a **ChatGPT Plus/Pro subscription** (it authenticates via browser OAuth — no API key). No subscription? Use any provider under "Other providers."
 
 ```bash
@@ -93,7 +93,7 @@ hexis chat
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `hexis init` stalls starting services | Docker daemon isn't running | Start Docker Desktop, re-run `hexis init` |
-| Embedding model pull fails | Ollama isn't running | `ollama serve`, then re-run |
+| Embedding model pull fails | Local embedding sidecar isn't running | Start `~/embeddinggemma.c/build/embeddinggemma-metal`, then re-run |
 | Browser login loops or model errors | No ChatGPT Plus/Pro on that account | Use another provider below, or `hexis auth` |
 | Anything else | — | `hexis doctor`, then [Troubleshooting](docs/operations/troubleshooting.md) |
 
@@ -106,8 +106,8 @@ hexis init --character jarvis --provider github-copilot --model gpt-4o
 # Chutes (free inference)
 hexis init --character hexis --provider chutes --model deepseek-ai/DeepSeek-V3-0324
 
-# Ollama (fully local, no API key, no subscription)
-hexis init --provider ollama --model llama3.1 --character hexis
+# Local OpenAI-compatible endpoint
+hexis init --provider openai_compatible --model local-model --character hexis
 
 # API-key providers (auto-detect from prefix)
 hexis init --character jarvis --api-key sk-...

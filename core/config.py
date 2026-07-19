@@ -24,7 +24,7 @@ _HEXIS_HOME = Path(os.environ.get("HEXIS_HOME", Path.home() / ".hexis"))
 # Defaults used when neither env var nor config file provides a value
 _DEFAULTS: dict[str, Any] = {
     "embedding.service_url": "http://localhost:11434/api/embed",
-    "embedding.model_id": "embeddinggemma:300m",
+    "embedding.model_id": "embeddinggemma:300m-qat-q4_0",
     "embedding.dimension": 768,
     "heartbeat.interval_minutes": 60,
     "heartbeat.max_energy": 20,

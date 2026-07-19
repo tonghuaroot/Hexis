@@ -4,7 +4,6 @@
 // hand-maintained list, treat it as advisory, and always allow a free-typed id.
 //   * cloud providers -> the models.dev catalog (one no-auth JSON), cached ~24h
 //     in-memory and sorted newest-first
-//   * ollama -> the local daemon's /api/tags at the user-provided endpoint
 //   * on any failure -> a short curated fallback; the model field stays free-text
 
 import { catalogDeclaredDefault } from "@/lib/init-llm";
@@ -23,7 +22,7 @@ function hexisApiBaseUrl(): string {
   );
 }
 
-// Hexis provider id -> models.dev slug. Ollama is special-cased (local fetch).
+// Hexis provider id -> models.dev slug.
 const PROVIDER_SLUG: Record<string, string> = {
   openai: "openai",
   anthropic: "anthropic",
@@ -188,40 +187,11 @@ function recommendedDefault(_provider: string, models: string[]): string {
   return models[0];
 }
 
-async function ollamaModels(endpoint: string | null): Promise<string[]> {
-  let host = "http://localhost:11434";
-  if (endpoint) {
-    const m = endpoint.trim().match(/^(https?:\/\/[^/]+)/);
-    if (m) host = m[1];
-  }
-  const url = host.replace(/\/+$/, "") + "/api/tags";
-  const resp = await fetchWithTimeout(url);
-  if (!resp.ok) throw new Error(`Ollama responded ${resp.status}`);
-  const data = asRecord(await resp.json());
-  const list = Array.isArray(data.models) ? data.models : [];
-  return list
-    .map((model) => asRecord(model).name)
-    .filter((name): name is string => typeof name === "string");
-}
-
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const provider = (searchParams.get("provider") || "").trim();
-  const endpoint = searchParams.get("endpoint");
   if (!provider) {
     return Response.json({ models: [], default: "", error: "Missing provider" }, { status: 400 });
-  }
-
-  if (provider === "ollama") {
-    try {
-      const models = await ollamaModels(endpoint);
-      return Response.json({ models, default: models[0] || "" });
-    } catch (err: unknown) {
-      return Response.json(
-        { models: [], default: "", error: errorMessage(err, "Unable to reach Ollama.") },
-        { status: 503 }
-      );
-    }
   }
 
   if (provider === "openai-codex") {

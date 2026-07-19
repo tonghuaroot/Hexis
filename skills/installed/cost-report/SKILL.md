@@ -25,7 +25,7 @@ Query the API usage ledger and produce clear, actionable cost reports broken dow
 1. **Determine the time window**: Default to the current billing period (calendar month) unless the user specifies a range. Common windows: today, this week, this month, last 30 days, custom range.
 2. **Query the ledger**: Use `query_usage` with the appropriate date range. The tool returns rows from the `api_usage` table with provider, model, token counts (input/output), and computed cost.
 3. **Aggregate by dimension**: Break down the raw data into useful summaries:
-   - **By provider**: Total cost per provider (OpenAI, Anthropic, local Ollama, etc.)
+   - **By provider**: Total cost per provider (OpenAI, Anthropic, local inference, etc.)
    - **By model**: Cost per model to identify which models consume the most budget
    - **By category**: Separate LLM inference costs from embedding costs from tool API costs
    - **By day**: Daily trend to spot spikes or patterns

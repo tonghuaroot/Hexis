@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Tiny deterministic fake embedding server for CI (no Ollama, no GB-scale model).
+"""Tiny deterministic fake embedding server for CI (no GB-scale model).
 
-It speaks the Ollama ``/api/embed`` shape that Hexis's ``get_embedding()`` expects
+It speaks the local embed ``/api/embed`` shape that Hexis's ``get_embedding()`` expects
 (``db/03_functions_helpers.sql``): a health probe on ``GET /api/tags`` and
 ``POST /api/embed`` returning ``{"embeddings": [[...768 floats...], ...]}``.
 
@@ -55,7 +55,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802 (http.server API)
-        # /api/tags (Ollama health) and /health (origin health) both return 200.
+        # /api/tags (tag-style health) and /health (origin health) both return 200.
         self._json(200, {"models": []})
 
     def do_POST(self):  # noqa: N802
@@ -69,7 +69,7 @@ class _Handler(BaseHTTPRequestHandler):
         if isinstance(inputs, str):
             inputs = [inputs]
         vectors = [_vector(str(t)) for t in inputs]
-        # Ollama-shaped; get_embedding() also accepts {data:[{embedding}]} / {embedding}.
+        # Local embed shape; get_embedding() also accepts {data:[{embedding}]} / {embedding}.
         self._json(200, {"embeddings": vectors})
 
     def log_message(self, *args):  # keep CI logs quiet

@@ -385,13 +385,22 @@ CREATE TABLE IF NOT EXISTS config (
     description TEXT,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS config_defaults (
+    key TEXT PRIMARY KEY,
+    value JSONB NOT NULL,
+    description TEXT,
+    source_path TEXT,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
 INSERT INTO config (key, value, description) VALUES
     ('embedding.service_url', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_service_url', true), ''), 'http://host.docker.internal:11434/api/embed')), 'URL of the embedding service'),
-    ('embedding.model_id', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_model_id', true), ''), 'embeddinggemma:300m-qat-q4_0')), 'Embedding model id for Ollama / custom services'),
+    ('embedding.model_id', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_model_id', true), ''), 'embeddinggemma:300m-qat-q4_0')), 'Embedding model id for local / custom embedding services'),
     ('embedding.dimension', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_dimension', true), ''), '768')::int), 'Embedding vector dimension'),
     ('embedding.retry_seconds', '30'::jsonb, 'Total seconds to retry embedding requests'),
     ('embedding.retry_interval_seconds', '1.0'::jsonb, 'Seconds between retry attempts'),
-    ('embedding.http_timeout_ms', '9000'::jsonb, 'Per-request HTTP timeout (ms) for embedding calls; must exceed the server cold model-load time (~8s for Ollama) so a request rides through a cold load instead of aborting it')
+    ('embedding.http_timeout_ms', '9000'::jsonb, 'Per-request HTTP timeout (ms) for embedding calls; must exceed the server cold model-load time so a request rides through a cold load instead of aborting it')
 ON CONFLICT (key) DO NOTHING;
 
 -- HMX: stable identity lineage id — established at birth, propagated on
@@ -545,7 +554,7 @@ VALUES
     ('rest',       'Builds fastest; satisfied by resting',                     0.50, 0.50, 0.03, 0.05, INTERVAL '2 hours',    0.80)
 ON CONFLICT (name) DO NOTHING;
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('heartbeat.base_regeneration', '10'::jsonb, 'Energy regenerated per heartbeat'),
     ('heartbeat.max_energy', '20'::jsonb, 'Maximum energy cap'),
     ('heartbeat.heartbeat_interval_minutes', '60'::jsonb, 'Minutes between heartbeats'),
@@ -593,10 +602,10 @@ INSERT INTO config (key, value, description) VALUES
     ('heartbeat.cost_release_memory', '0'::jsonb, 'Let a fading memory go (free)'),
     ('heartbeat.cost_journal_memory', '3'::jsonb, 'Commit a fading memory to the journal before letting it fade')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('agent.tools', '["recall","sense_memory_availability","request_background_search","recall_recent","recall_episode","explore_concept","explore_cluster","get_procedures","get_strategies","list_recent_episodes","create_goal","schedule_task","list_scheduled_tasks","update_scheduled_task","delete_scheduled_task","queue_user_message"]'::jsonb, 'Allowed tool names for agent tool use')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('maintenance.maintenance_interval_seconds', '60'::jsonb, 'Seconds between subconscious maintenance ticks'),
     ('maintenance.subconscious_enabled', 'false'::jsonb, 'Enable subconscious decider (LLM-based pattern detection)'),
     ('maintenance.subconscious_interval_seconds', '300'::jsonb, 'Seconds between subconscious decider runs'),

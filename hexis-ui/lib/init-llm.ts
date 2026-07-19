@@ -1,6 +1,5 @@
 const ENDPOINT_DEFAULTS: Record<string, string> = {
   openai: "https://api.openai.com/v1",
-  ollama: "http://localhost:11434/v1",
 };
 
 const ENDPOINTLESS_PROVIDERS = new Set([

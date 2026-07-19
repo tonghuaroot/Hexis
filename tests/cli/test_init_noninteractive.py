@@ -126,10 +126,8 @@ def test_default_models_derive_from_live_catalog():
     models.dev catalog via model_catalog.recommended_default (Bar #1)."""
     from apps.tui import model_catalog
 
-    # Every non-Ollama provider maps to a models.dev slug (Ollama is local-only).
+    # Every provider maps to a models.dev slug.
     for provider in _PROVIDER_ENV_VARS:
-        if provider == "ollama":
-            continue
         assert provider in model_catalog.PROVIDER_SLUG, f"No catalog slug for {provider}"
     # The flagship heuristic picks a sensible non-variant default.
     assert model_catalog.recommended_default(

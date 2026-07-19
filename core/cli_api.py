@@ -151,7 +151,7 @@ async def config_validate(dsn: str | None = None, *, wait_seconds: int = 30) -> 
 
             if not provider:
                 errors.append(f"{name}.provider is required")
-            if not model and provider not in {"ollama"}:
+            if not model:
                 warnings.append(f"{name}.model is empty (will rely on worker defaults)")
 
             if provider == "openai-codex":
@@ -429,7 +429,9 @@ async def doctor_payload(
                 paused = hb_row["is_paused"]
                 max_energy = await conn.fetchval(
                     "SELECT get_config_int('heartbeat.max_energy')"
-                ) or 20
+                )
+                if max_energy is None:
+                    raise RuntimeError("Missing heartbeat.max_energy default; run `hexis migrate`.")
                 if paused:
                     checks.append({
                         "label": "Heartbeat",
@@ -661,8 +663,10 @@ async def status_payload_rich(
             hb_row = await conn.fetchrow(
                 "SELECT current_energy, last_heartbeat_at, is_paused, heartbeat_count FROM heartbeat_state WHERE id = 1"
             )
-            max_energy = await conn.fetchval("SELECT get_config_int('heartbeat.max_energy')") or 20
-            interval_min = await conn.fetchval("SELECT get_config_float('heartbeat.heartbeat_interval_minutes')") or 60
+            max_energy = await conn.fetchval("SELECT get_config_int('heartbeat.max_energy')")
+            interval_min = await conn.fetchval("SELECT get_config_float('heartbeat.heartbeat_interval_minutes')")
+            if max_energy is None or interval_min is None:
+                raise RuntimeError("Missing heartbeat config defaults; run `hexis migrate`.")
 
             if hb_row:
                 payload["energy"] = hb_row["current_energy"]

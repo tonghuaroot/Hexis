@@ -34,7 +34,7 @@ hexis init
 Configure the LLM provider and model for the conscious layer (main conversations and heartbeat decisions). Options:
 
 - **OAuth providers** (no API key): OpenAI Codex, GitHub Copilot, Chutes, Gemini, Qwen, MiniMax
-- **API-key providers**: OpenAI, Anthropic, Grok, Gemini, Ollama, or any OpenAI-compatible endpoint
+- **API-key providers**: OpenAI, Anthropic, Grok, Gemini, or any OpenAI-compatible endpoint
 
 If using OAuth, `hexis init` triggers the login flow automatically.
 
@@ -77,7 +77,7 @@ See [Character Cards guide](../guides/character-cards.md) for customization and 
 After `hexis init` completes:
 
 1. PostgreSQL is running with the full cognitive schema
-2. An embedding model is available (Ollama or configured service)
+2. An embedding model is available from the local sidecar or configured service
 3. The agent has identity, personality (Big Five traits), values, and worldview stored as memories
 4. A consent certificate is recorded
 5. The agent's origin story (curated claims from its founding documents) is seeded as protected, recallable memories with document provenance

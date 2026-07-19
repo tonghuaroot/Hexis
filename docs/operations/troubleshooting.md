@@ -30,7 +30,7 @@ Problem?
 ├── Can't start Hexis
 │   ├── Docker not running → Start Docker Desktop
 │   ├── Port conflict → Change POSTGRES_PORT in .env
-│   └── Ollama not running → Start Ollama
+│   └── Embedding service not running → Start the local sidecar
 │
 ├── Database connection errors
 │   ├── Container not running → docker compose up -d
@@ -44,7 +44,7 @@ Problem?
 │   └── No energy → Wait for regeneration
 │
 ├── Memory search returns nothing
-│   ├── Ollama not running → Start Ollama, pull model
+│   ├── Embedding service not running → Start the local sidecar
 │   ├── Wrong dimension → hexis reset after fixing EMBEDDING_DIMENSION
 │   └── No memories stored → Ingest content first
 │
@@ -108,8 +108,8 @@ docker compose ps | grep heartbeat
 # Check embedding service
 hexis doctor
 
-# Check if Ollama has the model
-ollama list
+# Check that the local embedding sidecar starts
+~/embeddinggemma.c/build/embeddinggemma-metal --help
 
 # Check memory count
 docker exec hexis_brain psql -U hexis_user -d hexis_memory \
@@ -117,8 +117,8 @@ docker exec hexis_brain psql -U hexis_user -d hexis_memory \
 ```
 
 **Fixes**:
-- Start Ollama: `ollama serve`
-- Pull model: `ollama pull embeddinggemma:300m-qat-q4_0`
+- Start the sidecar: `~/embeddinggemma.c/build/embeddinggemma-metal`
+- Let the sidecar download `embeddinggemma-300M-qat-Q4_0.gguf` on first use
 - Ingest content: `hexis ingest --file ./notes.md`
 
 ### Schema Changes Not Taking Effect

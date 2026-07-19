@@ -88,6 +88,25 @@ def _truncate(text: str, max_len: int = 200) -> str:
     return text[:max_len] + "…"
 
 
+def _append_visible_turn(
+    history: list[dict[str, Any]],
+    *,
+    user_input: str,
+    assistant_text: str,
+    was_greet: bool,
+) -> None:
+    """Append only real user turns to CLI-local history.
+
+    ``--greet`` is a synthetic wake-up nudge. Keeping only its assistant reply
+    creates an invalid assistant-first history, which can make the next user
+    turn appear to include Samantha's prior words.
+    """
+    if was_greet:
+        return
+    history.append({"role": "user", "content": user_input})
+    history.append({"role": "assistant", "content": assistant_text})
+
+
 def _print_debug_panel(title: str, content: str, *, style: str = "blue") -> None:
     from rich.panel import Panel
     from rich.syntax import Syntax
@@ -422,12 +441,14 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
 
                 console.print()
 
-                # Update history. On the first-run greet, keep the agent's intro
-                # for context but do NOT record the fabricated wake-nudge as the
-                # user's words (in history or in long-term memory).
-                if not was_greet:
-                    history.append({"role": "user", "content": user_input})
-                history.append({"role": "assistant", "content": clean_text})
+                # Update CLI-local history. Synthetic greet turns are displayed
+                # only; they are not real user-authored context.
+                _append_visible_turn(
+                    history,
+                    user_input=user_input,
+                    assistant_text=clean_text,
+                    was_greet=was_greet,
+                )
 
                 if was_greet:
                     continue

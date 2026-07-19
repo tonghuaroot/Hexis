@@ -26,12 +26,12 @@ async def test_json_null_override_falls_back(db_pool):
                     ('llm.test_fallback_role', $1::jsonb, 'test')
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                 """,
-                json.dumps({"provider": "ollama", "model": "test-model"}),
+                json.dumps({"provider": "openai_compatible", "model": "test-model"}),
             )
             cfg = await load_llm_config(
                 conn, "llm.test_null_role", fallback_key="llm.test_fallback_role"
             )
-            assert cfg["provider"] == "ollama"
+            assert cfg["provider"] == "openai_compatible"
             assert cfg["model"] == "test-model"
         finally:
             await tr.rollback()
@@ -49,7 +49,7 @@ async def test_empty_object_override_falls_back(db_pool):
                     ('llm.test_fallback_role2', $1::jsonb, 'test')
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                 """,
-                json.dumps({"provider": "ollama", "model": "test-model-2"}),
+                json.dumps({"provider": "openai_compatible", "model": "test-model-2"}),
             )
             cfg = await load_llm_config(
                 conn, "llm.test_empty_role", fallback_key="llm.test_fallback_role2"
@@ -71,8 +71,8 @@ async def test_real_override_wins_over_fallback(db_pool):
                     ('llm.test_fallback_role3', $2::jsonb, 'test')
                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
                 """,
-                json.dumps({"provider": "ollama", "model": "override-model"}),
-                json.dumps({"provider": "ollama", "model": "fallback-model"}),
+                json.dumps({"provider": "openai_compatible", "model": "override-model"}),
+                json.dumps({"provider": "openai_compatible", "model": "fallback-model"}),
             )
             cfg = await load_llm_config(
                 conn, "llm.test_set_role", fallback_key="llm.test_fallback_role3"

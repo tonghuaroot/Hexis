@@ -253,6 +253,8 @@ async def stream_chat_turn(
         agent_profile = await get_agent_profile_context(pool=pool)
 
         collected: list[str] = []
+        timed_out = False
+        error_message: str | None = None
         async for event in stream_agent(
             pool,
             registry,
@@ -269,8 +271,25 @@ async def stream_chat_turn(
                 if text:
                     collected.append(text)
                     yield text
+            elif event.event == AgentEvent.LOOP_END:
+                stopped = str(event.data.get("stopped_reason") or "")
+                timed_out = stopped == "timeout" or bool(event.data.get("timed_out"))
+            elif event.event == AgentEvent.ERROR:
+                error_message = str(event.data.get("error") or "Unknown agent error")
 
         full_text = "".join(collected)
+        if timed_out:
+            if full_text:
+                yield "\n\n[Response timed out before completion.]"
+            else:
+                yield (
+                    "Request timed out before a response arrived. Try again, "
+                    "or run `hexis doctor --llm` if it keeps happening."
+                )
+            return
+        if not full_text and error_message:
+            yield f"Request failed: {error_message}"
+            return
         if full_text:
             async with CognitiveMemory.connect(dsn) as mem_client:
                 await _remember_conversation(

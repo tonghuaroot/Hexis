@@ -59,8 +59,8 @@ services:
       - public
       - private
 
-  # Embeddings are provided by Ollama running on the host (default).
-  # The DB connects to Ollama via host.docker.internal:11434.
+  # Embeddings are provided by the local sidecar running on the host (default).
+  # The DB connects to it via host.docker.internal:11434.
   # To use HuggingFace TEI instead, uncomment the service below and set:
   #   EMBEDDING_SERVICE_URL=http://embeddings:80/embed
   #

@@ -5,12 +5,13 @@ uses the local Metal sidecar binary until publishing)
 
 ## Standing orders from Eric (do not violate)
 
-1. **Do NOT touch Ollama. At all.** No commands, no comparisons, no reading its
-   blobs, no symlinks into `~/.ollama`. It is being replaced by the standalone
-   `~/embeddinggemma.c` engine. (Context: an earlier symlink + case-insensitive
-   filename collision let a `curl -o` clobber an Ollama blob through the
-   symlink — repaired and verified, but the lesson stands: never symlink into
-   another app's store; beware macOS case-insensitive paths.)
+1. **Do not touch the retired local-model app or any of its stores.** No
+   commands, comparisons, blob reads, or symlinks into another app's model
+   directory. Hexis uses the standalone `~/embeddinggemma.c` engine. (Context:
+   an earlier symlink + case-insensitive filename collision let a `curl -o`
+   clobber another app's model blob through the symlink — repaired and
+   verified, but the lesson stands: never symlink into another app's store;
+   beware macOS case-insensitive paths.)
 2. **embeddinggemma.c is a true hand-port** — pure C, no C++, no dependencies
    except libcurl for the download path, no ggml, no llama.cpp linkage. Eric
    explicitly chose owning the full inference path. Do not relitigate.
@@ -21,9 +22,9 @@ uses the local Metal sidecar binary until publishing)
 4. The sidecar owns model placement and download: it always looks for
    `model/embeddinggemma-300M-qat-Q4_0.gguf` relative to its executable and
    downloads the hard-coded Hugging Face URL when absent. No overrides.
-5. Re-verify machine state before acting — earlier probes go stale (an Ollama
-   install appeared mid-session and a duplicate `brew install` followed a stale
-   "not installed" check; Eric called it out).
+5. Re-verify machine state before acting — earlier probes go stale, and a
+   duplicate package install once followed a stale "not installed" check; Eric
+   called it out.
 
 ## This machine (new laptop) — environment state
 
@@ -90,7 +91,7 @@ uses the local Metal sidecar binary until publishing)
     non-interactive path. +3 regression tests in
     `tests/cli/test_init_noninteractive.py` (tests/cli: 50/50 green).
     The guidance now points to the local `embeddinggemma.c` sidecar, not
-    Ollama.
+    the retired local-model app.
   - `apps/hexis_cli.py`: `hexis up` starts
     `~/embeddinggemma.c/build/embeddinggemma-metal` before the advisory
     embedding health probe. The old in-repo `embedding-inference/` directory

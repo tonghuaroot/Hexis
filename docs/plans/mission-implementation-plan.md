@@ -301,7 +301,7 @@ coverage (core/tools/skills.py:364-370).
 ## Batch 4 — Continuity hygiene
 
 Survey facts: UI talks to three backends (37 Prisma call sites + FastAPI
-proxies + filesystem/Ollama); chat orchestration duplicated
+proxies + filesystem/local services); chat orchestration duplicated
 (hexis_api.py:1103 `_stream_chat` + :397 `_openai_agent_events` hand-roll
 what services/chat.py:252-283 wraps); RLM gate `chat.use_rlm` exists only
 in services/chat.py:122-148; UI DSN is a one-time snapshot

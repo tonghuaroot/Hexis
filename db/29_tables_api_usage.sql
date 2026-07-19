@@ -14,7 +14,7 @@ SET search_path = public, ag_catalog, "$user";
 CREATE TABLE api_usage (
     id              BIGSERIAL PRIMARY KEY,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    provider        TEXT NOT NULL,            -- e.g. 'anthropic', 'openai', 'gemini', 'ollama'
+    provider        TEXT NOT NULL,            -- e.g. 'anthropic', 'openai', 'gemini', 'local-embedding'
     model           TEXT NOT NULL,            -- e.g. 'claude-opus-4-6', 'gpt-4o'
     operation       TEXT NOT NULL DEFAULT 'chat',  -- 'chat', 'embed', 'image', 'stream'
     input_tokens    INT NOT NULL DEFAULT 0,
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS model_costs (
 );
 
 COMMENT ON TABLE model_costs IS
-    'USD per million tokens by model. estimate_api_cost() resolves a model by exact then longest-prefix match; unknown models cost NULL (e.g. local Ollama).';
+    'USD per million tokens by model. estimate_api_cost() resolves a model by exact then longest-prefix match; unknown models cost NULL for local services.';
 
 INSERT INTO model_costs (model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok) VALUES
     -- Anthropic

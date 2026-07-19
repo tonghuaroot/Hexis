@@ -120,7 +120,7 @@ BEGIN
         WHERE key = 'embedding.model_id';
         IF current_model IS DISTINCT FROM configured_model THEN
             INSERT INTO config (key, value, description, updated_at)
-            VALUES ('embedding.model_id', to_jsonb(configured_model), 'Embedding model id for Ollama / custom services', CURRENT_TIMESTAMP)
+            VALUES ('embedding.model_id', to_jsonb(configured_model), 'Embedding model id for local / custom embedding services', CURRENT_TIMESTAMP)
             ON CONFLICT (key) DO UPDATE
                 SET value = EXCLUDED.value,
                     description = EXCLUDED.description,
@@ -249,9 +249,9 @@ RETURNS vector[] AS $$
 	        1.0
 	    );
 	    -- Bound each HTTP attempt above the embedding server's cold model-load
-	    -- time (~8s for Ollama). The pgsql-http default (5s) is shorter, so the
-	    -- first embed after an idle unload aborts mid-load -- which cancels the
-	    -- load -- and never recovers within retry_seconds. 9s rides it through.
+	    -- time. The pgsql-http default (5s) can be shorter than a cold load, so
+	    -- the first embed after an idle unload aborts mid-load -- which cancels
+	    -- the load -- and never recovers within retry_seconds. 9s rides it through.
 	    http_timeout_ms := COALESCE(
 	        (SELECT (value #>> '{}')::int FROM config WHERE key = 'embedding.http_timeout_ms'),
 	        9000
@@ -354,11 +354,11 @@ RETURNS vector[] AS $$
 	        BEGIN
 	            INSERT INTO api_usage (provider, model, operation, input_tokens, source)
 	            VALUES (
-	                'ollama',
+	                'local-embedding',
 	                model_id,
 	                'embed',
 	                COALESCE(
-	                    (embedding_json->>'prompt_eval_count')::int,  -- Ollama
+	                    (embedding_json->>'prompt_eval_count')::int,  -- local embed API
 	                    (embedding_json->'usage'->>'total_tokens')::int,  -- OpenAI-compat
 	                    array_length(batch_texts, 1) * 50  -- fallback estimate
 	                ),

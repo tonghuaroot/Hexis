@@ -149,7 +149,6 @@ export async function POST(request: Request) {
     const useJsonMode =
       llmConfig.provider === "openai" ||
       llmConfig.provider === "grok" ||
-      llmConfig.provider === "ollama" ||
       llmConfig.provider === "openai_compatible";
 
     const response = await callLlm({

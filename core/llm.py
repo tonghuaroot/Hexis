@@ -32,7 +32,6 @@ OPENAI_COMPATIBLE = {
     "openai",
     "openai_compatible",
     "openai-chat-completions-endpoint",
-    "ollama",
     "grok",
     "chutes",
     "github-copilot",
@@ -589,7 +588,6 @@ def normalize_endpoint(provider: str, endpoint: str | None) -> str | None:
     if endpoint:
         return endpoint.strip() or None
     _DEFAULTS: dict[str, str] = {
-        "ollama": "http://localhost:11434/v1",
         "grok": "https://api.x.ai/v1",
         "chutes": "https://api.chutes.ai/v1",
         "qwen-portal": "https://portal.qwen.ai/v1",

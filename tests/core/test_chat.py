@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 
 from services import chat as chat_mod
+from core.agent_loop import AgentEvent, AgentEventData
 from core.cognitive_memory_api import HydratedContext, Memory, MemoryType, RecallResult
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.core]
@@ -195,3 +196,71 @@ async def test_chat_turn_tool_loop(monkeypatch, db_pool):
     )
 
     assert result["assistant"] == "final response"
+
+
+async def test_stream_chat_turn_reports_empty_timeout_without_memory(monkeypatch):
+    async def fake_agent_profile(_dsn=None, **_kwargs):
+        return {}
+
+    async def fake_stream_agent(*_args, **_kwargs):
+        yield AgentEventData(
+            event=AgentEvent.LOOP_END,
+            data={"stopped_reason": "timeout", "timed_out": True},
+        )
+
+    @asynccontextmanager
+    async def fail_connect(*_args, **_kwargs):
+        raise AssertionError("timeout notices must not be written as memories")
+        yield
+
+    monkeypatch.setattr(chat_mod, "get_agent_profile_context", fake_agent_profile)
+    monkeypatch.setattr(chat_mod, "stream_agent", fake_stream_agent)
+    monkeypatch.setattr(chat_mod.CognitiveMemory, "connect", fail_connect)
+
+    chunks = [
+        chunk
+        async for chunk in chat_mod.stream_chat_turn(
+            user_message="hi",
+            history=[],
+            llm_config={"provider": "openai", "model": "gpt-4o"},
+            dsn="postgresql://unused",
+            pool=object(),
+        )
+    ]
+
+    text = "".join(chunks)
+    assert "Request timed out before a response arrived" in text
+
+
+async def test_stream_chat_turn_skips_memory_for_partial_timeout(monkeypatch):
+    async def fake_agent_profile(_dsn=None, **_kwargs):
+        return {}
+
+    async def fake_stream_agent(*_args, **_kwargs):
+        yield AgentEventData(event=AgentEvent.TEXT_DELTA, data={"text": "partial"})
+        yield AgentEventData(
+            event=AgentEvent.LOOP_END,
+            data={"stopped_reason": "timeout", "timed_out": True},
+        )
+
+    @asynccontextmanager
+    async def fail_connect(*_args, **_kwargs):
+        raise AssertionError("partial timeout replies must not be written as memories")
+        yield
+
+    monkeypatch.setattr(chat_mod, "get_agent_profile_context", fake_agent_profile)
+    monkeypatch.setattr(chat_mod, "stream_agent", fake_stream_agent)
+    monkeypatch.setattr(chat_mod.CognitiveMemory, "connect", fail_connect)
+
+    chunks = [
+        chunk
+        async for chunk in chat_mod.stream_chat_turn(
+            user_message="hi",
+            history=[],
+            llm_config={"provider": "openai", "model": "gpt-4o"},
+            dsn="postgresql://unused",
+            pool=object(),
+        )
+    ]
+
+    assert "".join(chunks) == "partial\n\n[Response timed out before completion.]"

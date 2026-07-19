@@ -319,6 +319,26 @@ async def test_init_with_defaults_and_reset(db_pool, ensure_embedding_service):
                 )
             )
             assert result["status"]["stage"] == "consent"
+            assert await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM memories
+                    WHERE type = 'worldview'
+                      AND status = 'active'
+                      AND content = 'I am in a co-development partnership with Tester.'
+                )
+                """
+            )
+            assert not await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM memories
+                    WHERE type = 'worldview'
+                      AND status = 'active'
+                      AND content = 'My relationship with Tester is partner.'
+                )
+                """
+            )
 
             status = _coerce_json(
                 await timed_db_call(

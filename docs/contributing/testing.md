@@ -34,7 +34,7 @@ Use `POSTGRES_HOST=127.0.0.1` to avoid SSL negotiation flakes when connecting to
 
 GitHub Actions runs the required `all-checks-pass` gate. The integration lane
 starts the prebuilt Hexis brain image and uses `ops/ci/fake_embeddings.py`
-instead of Ollama, so CI does not download embedding models. The
+instead of the real embedding model, so CI does not download embedding models. The
 `migration-survivor` lane seeds an existing database, runs `hexis migrate`'s
 underlying migration runner, and verifies the data survives.
 

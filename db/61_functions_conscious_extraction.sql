@@ -273,7 +273,7 @@ BEGIN
                             ev_when + make_interval(mins =>
                                 COALESCE(get_config_int('care.checkin_delay_minutes'), 120)),
                             CURRENT_TIMESTAMP + make_interval(mins =>
-                                GREATEST(COALESCE(get_config_int('heartbeat.heartbeat_interval_minutes'), 60), 5)));
+                                GREATEST(get_config_int('heartbeat.heartbeat_interval_minutes'), 5)));
                         PERFORM create_scheduled_task(
                             'care-checkin: ' || left(COALESCE(fact->>'content', 'event'), 40),
                             'once',

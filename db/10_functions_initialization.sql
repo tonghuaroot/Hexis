@@ -112,17 +112,23 @@ DECLARE
     cost_value FLOAT;
     data JSONB;
 BEGIN
-    interval_minutes := COALESCE(NULLIF(p_interval_minutes, 0), 60);
+    interval_minutes := COALESCE(
+        NULLIF(p_interval_minutes, 0),
+        get_config_int('heartbeat.heartbeat_interval_minutes')
+    );
     IF interval_minutes < 1 THEN
         interval_minutes := 1;
     END IF;
-    decision_max_tokens := COALESCE(NULLIF(p_decision_max_tokens, 0), 2048);
+    decision_max_tokens := COALESCE(
+        NULLIF(p_decision_max_tokens, 0),
+        get_config_int('heartbeat.max_decision_tokens')
+    );
     IF decision_max_tokens < 256 THEN
         decision_max_tokens := 256;
     END IF;
 
     IF p_base_regeneration IS NULL THEN
-        base_regen := COALESCE(get_config_float('heartbeat.base_regeneration'), 10);
+        base_regen := get_config_float('heartbeat.base_regeneration');
     ELSE
         base_regen := p_base_regeneration;
     END IF;
@@ -131,7 +137,7 @@ BEGIN
     END IF;
 
     IF p_max_energy IS NULL THEN
-        max_energy := COALESCE(get_config_float('heartbeat.max_energy'), 20);
+        max_energy := get_config_float('heartbeat.max_energy');
     ELSE
         max_energy := p_max_energy;
     END IF;
@@ -189,8 +195,7 @@ BEGIN
         regexp_replace(key, '^heartbeat\.cost_', ''),
         value
     ) INTO action_costs
-    FROM config
-    WHERE key LIKE 'heartbeat.cost_%';
+    FROM get_config_by_prefixes(ARRAY['heartbeat.cost_']);
     tools := COALESCE(get_config('agent.tools'), '[]'::jsonb);
 
     data := jsonb_build_object(
@@ -935,6 +940,7 @@ DECLARE
     user_name TEXT;
     rel_type TEXT;
     rel_purpose TEXT;
+    rel_memory_text TEXT;
     embed_texts TEXT[] := ARRAY[]::text[];
     mem_id UUID;
     origin_id UUID;
@@ -942,9 +948,16 @@ BEGIN
     user_name := COALESCE(NULLIF(btrim(user_input->>'name'), ''), 'user');
     rel_type := COALESCE(NULLIF(btrim(relationship_input->>'type'), ''), 'partner');
     rel_purpose := NULLIF(btrim(relationship_input->>'purpose'), '');
+    rel_memory_text := CASE
+        WHEN lower(rel_type) = 'partner' AND lower(COALESCE(rel_purpose, '')) LIKE 'co-develop%' THEN
+            format('I am in a co-development partnership with %s.', user_name)
+        WHEN rel_purpose IS NOT NULL THEN
+            format('My relationship with %s is %s; our purpose is %s.', user_name, rel_type, rel_purpose)
+        ELSE
+            format('My relationship with %s is %s.', user_name, rel_type)
+    END;
 
-    embed_texts := ARRAY[format('My relationship with %s is %s.', user_name, rel_type),
-                         format('I met %s and began my life with them.', user_name)];
+    embed_texts := ARRAY[rel_memory_text, format('I met %s and began my life with them.', user_name)];
     IF rel_purpose IS NOT NULL THEN
         embed_texts := embed_texts || format('Our relationship purpose is %s.', rel_purpose);
     END IF;
@@ -953,7 +966,7 @@ BEGIN
     PERFORM upsert_self_concept_edge('relationship', user_name, 0.9, NULL);
 
     mem_id := create_worldview_memory(
-        format('My relationship with %s is %s.', user_name, rel_type),
+        rel_memory_text,
         'other',
         0.85,
         0.85,
@@ -1142,7 +1155,7 @@ BEGIN
         'Support the user and grow as an individual',
         'My role is general assistant.',
         'Relationship aspiration: co-develop with mutual respect',
-        format('My relationship with %s is partner.', p_user_name),
+        format('I am in a co-development partnership with %s.', p_user_name),
         'Our relationship purpose is co-develop.',
         format('I met %s and began my life with them.', p_user_name)
     ];
@@ -1185,17 +1198,16 @@ BEGIN
         jsonb_build_object('type', 'partner', 'purpose', 'co-develop')
     );
 
-    hb_interval := COALESCE(get_config_int('heartbeat.heartbeat_interval_minutes'), 60);
-    hb_tokens := COALESCE(get_config_int('heartbeat.max_decision_tokens'), 2048);
-    hb_base_regen := COALESCE(get_config_float('heartbeat.base_regeneration'), 10);
-    hb_max_energy := COALESCE(get_config_float('heartbeat.max_energy'), 20);
+    hb_interval := get_config_int('heartbeat.heartbeat_interval_minutes');
+    hb_tokens := get_config_int('heartbeat.max_decision_tokens');
+    hb_base_regen := get_config_float('heartbeat.base_regeneration');
+    hb_max_energy := get_config_float('heartbeat.max_energy');
     hb_allowed_actions := COALESCE(get_config('heartbeat.allowed_actions'), '[]'::jsonb);
     SELECT jsonb_object_agg(
         regexp_replace(key, '^heartbeat\.cost_', ''),
         value
     ) INTO hb_action_costs
-    FROM config
-    WHERE key LIKE 'heartbeat.cost_%';
+    FROM get_config_by_prefixes(ARRAY['heartbeat.cost_']);
     hb_tools := COALESCE(get_config('agent.tools'), '[]'::jsonb);
     PERFORM merge_init_profile(jsonb_build_object(
         'heartbeat', jsonb_build_object(
@@ -1550,17 +1562,16 @@ BEGIN
     END IF;
 
     -- Merge heartbeat defaults into init profile (same as init_with_defaults)
-    hb_interval := COALESCE(get_config_int('heartbeat.heartbeat_interval_minutes'), 60);
-    hb_tokens := COALESCE(get_config_int('heartbeat.max_decision_tokens'), 2048);
-    hb_base_regen := COALESCE(get_config_float('heartbeat.base_regeneration'), 10);
-    hb_max_energy := COALESCE(get_config_float('heartbeat.max_energy'), 20);
+    hb_interval := get_config_int('heartbeat.heartbeat_interval_minutes');
+    hb_tokens := get_config_int('heartbeat.max_decision_tokens');
+    hb_base_regen := get_config_float('heartbeat.base_regeneration');
+    hb_max_energy := get_config_float('heartbeat.max_energy');
     hb_allowed_actions := COALESCE(get_config('heartbeat.allowed_actions'), '[]'::jsonb);
     SELECT jsonb_object_agg(
         regexp_replace(key, '^heartbeat\.cost_', ''),
         value
     ) INTO hb_action_costs
-    FROM config
-    WHERE key LIKE 'heartbeat.cost_%';
+    FROM get_config_by_prefixes(ARRAY['heartbeat.cost_']);
     hb_tools := COALESCE(get_config('agent.tools'), '[]'::jsonb);
     PERFORM merge_init_profile(jsonb_build_object(
         'heartbeat', jsonb_build_object(

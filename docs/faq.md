@@ -10,15 +10,15 @@ section: root
 
 ## What do I need to run it?
 
-Docker Desktop (running), Ollama (running — it serves the local embedding model), and Python 3.10+. The default quickstart authenticates with a **ChatGPT Plus/Pro subscription** via browser OAuth; if you don't have one, use GitHub Copilot, Chutes (free), a local Ollama model, or any API-key provider. See [Prerequisites](start/prerequisites.md).
+Docker Desktop (running), Python 3.10+, and the local embedding sidecar that `hexis init` starts for memory storage. The default quickstart authenticates with a **ChatGPT Plus/Pro subscription** via browser OAuth; if you don't have one, use GitHub Copilot, Chutes (free), a local OpenAI-compatible endpoint, or any API-key provider. See [Prerequisites](start/prerequisites.md).
 
 ## What does it cost to run?
 
-Hexis itself is free (MIT). Your costs are whatever your LLM provider charges — subscription OAuth providers (ChatGPT Plus, GitHub Copilot) have no per-token cost, and fully local Ollama is free. The agent's **energy budget** naturally bounds autonomous spend: heartbeat actions cost energy, and energy regenerates slowly, so an idle agent is cheap by construction.
+Hexis itself is free (MIT). Your costs are whatever your LLM provider charges — subscription OAuth providers (ChatGPT Plus, GitHub Copilot) have no per-token cost, and local OpenAI-compatible inference can run on your own hardware. The agent's **energy budget** naturally bounds autonomous spend: heartbeat actions cost energy, and energy regenerates slowly, so an idle agent is cheap by construction.
 
 ## Where does my data live? Does anything leave my machine?
 
-Everything the agent is — memories, identity, beliefs, goals — lives in a PostgreSQL database in a local Docker volume. Conversations are sent to whichever LLM provider you configured (that's how the model thinks); with Ollama as the provider, nothing leaves your machine at all. API keys stay in your environment; the database stores only environment-variable *names*.
+Everything the agent is — memories, identity, beliefs, goals — lives in a PostgreSQL database in a local Docker volume. Conversations are sent to whichever LLM provider you configured (that's how the model thinks); with a local OpenAI-compatible provider, chat inference can stay on your machine. API keys stay in your environment; the database stores only environment-variable *names*.
 
 ## How do I upgrade without losing the agent's memories?
 
@@ -54,4 +54,4 @@ Those give your *application* a memory feature. Hexis builds a persistent *indiv
 
 ## Something's broken.
 
-`hexis doctor` first — it diagnoses the common failures (Docker not running, Ollama unreachable, unconfigured agent). Then [Troubleshooting](operations/troubleshooting.md). Still stuck? [Open an issue](https://github.com/QuixiAI/Hexis/issues).
+`hexis doctor` first — it diagnoses the common failures (Docker not running, embeddings unreachable, unconfigured agent). Then [Troubleshooting](operations/troubleshooting.md). Still stuck? [Open an issue](https://github.com/QuixiAI/Hexis/issues).

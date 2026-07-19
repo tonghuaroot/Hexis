@@ -197,7 +197,7 @@ class TestCostEstimation:
         assert abs(cost - 3.5) < 0.01
 
     async def test_unknown_model(self, db_pool):
-        """Unknown models price NULL (local Ollama stays free)."""
+        """Unknown local models price NULL."""
         assert await self._cost(db_pool, "llama3.2:latest", 1000, 500) is None
 
     async def test_partial_match(self, db_pool):

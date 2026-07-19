@@ -78,7 +78,7 @@ hexis/
 ├── docs/                   # index.md + concepts/ guides/ reference/ operations/ …
 │   ├── philosophy/PHILOSOPHY.md   # Philosophical framework
 │   └── memory_retention_design.md # Compression-native memory substrate design
-└── docker-compose.yml      # Local stack (Postgres + workers; embeddings via host Ollama)
+└── docker-compose.yml      # Local stack (Postgres + workers; local embedding sidecar)
 ```
 
 ### Key Files
@@ -119,7 +119,7 @@ hexis/
 ## Build, Test, and Development Commands
 
 ```bash
-# Start services (passive - db only; embeddings via host Ollama)
+# Start services (passive - db only; embeddings via local sidecar)
 docker compose up -d
 
 # Start services (active - adds heartbeat_worker + maintenance_worker)
@@ -142,7 +142,7 @@ pytest tests/cli -q       # CLI smoke tests
 
 # CI parity checks (GitHub Actions)
 # - Required branch check: all-checks-pass
-# - CI uses ops/ci/fake_embeddings.py instead of Ollama
+# - CI uses ops/ci/fake_embeddings.py instead of the real embedding model
 # - Migration-survivor proves existing DB data survives hexis migrate
 
 # Other CLI commands
@@ -209,7 +209,7 @@ The heartbeat is the agent's conscious cognitive loop:
 
 - **Schema changes not taking effect?** SQL files are baked into the Docker image -- see "Bouncing the Database" below
 - **Heartbeat not running?** Check `agent.is_configured` via `hexis status` or run `hexis init`
-- **Memory not found?** Check if Ollama is running and has the embedding model (`ollama list`)
+- **Memory not found?** Check that the local embedding service is running and has the model available.
 - **Test failures?** Ensure Docker services are up before running pytest; after a fresh `down -v`, wait for Postgres to accept connections. Use `POSTGRES_HOST=127.0.0.1` with pytest if localhost SSL negotiation flakes.
 
 ## Agent Operational Notes

@@ -14,8 +14,8 @@ Hexis needs an embedding service to generate vectors for memory storage and retr
 ## Quick Start
 
 ```bash
-# Pull the default Ollama model
-ollama pull embeddinggemma:300m-qat-q4_0
+# Start the default local embedding sidecar
+~/embeddinggemma.c/build/embeddinggemma-metal
 
 # Verify
 hexis doctor    # checks embedding service health
@@ -33,12 +33,12 @@ EMBEDDING_DIMENSION=768
 
 ## Providers
 
-### Ollama (Default)
+### Local Sidecar (Default)
 
-The default uses [Ollama](https://ollama.com/download) running on the host. Quantized models run fast on commodity hardware.
+The default uses the standalone `embeddinggemma.c` service running on the host. It downloads `embeddinggemma-300M-qat-Q4_0.gguf` into its own `model/` directory on first use.
 
 ```bash
-ollama pull embeddinggemma:300m-qat-q4_0   # run once
+~/embeddinggemma.c/build/embeddinggemma-metal
 ```
 
 ```bash
@@ -85,8 +85,8 @@ hexis doctor    # identifies the provider from URL and gives specific fix steps
 
 Common issues:
 
-- **Ollama not running** -- start Ollama and ensure the model is pulled
-- **Model not found** -- run `ollama pull <model_id>`
+- **Embedding service not running** -- start `~/embeddinggemma.c/build/embeddinggemma-metal`
+- **Model not found** -- restart the sidecar and let it download the configured model
 - **Wrong dimension** -- ensure `EMBEDDING_DIMENSION` matches the model's output dimension
 - **Docker networking** -- the DB container uses `host.docker.internal` to reach host services
 

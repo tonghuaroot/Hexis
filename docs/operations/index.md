@@ -18,7 +18,7 @@ Infrastructure management, deployment, and operational reference.
 | [Docker Compose](docker-compose.md) | Profiles, services, ports, overrides |
 | [Workers](workers.md) | Heartbeat and maintenance worker lifecycle |
 | [Database](database.md) | Schema management, bouncing DB, resetting |
-| [Embeddings](embeddings.md) | Ollama, TEI, OpenAI, dimension configuration |
+| [Embeddings](embeddings.md) | Local sidecar, TEI, OpenAI, dimension configuration |
 | [Environment Variables](environment-variables.md) | Complete .env reference |
 | [Production](production.md) | Cloud deployment and scaling |
 | [Troubleshooting](troubleshooting.md) | Symptom-based diagnosis and fixes |

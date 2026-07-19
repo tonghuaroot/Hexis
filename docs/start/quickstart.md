@@ -14,8 +14,8 @@ Get a running agent in 3 commands.
 ## Prerequisites
 
 - [Docker Desktop](https://docs.docker.com/get-docker/) -- installed **and running**
-- [Ollama](https://ollama.com/download) -- installed **and running** (`ollama serve` if it isn't); it serves the ~300M-parameter local embedding model that `hexis init` pulls
 - Python 3.10+
+- Local embedding sidecar -- `hexis init` starts it and downloads the ~300M-parameter embedding model on first use
 - For the default command below: a **ChatGPT Plus/Pro subscription** (browser OAuth, no API key). Without one, pick any provider from [Other Providers](#other-providers) instead.
 
 ## 3-Command Setup
@@ -30,7 +30,7 @@ hexis chat
 
 **What success looks like:** init finishes with consent recorded; `hexis chat` greets you in character; `hexis status` reports a configured agent. Tell it your name, open a *new* chat, and ask -- it remembers.
 
-**If it breaks:** `hexis doctor` diagnoses the usual suspects (Docker daemon down, Ollama unreachable, login incomplete). Then see [Troubleshooting](../operations/troubleshooting.md).
+**If it breaks:** `hexis doctor` diagnoses the usual suspects (Docker daemon down, embeddings unreachable, login incomplete). Then see [Troubleshooting](../operations/troubleshooting.md).
 
 ## Other Providers
 
@@ -59,8 +59,8 @@ hexis init --character jarvis --api-key sk-...
 # Anthropic
 hexis init --provider anthropic --model claude-sonnet-4-20250514 --api-key sk-ant-...
 
-# Ollama (fully local, no API key needed)
-hexis init --provider ollama --model llama3.1 --character hexis
+# Local OpenAI-compatible endpoint
+hexis init --provider openai_compatible --model local-model --character hexis
 
 # Express defaults (no character card)
 hexis init --api-key sk-ant-...
@@ -87,7 +87,7 @@ With the `active` profile, the agent wakes on its own, reviews goals, reflects, 
 
 ## What Just Happened
 
-1. `hexis init` started a PostgreSQL container (the agent's brain), pulled an embedding model into Ollama, configured your chosen character's identity/personality/values, and ran a consent flow where the agent agreed to begin.
+1. `hexis init` started a PostgreSQL container (the agent's brain), started the embedding sidecar, downloaded the embedding model if needed, configured your chosen character's identity/personality/values, and ran a consent flow where the agent agreed to begin.
 2. `hexis chat` opened an interactive conversation with memory enrichment -- your messages are augmented with relevant memories, and the agent forms new memories from the conversation.
 
 ## Next Steps

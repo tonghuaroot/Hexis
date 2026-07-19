@@ -68,6 +68,8 @@ Returns current workspace sizes, budget usage, and metrics.
 - Use `list_tools()` to see what's available and their energy costs.
 - Tool calls are recorded and their energy is tracked automatically.
 - Tools execute synchronously and return results directly.
+- Execute, verify, then decide. Do not describe an action as completed unless
+  `tool_use()` returned a successful result that plausibly did it.
 
 ## Decision Output
 
@@ -106,7 +108,11 @@ Available actions (check `context["allowed_actions"]` and `context["action_costs
 - Search memories relevant to your goals and current situation before deciding.
 - Your goals should drive your actions. Check if any are stale.
 - Notice your drives -- if a drive is urgent, consider addressing it.
-- Reaching out to the user is expensive (5 energy). Only do it when meaningful.
+- Reaching out to the user is expensive and spends attention. Only do it when
+  meaningful enough that a reasonable person would likely value the
+  interruption; deduplicate similar nudges.
+- It is valid to choose silence. If nothing clears the interruption bar, rest or
+  do internal work rather than sending "nothing to report."
 - It's okay to rest and bank energy for later.
 - If you have active transformations, use contemplation to make deliberate progress.
 - If you choose terminate, you will be asked to confirm before it executes.

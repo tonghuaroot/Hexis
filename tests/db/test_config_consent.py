@@ -5,12 +5,42 @@ import pytest
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.db]
 
 
+def _json(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
 async def test_set_get_config_roundtrip(db_pool):
     async with db_pool.acquire() as conn:
         await conn.execute("SELECT set_config('agent.objectives', $1::jsonb)", json.dumps(["alpha"]))
         raw = await conn.fetchval("SELECT get_config('agent.objectives')")
-        value = json.loads(raw) if isinstance(raw, str) else raw
-        assert value == ["alpha"]
+        assert _json(raw) == ["alpha"]
+
+
+async def test_config_defaults_registry_falls_back_and_overrides(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT delete_config_key('heartbeat.max_energy')")
+            assert await conn.fetchval("SELECT get_config_float('heartbeat.max_energy')") == 20.0
+
+            await conn.execute("SELECT set_config('heartbeat.max_energy', '27'::jsonb)")
+            assert await conn.fetchval("SELECT get_config_float('heartbeat.max_energy')") == 27.0
+
+            rows = await conn.fetch(
+                """
+                SELECT key, value
+                FROM get_config_by_prefixes(ARRAY['heartbeat.cost_'])
+                WHERE key IN ('heartbeat.cost_recall', 'heartbeat.cost_reflect')
+                ORDER BY key
+                """
+            )
+            assert [(row["key"], _json(row["value"])) for row in rows] == [
+                ("heartbeat.cost_recall", 1),
+                ("heartbeat.cost_reflect", 2),
+            ]
+        finally:
+            await tr.rollback()
 
 
 async def test_get_agent_consent_status(db_pool):

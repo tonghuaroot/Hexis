@@ -44,7 +44,7 @@ Options for production:
 
 | Option | Pros | Cons |
 |--------|------|------|
-| **Ollama on host** | Simple, fast for small scale | Single point of failure |
+| **Local embedding sidecar on host** | Simple, fast for small scale | Single point of failure |
 | **HuggingFace TEI** | Docker-based, scalable | CPU-only (float32) |
 | **OpenAI Embeddings** | No infrastructure | Cost per request, latency |
 | **vLLM / LiteLLM** | GPU support, OpenAI-compatible | More infrastructure |

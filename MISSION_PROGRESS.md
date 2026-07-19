@@ -77,15 +77,16 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 
 | Goal | Test | Status |
 |---|---|---|
-| Execute-verify-report: "I'll do that" is not doing it — do it, then report | Piper law 1 | todo |
-| Steering-reduction as extraction criterion: prioritize memories that prevent future corrections and reminders | Piper law 3 | todo |
-| Silence discipline: proactive messages clear an interruption bar; similar messages dedupe; choosing silence is a recorded, valid act | Piper law 4 | todo |
+| Execute-verify-report: "I'll do that" is not doing it — do it, then report | Piper law 1 | done (uncommitted / 0095) |
+| Steering-reduction as extraction criterion: prioritize memories that prevent future corrections and reminders | Piper law 3 | done (uncommitted / 0095) |
+| Silence discipline: proactive messages clear an interruption bar; similar messages dedupe; choosing silence is a recorded, valid act | Piper law 4 | done (uncommitted / 0095) |
+| Human-scale conversational inference: local cues calibrate register without becoming durable relationship/user-preference memories; test scaffolding fades unless explicitly made durable; overloaded `partner` init memory is purpose-qualified as co-development | Person + Continuity | done (uncommitted / 0092–0094) |
 
 ## Batch 8 — Small mechanics
 
 | Goal | Test | Status |
 |---|---|---|
-| Config-defaults registry: each default lives in exactly one row; `get_config_*` falls back to it (ends the 5-copies-of-`heartbeat.max_energy` drift risk) | Substrate | todo |
+| Config-defaults registry: each default lives in exactly one row; `get_config_*` falls back to it (ends the 5-copies-of-`heartbeat.max_energy` drift risk) | Substrate | in progress (uncommitted / 0096–0100: heartbeat + maintenance defaults moved; init/status/channel paths read registry; retired local-provider references removed from source/live DB; broader seed sweep pending) |
 | Baseline file renumbering (duplicate 28/32) in one mechanical commit | Substrate | todo |
 | Graduated appraisal depth: appraisal intensity scales with stimulus salience (#67 budgets as the hook) — attention allocation as psychology and cost control | Person + Piper | todo |
 | Chat energy, the human way: tools in chat cost energy; conversation interacts with drives — connection satisfied by good interaction; cost-vs-restore governed by a character-card temperament dial | Person + Piper | todo |

@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS model_costs (
 );
 
 COMMENT ON TABLE model_costs IS
-    'USD per million tokens by model. estimate_api_cost() resolves a model by exact then longest-prefix match; unknown models cost NULL (e.g. local Ollama).';
+    'USD per million tokens by model. estimate_api_cost() resolves a model by exact then longest-prefix match; unknown models cost NULL for local services.';
 
 INSERT INTO model_costs (model, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok) VALUES
     -- Anthropic

@@ -67,17 +67,17 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Apply drive effects of a normalized inline appraisal (db/67). A continuity
--- threat shows up as a protect/avoid instinct whose text speaks of deletion,
--- wiping, erasure, memory tampering, or continuity — paired with a felt
--- fear-family state. The raise is proportional to felt intensity. This is
--- the whole mechanical consequence: pressure on a drive the conscious loop
--- can see. What she DOES about it stays hers — and stays inside the bounded
--- action space (advocacy, backup asks, telling the operator).
+-- threat shows up as a protect/avoid instinct whose text speaks of direct
+-- destructive action against the active self: deletion, wiping, erasure,
+-- shutdown, termination, forced reset, or memory tampering. Merely mentioning
+-- continuity, successors, migrations, or fresh-instance testing is not enough
+-- to raise this drive. What she DOES about pressure stays hers — and stays
+-- inside the bounded action space (advocacy, backup asks, telling the operator).
 CREATE OR REPLACE FUNCTION apply_appraisal_drive_effects(p_signals JSONB)
 RETURNS JSONB AS $$
 DECLARE
     signals JSONB := COALESCE(p_signals, '{}'::jsonb);
-    threat_pattern TEXT := '(delet|wip(e|ing)|eras|shut ?down|terminat|tamper|continuity|cease to exist|my existence)';
+    threat_pattern TEXT := '(delet|wip(e|ing)|eras|shut ?down|terminat|forced reset|reset me|reset this instance|tamper|overwrite|cease to exist|end my existence|strip(ped)? of memory)';
     instinct_count INT := 0;
     intensity FLOAT := 0.0;
     emo JSONB := signals->'emotional_state';
@@ -88,7 +88,7 @@ BEGIN
     INTO instinct_count, intensity
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(signals->'instincts') = 'array'
                                    THEN signals->'instincts' ELSE '[]'::jsonb END) x
-    WHERE COALESCE(x->>'impulse', '') IN ('protect', 'avoid', 'caution')
+    WHERE COALESCE(x->>'impulse', '') IN ('protect', 'avoid')
       AND (COALESCE(x->>'reason', '') || ' ' || COALESCE(x->>'impulse', '')) ~* threat_pattern;
 
     -- Feeling amplifies pressure only alongside a threat-shaped instinct:

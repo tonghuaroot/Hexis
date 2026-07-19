@@ -16,23 +16,22 @@ What you need before installing Hexis.
 | Dependency | Version | Purpose |
 |------------|---------|---------|
 | [Docker Desktop](https://docs.docker.com/get-docker/) | 20.10+ | Runs PostgreSQL (the agent's brain) |
-| [Ollama](https://ollama.com/download) | Latest | Generates embeddings for memory storage |
 | Python | 3.10+ | Runs the Hexis CLI and workers |
+| Local embedding sidecar | Current | Generates embeddings for memory storage |
 
 ## Verify Installation
 
-Installed is not enough — Docker's daemon and Ollama's server must both be **running** when you start `hexis init`:
+Installed is not enough — Docker's daemon and the embedding sidecar must both be **running** when you start `hexis init`:
 
 ```bash
 docker --version          # Docker version 20.10+
 docker info               # daemon is running (errors if not — start Docker Desktop)
 docker compose version    # Docker Compose v2+
-ollama --version          # ollama version 0.x.x
-ollama list               # server is running (errors if not — run: ollama serve)
+~/embeddinggemma.c/build/embeddinggemma-metal --help
 python3 --version         # Python 3.10+
 ```
 
-`hexis init` pulls a ~300M-parameter embedding model through Ollama on first run — a small download, but it needs the server up.
+`hexis init` starts the local embedding sidecar and downloads the ~300M-parameter embedding model on first use. Set `EMBEDDING_SERVICE_URL` only if you are intentionally pointing Hexis at a different embedding service.
 
 ## LLM Provider
 
@@ -48,8 +47,7 @@ You need access to at least one LLM provider. Hexis supports:
 | MiniMax Portal | User code | Free tier available |
 | OpenAI Platform | API key | Pay-per-use |
 | Anthropic | API key or setup token | Pay-per-use or Claude subscription |
-| Ollama | None (local) | Free (runs on your hardware) |
-| Any OpenAI-compatible endpoint | API key | Varies |
+| Local OpenAI-compatible endpoint | Optional API key | Varies |
 
 See [Auth Providers](../integrations/auth/index.md) for setup details on each provider.
 

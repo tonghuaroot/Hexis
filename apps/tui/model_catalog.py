@@ -6,7 +6,6 @@ always allow a free-typed id.
 
   * cloud providers → the models.dev catalog (one no-auth JSON covering every
     provider), cached on disk ~24h and sorted newest-first
-  * ollama → the local daemon's /api/tags (what's actually installed)
   * on any failure → a short curated fallback; the model field stays free-text
 """
 from __future__ import annotations
@@ -23,7 +22,7 @@ _CACHE = Path.home() / ".cache" / "hexis" / "models_dev.json"
 _CACHE_TTL = 24 * 3600
 _TIMEOUT = 12.0
 
-# Hexis provider id → models.dev slug. Ollama is special-cased (local fetch).
+# Hexis provider id → models.dev slug.
 PROVIDER_SLUG: dict[str, str] = {
     "openai": "openai",
     "openai-codex": "openai",
@@ -154,25 +153,10 @@ def chat_models(provider_block: dict) -> list[str]:
     return ids
 
 
-async def _ollama_models(endpoint: str | None) -> list[str]:
-    host = "http://localhost:11434"
-    if endpoint:
-        m = re.match(r"(https?://[^/]+)", endpoint.strip())
-        if m:
-            host = m.group(1)
-    url = host.rstrip("/") + "/api/tags"
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        data = resp.json()
-    return [m["name"] for m in data.get("models", []) if m.get("name")]
-
-
 async def fetch_models(provider: str, *, endpoint: str | None = None) -> list[str]:
     """Best-effort current chat model ids for *provider* (newest first)."""
+    _ = endpoint
     try:
-        if provider == "ollama":
-            return await _ollama_models(endpoint)
         slug = PROVIDER_SLUG.get(provider)
         if not slug:
             return _FALLBACK.get(provider, [])

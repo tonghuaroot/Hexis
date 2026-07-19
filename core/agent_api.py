@@ -124,26 +124,26 @@ async def get_init_defaults(dsn: str | None = None, wait_seconds: int | None = N
         )
         cfg = {r["key"]: r["value"] for r in rows}
 
-        def get_float(key: str, default: float) -> float:
+        def get_float(key: str) -> float:
             val = cfg.get(key)
             if val is None:
-                return default
+                raise RuntimeError(f"Missing config default for {key}; run `hexis migrate`.")
             # JSONB values may be strings or numbers
             if isinstance(val, (int, float)):
                 return float(val)
             try:
                 import json
                 return float(json.loads(val) if isinstance(val, str) else val)
-            except Exception:
-                return default
+            except Exception as exc:
+                raise RuntimeError(f"Invalid config default for {key}; run `hexis migrate`.") from exc
 
         return {
-            "heartbeat_interval_minutes": int(get_float("heartbeat.heartbeat_interval_minutes", 60)),
-            "max_energy": get_float("heartbeat.max_energy", 20),
-            "base_regeneration": get_float("heartbeat.base_regeneration", 10),
-            "max_active_goals": int(get_float("heartbeat.max_active_goals", 3)),
-            "maintenance_interval_seconds": int(get_float("maintenance.maintenance_interval_seconds", 60)),
-            "subconscious_interval_seconds": int(get_float("maintenance.subconscious_interval_seconds", 300)),
+            "heartbeat_interval_minutes": int(get_float("heartbeat.heartbeat_interval_minutes")),
+            "max_energy": get_float("heartbeat.max_energy"),
+            "base_regeneration": get_float("heartbeat.base_regeneration"),
+            "max_active_goals": int(get_float("heartbeat.max_active_goals")),
+            "maintenance_interval_seconds": int(get_float("maintenance.maintenance_interval_seconds")),
+            "subconscious_interval_seconds": int(get_float("maintenance.subconscious_interval_seconds")),
         }
     finally:
         await conn.close()

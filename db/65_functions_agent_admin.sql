@@ -12,17 +12,43 @@ CREATE OR REPLACE FUNCTION apply_agent_config(
 ) RETURNS JSONB AS $$
 DECLARE
     c JSONB := COALESCE(p_config, '{}'::jsonb);
+    hb_interval FLOAT;
+    max_energy FLOAT;
+    base_regeneration FLOAT;
+    max_active_goals FLOAT;
+    maintenance_interval FLOAT;
 BEGIN
+    hb_interval := COALESCE(
+        NULLIF(c->>'heartbeat_interval_minutes', '')::float,
+        get_config_float('heartbeat.heartbeat_interval_minutes')
+    );
+    max_energy := COALESCE(
+        NULLIF(c->>'max_energy', '')::float,
+        get_config_float('heartbeat.max_energy')
+    );
+    base_regeneration := COALESCE(
+        NULLIF(c->>'base_regeneration', '')::float,
+        get_config_float('heartbeat.base_regeneration')
+    );
+    max_active_goals := COALESCE(
+        NULLIF(c->>'max_active_goals', '')::float,
+        get_config_float('heartbeat.max_active_goals')
+    );
+    maintenance_interval := COALESCE(
+        NULLIF(c->>'maintenance_interval_seconds', '')::float,
+        get_config_float('maintenance.maintenance_interval_seconds')
+    );
+
     PERFORM set_config('heartbeat.heartbeat_interval_minutes',
-        to_jsonb(COALESCE((c->>'heartbeat_interval_minutes')::float, 60.0)));
+        to_jsonb(hb_interval));
     PERFORM set_config('heartbeat.max_energy',
-        to_jsonb(COALESCE((c->>'max_energy')::float, 20.0)));
+        to_jsonb(max_energy));
     PERFORM set_config('heartbeat.base_regeneration',
-        to_jsonb(COALESCE((c->>'base_regeneration')::float, 10.0)));
+        to_jsonb(base_regeneration));
     PERFORM set_config('heartbeat.max_active_goals',
-        to_jsonb(COALESCE((c->>'max_active_goals')::float, 3.0)));
+        to_jsonb(max_active_goals));
     PERFORM set_config('maintenance.maintenance_interval_seconds',
-        to_jsonb(COALESCE((c->>'maintenance_interval_seconds')::float, 60.0)));
+        to_jsonb(maintenance_interval));
     IF c ? 'subconscious_interval_seconds' AND c->>'subconscious_interval_seconds' IS NOT NULL THEN
         PERFORM set_config('maintenance.subconscious_interval_seconds',
             to_jsonb((c->>'subconscious_interval_seconds')::float));
@@ -34,10 +60,10 @@ BEGIN
 
     PERFORM set_config('agent.objectives', COALESCE(c->'objectives', '[]'::jsonb));
     PERFORM set_config('agent.budget', jsonb_build_object(
-        'max_energy', COALESCE((c->>'max_energy')::float, 20.0),
-        'base_regeneration', COALESCE((c->>'base_regeneration')::float, 10.0),
-        'heartbeat_interval_minutes', COALESCE((c->>'heartbeat_interval_minutes')::float, 60.0)::int,
-        'max_active_goals', COALESCE((c->>'max_active_goals')::float, 3.0)::int
+        'max_energy', max_energy,
+        'base_regeneration', base_regeneration,
+        'heartbeat_interval_minutes', hb_interval::int,
+        'max_active_goals', max_active_goals::int
     ));
     PERFORM set_config('agent.guardrails', COALESCE(c->'guardrails', '[]'::jsonb));
     PERFORM set_config('agent.initial_message', COALESCE(c->'initial_message', '""'::jsonb));

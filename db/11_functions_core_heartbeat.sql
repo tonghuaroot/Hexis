@@ -47,7 +47,7 @@ BEGIN
     ELSE
         context := gather_turn_context();
     END IF;
-    decision_max_tokens := COALESCE(get_config_int('heartbeat.max_decision_tokens'), 2048);
+    decision_max_tokens := get_config_int('heartbeat.max_decision_tokens');
     external_calls := jsonb_build_array(
         build_external_call(
             'think',

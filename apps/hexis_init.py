@@ -43,7 +43,6 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
     "openai-codex": "",
     "grok": "XAI_API_KEY",
     "gemini": "GEMINI_API_KEY",
-    "ollama": "",
     "chutes": "",
     "github-copilot": "",
     "qwen-portal": "",
@@ -344,12 +343,12 @@ async def _run_init_noninteractive(args: argparse.Namespace) -> int:
         if args.api_key:
             provider = detect_provider(args.api_key)
         else:
-            provider = "ollama"
+            provider = "openai-codex"
     provider = _normalize_provider_name(provider)
     # "anthropic-oauth" is a wizard alias; the LLM layer knows "anthropic".
     persist_provider = "anthropic" if provider == "anthropic-oauth" else provider
 
-    _no_key_needed = _OAUTH_PROVIDERS | {"ollama", "anthropic-oauth"}
+    _no_key_needed = _OAUTH_PROVIDERS | {"anthropic-oauth"}
     if provider not in _no_key_needed and not args.api_key:
         err_console.print(f"[fail]--api-key required for provider '{provider}'[/fail]")
         return 1
@@ -620,7 +619,6 @@ async def _configure_llm(conn: Any, *, dsn: str, wait_seconds: int) -> dict[str,
         ("Anthropic — API key", "anthropic"),
         ("Grok (xAI) — API key", "grok"),
         ("Gemini — API key", "gemini"),
-        ("Ollama — local, no key", "ollama"),
         ("GitHub Copilot — OAuth", "github-copilot"),
         ("Qwen Portal — OAuth", "qwen-portal"),
         ("MiniMax Portal — OAuth", "minimax-portal"),
@@ -637,7 +635,7 @@ async def _configure_llm(conn: Any, *, dsn: str, wait_seconds: int) -> dict[str,
             _prompt("Provider id", default=env_default or "", required=True))
 
     # Model — the list AND the default both come from the live catalog
-    # (models.dev / local Ollama), the way hermes-agent and openclaw do it. No
+    # (models.dev), the way hermes-agent and openclaw do it. No
     # stale hard-coded default; any free-typed name is still accepted.
     from apps.tui import model_catalog
     catalog: list[str] = []
