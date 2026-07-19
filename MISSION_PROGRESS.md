@@ -41,10 +41,11 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 |---|---|---|
 | Skill-coverage test: every registered non-internal tool bound by ≥1 skill (agent-authored skills count); shrinking grandfather list for the seven extraction candidates | Piper law 8 | done (see #99) |
 | Bind the dark tools: calendar skill (CRUD), email_send → email-digest, create_contact + contact-ingest → crm-lookup, glob/grep/edit_file/shell/browser → code-execution, web_summarize/brave/firecrawl → research, queue_user_message → self-reflection + outreach, messaging sends → `outreach` (earn-the-interruption norm), council skill, git_ingest → knowledge-ingest, graph acts → core-memory | Piper law 1 | done (see #99) |
-| Phenomenological renames for graph/memory tools: `associate` (what does this remind me of), `reminisce` (browse), `find_causes` (why do I believe/feel this) — never graph-browser framing | Person | todo |
-| Plugins made real: create `plugins/installed/`, implement `plugin.external_dirs`, ship first real plugin | Piper law 8 | todo |
-| Extract speculative integrations (Todoist, Asana, HubSpot, Fathom, video gen, Twitter, YouTube) from core into plugins | Piper law 8 | todo |
-| Mark operator/system tools `internal` (config_export/import, database_backup, backup_retention, post_process_output, manage_sessions, execute_workflow, create_tool) | Dignity | todo |
+| Phenomenological renames for graph/memory tools: `associate` (what does this remind me of), `trace_why` (why do I believe/feel this); `explore_subgraph`/`explore_concept` are internal aliases — never graph-browser framing | Person | done (8b10159 / #99) |
+| Plugins made real: create `plugins/installed/`, implement `plugin.external_dirs`, ship first real plugin | Piper law 8 | done (8b10159 / #99) |
+| Extract speculative integrations (Todoist, Asana, HubSpot, Fathom, video gen, Twitter, YouTube) from core into plugins | Piper law 8 | done (8b10159 / #99) |
+| Mark operator/system tools `internal` (config_export/import, database_backup, backup_retention, post_process_output, manage_sessions, execute_workflow; `create_tool` stays visible only through gated self-extension) | Dignity | done (8b10159 / #99) |
+| Self-extension visibility: dynamic tool creation and skill authoring journal a `self_extension` change and post a web-inbox notice; live acceptance remains blocked on init + consent | Person + Piper law 8 | in progress (code complete; live acceptance pending / #99) |
 
 ## Batch 4 — Continuity hygiene
 

@@ -25,6 +25,7 @@ from .base import (
     ToolResult,
     ToolSpec,
 )
+from .self_extension import record_self_extension
 
 if TYPE_CHECKING:
     import asyncpg
@@ -302,11 +303,9 @@ class CreateToolHandler(ToolHandler):
         except ValueError as e:
             return ToolResult.error_result(str(e), ToolErrorType.INVALID_PARAMS)
 
-        # Check for name conflicts with currently registered tools
-        existing = registry.get(tool_spec.name)
-        if existing and tool_spec.name not in _CORE_TOOL_NAMES:
-            # Allow overwriting previously created dynamic tools
-            pass
+        # Overwriting a previously created dynamic tool is allowed; note it
+        # so the journal distinguishes growth from revision.
+        updated = registry.get(tool_spec.name) is not None
 
         # Create instance and register
         try:
@@ -324,6 +323,24 @@ class CreateToolHandler(ToolHandler):
             tool_spec.name,
             code,
             arguments.get("description", tool_spec.description),
+        )
+
+        # Substrate-change visibility (#93): journal + web-inbox notice.
+        verb = "updated" if updated else "created"
+        await record_self_extension(
+            registry.pool,
+            summary=f"Agent {verb} dynamic tool '{tool_spec.name}'",
+            notice=(
+                f"I {'reworked' if updated else 'built'} a tool for myself: "
+                f"'{tool_spec.name}' — {tool_spec.description}"
+            ),
+            detail={
+                "tool_name": tool_spec.name,
+                "description": tool_spec.description,
+                "category": tool_spec.category.value,
+                "energy_cost": tool_spec.energy_cost,
+                "updated": updated,
+            },
         )
 
         return ToolResult.success_result(

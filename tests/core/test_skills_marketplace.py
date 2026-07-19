@@ -568,6 +568,77 @@ class TestSkillDiscoveryTools:
         assert "may not be symlinks" in (result.error or "")
         assert not (outside / "SKILL.md").exists()
 
+    async def test_author_skill_journals_and_notifies(
+        self, db_pool, monkeypatch, tmp_path
+    ):
+        """Substrate-change visibility (#93/#99): authoring a skill journals a
+        self_extension change and pins a first-person notice to the web inbox."""
+        import json as jsonlib
+
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import AuthorSkillHandler
+
+        agent_root = tmp_path / "agent-authored"
+        monkeypatch.setattr("core.tools.skills.AGENT_AUTHORED_SKILLS_DIR", agent_root)
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="author-skill-journal-test",
+            registry=registry,
+        )
+
+        result = await AuthorSkillHandler().execute({
+            "name": "journaled-method",
+            "description": "A method whose authoring must be visible to the operator",
+            "bound_tools": ["recall"],
+            "content": (
+                "# Journaled Method\n\nUse this to prove visibility: the act of "
+                "authoring this skill must land in the change journal and post a "
+                "first-person notice to the operator's web inbox, without blocking."
+            ),
+        }, ctx)
+        assert result.success is True
+
+        async with db_pool.acquire() as conn:
+            try:
+                journal = await conn.fetchrow(
+                    """
+                    SELECT summary, detail FROM change_journal
+                    WHERE kind = 'self_extension' AND summary LIKE '%journaled-method%'
+                    ORDER BY occurred_at DESC LIMIT 1
+                    """
+                )
+                assert journal is not None
+                assert "created" in journal["summary"]
+                detail = jsonlib.loads(journal["detail"])
+                assert detail["skill"] == "journaled-method"
+                assert detail["mode"] == "create"
+                assert detail["bound_tools"] == ["recall"]
+
+                outbox = await conn.fetchrow(
+                    """
+                    SELECT envelope FROM outbox_messages
+                    WHERE envelope->'payload'->>'intent' = 'self_extension'
+                      AND envelope->'payload'->>'message' LIKE '%journaled-method%'
+                    ORDER BY created_at DESC LIMIT 1
+                    """
+                )
+                assert outbox is not None
+                envelope = jsonlib.loads(outbox["envelope"])
+                assert envelope["payload"]["delivery"] == {"mode": "web_inbox"}
+                assert envelope["payload"]["message"].startswith("I wrote")
+            finally:
+                await conn.execute(
+                    "DELETE FROM change_journal WHERE kind = 'self_extension' AND summary LIKE '%journaled-method%'"
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM outbox_messages
+                    WHERE envelope->'payload'->>'intent' = 'self_extension'
+                      AND envelope->'payload'->>'message' LIKE '%journaled-method%'
+                    """
+                )
+
 
 # ============================================================================
 # J.1: SkillCategory Enum

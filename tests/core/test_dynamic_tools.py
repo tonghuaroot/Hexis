@@ -303,6 +303,96 @@ class TestCreateTool:
 
 
 # ============================================================================
+# Substrate-change visibility (#93/#99)
+# ============================================================================
+
+
+class TestSelfExtensionVisibility:
+    async def test_create_tool_journals_and_notifies(self, db_pool):
+        await _enable_dynamic(db_pool)
+        registry = _make_registry(db_pool)
+        handler = CreateToolHandler()
+        ctx = _make_context(registry)
+
+        result = await handler.execute({"code": VALID_TOOL_CODE}, ctx)
+        assert result.success is True
+
+        async with db_pool.acquire() as conn:
+            try:
+                journal = await conn.fetchrow(
+                    """
+                    SELECT summary, detail FROM change_journal
+                    WHERE kind = 'self_extension' AND summary LIKE '%greet%'
+                    ORDER BY occurred_at DESC LIMIT 1
+                    """
+                )
+                assert journal is not None
+                detail = json.loads(journal["detail"])
+                assert detail["tool_name"] == "greet"
+                assert detail["updated"] is False
+
+                outbox = await conn.fetchrow(
+                    """
+                    SELECT envelope FROM outbox_messages
+                    WHERE envelope->'payload'->>'intent' = 'self_extension'
+                      AND envelope->'payload'->>'message' LIKE '%greet%'
+                    ORDER BY created_at DESC LIMIT 1
+                    """
+                )
+                assert outbox is not None
+                envelope = json.loads(outbox["envelope"])
+                # Pinned to the dashboard inbox, never last-active routing.
+                assert envelope["payload"]["delivery"] == {"mode": "web_inbox"}
+                assert envelope["payload"]["message"].startswith("I built")
+            finally:
+                await conn.execute(
+                    "DELETE FROM change_journal WHERE kind = 'self_extension' AND summary LIKE '%greet%'"
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM outbox_messages
+                    WHERE envelope->'payload'->>'intent' = 'self_extension'
+                      AND envelope->'payload'->>'message' LIKE '%greet%'
+                    """
+                )
+
+    async def test_recreating_tool_journals_as_update(self, db_pool):
+        await _enable_dynamic(db_pool)
+        registry = _make_registry(db_pool)
+        handler = CreateToolHandler()
+
+        first = await handler.execute({"code": VALID_TOOL_CODE}, _make_context(registry))
+        second = await handler.execute({"code": VALID_TOOL_CODE}, _make_context(registry))
+        assert first.success is True
+        assert second.success is True
+
+        async with db_pool.acquire() as conn:
+            try:
+                updated_flags = [
+                    json.loads(r["detail"])["updated"]
+                    for r in await conn.fetch(
+                        """
+                        SELECT detail FROM change_journal
+                        WHERE kind = 'self_extension' AND summary LIKE '%greet%'
+                        ORDER BY occurred_at
+                        """
+                    )
+                ]
+                assert updated_flags == [False, True]
+            finally:
+                await conn.execute(
+                    "DELETE FROM change_journal WHERE kind = 'self_extension' AND summary LIKE '%greet%'"
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM outbox_messages
+                    WHERE envelope->'payload'->>'intent' = 'self_extension'
+                      AND envelope->'payload'->>'message' LIKE '%greet%'
+                    """
+                )
+
+
+# ============================================================================
 # Persistence and reload
 # ============================================================================
 

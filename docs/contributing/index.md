@@ -159,3 +159,7 @@ existing data survives the migration runner.
 2. **Schema authority** -- `db/*.sql` is the source of truth
 3. **Stateless workers** -- can be killed/restarted without losing anything
 4. **ACID for cognition** -- atomic memory updates ensure consistent state
+5. **Core is the mind; capability lives at the edges** -- before adding
+   anything to `core/`, walk the footprint ladder in
+   [CONTRIBUTING.md](../../CONTRIBUTING.md#where-new-capability-belongs--the-footprint-ladder)
+   (extend existing → skill → gated tool → plugin → MCP → core tool last)

@@ -29,6 +29,7 @@ from .base import (
     ToolResult,
     ToolSpec,
 )
+from .self_extension import record_self_extension
 
 
 AGENT_AUTHORED_SKILLS_DIR = Path.home() / ".hexis" / "skills" / "agent-authored"
@@ -423,6 +424,23 @@ class AuthorSkillHandler(ToolHandler):
 
         skill_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(skill_text, encoding="utf-8")
+
+        # Substrate-change visibility (#93): journal + web-inbox notice.
+        await record_self_extension(
+            context.registry.pool,
+            summary=f"Agent {mode}d skill '{name}'",
+            notice=(
+                f"I {'revised' if mode == 'update' else 'wrote'} a skill for myself: "
+                f"'{name}' — {description}"
+            ),
+            detail={
+                "skill": name,
+                "mode": mode,
+                "path": str(path),
+                "bound_tools": bound_tools,
+            },
+        )
+
         return ToolResult.success_result(
             {
                 "skill": name,
