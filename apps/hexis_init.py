@@ -11,8 +11,6 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
-import subprocess
 import sys
 from getpass import getpass
 from pathlib import Path
@@ -263,42 +261,79 @@ def _ensure_stack_running(args: argparse.Namespace) -> Path:
     return stack_root
 
 
+_DEFAULT_EMBEDDING_MODEL = "embeddinggemma:300m-qat-q4_0"
+_DEFAULT_EMBEDDING_URL = "http://host.docker.internal:11434/api/embed"
+
+# Substrings of the errors get_embedding() raises when its HTTP endpoint is
+# down (db/03_functions_helpers.sql) — the one init failure the user can fix
+# in place by starting the local embedding sidecar.
+_EMBEDDING_ERROR_MARKERS = (
+    "Embedding service not available",
+    "Failed to get embeddings",
+)
+
+
+def _is_embedding_unavailable(exc: BaseException) -> bool:
+    msg = str(exc)
+    return any(marker in msg for marker in _EMBEDDING_ERROR_MARKERS)
+
+
+async def _embedding_service_info(conn: Any) -> tuple[str, str]:
+    """The embedding URL + model the DB is actually configured with."""
+    url = model = None
+    try:
+        url = await conn.fetchval(
+            "SELECT current_setting('app.embedding_service_url', true)")
+        model = await conn.fetchval(
+            "SELECT current_setting('app.embedding_model_id', true)")
+    except Exception:
+        pass
+    return url or _DEFAULT_EMBEDDING_URL, model or _DEFAULT_EMBEDDING_MODEL
+
+
+async def _run_embedding_step(conn: Any, step: Any, *, interactive: bool = True) -> Any:
+    """Run a DB write that stores memories (and therefore needs embeddings).
+
+    When the embedding service is unreachable, explain the cause and the exact
+    fix, then offer to retry in place — the wizard never dead-ends on a
+    stopped sidecar. Only the DB write reruns; answers already given are kept.
+    """
+    while True:
+        try:
+            return await step()
+        except Exception as exc:
+            if not _is_embedding_unavailable(exc):
+                raise
+            url, _model = await _embedding_service_info(conn)
+            err_console.print(make_panel(
+                "[fail]The embedding service isn't reachable, so memories can't be "
+                "stored yet.[/fail]\n\n"
+                f"[key]Configured URL:[/key] {url}\n\n"
+                "By default Hexis uses the local [bold]embeddinggemma.c[/bold] sidecar. To fix:\n"
+                "  1. Start it: [bold]~/embeddinggemma.c/build/embeddinggemma-metal[/bold]\n"
+                "  2. Or run [bold]hexis up[/bold] to start the stack and sidecar together.\n\n"
+                "Using a different embedding server? Set [bold]EMBEDDING_SERVICE_URL[/bold] "
+                "and restart the stack with `hexis up`.",
+                title="Embeddings unavailable",
+            ))
+            if not interactive or not _prompt_yes_no("Try again?", default=True):
+                raise RuntimeError(
+                    "the embedding service is unreachable — start the local embedding "
+                    "service (or your configured embedding server), then run `hexis init` again"
+                ) from exc
+
+
 def _ensure_embedding_model() -> None:
-    """Pull the default Ollama embedding model if not present."""
-    model = "embeddinggemma:300m-qat-q4_0"
-    ollama_bin = shutil.which("ollama")
-    if not ollama_bin:
-        console.print(
-            "[warn]\u26a0[/warn] Ollama not found. Install from https://ollama.com/download "
-            f"and run: ollama pull {model}"
-        )
-        return
-
+    """Start the local embeddinggemma.c sidecar if needed."""
     try:
-        result = subprocess.run(
-            [ollama_bin, "list"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if model.split(":")[0] in result.stdout:
-            console.print(f"[ok]\u2714[/ok] Embedding model [bold]{model}[/bold] present")
-            return
+        from apps.hexis_cli import _start_local_embedding_service
+
+        _start_local_embedding_service()
     except Exception as exc:
         console.print(
-            f"[warn]\u26a0[/warn] Couldn't query Ollama ({exc}). Is it running? "
-            "Try `ollama serve`. Attempting to pull anyway\u2026"
+            f"[warn]\u26a0[/warn] Couldn't start local embedding service: {exc}\n"
+            "  Try running: ~/embeddinggemma.c/build/embeddinggemma-metal"
         )
-
-    console.print(f"[muted]Pulling embedding model {model}...[/muted]")
-    try:
-        subprocess.run(
-            [ollama_bin, "pull", model],
-            timeout=600,
-        )
-        console.print(f"[ok]\u2714[/ok] Embedding model pulled")
-    except subprocess.TimeoutExpired:
-        console.print(f"[warn]\u26a0[/warn] Ollama pull timed out. Run manually: ollama pull {model}")
-    except Exception as exc:
-        console.print(f"[warn]\u26a0[/warn] Ollama pull failed: {exc}. Run manually: ollama pull {model}")
 
 
 async def _run_init_noninteractive(args: argparse.Namespace) -> int:
@@ -409,14 +444,22 @@ async def _run_init_noninteractive(args: argparse.Namespace) -> int:
                 return 1
             chosen = match[0]
             character_card = load_character_card_document(chosen)
-            await conn.fetchval(
-                "SELECT init_from_character_card($1::jsonb, $2)",
-                json.dumps(character_card),
-                user_name,
+            await _run_embedding_step(
+                conn,
+                lambda: conn.fetchval(
+                    "SELECT init_from_character_card($1::jsonb, $2)",
+                    json.dumps(character_card),
+                    user_name,
+                ),
+                interactive=False,
             )
             console.print(f"[ok]\u2714[/ok] Character [bold]{chosen['name']}[/bold] applied")
         else:
-            await conn.fetchval("SELECT init_with_defaults($1)", user_name)
+            await _run_embedding_step(
+                conn,
+                lambda: conn.fetchval("SELECT init_with_defaults($1)", user_name),
+                interactive=False,
+            )
             console.print("[ok]\u2714[/ok] Express defaults applied")
 
         # 9. Consent
@@ -740,7 +783,8 @@ async def _run_express(conn: Any) -> str:
     user_name = _prompt("What should Hexis call you?", default="User")
 
     console.print("\n[muted]Applying defaults...[/muted]")
-    raw = await conn.fetchval("SELECT init_with_defaults($1)", user_name)
+    raw = await _run_embedding_step(
+        conn, lambda: conn.fetchval("SELECT init_with_defaults($1)", user_name))
 
     console.print(make_panel(
         "[key]Name:[/key]   Hexis\n"
@@ -831,10 +875,13 @@ async def _run_character(conn: Any) -> str:
         character_card["data"].setdefault("extensions", {})["hexis"] = chosen[
             "extensions_hexis"
         ]
-    raw = await conn.fetchval(
-        "SELECT init_from_character_card($1::jsonb, $2)",
-        json.dumps(character_card),
-        user_name,
+    raw = await _run_embedding_step(
+        conn,
+        lambda: conn.fetchval(
+            "SELECT init_from_character_card($1::jsonb, $2)",
+            json.dumps(character_card),
+            user_name,
+        ),
     )
 
     return user_name
@@ -892,16 +939,19 @@ async def _run_custom(
     await conn.fetchval("SELECT reset_persona()")
 
     # Apply Phase 1
-    await conn.fetchval("SELECT init_mode('persona')")
-    await conn.fetchval(
-        "SELECT init_identity($1, $2, $3, $4, $5, $6)",
-        agent_name, pronouns, voice, description, purpose, user_name,
-    )
-    await conn.fetchval(
-        "SELECT init_personality($1::jsonb, $2)",
-        json.dumps(traits) if traits else None,
-        personality_desc,
-    )
+    async def _apply_identity() -> None:
+        await conn.fetchval("SELECT init_mode('persona')")
+        await conn.fetchval(
+            "SELECT init_identity($1, $2, $3, $4, $5, $6)",
+            agent_name, pronouns, voice, description, purpose, user_name,
+        )
+        await conn.fetchval(
+            "SELECT init_personality($1::jsonb, $2)",
+            json.dumps(traits) if traits else None,
+            personality_desc,
+        )
+
+    await _run_embedding_step(conn, _apply_identity)
     console.print("[ok]\u2714[/ok] Identity saved")
 
     # Phase 2: What Matters (values + worldview + boundaries)
@@ -932,9 +982,12 @@ async def _run_custom(
     boundaries = _prompt_list("Boundaries (comma-separated)", default=default_boundaries)
     boundaries_json = json.dumps(boundaries)
 
-    await conn.fetchval("SELECT init_values($1::jsonb)", values_json)
-    await conn.fetchval("SELECT init_worldview($1::jsonb)", json.dumps(worldview))
-    await conn.fetchval("SELECT init_boundaries($1::jsonb)", boundaries_json)
+    async def _apply_values() -> None:
+        await conn.fetchval("SELECT init_values($1::jsonb)", values_json)
+        await conn.fetchval("SELECT init_worldview($1::jsonb)", json.dumps(worldview))
+        await conn.fetchval("SELECT init_boundaries($1::jsonb)", boundaries_json)
+
+    await _run_embedding_step(conn, _apply_values)
     console.print("[ok]\u2714[/ok] Values and worldview saved")
 
     # Phase 3: What's Next (interests + goals + relationship)
@@ -950,30 +1003,33 @@ async def _run_custom(
 
     rel_type = _prompt("Relationship type", default="partner")
 
-    await conn.fetchval("SELECT init_interests($1::jsonb)", json.dumps(interests))
-    await conn.fetchval(
-        "SELECT init_goals($1::jsonb)",
-        json.dumps({
-            "goals": [{"title": g, "priority": "queued", "source": "identity"} for g in goals],
-            "role": "general assistant",
-            "relationship_aspiration": "co-develop with mutual respect",
-        }),
-    )
-    await conn.fetchval(
-        "SELECT init_relationship($1::jsonb, $2::jsonb)",
-        json.dumps({"name": user_name}),
-        json.dumps({"type": rel_type, "purpose": "co-develop"}),
-    )
+    async def _apply_goals() -> None:
+        await conn.fetchval("SELECT init_interests($1::jsonb)", json.dumps(interests))
+        await conn.fetchval(
+            "SELECT init_goals($1::jsonb)",
+            json.dumps({
+                "goals": [{"title": g, "priority": "queued", "source": "identity"} for g in goals],
+                "role": "general assistant",
+                "relationship_aspiration": "co-develop with mutual respect",
+            }),
+        )
+        await conn.fetchval(
+            "SELECT init_relationship($1::jsonb, $2::jsonb)",
+            json.dumps({"name": user_name}),
+            json.dumps({"type": rel_type, "purpose": "co-develop"}),
+        )
 
-    # Merge heartbeat defaults into init profile
-    await conn.fetchval("""
-        SELECT merge_init_profile(jsonb_build_object('autonomy', 'medium'))
-    """)
+        # Merge heartbeat defaults into init profile
+        await conn.fetchval("""
+            SELECT merge_init_profile(jsonb_build_object('autonomy', 'medium'))
+        """)
 
-    # Advance to consent stage
-    await conn.fetchval("""
-        SELECT advance_init_stage('consent', jsonb_build_object('custom_completed', true))
-    """)
+        # Advance to consent stage
+        await conn.fetchval("""
+            SELECT advance_init_stage('consent', jsonb_build_object('custom_completed', true))
+        """)
+
+    await _run_embedding_step(conn, _apply_goals)
     console.print("[ok]\u2714[/ok] Goals and relationship saved")
 
     return user_name
@@ -997,10 +1053,13 @@ async def _run_consent(conn: Any, llm_config: dict[str, Any], *, interactive: bo
     console.print(f"\n{_step_bar(3)}\n")
     heading("Consent")
 
+    async def _consent_step() -> Any:
+        with Live(Spinner("dots", text="[muted]Requesting consent from the agent...[/muted]"), console=console, transient=True):
+            return await run_consent_flow(conn, llm_config)
+
     result = None
     try:
-        with Live(Spinner("dots", text="[muted]Requesting consent from the agent...[/muted]"), console=console, transient=True):
-            result = await run_consent_flow(conn, llm_config)
+        result = await _run_embedding_step(conn, _consent_step, interactive=interactive)
     except Exception as exc:
         err_console.print(f"[fail]Consent failed: {exc}[/fail]")
         return False
@@ -1235,7 +1294,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-docker", action="store_true", default=False,
                     help="Skip Docker auto-start")
     p.add_argument("--no-pull", action="store_true", default=False,
-                    help="Skip Ollama embedding model pull")
+                    help="Skip local embedding sidecar startup")
     return p
 
 

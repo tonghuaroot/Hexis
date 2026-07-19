@@ -11,7 +11,7 @@ from importlib.metadata import PackageNotFoundError, version as pkg_version
 from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from core import cli_api
 from core.agent_api import db_dsn_from_env, resolve_instance
@@ -3029,6 +3029,141 @@ def _port_ready(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> boo
         return False
 
 
+_LOCAL_EMBEDDING_BINARY = Path.home() / "embeddinggemma.c" / "build" / "embeddinggemma-metal"
+_LOCAL_EMBEDDING_PORT = 11434
+_LOCAL_EMBEDDING_LOG = Path.home() / ".hexis" / "embeddinggemma.log"
+
+
+def _port_listener_summary(port: int) -> str | None:
+    """Best-effort process name(s) listening on a local TCP port."""
+    lsof = shutil.which("lsof")
+    if not lsof:
+        return None
+    try:
+        p = subprocess.run(
+            [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pc"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+
+    names: list[str] = []
+    current_pid: str | None = None
+    for line in p.stdout.splitlines():
+        if line.startswith("p"):
+            current_pid = line[1:]
+        elif line.startswith("c"):
+            name = line[1:]
+            if current_pid:
+                names.append(f"{name} (pid {current_pid})")
+            else:
+                names.append(name)
+    return ", ".join(names) if names else None
+
+
+def _configured_embedding_url(env_file: Path | None) -> str | None:
+    """Read the embedding URL the compose stack will use, without mutating env."""
+    env_url = os.getenv("EMBEDDING_SERVICE_URL")
+    if env_url:
+        return env_url
+    if env_file and env_file.exists():
+        try:
+            value = dotenv_values(env_file).get("EMBEDDING_SERVICE_URL")
+            return str(value) if value else None
+        except Exception:
+            return None
+    return None
+
+
+def _uses_local_embedding_sidecar(env_file: Path | None) -> bool:
+    """True when the DB is configured for the default host-sidecar port."""
+    url = (_configured_embedding_url(env_file) or "").lower()
+    if not url:
+        return True
+    return ":11434" in url
+
+
+def _start_local_embedding_service(wait_seconds: float = 90.0) -> bool:
+    """Start the standalone embeddinggemma.c sidecar if port 11434 is idle."""
+    import time as _time
+
+    from apps.cli_theme import console
+
+    if _port_ready(_LOCAL_EMBEDDING_PORT):
+        listener = _port_listener_summary(_LOCAL_EMBEDDING_PORT)
+        if listener and "embeddinggemma" in listener.lower():
+            console.print("[ok]Embedding service is already listening on port 11434.[/ok]")
+            return True
+        detail = f" Listener: {listener}." if listener else ""
+        console.print(
+            f"[warn]Port 11434 is already in use, so Hexis did not start {_LOCAL_EMBEDDING_BINARY}.[/warn]"
+            f"{detail}\n"
+            "  If this is not the embeddinggemma.c sidecar, stop that process and run "
+            "[accent]hexis up[/accent] again."
+        )
+        return False
+
+    binary = _LOCAL_EMBEDDING_BINARY
+    if not binary.exists():
+        console.print(
+            f"[warn]Embedding service binary not found at {binary}.[/warn]\n"
+            "  Build the standalone project, then run [accent]hexis up[/accent] again:\n"
+            "    [accent]cd ~/embeddinggemma.c && make build/embeddinggemma-metal[/accent]"
+        )
+        return False
+    if not os.access(binary, os.X_OK):
+        console.print(
+            f"[warn]Embedding service binary is not executable: {binary}[/warn]\n"
+            f"  Fix permissions, then run [accent]hexis up[/accent] again:\n"
+            f"    [accent]chmod +x {binary}[/accent]"
+        )
+        return False
+
+    _LOCAL_EMBEDDING_LOG.parent.mkdir(parents=True, exist_ok=True)
+    console.print(f"[muted]Starting local embedding service: {binary}[/muted]")
+    try:
+        with _LOCAL_EMBEDDING_LOG.open("ab") as log_f:
+            proc = subprocess.Popen(
+                [str(binary)],
+                cwd=str(binary.parent.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                env=os.environ.copy(),
+                start_new_session=True,
+            )
+    except Exception as exc:
+        console.print(
+            f"[warn]Couldn't start local embedding service: {exc}[/warn]\n"
+            f"  Try running it directly: [accent]{binary}[/accent]"
+        )
+        return False
+
+    deadline = _time.monotonic() + wait_seconds
+    while _time.monotonic() < deadline:
+        if _port_ready(_LOCAL_EMBEDDING_PORT):
+            console.print(f"[ok]Embedding service is ready on port {_LOCAL_EMBEDDING_PORT}.[/ok]")
+            return True
+        if proc.poll() is not None:
+            console.print(
+                f"[warn]Embedding service exited with code {proc.returncode}.[/warn]\n"
+                f"  See log: [accent]{_LOCAL_EMBEDDING_LOG}[/accent]\n"
+                f"  Or run directly: [accent]{binary}[/accent]"
+            )
+            return False
+        _time.sleep(0.5)
+
+    console.print(
+        f"[warn]Embedding service did not become ready within {int(wait_seconds)} seconds.[/warn]\n"
+        f"  It may still be downloading/loading the model. See log: [accent]{_LOCAL_EMBEDDING_LOG}[/accent]"
+    )
+    return False
+
+
 def _wait_port_ready(port: int, host: str = "127.0.0.1", overall: float = 45.0) -> bool:
     """Poll until the port accepts connections (or time out). Beats a fixed
     sleep before opening a browser at a cold Next.js build (Bar #4)."""
@@ -3081,6 +3216,12 @@ def _handle_ui(stack_root: Path, port: int, no_open: bool) -> int:
     if "DATABASE_URL" not in existing_env:
         with open(env_local, "a") as f:
             f.write(f"\nDATABASE_URL={dsn}\n")
+
+    try:
+        if _uses_local_embedding_sidecar(resolve_env_file(stack_root)):
+            _start_local_embedding_service()
+    except Exception:
+        pass  # advisory only; init write routes surface embedding failures
 
     api_url = (
         os.getenv("HEXIS_API_URL")
@@ -3239,6 +3380,12 @@ def _handle_ui_container(
     import webbrowser
 
     from apps.cli_theme import console
+
+    try:
+        if _uses_local_embedding_sidecar(env_file):
+            _start_local_embedding_service()
+    except Exception:
+        pass  # advisory only; init write routes surface embedding failures
 
     console.print("[accent]Starting containerized web dashboard...[/accent]")
 
@@ -3500,12 +3647,21 @@ def _dispatch(argv: list[str] | None = None) -> int:
             from apps.cli_theme import console
             console.print("\n[ok]Stack is starting.[/ok]\n")
 
-            # Advisory embedding health check (waits for DB, probes embedding URL)
+            # Start the standalone embedding sidecar before probing DB health.
+            embedding_probe_allowed = True
             try:
-                dsn = db_dsn_from_env()
-                asyncio.run(_check_embedding_health(dsn))
+                if _uses_local_embedding_sidecar(env_file):
+                    embedding_probe_allowed = _start_local_embedding_service()
             except Exception:
-                pass  # never block startup
+                embedding_probe_allowed = False
+
+            # Advisory embedding health check (waits for DB, probes embedding URL)
+            if embedding_probe_allowed:
+                try:
+                    dsn = db_dsn_from_env()
+                    asyncio.run(_check_embedding_health(dsn))
+                except Exception:
+                    pass  # never block startup
 
             # Bring the schema up to date without touching data (advisory-locked,
             # no-op if already current). The workers/API also run this on startup.

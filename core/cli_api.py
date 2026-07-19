@@ -15,12 +15,11 @@ logger = logging.getLogger(__name__)
 def embedding_service_diagnosis(url: str | None, model: str | None = None) -> tuple[str, list[str]]:
     """Identify the embedding backend from its URL and return (name, fix_steps)."""
     url = (url or "").lower()
-    emb_model = model or "embeddinggemma:300m-qat-q4_0"
     if ":11434" in url:
-        return "Ollama", [
-            "Install Ollama — https://ollama.com/download",
-            "Start it:       ollama serve",
-            f"Pull the model:  ollama pull {emb_model}",
+        return "embeddinggemma.c local sidecar", [
+            "Start it: ~/embeddinggemma.c/build/embeddinggemma-metal",
+            "Or run: hexis up",
+            "If Hexis started it, check: ~/.hexis/embeddinggemma.log",
         ]
     if "embeddings:" in url or "text-embeddings" in url:
         return "TEI (Text Embeddings Inference)", [

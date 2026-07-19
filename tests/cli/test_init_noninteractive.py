@@ -172,3 +172,63 @@ async def test_cli_init_bad_key_prefix():
     assert p.returncode != 0
     combined = p.stdout + p.stderr
     assert "Cannot detect provider" in combined or "init failed" in combined
+
+
+# ---------------------------------------------------------------------------
+# Embedding-unavailable handling (Experience Bar: no dead-ends)
+# ---------------------------------------------------------------------------
+
+
+class _StubConn:
+    """Conn stub: _embedding_service_info falls back to defaults on failure."""
+
+    async def fetchval(self, *args, **kwargs):
+        raise RuntimeError("no db in this test")
+
+
+async def test_embedding_step_noninteractive_fails_with_guidance(capsys):
+    """A down embedding service yields sidecar guidance + a clean error, not a bare traceback."""
+    from apps.hexis_init import _run_embedding_step
+
+    async def down_step():
+        raise RuntimeError(
+            "Failed to get embeddings: Embedding service not available after 30 seconds: "
+            "Failed to connect to host.docker.internal port 11434: Connection refused"
+        )
+
+    with pytest.raises(RuntimeError, match="start the local embedding service"):
+        await _run_embedding_step(_StubConn(), down_step, interactive=False)
+    err = capsys.readouterr().err
+    assert "embeddinggemma.c" in err
+    assert "embeddinggemma-metal" in err
+    assert "EMBEDDING_SERVICE_URL" in err
+
+
+async def test_embedding_step_interactive_retries_then_succeeds(monkeypatch):
+    """Answering yes to 'Try again?' reruns only the failed DB step."""
+    import builtins
+
+    from apps.hexis_init import _run_embedding_step
+
+    monkeypatch.setattr(builtins, "input", lambda *a, **k: "y")
+    attempts = {"n": 0}
+
+    async def flaky_step():
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError("Embedding service not available after 30 seconds: refused")
+        return "ok"
+
+    assert await _run_embedding_step(_StubConn(), flaky_step) == "ok"
+    assert attempts["n"] == 2
+
+
+async def test_embedding_step_unrelated_errors_pass_through():
+    """Only embedding-service failures get the retry flow; other errors raise as-is."""
+    from apps.hexis_init import _run_embedding_step
+
+    async def broken_step():
+        raise ValueError("some other init problem")
+
+    with pytest.raises(ValueError, match="some other init problem"):
+        await _run_embedding_step(_StubConn(), broken_step, interactive=False)

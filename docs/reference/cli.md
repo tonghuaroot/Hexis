@@ -255,7 +255,7 @@ hexis init [--api-key KEY] [--provider PROVIDER] [--model MODEL]
 | `--character` | Character card name (e.g., `hexis`, `jarvis`) |
 | `--name` | What the agent calls you (default: `User`) |
 | `--no-docker` | Skip Docker auto-start |
-| `--no-pull` | Skip Ollama model pull |
+| `--no-pull` | Skip local embedding sidecar startup |
 
 ## Related
 
