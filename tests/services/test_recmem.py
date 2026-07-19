@@ -222,7 +222,10 @@ async def test_maintenance_worker_runs_due_recmem_sweep(db_pool, monkeypatch):
     worker.pool = db_pool
 
     async with db_pool.acquire() as conn:
-        old_interval = await conn.fetchval("SELECT value FROM config WHERE key = 'memory.recmem_sweep_interval_seconds'")
+        old_interval = await conn.fetchval(
+            "SELECT value FROM config WHERE key = 'memory.recmem_sweep_interval_seconds'"
+        )
+        had_interval_override = old_interval is not None
         old_state = await conn.fetchval("SELECT value FROM state WHERE key = 'recmem_state'")
         await conn.execute("SELECT set_config('memory.recmem_sweep_interval_seconds', '86400'::jsonb)")
         await conn.execute("DELETE FROM state WHERE key = 'recmem_state'")
@@ -235,10 +238,15 @@ async def test_maintenance_worker_runs_due_recmem_sweep(db_pool, monkeypatch):
             assert await conn.fetchval("SELECT should_run_recmem_sweep()") is False
     finally:
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE config SET value = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE key = 'memory.recmem_sweep_interval_seconds'",
-                old_interval,
-            )
+            if had_interval_override:
+                await conn.execute(
+                    "SELECT set_config('memory.recmem_sweep_interval_seconds', $1::jsonb)",
+                    old_interval,
+                )
+            else:
+                await conn.execute(
+                    "SELECT delete_config_key('memory.recmem_sweep_interval_seconds')"
+                )
             if old_state is None:
                 await conn.execute("DELETE FROM state WHERE key = 'recmem_state'")
             else:

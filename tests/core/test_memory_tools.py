@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.tools.base import ToolContext, ToolExecutionContext
-from core.tools.memory import RecallHandler, RememberHandler
+from core.tools.memory import OpenDocumentHandler, RecallHandler, RememberHandler, SearchDocumentsHandler
 from tests.utils import get_test_identifier
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
@@ -121,3 +121,45 @@ class TestBeliefHistoryTool:
         assert spec.energy_cost == 0
         assert spec.parameters["required"] == ["memory_id"]
         assert "why" in spec.description.lower()
+
+
+class TestSourceDocumentTools:
+    async def test_search_and_open_documents(self, db_pool):
+        marker = get_test_identifier("sourcedoctool")
+        content_hash = f"hash-{marker}"
+        content = f"Tool document {marker}\n\nThe exact arclight clause is here."
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.fetchval(
+                    """
+                    SELECT upsert_source_document(
+                        $1, 'document', $2, $3, '.txt', $4, 8,
+                        $5::jsonb, '{}'::jsonb
+                    )
+                    """,
+                    f"Tool document {marker}",
+                    content_hash,
+                    f"/tmp/{marker}.txt",
+                    content,
+                    json.dumps({"kind": "document", "ref": content_hash, "content_hash": content_hash}),
+                )
+
+            result = await SearchDocumentsHandler().execute({"query": f"arclight {marker}"}, _ctx(db_pool))
+            assert result.success, result.error
+            assert result.output["count"] == 1
+            doc_id = result.output["documents"][0]["document_id"]
+
+            opened = await OpenDocumentHandler().execute({"document_id": doc_id}, _ctx(db_pool))
+            assert opened.success, opened.error
+            assert opened.output["content"] == content
+            assert opened.output["truncated"] is False
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
+
+    async def test_document_handlers_registered(self):
+        from core.tools.memory import create_memory_tools
+
+        names = [handler.spec.name for handler in create_memory_tools()]
+        assert "search_documents" in names
+        assert "open_document" in names

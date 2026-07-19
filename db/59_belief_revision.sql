@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS belief_revision_audit (
 CREATE INDEX IF NOT EXISTS idx_belief_revision_audit_memory
     ON belief_revision_audit (memory_id, created_at);
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('belief.revision_enabled', 'true'::jsonb,
      'Apply calibrated confidence revision when evidence corroborates or contradicts a semantic memory'),
     ('belief.support_rate', '0.35'::jsonb,

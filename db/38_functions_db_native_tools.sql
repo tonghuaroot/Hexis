@@ -3,7 +3,7 @@ SET search_path = public, ag_catalog, "$user";
 
 -- Memory-count budgets (WS6): counts protect context and cost; relevance is
 -- governed by min_score, never by a hardcoded N.
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.recall_default_limit', '5'::jsonb,
      'Default memory count for recall when the caller does not specify one'),
     ('memory.recall_max_limit', '50'::jsonb,

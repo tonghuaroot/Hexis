@@ -4,7 +4,7 @@
 -- mechanism built, mirror forgotten. No new machinery here, only reads.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('inspection.config_prefixes',
      '["agent.", "heartbeat.", "maintenance.", "memory.", "retention.", "extraction.", "origin_memories.", "belief.", "guardrails.", "inspection.", "mcp.", "recmem.", "llm."]'::jsonb,
      'Config key prefixes the agent may read via inspect_config (values with secret-like names are redacted regardless)')
@@ -220,9 +220,10 @@ DECLARE
     mem RECORD;
     units JSONB;
     gisted_members JSONB;
+    documents JSONB;
 BEGIN
     SELECT id, type, content, importance, trust_level, fidelity, status,
-           created_at, superseded_by, metadata
+           created_at, superseded_by, source_attribution, metadata
     INTO mem
     FROM memories WHERE id = p_memory_id;
 
@@ -258,6 +259,35 @@ BEGIN
     FROM memories g
     WHERE g.superseded_by = p_memory_id;
 
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'document_id', d.id,
+        'title', d.title,
+        'source_type', d.source_type,
+        'path', d.path,
+        'file_type', d.file_type,
+        'content_hash', d.content_hash,
+        'word_count', d.word_count,
+        'size_bytes', d.size_bytes,
+        'updated_at', d.updated_at
+    ) ORDER BY d.updated_at DESC, d.id), '[]'::jsonb)
+    INTO documents
+    FROM source_documents d
+    WHERE d.status = 'active'
+      AND (
+          d.content_hash = NULLIF(mem.source_attribution->>'content_hash', '')
+          OR d.content_hash = NULLIF(mem.source_attribution->>'ref', '')
+          OR EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(CASE
+                  WHEN jsonb_typeof(mem.metadata->'source_references') = 'array'
+                  THEN mem.metadata->'source_references'
+                  ELSE '[]'::jsonb
+              END) src
+              WHERE d.content_hash = NULLIF(src->>'content_hash', '')
+                 OR d.content_hash = NULLIF(src->>'ref', '')
+          )
+      );
+
     RETURN jsonb_strip_nulls(jsonb_build_object(
         'memory', jsonb_build_object(
             'id', mem.id,
@@ -275,6 +305,7 @@ BEGIN
         ),
         'full_content', NULLIF(mem.metadata#>>'{consolidation,full_content}', ''),
         'source_units', units,
+        'source_documents', CASE WHEN documents = '[]'::jsonb THEN NULL ELSE documents END,
         'superseded_members', CASE WHEN gisted_members = '[]'::jsonb THEN NULL ELSE gisted_members END,
         'superseded_by', mem.superseded_by,
         'evidence', jsonb_build_object(

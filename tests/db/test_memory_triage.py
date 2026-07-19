@@ -58,14 +58,14 @@ async def test_schema_fit_signal_is_opt_in(db_pool):
             # off by default -> mundane novel memory is not borderline
             assert await conn.fetchval("SELECT is_consolidation_borderline(ARRAY[$1]::uuid[])", novel) is False
             # enable it -> nothing in the schema is close, so it escalates
-            await conn.execute("UPDATE config SET value='0.5'::jsonb WHERE key='retention.borderline_schema_fit'")
+            await conn.execute("SELECT set_config('retention.borderline_schema_fit', '0.5'::jsonb)")
             assert await conn.fetchval("SELECT is_consolidation_borderline(ARRAY[$1]::uuid[])", novel) is True
         finally:
             await tr.rollback()
 
 
 async def _enable(conn):
-    await conn.execute("UPDATE config SET value='true'::jsonb WHERE key='retention.enabled'")
+    await conn.execute("SELECT set_config('retention.enabled', 'true'::jsonb)")
 
 
 async def _aged_group(conn, ep_key, importance):

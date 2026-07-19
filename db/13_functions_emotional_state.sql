@@ -338,7 +338,7 @@ BEGIN
     RETURN activation_id;
 END;
 $$ LANGUAGE plpgsql;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('incubation.resolution_boost', '0.45'::jsonb,
      'Activation boost applied when a background search resolves — must clear memory.spontaneous_min_boost so the answer genuinely rises into mind'),
     ('incubation.tell_user', 'true'::jsonb,

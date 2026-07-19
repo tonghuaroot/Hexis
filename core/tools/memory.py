@@ -539,6 +539,251 @@ class OpenMemoryHandler(ToolHandler):
         )
 
 
+class SearchDocumentsHandler(ToolHandler):
+    """Search preserved raw source documents from ingestion."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="search_documents",
+            description=(
+                "Search exact preserved source documents from ingestion. "
+                "Use this when normal recall finds a source, or when a question "
+                "depends on wording in a whole file, spec, email, web page, or "
+                "other ingested artifact rather than only distilled memories."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Postgres web-search query over document title, path, and full raw content.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 10,
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "Result offset for paging.",
+                    },
+                    "source_path": {
+                        "type": "string",
+                        "description": "Optional partial path/URL filter.",
+                    },
+                    "source_type": {
+                        "type": "string",
+                        "description": "Optional source type filter, e.g. document, web, code, email.",
+                    },
+                    "created_after": {
+                        "type": "string",
+                        "description": "Optional inclusive ISO-8601 lower time bound.",
+                    },
+                    "created_before": {
+                        "type": "string",
+                        "description": "Optional exclusive ISO-8601 upper time bound.",
+                    },
+                    "snippet_chars": {
+                        "type": "integer",
+                        "minimum": 80,
+                        "maximum": 4000,
+                        "default": 500,
+                    },
+                },
+                "required": [],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if not context.registry or not context.registry.pool:
+            return ToolResult.error_result("Database unavailable", ToolErrorType.EXECUTION_FAILED)
+
+        args = dict(arguments)
+        has_selector = any(
+            str(args.get(name) or "").strip()
+            for name in ("query", "source_path", "source_type", "created_after", "created_before")
+        )
+        if not has_selector:
+            return ToolResult.error_result(
+                "Provide query or one filter (source_path, source_type, created_after, created_before).",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        try:
+            limit = max(1, min(int(args.get("limit") or 10), 50))
+            offset = max(0, int(args.get("offset") or 0))
+            snippet_chars = max(80, min(int(args.get("snippet_chars") or 500), 4000))
+        except (TypeError, ValueError):
+            return ToolResult.error_result("limit, offset, and snippet_chars must be integers", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT document_id, title, source_type, path, file_type,
+                           content_hash, word_count, size_bytes, created_at,
+                           updated_at, rank, snippet
+                    FROM search_source_documents(
+                        $1::text, $2::int, $3::text, $4::text,
+                        NULLIF($5::text, '')::timestamptz,
+                        NULLIF($6::text, '')::timestamptz,
+                        false, $7::int, $8::int, $9::boolean
+                    )
+                    """,
+                    args.get("query"),
+                    limit,
+                    args.get("source_path"),
+                    args.get("source_type"),
+                    args.get("created_after"),
+                    args.get("created_before"),
+                    offset,
+                    snippet_chars,
+                    bool(args.get("exclude_sensitive") or context.is_group),
+                )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+        documents = [
+            {
+                "document_id": str(row["document_id"]),
+                "title": row["title"],
+                "source_type": row["source_type"],
+                "path": row["path"],
+                "file_type": row["file_type"],
+                "content_hash": row["content_hash"],
+                "word_count": row["word_count"],
+                "size_bytes": row["size_bytes"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                "rank": row["rank"],
+                "snippet": row["snippet"],
+            }
+            for row in rows
+        ]
+        return ToolResult.success_result(
+            {"documents": documents, "count": len(documents), "offset": offset, "limit": limit},
+            display_output=f"Found {len(documents)} source document(s)",
+        )
+
+
+class OpenDocumentHandler(ToolHandler):
+    """Open exact preserved raw source document content."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="open_document",
+            description=(
+                "Open a preserved raw source document by document_id, content_hash, "
+                "or path. Omit max_chars to retrieve the full exact content; pass "
+                "offset/max_chars for deliberate paging when the document is too "
+                "large for the current context."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "document_id": {
+                        "type": "string",
+                        "description": "UUID returned by search_documents or open_memory.source_documents.",
+                    },
+                    "content_hash": {
+                        "type": "string",
+                        "description": "Exact content hash for the source document.",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Exact or partial path/URL for the source document.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional character budget. Omit to retrieve the full document.",
+                    },
+                },
+                "required": [],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=1,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if not context.registry or not context.registry.pool:
+            return ToolResult.error_result("Database unavailable", ToolErrorType.EXECUTION_FAILED)
+
+        args = dict(arguments)
+        document_id = args.get("document_id")
+        if document_id:
+            try:
+                document_id = UUID(str(document_id))
+            except ValueError:
+                return ToolResult.error_result("document_id must be a uuid", ToolErrorType.INVALID_PARAMS)
+
+        if not document_id and not str(args.get("content_hash") or "").strip() and not str(args.get("path") or "").strip():
+            return ToolResult.error_result(
+                "Provide document_id, content_hash, or path.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+            max_chars = args.get("max_chars")
+            if max_chars is not None:
+                max_chars = max(1, int(max_chars))
+        except (TypeError, ValueError):
+            return ToolResult.error_result("offset and max_chars must be integers", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    """
+                    SELECT open_source_document(
+                        $1::uuid, $2::text, $3::text, $4::int, $5::int, $6::boolean
+                    )
+                    """,
+                    document_id,
+                    args.get("content_hash"),
+                    args.get("path"),
+                    offset,
+                    max_chars,
+                    bool(args.get("exclude_sensitive") or context.is_group),
+                )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(payload, dict):
+            return ToolResult.error_result("open_source_document returned an invalid payload", ToolErrorType.EXECUTION_FAILED)
+        if payload.get("error") == "missing_selector":
+            return ToolResult.error_result("Provide document_id, content_hash, or path.", ToolErrorType.INVALID_PARAMS)
+        if payload.get("error") == "not_found":
+            return ToolResult.error_result("Source document not found.", ToolErrorType.INVALID_PARAMS)
+
+        title = str(payload.get("title") or payload.get("path") or payload.get("document_id") or "document")
+        suffix = " (truncated)" if payload.get("truncated") else ""
+        return ToolResult.success_result(payload, display_output=f"Opened source document: {title}{suffix}")
+
+
 class SenseMemoryAvailabilityHandler(ToolHandler):
     """Quick feeling-of-knowing check before full recall."""
 
@@ -1333,6 +1578,8 @@ def create_memory_tools() -> list[ToolHandler]:
         AddEvidenceHandler(),
         BeliefHistoryHandler(),
         OpenMemoryHandler(),
+        SearchDocumentsHandler(),
+        OpenDocumentHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
         AssociateHandler(),

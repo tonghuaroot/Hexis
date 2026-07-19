@@ -161,7 +161,7 @@ $$ LANGUAGE plpgsql;
 
 -- Channel-command shapers (3.13): outbox target resolution and the
 -- /status, /goals, /energy renderings.
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('channel.broadcast_window_days', '7'::jsonb,
      'Broadcast delivery reaches channel sessions active within this many days')
 ON CONFLICT (key) DO NOTHING;

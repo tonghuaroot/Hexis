@@ -43,6 +43,61 @@ async def test_config_defaults_registry_falls_back_and_overrides(db_pool):
             await tr.rollback()
 
 
+async def test_feature_defaults_live_in_registry(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            moved_defaults = [
+                ("memory.recall_max_limit", "get_config_int", 50),
+                ("retention.summarize_batch_size", "get_config_int", 8),
+                ("skills.self_improvement.min_confidence", "get_config_float", 0.8),
+                ("channel.web_inbox.enabled", "get_config_bool", True),
+                ("tools", "get_config", {
+                    "enabled": None,
+                    "disabled": [],
+                    "disabled_categories": [],
+                    "mcp_servers": [],
+                    "api_keys": {},
+                    "costs": {},
+                    "context_overrides": {
+                        "heartbeat": {
+                            "max_energy_per_tool": 5,
+                            "disabled": ["shell", "write_file"],
+                            "allow_shell": False,
+                            "allow_file_write": False,
+                        },
+                        "chat": {
+                            "allow_all": True,
+                            "allow_shell": True,
+                            "allow_file_write": True,
+                        },
+                    },
+                    "workspace_path": None,
+                }),
+            ]
+
+            for key, getter, expected in moved_defaults:
+                await conn.execute("SELECT delete_config_key($1)", key)
+                actual = await conn.fetchval(f"SELECT {getter}($1)", key)
+                assert _json(actual) == expected
+
+            rows = await conn.fetch(
+                """
+                SELECT key
+                FROM config_defaults
+                WHERE key = ANY($1::text[])
+                ORDER BY key
+                """,
+                [key for key, _getter, _expected in moved_defaults],
+            )
+            assert [row["key"] for row in rows] == sorted(
+                key for key, _getter, _expected in moved_defaults
+            )
+        finally:
+            await tr.rollback()
+
+
 async def test_get_agent_consent_status(db_pool):
     async with db_pool.acquire() as conn:
         await conn.execute("SELECT set_config('agent.consent_status', '\"consent\"'::jsonb)")

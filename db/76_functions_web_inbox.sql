@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_web_inbox_feed ON web_inbox (delivered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_web_inbox_unread ON web_inbox (delivered_at)
     WHERE read_at IS NULL;
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('channel.web_inbox.enabled', 'true'::jsonb,
      'Deliver a copy of every user-bound outbox message to the web dashboard inbox')
 ON CONFLICT (key) DO NOTHING;

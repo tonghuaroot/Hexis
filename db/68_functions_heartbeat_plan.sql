@@ -6,7 +6,7 @@
 -- grant, and the protected-decision prompt fragments.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('heartbeat.task_energy_multiplier', '2'::jsonb,
      'Energy budget multiplier when the backlog has actionable work'),
     ('heartbeat.base_timeout_seconds', '120'::jsonb,

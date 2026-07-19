@@ -2,7 +2,7 @@
 SET search_path = public, ag_catalog, "$user";
 SET check_function_bodies = off;
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('metamemory.incubate_min_familiarity', '0.5'::jsonb,
      'Familiarity (strongest_match) above which an empty recall files a background search — "it will come to me"')
 ON CONFLICT (key) DO NOTHING;

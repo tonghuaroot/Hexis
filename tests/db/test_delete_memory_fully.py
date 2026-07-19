@@ -72,7 +72,7 @@ async def test_gc_respects_grace_and_protection(db_pool):
         tr = conn.transaction()
         await tr.start()
         try:
-            await conn.execute("UPDATE config SET value='true'::jsonb WHERE key='retention.enabled'")
+            await conn.execute("SELECT set_config('retention.enabled', 'true'::jsonb)")
 
             async def archive(mid, archived_days_ago):
                 await conn.execute(

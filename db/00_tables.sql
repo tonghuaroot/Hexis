@@ -614,7 +614,7 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('maintenance.working_memory_promote_min_importance', '0.75'::jsonb, 'Working-memory items above this importance are promoted on expiry'),
     ('maintenance.working_memory_promote_min_accesses', '3'::jsonb, 'Working-memory items accessed >= this count are promoted on expiry')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.recall_min_trust_level', '0'::jsonb, 'Minimum trust_level to include in recall (0 disables filtering)'),
     ('memory.recall_strength_weight', '0.5'::jsonb, 'How much computed memory strength (recency/reinforcement/decay) reshapes the pure-cosine recall score: 0=pure similarity, 0.5=gentle, 1=score fully scaled by strength'),
     ('memory.recall_low_vividness_threshold', '0.35'::jsonb, 'Recall below this strength/fidelity vividness renders as a hedged reconstruction ("I vaguely recall...")'),
@@ -652,7 +652,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.recmem_sweep_interval_seconds', '86400'::jsonb, 'Seconds between RecMem raw-only recurrence sweeps'),
     ('memory.recmem_sweep_min_rerouting_age_days', '7'::jsonb, 'Skip units routed within this window')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('llm.recmem', 'null'::jsonb, 'Optional LLM override for RecMem consolidation prompts'),
     ('llm.summarization', 'null'::jsonb, 'Optional LLM override for memory-consolidation summarization/distillation')
 ON CONFLICT (key) DO NOTHING;
@@ -662,7 +662,7 @@ ON CONFLICT (key) DO NOTHING;
 -- -> prune) is heavily guarded — 30-day minimum age, protected classes, a
 -- conscious veto queue, a 14-day undo window, capacity pruning off — and this
 -- flag remains the kill switch.
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('retention.enabled', 'true'::jsonb, 'Master switch for rest-cycle memory consolidation + pruning (kill switch)'),
     ('retention.min_age_days', '30'::jsonb, 'Episodic memories younger than this are never consolidated'),
     ('retention.min_idle_days', '21'::jsonb, 'Skip memories reinforced within this window'),
@@ -688,7 +688,7 @@ INSERT INTO config (key, value, description) VALUES
     ('retention.doc_idle_days', '90'::jsonb, 'An ingested document not drawn on within this window counts as unused'),
     ('retention.doc_request_batch', '2'::jsonb, 'Max stale-document approval requests sent to the user per rest pass (do not nag)')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('heartbeat.use_rlm', 'true'::jsonb, 'Enable RLM loop for heartbeat decisions'),
     ('chat.use_rlm', 'true'::jsonb, 'Enable RLM loop for chat'),
     ('rlm.heartbeat.max_iterations', '10'::jsonb, 'Max RLM iterations for heartbeat'),
@@ -701,7 +701,7 @@ INSERT INTO config (key, value, description) VALUES
     ('rlm.workspace.max_per_memory_chars', '2000'::jsonb, 'Max chars per fetched memory'),
     ('rlm.heartbeat.timeout_seconds', '300'::jsonb, 'Overall timeout for RLM heartbeat')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('transformation.personality', '{
         "stability": 0.99,
         "evidence_threshold": 0.95,
@@ -740,7 +740,7 @@ INSERT INTO config (key, value, description) VALUES
         "min_heartbeats": 80
     }'::jsonb, 'Requirements for political philosophy transformation')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('emotion.baseline', '{
         "valence": 0.0,
         "arousal": 0.3,
@@ -763,7 +763,7 @@ INSERT INTO config (key, value, description) VALUES
         "neutral": {}
     }'::jsonb, 'Mapping from dimensional to discrete emotions')
 ON CONFLICT (key) DO NOTHING;
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('tools', '{
         "enabled": null,
         "disabled": [],
@@ -869,7 +869,7 @@ CREATE TABLE IF NOT EXISTS skill_improvement_proposals (
     applied_at TIMESTAMPTZ
 );
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('skills.self_improvement.enabled', 'false'::jsonb, 'Opt in to background experience review that creates skill proposals; proposals are never auto-applied'),
     ('skills.self_improvement.interval_seconds', '604800'::jsonb, 'Minimum seconds between skill-improvement reviews'),
     ('skills.self_improvement.claim_timeout_seconds', '1800'::jsonb, 'Seconds before an interrupted review claim can be retried'),

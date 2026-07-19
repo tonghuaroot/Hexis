@@ -4,7 +4,7 @@ SET check_function_bodies = off;
 
 -- Recency in recall ranking (#47): temporal questions must not lose to raw
 -- similarity. Half-life decay; weight 0 disables.
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.recency_weight', '0.1'::jsonb,
      'Weight of the recency term in fast_recall scoring (0 disables)'),
     ('memory.recency_halflife_days', '7'::jsonb,

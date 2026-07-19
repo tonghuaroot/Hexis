@@ -6,7 +6,7 @@
 -- unconsumed units). Units without a session_id stay on the recurrence path.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.scene_idle_seconds', '1800'::jsonb,
      'A session with no new turns for this long is a closed scene, ready to consolidate'),
     ('memory.scene_check_interval_seconds', '300'::jsonb,

@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS skill_improvement_proposals (
 CREATE INDEX IF NOT EXISTS idx_skill_improvement_proposals_status_created
     ON skill_improvement_proposals (status, created_at DESC);
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('skills.self_improvement.enabled', 'false'::jsonb, 'Opt in to background experience review that creates skill proposals; proposals are never auto-applied'),
     ('skills.self_improvement.interval_seconds', '604800'::jsonb, 'Minimum seconds between skill-improvement reviews'),
     ('skills.self_improvement.claim_timeout_seconds', '1800'::jsonb, 'Seconds before an interrupted review claim can be retried'),

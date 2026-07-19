@@ -1,6 +1,6 @@
 -- RecMem: recurrence-based memory consolidation.
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.history_browse_max', '200'::jsonb,
      'Row ceiling for keyword-less time-window browsing in search_history (preview-grain rows)')
 ON CONFLICT (key) DO NOTHING;

@@ -255,6 +255,18 @@ class IngestionPipeline:
         metrics.mode = mode.value
         metrics.source_type = doc.source_type
 
+        await self.store.store_source_document(
+            title=doc.title,
+            source_type=doc.source_type,
+            content_hash=doc.content_hash,
+            path=doc.path,
+            file_type=doc.file_type,
+            content=content,
+            word_count=doc.word_count,
+            source_attribution=self._source_payload(doc),
+            metadata={"mode": mode.value},
+        )
+
         sections = self.sectioner.split(content, section_path)
         section_hashes = [_hash_text(s.content) for s in sections]
 

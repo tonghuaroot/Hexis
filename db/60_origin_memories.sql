@@ -12,7 +12,7 @@
 -- either direction — no manual SQL, no re-consent.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('origin_memories.enabled', 'true'::jsonb,
      'Seed protected semantic memories from the origin prompt modules (kill switch; seeding is idempotent)'),
     ('origin_memories.trust', '0.9'::jsonb, 'Trust level for seeded origin memories'),

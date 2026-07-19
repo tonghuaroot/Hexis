@@ -1,7 +1,7 @@
 -- HMX Slice 6: accepted-memory re-embedding and raw-unit routing.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.hmx_reembed_batch_size', '16'::jsonb,
      'Accepted HMX memories embedded per maintenance tick'),
     ('memory.hmx_reembed_claim_timeout_s', '300'::jsonb,

@@ -17,7 +17,7 @@ def _j(v):
 
 
 async def _enable(conn):
-    await conn.execute("UPDATE config SET value='true'::jsonb WHERE key='retention.enabled'")
+    await conn.execute("SELECT set_config('retention.enabled', 'true'::jsonb)")
 
 
 async def _ingest_doc(conn, content_hash, label, *, age_days=300, n_facts=2):
@@ -67,7 +67,7 @@ async def test_gc_capacity_prune_spares_ingested(db_pool):
         await tr.start()
         try:
             await _enable(conn)
-            await conn.execute("UPDATE config SET value='0.001'::jsonb WHERE key='retention.capacity'")  # extreme pressure
+            await conn.execute("SELECT set_config('retention.capacity', '0.001'::jsonb)")  # extreme pressure
             ids = await _ingest_doc(conn, "hcap", "Capacity Doc")
             _j(await conn.fetchval("SELECT run_retention_gc()"))
             # the ingested episodic encounter must survive the capacity prune
@@ -109,7 +109,7 @@ async def test_request_noop_when_disabled(db_pool):
         tr = conn.transaction()
         await tr.start()
         try:
-            await conn.execute("UPDATE config SET value='false'::jsonb WHERE key='retention.enabled'")
+            await conn.execute("SELECT set_config('retention.enabled', 'false'::jsonb)")
             await _ingest_doc(conn, "hoff", "Off Doc", age_days=300)
             assert _j(await conn.fetchval("SELECT request_stale_document_fades()")).get("skipped") is True
         finally:

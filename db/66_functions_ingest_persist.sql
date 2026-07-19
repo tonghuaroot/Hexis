@@ -6,7 +6,7 @@
 -- transaction, config-owned knobs.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.ingest_decay_base', '0.01'::jsonb,
      'Base decay rate for ingested memories; intensity bands scale it'),
     ('memory.ingest_worldview_hint_threshold', '0.7'::jsonb,

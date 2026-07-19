@@ -9,7 +9,7 @@
 -- target differs from the old code (nearest neighbor vs. its last-wins quirk).
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.ingest_theta_dup', '0.92'::jsonb,
      'Ingest: similarity >= this treats an extraction as a duplicate of an existing semantic memory (merge source + boost confidence, no new memory)'),
     ('memory.ingest_theta_related', '0.8'::jsonb,

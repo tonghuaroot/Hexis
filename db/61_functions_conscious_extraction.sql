@@ -11,7 +11,7 @@
 -- KILL SWITCH for CI, cost-sensitive deployments, and custom setups.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('extraction.enabled', 'true'::jsonb,
      'Sweep conscious episodes (chat turns + heartbeat episodes) into selective durable memories (kill switch)'),
     ('extraction.min_importance', '0.6'::jsonb,

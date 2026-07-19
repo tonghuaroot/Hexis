@@ -15,7 +15,7 @@
 SET search_path = public, ag_catalog, "$user";
 SET check_function_bodies = off;
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('continuity.backup_stale_days', '14'::jsonb,
      'Backups older than this leave existence feeling unsecured: the continuity drive accumulates'),
     ('continuity.threat_raise_factor', '0.4'::jsonb,

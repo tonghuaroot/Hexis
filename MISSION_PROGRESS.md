@@ -27,6 +27,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Repoint every caller at the unified function: `fast_recall` is now a thin wrapper (db/05 family + all downstream upgraded transitively); final removal deferred one release | Substrate | done (see #96) |
 | Metamemory surface: thin/empty recall carries {feeling, familiarity, TOT partials}; familiar-but-blocked auto-files incubation ('I'll let it simmer'); low familiarity reads honestly; default relevance floor (memory.recall_min_score) makes honest failure possible at all | Person | done (see #96) |
 | Retrieval eval: seeded corpus pins home-turf ranking, knowledge-tier reachability, association expansion, mood congruence, activation boost (tests/db/test_retrieval_eval.py) | Experience Bar | done (see #96) |
+| Durable source-document recall: ingestion preserves exact raw artifacts in `source_documents`; `search_documents` finds them deliberately, `open_document` retrieves full verbatim content on demand, and `open_memory` points distilled facts back to their raw source document | Person + Continuity + Experience Bar | done (uncommitted / 0102) |
 
 ## Batch 2 — Both north stars, visible in days
 
@@ -57,7 +58,36 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Collapse chat orchestration onto `services/chat.py`; move the RLM gate where both web and channel paths pass through | Substrate | todo |
 | Wire `/api/ingest/jobs/{id}` polling into the web ingest flow | Experience Bar | todo |
 
-## Batch 5 — The reward loop, proven by emergence
+## Batch 5 — Life-channel ingestion and authorized agency
+
+Hexis has to live where the user lives and compound around a real person,
+not wait for manually curated notes. Connectors are consented senses and
+hands: they ingest the user's existing life channels, preserve raw
+provenance, distill durable memories, and act only inside explicit authority
+boundaries.
+
+Reference bar from `.reference/hermes-agent` and `.reference/openclaw`:
+setup is an onboarded, cross-channel product path. Hermes' Google Workspace
+script is deliberately agent-driven so the same flow works from CLI,
+Telegram, Discord, etc.; Hermes also shares slash commands across CLI/gateway
+and gives Slack a native command manifest. OpenClaw treats onboarding,
+daemon/gateway setup, channel pairing, status, and plugin setup descriptors as
+first-class surfaces. Hexis currently has adapters, docs, and interactive CLI
+setup, but not the shared setup broker Samantha can invoke while already
+talking to the user.
+
+| Goal | Test | Status |
+|---|---|---|
+| First-class personal-data connectors: Gmail, Slack, Telegram, Signal, and Twitter/X live as plugin-backed channels with scoped setup, clear capability manifests, account identity, revocation, and separate grants for read/search/send/delete/label/admin actions | Piper law 2 + Dignity + Experience Bar | todo |
+| Conversation-native connection setup: if the user says "connect my Gmail/Slack/Telegram/Signal/Twitter" in CLI chat, web chat, or any existing integration, Samantha can start the relevant setup flow in that same conversation, explain scopes, request only the needed user action, hand off OAuth URLs / QR codes / app manifests / env-secret prompts in-channel, and verify the connection before returning to chat | Piper law 2 + Experience Bar + Dignity | todo |
+| Setup broker substrate: one DB-owned `integration_connectors`/`connection_attempts` layer records provider manifests, required scopes, setup state, account identity, current channel/session, redacted errors, revocation status, and restart/worker requirements so CLI, UI, and channel adapters share one source of truth | Substrate + Continuity | todo |
+| Massive channel backfill: each connector supports incremental ingest with receipts, cursoring, retry/resume, dedupe, cost/progress visibility, and no silent ambient credential reuse | Piper law 3 + Experience Bar | todo |
+| Raw message/source preservation: ingested emails, chats, threads, attachments, and posts are stored as exact source artifacts with content hashes, channel/account/thread/message IDs, participants, timestamps, labels, sensitivity, and redaction status before any distillation | Continuity + Substrate + Dignity | todo |
+| User-model synthesis: heartbeat/consolidation turns channel history into evidence-backed beliefs about preferences, likes, dislikes, relationships, routines, commitments, and judgment patterns; claims point back to openable source artifacts instead of becoming untraceable prompt lore | Person + Piper law 3 + Continuity | todo |
+| Notification/action layer: important-item detection, spam triage, summaries, reminders, replies, texts, and cross-channel interventions run through explicit per-action consent or preauthorized policy, with audit logs and reversible/pauseable controls | Piper law 1 + Piper law 4 + Dignity | todo |
+| Connector setup UX: CLI and web flows are peers of the conversational broker, not separate instructions; all surfaces show scopes, accounts, backfill size, expected cost/time, job progress, pause/resume/revoke controls, worker/restart status, and exact next steps when a provider blocks access | Experience Bar + Dignity | todo |
+
+## Batch 6 — The reward loop, proven by emergence
 
 | Goal | Test | Status |
 |---|---|---|
@@ -65,7 +95,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | **Social reward**: positive-valence appraisal directed at her → RPE spike (the strongest human reward) | Person | todo |
 | Emergence eval suite: seeded scenarios asserting signatures appear — TOT events occur, mood measurably colors recall, open goals boost related retrieval (Zeigarnik), spaced reinforcement beats massed | Person (the standing test) | todo |
 
-## Batch 6 — Graph as subconscious substrate
+## Batch 7 — Graph as subconscious substrate
 
 | Goal | Test | Status |
 |---|---|---|
@@ -73,7 +103,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Causal-ancestor chains + contradiction *paths* rendered into context (directional; mind the `find_causal_chain` direction wrinkle) | Person | todo |
 | Graph-adjacency signal joins the fused ranker's association tier | Person | todo |
 
-## Batch 7 — Conduct norms (prompt modules)
+## Batch 8 — Conduct norms (prompt modules)
 
 | Goal | Test | Status |
 |---|---|---|
@@ -82,11 +112,11 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Silence discipline: proactive messages clear an interruption bar; similar messages dedupe; choosing silence is a recorded, valid act | Piper law 4 | done (uncommitted / 0095) |
 | Human-scale conversational inference: local cues calibrate register without becoming durable relationship/user-preference memories; test scaffolding fades unless explicitly made durable; overloaded `partner` init memory is purpose-qualified as co-development | Person + Continuity | done (uncommitted / 0092–0094) |
 
-## Batch 8 — Small mechanics
+## Batch 9 — Small mechanics
 
 | Goal | Test | Status |
 |---|---|---|
-| Config-defaults registry: each default lives in exactly one row; `get_config_*` falls back to it (ends the 5-copies-of-`heartbeat.max_energy` drift risk) | Substrate | in progress (uncommitted / 0096–0100: heartbeat + maintenance defaults moved; init/status/channel paths read registry; retired local-provider references removed from source/live DB; broader seed sweep pending) |
+| Config-defaults registry: each default lives in exactly one row; `get_config_*` falls back to it (ends the 5-copies-of-`heartbeat.max_energy` drift risk) | Substrate | done (uncommitted / 0096–0101: heartbeat + maintenance defaults moved; init/status/channel paths read registry; broad feature seed sweep moved into `config_defaults`; existing active config rows preserved as overrides) |
 | Baseline file renumbering (duplicate 28/32) in one mechanical commit | Substrate | todo |
 | Graduated appraisal depth: appraisal intensity scales with stimulus salience (#67 budgets as the hook) — attention allocation as psychology and cost control | Person + Piper | todo |
 | Chat energy, the human way: tools in chat cost energy; conversation interacts with drives — connection satisfied by good interaction; cost-vs-restore governed by a character-card temperament dial | Person + Piper | todo |

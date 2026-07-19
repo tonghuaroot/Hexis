@@ -102,6 +102,42 @@ class MemoryStore:
             doc_ref, section_hash, memory_id, memories_created, source_path,
         )
 
+    async def store_source_document(
+        self,
+        *,
+        title: str,
+        source_type: str,
+        content_hash: str,
+        path: str | None,
+        file_type: str | None,
+        content: str,
+        word_count: int,
+        source_attribution: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist the exact raw source text before chunk-level ingestion."""
+        if self.client is None:
+            await self.connect()
+        raw = await self._fetchval(
+            """
+            SELECT upsert_source_document(
+                $1::text, $2::text, $3::text, $4::text, $5::text,
+                $6::text, $7::int, $8::jsonb, $9::jsonb
+            )
+            """,
+            title,
+            source_type,
+            content_hash,
+            path,
+            file_type,
+            content,
+            int(word_count),
+            json.dumps(source_attribution),
+            json.dumps(metadata or {}),
+        )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, dict) else {}
+
     async def set_affective_state(self, appraisal: Appraisal) -> None:
         if self.client is None:
             await self.connect()

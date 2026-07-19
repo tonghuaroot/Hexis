@@ -6,14 +6,14 @@
 -- stay in Python.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('subconscious.min_signal_confidence', '0.6'::jsonb,
      'Appraisal signals below this confidence are dropped during normalization'),
     ('subconscious.response_max_chars', '500'::jsonb,
      'Gut-reaction text cap applied during appraisal normalization')
 ON CONFLICT (key) DO NOTHING;
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('subconscious.appraisal_memory_limit', '10'::jsonb,
      'How many hydrated memories ride into the inline appraisal payload'),
     ('subconscious.appraisal_memory_chars', '1200'::jsonb,

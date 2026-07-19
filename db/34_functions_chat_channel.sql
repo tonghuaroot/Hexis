@@ -4,7 +4,7 @@ SET search_path = public, ag_catalog, "$user";
 -- Conversational testimony trust (#61): the default for a chat turn's source
 -- attribution. Near-certain trust belongs to verified provenance, not to
 -- whoever is on the line.
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.conversation_turn_trust', '0.8'::jsonb,
      'Default source trust for conversation turns (chat/channel) when the caller supplies none'),
     ('memory.direct_promotion_min_importance', '0.95'::jsonb,

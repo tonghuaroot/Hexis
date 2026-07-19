@@ -169,3 +169,36 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_in_progress
     ON ingestion_jobs (claimed_at) WHERE status = 'in_progress';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ingestion_jobs_active_hash
     ON ingestion_jobs (content_hash) WHERE status IN ('pending', 'in_progress');
+
+-- Durable raw source artifacts: ingestion extracts memories, but the exact
+-- source text stays available for deliberate document search/open later.
+CREATE TABLE IF NOT EXISTS source_documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_ingested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    title TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    path TEXT,
+    file_type TEXT,
+    content TEXT NOT NULL,
+    word_count INT NOT NULL DEFAULT 0,
+    size_bytes INT NOT NULL DEFAULT 0,
+    source_attribution JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'redacted', 'archived'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_documents_status_updated
+    ON source_documents (status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_source_documents_path
+    ON source_documents (path) WHERE path IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_source_documents_source_type
+    ON source_documents (source_type);
+CREATE INDEX IF NOT EXISTS idx_source_documents_content_fts
+    ON source_documents USING GIN (to_tsvector('english', title || ' ' || COALESCE(path, '') || ' ' || content))
+    WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_source_documents_source_attribution
+    ON source_documents USING GIN (source_attribution);

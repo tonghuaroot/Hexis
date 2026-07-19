@@ -3,7 +3,7 @@
 -- the consumer; the API is an enqueuer.
 SET search_path = public, ag_catalog, "$user";
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('ingest.job_max_content_chars', '2000000'::jsonb,
      'Maximum pasted/extracted text an ingestion job may carry; larger content uses the synchronous CLI path'),
     ('ingest.job_claim_timeout_s', '1800'::jsonb,
@@ -193,7 +193,7 @@ CREATE OR REPLACE FUNCTION get_ingestion_job(
 $$ LANGUAGE sql STABLE;
 
 -- Ingestion policy keys (#91): the dataclass defaults mirror these seeds.
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('ingest.deep_max_words', '2000'::jsonb,
      'Documents at or under this word count get per-section appraisal (deep mode); larger get one doc-level appraisal'),
     ('ingest.max_section_chars', '2000'::jsonb,

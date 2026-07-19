@@ -88,7 +88,7 @@ WHERE NOT EXISTS (
     WHERE p.claim_kind = v.claim_kind AND p.pattern = v.pattern
 );
 
-INSERT INTO config (key, value, description) VALUES
+INSERT INTO config_defaults (key, value, description) VALUES
     ('guardrails.action_claims.enabled', 'true'::jsonb,
      'Detect unsupported action claims in final assistant text and append a visible correction'),
     ('guardrails.action_claims.llm_verifier_enabled', 'false'::jsonb,
