@@ -1,109 +1,172 @@
 # Hexis Handoff
 
-Last updated: 2026-07-18 (mission Batch 3 nearly complete — laptop switch mid-batch)
+Last updated: 2026-07-19 (standalone `~/embeddinggemma.c` chosen; Hexis now
+uses the local Metal sidecar binary until publishing)
 
-## Where we are
+## Standing orders from Eric (do not violate)
 
-The mission workstream is live: **MISSION.md** (two north stars: personhood +
-usefulness; six decision tests) and **MISSION_PROGRESS.md** (the committed
-tracker) drive an 8-batch implementation plan. The full execution plan —
-including per-batch exploration facts, risk-review fixes, and reference-project
-guidance — is committed at **`docs/plans/mission-implementation-plan.md`**
-(copied from local plan storage so it survives machine switches).
+1. **Do NOT touch Ollama. At all.** No commands, no comparisons, no reading its
+   blobs, no symlinks into `~/.ollama`. It is being replaced by the standalone
+   `~/embeddinggemma.c` engine. (Context: an earlier symlink + case-insensitive
+   filename collision let a `curl -o` clobber an Ollama blob through the
+   symlink — repaired and verified, but the lesson stands: never symlink into
+   another app's store; beware macOS case-insensitive paths.)
+2. **embeddinggemma.c is a true hand-port** — pure C, no C++, no dependencies
+   except libcurl for the download path, no ggml, no llama.cpp linkage. Eric
+   explicitly chose owning the full inference path. Do not relitigate.
+3. **Eric builds and publishes all binaries from this machine** into the Hexis
+   release (no CI build matrix). Targets: Metal, CUDA, ROCm, CPU x64, CPU arm64.
+   For now Hexis uses the local binary:
+   `~/embeddinggemma.c/build/embeddinggemma-metal`.
+4. The sidecar owns model placement and download: it always looks for
+   `model/embeddinggemma-300M-qat-Q4_0.gguf` relative to its executable and
+   downloads the hard-coded Hugging Face URL when absent. No overrides.
+5. Re-verify machine state before acting — earlier probes go stale (an Ollama
+   install appeared mid-session and a duplicate `brew install` followed a stale
+   "not installed" check; Eric called it out).
 
-- **Batch 1 — one ranker (#96): DONE.** Unified `recmem_recall_context` with
-  knowledge + spontaneous tiers, `fast_recall` reduced to a flattening wrapper,
-  sensitivity stopgap, metamemory envelope (familiarity / tip-of-tongue /
-  "I'm not sure I ever knew this"), relevance floor `memory.recall_min_score`,
-  retrieval eval. Migrations 0080–0082. Commits c1a3442, f8dba7a, ab8bcf7.
-- **Batch 2 — incubation + inferred care (#98): DONE.** Background searches
-  resolve → activation boost + "it came back to me" web-inbox message;
-  extraction kind `user_event` → scheduled check-ins with confidence floors,
-  dedupe, caps, horizon clamps. Migrations 0083–0084. Commits e3f0785, f7ea2f3.
-- **Batch 3 — lean core, reachable capability (#99): IN PROGRESS**, most of it
-  in the working tree at this handoff (committed as the WIP commit alongside
-  this file). Details below.
-- **Batches 4–8: not started.** See the plan + MISSION_PROGRESS.md.
+## This machine (new laptop) — environment state
 
-## Batch 3 state (issue #99)
+- **venv**: rebuilt with uv (Python 3.12.13) after the old symlink broke in the
+  laptop switch. No `pip` in it — use `uv pip install --python .venv/bin/python`.
+  Shell is **fish**: `source .venv/bin/activate` fails in the Bash tool; call
+  `.venv/bin/python` / `.venv/bin/pytest` / `.venv/bin/hexis` directly, or
+  wrap loops in `bash -c '...'`.
+- **Network**: AT&T WiFi with a content filter. apt repos (deb.debian.org,
+  apt.postgresql.org) are BLOCKED (redirect to login.attwifi.com) → the db
+  Docker image cannot be built locally on this network. Docker Hub, GHCR, npm,
+  PyPI, and huggingface.co all work. `gh` token now has `read:packages`.
+- **DB stack**: `hexis_brain` runs the prebuilt `ghcr.io/quixiai/hexis-brain:latest`
+  tagged locally as `hexis-db:latest`; start with
+  `docker compose up -d --no-build`. Working-tree parity comes from
+  migrations (all 0001–0086 applied; **next migration number: 0087**). Rebuild
+  the image from `ops/Dockerfile.db` when on an unfiltered network.
+- **Agent state**: `hexis init` NOT completed — `agent.is_configured` unset,
+  0 memories, embedding cache cleared. No `.env` / API keys on this machine
+  (didn't transfer). `tools.allow_dynamic=true` already set in config.
+- **Web UI**: deps installed via **bun** (`hexis ui` works). Gotcha: fresh
+  `bun install` does not run `prisma generate` — if `/api/status` 500s with
+  "Cannot find module '.prisma/client/default'", run
+  `cd hexis-ui && bunx prisma generate` and restart the dev server.
+- **Embeddings**: Hexis now uses the standalone `~/embeddinggemma.c` project,
+  not an in-repo `embedding-inference/` tree. Local binary:
+  `~/embeddinggemma.c/build/embeddinggemma-metal` (verified Mach-O arm64).
+  `hexis up` starts it on port 11434 if that port is idle, then the DB reaches
+  it through the existing default
+  `EMBEDDING_SERVICE_URL=http://host.docker.internal:11434/api/embed`. Sidecar
+  logs go to `~/.hexis/embeddinggemma.log`. The binary itself hard-codes the
+  model path relative to its executable and downloads the GGUF with libcurl if
+  missing.
+- **Init UI**: migration 0086 tightens `get_init_status()` so model setup is
+  complete only when both conscious and subconscious configs have provider +
+  model. The web init page no longer skips the Models screen from ambient
+  stored config while DB stage is still `llm`; it pre-fills rows but waits for
+  an explicit Save Models click.
+- llama.cpp reference checkout: `~/llama.cpp` at commit `d77599234`, tools
+  already built in `build/bin` (`llama-embedding`, `llama-tokenize`,
+  `llama-gguf`). Used ONLY to generate goldens.
 
-Done and committed (487b0a4 + the WIP commit accompanying this handoff):
+## Workstream A — Mission plan (MISSION_PROGRESS.md, plan at docs/plans/mission-implementation-plan.md)
 
-1. **Coverage gate**: `ToolSpec.internal` flag; `tests/core/test_tool_coverage.py`
-   fails the build for any registered non-internal tool bound by no skill.
-   `GRANDFATHERED_UNBOUND` is now the empty set. Agent-authored skills
-   (`~/.hexis/skills/agent-authored/`) count as bindings.
-2. **Bind wave**: calendar, outreach, council skills created; email-digest,
-   crm-lookup, code-execution, research, self-reflection, core-memory,
-   knowledge-ingest, skill-authoring extended. skill-authoring teaches the
-   two-step growth loop (create_tool → bind in a skill).
-3. **Phenomenological renames**: `explore_subgraph` → `associate` (old name is
-   an internal alias), `explore_concept` internal, new `trace_why` wrapping
-   `find_causal_chain`. DB dispatch names unchanged.
-4. **Plugins made real**: all seven speculative integrations extracted to
-   `plugins/installed/{todoist,asana,hubspot,fathom,video_gen,twitter,youtube}/`
-   (tools.py + plugin.json manifest with a **tool-ownership contract** +
-   `__init__.py` Plugin class + bundled skill). Loader reads
-   `plugin.external_dirs` config; ownership mismatch skips loudly; new
-   `include_bundled=False` kwarg on `discover_plugins`/`load_plugins` isolates
-   synthetic-plugin tests from the now-populated bundled dir. Registry is down
-   to 106 core tools; live check shows `plugins: 7 | tools: 14`. Integration
-   tests moved to `tests/plugins/` (174 pass with coverage/validation suites).
-5. **Self-extension visibility (partial)**: migration **0085** (applied to the
-   dev DB) + baseline `db/32_tables_runtime.sql` widen the `change_journal.kind`
-   CHECK to include `'self_extension'`. **The Python wiring is NOT done yet** —
-   see next steps.
+- Batches 1 (#96) and 2 (#98): DONE (see git log / previous handoff).
+- **Batch 3 (#99): all code complete, suite green (2457 passed / 1 skipped),
+  but UNCOMMITTED** — the working tree holds:
+  - `core/tools/self_extension.py` (new): `record_self_extension(pool,
+    summary, notice, detail)` — journals `record_change('self_extension', …)`
+    + queues a web-inbox notice via `queue_outbox_message(…,
+    '{"mode":"web_inbox"}')`; advisory (log-and-continue).
+  - `core/tools/dynamic.py` + `core/tools/skills.py`: call it after successful
+    create_tool / author_skill (created-vs-updated distinguished).
+  - Tests: `tests/core/test_dynamic_tools.py` (+2),
+    `tests/core/test_skills_marketplace.py` (+1) — journal row, envelope
+    `delivery == {"mode":"web_inbox"}`, first-person notice text, cleanup.
+  - `CONTRIBUTING.md`: footprint ladder (extend → skill → gated tool → plugin
+    → MCP → core last) + omissions-with-redirects table;
+    `docs/contributing/index.md` gained Key Principle 5 linking it.
+  - `apps/hexis_init.py`: **embedding-failure UX fix** (Experience Bar) —
+    `_run_embedding_step(conn, step, interactive=)` shows cause + exact fix +
+    "Try again?" retry-in-place (only the failed DB write reruns; answers
+    kept); wraps express/character/custom write blocks, consent, and the
+    non-interactive path. +3 regression tests in
+    `tests/cli/test_init_noninteractive.py` (tests/cli: 50/50 green).
+    The guidance now points to the local `embeddinggemma.c` sidecar, not
+    Ollama.
+  - `apps/hexis_cli.py`: `hexis up` starts
+    `~/embeddinggemma.c/build/embeddinggemma-metal` before the advisory
+    embedding health probe. The old in-repo `embedding-inference/` directory
+    was removed.
+- **Remaining to close #99**: (1) live self-extension acceptance — blocked on
+  Eric completing init + consent (needs an LLM API key; wizard at
+  `hexis init` or `localhost:3477/init`): ask the agent to build a small tool
+  via create_tool, bind via author_skill, use it; verify change-journal row +
+  web-inbox notice + survival across worker restart; (2) flip Batch 3 rows in
+  MISSION_PROGRESS.md with SHAs; (3) close #99. Commit message pattern: see
+  git log; never add Co-Authored-By.
+- Batches 4–8: not started. The standalone embeddinggemma.c integration has
+  jumped the queue by Eric's directive; expect re-sequencing.
 
-### Batch 3 — remaining work (do in order)
+## Workstream B — standalone embeddinggemma.c
 
-1. **Self-extension journaling + notice**: in `core/tools/dynamic.py`
-   (CreateToolHandler) and `core/tools/skills.py` (author_skill path), after a
-   successful create/update: call `record_change('self_extension', <summary>,
-   ...)` (`db/71_functions_change_journal.sql`) and post a web-inbox notice via
-   `queue_outbox_message(<first-person text>, 'self_extension' intent, ...,
-   '{"mode":"web_inbox"}'::jsonb)` — note queue_outbox_message now takes a 4th
-   `p_delivery` param (migration 0083). Advisory (try/except-log), never blocks
-   the authoring itself. Add a db or core test for the journal row.
-2. **CONTRIBUTING.md**: add pi's omissions-with-redirects section and the
-   adapted hermes footprint ladder (extend existing → skill → gated tool →
-   plugin → MCP → new core tool last) — "core is the mind; capability lives at
-   the edges"; every "not in core" names its sanctioned path.
-3. **Full suite green** (`pytest tests -q`; expect ~2455 passing), rebuild the
-   stack (`hexis upgrade`), then the **live self-extension acceptance**: ask dev
-   Samantha to build a small tool via `create_tool` (needs config
-   `tools.allow_dynamic=true`), bind it via `author_skill`, use it in the same
-   conversation; verify the change-journal row + web-inbox notice; verify it
-   survives a worker restart.
-4. **MISSION_PROGRESS.md**: flip the Batch 3 rows (coverage gate, bind wave,
-   renames, plugins, self-extension) to done with SHAs.
-5. Close **#99** with the SHAs; then proceed to Batch 4 (issue-per-batch
-   pattern — file the Batch 4 issue at start).
+**Decision update**: `embedding-inference/` was removed from this repo. The
+embedding engine is now the standalone project `~/embeddinggemma.c`, pure C
+with no C++ and no runtime dependency other than libcurl for model download.
+It is not published yet; Hexis is temporarily hard-wired to the local binary
+`~/embeddinggemma.c/build/embeddinggemma-metal`.
 
-## Gotchas worth carrying (hard-won this batch)
+**Serving contract**: the sidecar binds `0.0.0.0:11434` by default and serves
+the DB contract already used by `get_embedding()`:
+- `GET /api/tags` for health.
+- `POST /api/embed` with `{"model","input":[...]}` returning
+  `{"embeddings":[[768 floats]...]}`. The DB sends text prefixes itself via
+  `ensure_embedding_prefix`: `search_document:`, `search_query:`,
+  `clustering:`, `classification:`.
 
-- **Defaulted-param overloads**: adding a defaulted param via CREATE OR REPLACE
-  creates a second ambiguous signature — always `DROP FUNCTION` the old
-  signature first in the migration.
-- **Migration edits during dev**: regenerate a migration wholesale from the
-  baselines rather than string-patching it repeatedly; force re-apply an
-  unshipped migration with `DELETE FROM schema_migrations WHERE version LIKE
-  'NNNN%'` then `hexis migrate`.
-- **Test fixtures for recall**: seed embeddings must embed the
-  `ensure_embedding_prefix(text,'search_query')` form (the CI stub axis depends
-  on the exact string); 'once' schedules require a `run_at` key; fixture DBs
-  are unconfigured fresh baselines (seed configs in-test).
-- **Plugin tests**: use `include_bundled=False` for synthetic tmp-dir plugins.
-- **Next migration number: 0086.**
+**Model** (the only one): `ggml-org/embeddinggemma-300M-qat-q4_0-GGUF`
+- URL: https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF/resolve/main/embeddinggemma-300M-qat-Q4_0.gguf
+  (note capital `Q4_0`; lowercase 404s).
+- sha256 `50d28e22432a148f6f8a86eab3700f92add5d1f54baf7790675a2a4dadbccf26`,
+  277,852,192 bytes.
+- The binary checks `model/embeddinggemma-300M-qat-Q4_0.gguf` relative to its
+  own executable first and downloads this URL if absent. No override path.
 
-## Environment notes for the new laptop
+**Project state in `~/embeddinggemma.c`**:
+- `PORT_SPEC.md`, `EXTRACTION.md`, tensor manifest, token goldens, and
+  embedding goldens are persisted there.
+- CPU scalar engine, HTTP server, libcurl model download, and Metal backend
+  exist. Local binary `build/embeddinggemma-metal` is present and executable.
+- Hexis integration now starts that binary from `hexis up`; init failure
+  guidance points to the sidecar; `core.cli_api.embedding_service_diagnosis`
+  labels `:11434` as `embeddinggemma.c local sidecar`.
+- Still before publishing: build/package the five release binaries from this
+  machine, decide final artifact location, then replace the temporary local
+  path with the published Hexis-managed binary path.
 
-- Dev DB state is local Docker (migrations 0080–0085 applied here; a fresh
-  clone just needs `docker compose up -d && hexis migrate`). Dev Samantha is
-  disposable — Eric plans a wipe now that Batch 1's unified ranker landed, so
-  the fresh brain refills under one ranker.
-- **`.reference/` is gitignored and does NOT transfer** — it holds the
-  sovereign-oss/pro specs and the pi/hermes-agent/openclaw reference checkouts.
-  Copy it manually if needed (the plan already folds in the reference guidance,
-  so Batches 4–8 don't strictly require it).
-- HMX workstream status (previous handoff content) is durably recorded in
-  `docs/hmx-acceptance.md` and `plans/hmx.md`.
+## Verification quick-reference
+
+```bash
+# suite (DB must be up)
+POSTGRES_HOST=127.0.0.1 .venv/bin/pytest tests -q          # 2457 pass / 1 skip
+# standalone embedding server
+cd ~/embeddinggemma.c && make build/embeddinggemma-metal
+~/embeddinggemma.c/build/embeddinggemma-metal
+# Hexis integration checks
+.venv/bin/python -m py_compile apps/hexis_cli.py apps/hexis_init.py core/cli_api.py
+.venv/bin/pytest tests/cli/test_init_noninteractive.py -q
+# regenerate goldens (only if llama.cpp bumps)
+~/llama.cpp/build/bin/llama-embedding -m <gguf> -p "<s>" --pooling mean \
+  --embd-normalize 2 --embd-output-format array -t 4 -ngl 0 --no-warmup
+~/llama.cpp/build/bin/llama-tokenize -m <gguf> -p "<s>" --ids --no-parse-special
+```
+
+## Gotchas carried forward
+
+- Defaulted-param SQL overloads: `DROP FUNCTION` the old signature first.
+- Test fixtures: seed embeddings must embed the `ensure_embedding_prefix`
+  form; `'once'` schedules need `run_at`; fixture DBs are unconfigured.
+- Plugin tests use `include_bundled=False`.
+- asyncpg returns JSONB as `str` (no codec registered) — `json.loads` in tests.
+- macOS FS is case-insensitive: `300M-qat-Q4_0.gguf` and `300m-qat-q4_0.gguf`
+  are THE SAME FILE. Never mix case variants; never symlink into app stores.
+- Harness background processes get reaped between sessions — anything
+  long-running (dev servers, sidecars) must be relaunched, or owned by the
+  stack (`hexis up`), not by a shell.

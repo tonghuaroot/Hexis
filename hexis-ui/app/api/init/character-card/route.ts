@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { normalizeJsonValue, toJsonParam } from "@/lib/db";
+import { initRouteError } from "@/lib/init-errors";
 
 export const runtime = "nodejs";
 
@@ -11,25 +12,29 @@ export async function POST(request: Request) {
     typeof body.character_filename === "string" ? body.character_filename : null;
   const portrait = typeof body.portrait === "string" ? body.portrait : null;
 
-  const rows = await prisma.$queryRaw<{ result: unknown }[]>`
-    SELECT init_from_character_card(${toJsonParam(card)}::jsonb, ${userName}) as result
-  `;
-  if (characterFilename || portrait) {
-    await prisma.$queryRaw`
-      SELECT merge_init_profile(jsonb_build_object(
-        'agent', jsonb_strip_nulls(jsonb_build_object(
-          'character_filename', ${characterFilename},
-          'portrait', ${portrait}
-        ))
-      ))
+  try {
+    const rows = await prisma.$queryRaw<{ result: unknown }[]>`
+      SELECT init_from_character_card(${toJsonParam(card)}::jsonb, ${userName}) as result
     `;
-  }
-  const statusRows = await prisma.$queryRaw<
-    { status: unknown }[]
-  >`SELECT get_init_status() as status`;
+    if (characterFilename || portrait) {
+      await prisma.$queryRaw`
+        SELECT merge_init_profile(jsonb_build_object(
+          'agent', jsonb_strip_nulls(jsonb_build_object(
+            'character_filename', ${characterFilename},
+            'portrait', ${portrait}
+          ))
+        ))
+      `;
+    }
+    const statusRows = await prisma.$queryRaw<
+      { status: unknown }[]
+    >`SELECT get_init_status() as status`;
 
-  return Response.json({
-    result: normalizeJsonValue(rows[0]?.result),
-    status: normalizeJsonValue(statusRows[0]?.status),
-  });
+    return Response.json({
+      result: normalizeJsonValue(rows[0]?.result),
+      status: normalizeJsonValue(statusRows[0]?.status),
+    });
+  } catch (error) {
+    return initRouteError(error, "Failed to apply character card.");
+  }
 }

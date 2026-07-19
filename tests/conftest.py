@@ -159,6 +159,7 @@ async def configure_agent_for_tests(db_pool):
         "agent.objectives",
         "llm.heartbeat",
         "llm.chat",
+        "llm.subconscious",
         "agent.consent_status",
         "agent.consent_signature",
         "agent.consent_log_id",
@@ -222,6 +223,10 @@ async def configure_agent_for_tests(db_pool):
         )
         await conn.execute(
             "SELECT set_config('llm.chat', $1::jsonb)",
+            json.dumps({"provider": "openai", "model": "gpt-4o", "endpoint": "", "api_key_env": ""}),
+        )
+        await conn.execute(
+            "SELECT set_config('llm.subconscious', $1::jsonb)",
             json.dumps({"provider": "openai", "model": "gpt-4o", "endpoint": "", "api_key_env": ""}),
         )
         await conn.execute("UPDATE heartbeat_state SET is_paused = FALSE WHERE id = 1")

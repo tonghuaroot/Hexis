@@ -679,6 +679,8 @@ DECLARE
     state_record RECORD;
     remaining TEXT[];
     profile JSONB := get_init_profile();
+    conscious_llm JSONB;
+    subconscious_llm JSONB;
     llm_ok BOOLEAN;
     profile_ok BOOLEAN;
     missing TEXT[] := ARRAY[]::TEXT[];
@@ -690,9 +692,17 @@ BEGIN
         WHERE stage > state_record.init_stage
     );
 
-    llm_ok := COALESCE(
+    conscious_llm := COALESCE(
         NULLIF(get_config('llm.heartbeat'), 'null'::jsonb),
-        NULLIF(get_config('llm.chat'), 'null'::jsonb)) IS NOT NULL;
+        NULLIF(get_config('llm.chat'), 'null'::jsonb),
+        '{}'::jsonb);
+    subconscious_llm := COALESCE(
+        NULLIF(get_config('llm.subconscious'), 'null'::jsonb),
+        '{}'::jsonb);
+    llm_ok := NULLIF(conscious_llm->>'provider', '') IS NOT NULL
+        AND NULLIF(conscious_llm->>'model', '') IS NOT NULL
+        AND NULLIF(subconscious_llm->>'provider', '') IS NOT NULL
+        AND NULLIF(subconscious_llm->>'model', '') IS NOT NULL;
     profile_ok := NULLIF(profile#>>'{agent,name}', '') IS NOT NULL;
     -- What stands between here and consent — the DB decides, every frontend
     -- renders. Order = the order a wizard should resolve them.

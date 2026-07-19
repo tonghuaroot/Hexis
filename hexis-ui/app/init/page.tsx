@@ -94,7 +94,7 @@ type CharacterEntry = {
   personality: string;
   image: string | null;
 };
-type InitStatus = { stage?: string };
+type InitStatus = { stage?: string; steps?: Record<string, unknown> };
 type InitProfile = { agent?: { name?: string } };
 type InitStatusResponse = {
   status?: InitStatus;
@@ -320,6 +320,49 @@ function dbStageToUiStage(dbStage: string): InitStage {
   return "choose_path";
 }
 
+export function hasCompleteLlmConfig(config: unknown): boolean {
+  if (config === null || typeof config !== "object" || Array.isArray(config)) {
+    return false;
+  }
+  const record = config as Record<string, unknown>;
+  return (
+    typeof record.provider === "string" &&
+    record.provider.trim().length > 0 &&
+    typeof record.model === "string" &&
+    record.model.trim().length > 0
+  );
+}
+
+export function hasCompleteLlmSetup(data: InitStatusResponse): boolean {
+  return (
+    hasCompleteLlmConfig(data.llm_heartbeat) &&
+    hasCompleteLlmConfig(data.llm_subconscious)
+  );
+}
+
+export function nextStageFromInitStatus(current: InitStage, data: InitStatusResponse): InitStage {
+  const dbStage = (data.status?.stage as string) ?? "not_started";
+  const uiStage = dbStageToUiStage(dbStage);
+  const steps = data.status?.steps ?? {};
+  const llmSetupComplete = steps.llm_configured === true && hasCompleteLlmSetup(data);
+
+  if (!llmSetupComplete) {
+    return "llm";
+  }
+  if (uiStage === "llm") {
+    // Saved model rows may be stale ambient state. Keep the user on Models
+    // until they explicitly confirm them in this UI session.
+    return current;
+  }
+  if (current === "consent" && uiStage === "complete") {
+    return current;
+  }
+  if (uiStage === "consent" || uiStage === "complete") {
+    return uiStage;
+  }
+  return current === "llm" ? "choose_path" : current;
+}
+
 export default function Home() {
   const router = useRouter();
   const [stage, setStage] = useState<InitStage>("llm");
@@ -455,22 +498,7 @@ export default function Home() {
     if (typeof data.mode === "string") {
       // no longer tracking mode separately
     }
-    const dbStage = (data.status?.stage as string) ?? "not_started";
-    const uiStage = dbStageToUiStage(dbStage);
-    if (uiStage === "llm") {
-      // Server truth (#79): the DB's steps contract says whether LLM config
-      // is complete — the wizard renders, it doesn't re-derive.
-      const steps = (data.status?.steps ?? {}) as Record<string, unknown>;
-      if (steps.llm_configured === true) {
-        setStage("choose_path");
-      }
-    } else {
-      setStage((prev) => {
-        if (prev === "consent" && uiStage === "complete") return prev;
-        if (uiStage === "consent" || uiStage === "complete") return uiStage;
-        return prev;
-      });
-    }
+    setStage((prev) => nextStageFromInitStatus(prev, data));
   };
 
   useEffect(() => {

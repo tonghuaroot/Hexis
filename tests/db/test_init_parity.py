@@ -48,6 +48,7 @@ async def test_consent_gate_reports_missing_steps(db_pool):
             # Control preconditions: no LLM config, no profile.
             await conn.execute("SELECT set_config('llm.heartbeat', 'null'::jsonb)")
             await conn.execute("SELECT set_config('llm.chat', 'null'::jsonb)")
+            await conn.execute("SELECT set_config('llm.subconscious', 'null'::jsonb)")
             status = _json(await conn.fetchval("SELECT get_init_status()"))
             assert status["ready_for_consent"] is False
             assert status["missing"] == ["llm", "profile"]
@@ -56,6 +57,14 @@ async def test_consent_gate_reports_missing_steps(db_pool):
                 """SELECT set_config('llm.heartbeat', '{"provider": "test", "model": "t"}'::jsonb)"""
             )
             status = _json(await conn.fetchval("SELECT get_init_status()"))
+            assert status["steps"]["llm_configured"] is False
+            assert status["missing"] == ["llm", "profile"]
+
+            await conn.execute(
+                """SELECT set_config('llm.subconscious', '{"provider": "test", "model": "s"}'::jsonb)"""
+            )
+            status = _json(await conn.fetchval("SELECT get_init_status()"))
+            assert status["steps"]["llm_configured"] is True
             assert status["missing"] == ["profile"]
         finally:
             await tr.rollback()
