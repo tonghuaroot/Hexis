@@ -153,6 +153,14 @@ class IngestUrlRequest(BaseModel):
     sensitivity: str | None = None
 
 
+class IntegrationActionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    action: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    source_session_id: str | None = None
+
+
 class OpenAIChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -562,6 +570,128 @@ async def status():
     except Exception as e:
         logger.error("Status failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+_INTEGRATION_ACTION_TO_TOOL = {
+    "start_setup": "start_integration_setup",
+    "configure_channel": "configure_channel_integration",
+    "connect_gmail": "connect_gmail",
+    "complete_gmail": "complete_gmail_connection",
+    "revoke_gmail": "revoke_gmail_connection",
+    "start_gmail_backfill": "start_gmail_backfill",
+    "control_gmail_backfill": "control_gmail_backfill",
+    "verify_channel": "verify_channel_integration",
+}
+
+
+def _integration_action_arguments(
+    action: str,
+    arguments: dict[str, Any],
+    source_session_id: str | None,
+) -> dict[str, Any]:
+    args = dict(arguments or {})
+    if action == "start_setup" and args.get("connector_id") == "gmail":
+        raise HTTPException(
+            status_code=422,
+            detail="Use connect_gmail for Gmail OAuth setup.",
+        )
+    if action in {"start_setup", "configure_channel", "verify_channel"}:
+        connector_id = (
+            str(args.get("connector_id") or "").strip().lower().replace("-", "_")
+        )
+        if connector_id not in {"slack", "telegram", "signal"}:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{action} supports Slack, Telegram, and Signal.",
+            )
+        args["connector_id"] = connector_id
+    if action in {"start_setup", "connect_gmail", "start_gmail_backfill"}:
+        args.setdefault("source_channel", "web")
+    if (
+        action in {"start_setup", "connect_gmail", "start_gmail_backfill"}
+        and source_session_id
+    ):
+        args.setdefault("source_session_id", source_session_id)
+    return args
+
+
+def _tool_result_payload(result: Any) -> dict[str, Any]:
+    return {
+        "success": bool(result.success),
+        "output": result.output,
+        "display_output": result.display_output,
+        "error": result.error,
+        "error_type": result.error_type.value if result.error_type else None,
+        "energy_spent": result.energy_spent,
+        "duration_seconds": result.duration_seconds,
+        "metadata": result.metadata,
+    }
+
+
+@app.post("/api/integrations/action")
+async def integration_action(req: IntegrationActionRequest):
+    """Execute first-class integration setup controls through Python drivers.
+
+    This is deliberately narrower than a generic web tool-execution endpoint:
+    the web UI can invoke only connector setup/control operations whose
+    implementation already lives in the tool registry or DB substrate.
+    """
+    pool = _pool
+    if pool is None:
+        return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
+
+    action = req.action.strip().lower()
+    action_arguments = dict(req.arguments or {})
+    if not action_arguments and req.model_extra:
+        action_arguments = {
+            key: value
+            for key, value in req.model_extra.items()
+            if key not in {"action", "arguments", "source_session_id"}
+        }
+
+    if action == "revoke_connection":
+        connector_id = (
+            str(action_arguments.get("connector_id") or "").strip().lower().replace("-", "_")
+        )
+        if not connector_id:
+            raise HTTPException(status_code=422, detail="connector_id is required")
+        account_key = action_arguments.get("account_key")
+        reason = action_arguments.get("reason") or "revoked from web connections"
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT revoke_integration_connection($1, $2, $3)",
+                connector_id,
+                account_key,
+                reason,
+            )
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        return JSONResponse(
+            {
+                "success": True,
+                "output": payload,
+                "display_output": f"{connector_id} connection revoked.",
+                "error": None,
+                "error_type": None,
+            }
+        )
+
+    tool_name = _INTEGRATION_ACTION_TO_TOOL.get(action)
+    if not tool_name:
+        raise HTTPException(status_code=422, detail=f"unknown integration action: {action}")
+
+    from core.tools.base import ToolContext, ToolExecutionContext
+
+    registry = create_default_registry(pool)
+    args = _integration_action_arguments(action, action_arguments, req.source_session_id)
+    context = ToolExecutionContext(
+        tool_context=ToolContext.CHAT,
+        call_id=f"web-integration:{uuid.uuid4()}",
+        session_id=req.source_session_id
+        or str(args.get("source_session_id") or "web-connections"),
+    )
+    result = await registry.execute(tool_name, args, context)
+    status_code = 200 if result.success else 400
+    return JSONResponse(jsonable_encoder(_tool_result_payload(result)), status_code=status_code)
 
 
 @app.post("/api/webhook/{source}")

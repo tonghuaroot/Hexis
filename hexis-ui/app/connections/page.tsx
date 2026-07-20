@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card } from "../components/ui/card";
+import { TextInput } from "../components/ui/input";
 import { PageHeader } from "../components/ui/page-header";
 import { Spinner } from "../components/ui/spinner";
 import {
@@ -26,6 +27,20 @@ import {
   stringArray,
   summarizeConnectors,
 } from "./status";
+
+type IntegrationActionResult = {
+  success?: boolean;
+  output?: unknown;
+  display_output?: string | null;
+  error?: string | null;
+  detail?: string | null;
+};
+
+type IntegrationActionHandler = (
+  busyKey: string,
+  action: string,
+  argumentsPayload?: Record<string, unknown>
+) => Promise<void>;
 
 export default function ConnectionsPage() {
   const [data, setData] = useState<IntegrationStatusData | null>(null);
@@ -49,10 +64,10 @@ export default function ConnectionsPage() {
     }
   }, []);
 
-  const startSetup = useCallback(
-    async (connectorId: string) => {
+  const runAction = useCallback<IntegrationActionHandler>(
+    async (busyKey, action, argumentsPayload = {}) => {
       if (actionBusy) return;
-      setActionBusy(connectorId);
+      setActionBusy(busyKey);
       setNotice(null);
       setError(null);
       try {
@@ -60,19 +75,19 @@ export default function ConnectionsPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            action: "start_setup",
-            connector_id: connectorId,
+            action,
+            arguments: argumentsPayload,
             source_session_id: "web-connections",
           }),
         });
-        const payload = await response.json();
-        if (!response.ok) {
-          throw new Error(payload?.error || `Setup failed (${response.status})`);
+        const payload = await readActionPayload(response);
+        if (!response.ok || payload.success === false) {
+          throw new Error(actionError(payload, response.status));
         }
-        setNotice(payload?.next_step || "Setup started.");
+        setNotice(actionNotice(payload));
         await fetchStatus();
       } catch (requestError: unknown) {
-        setError(requestError instanceof Error ? requestError.message : "Setup failed.");
+        setError(requestError instanceof Error ? requestError.message : "Action failed.");
       } finally {
         setActionBusy(null);
       }
@@ -132,14 +147,18 @@ export default function ConnectionsPage() {
           <ConnectorCard
             key={summary.connector.id}
             summary={summary}
-            busy={actionBusy === summary.connector.id}
-            onStartSetup={startSetup}
+            actionBusy={actionBusy}
+            onAction={runAction}
           />
         ))}
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.25fr,0.75fr]">
-        <BackfillPanel jobs={data?.backfill.jobs || []} />
+        <BackfillPanel
+          jobs={data?.backfill.jobs || []}
+          actionBusy={actionBusy}
+          onAction={runAction}
+        />
         <SourceItemsPanel summaries={summaries} />
       </div>
     </div>
@@ -148,12 +167,12 @@ export default function ConnectionsPage() {
 
 function ConnectorCard({
   summary,
-  busy,
-  onStartSetup,
+  actionBusy,
+  onAction,
 }: {
   summary: ConnectorSummary;
-  busy: boolean;
-  onStartSetup: (connectorId: string) => void;
+  actionBusy: string | null;
+  onAction: IntegrationActionHandler;
 }) {
   const { connector, runtime } = summary;
   const setupManifest = asRecord(connector.setup_manifest);
@@ -165,6 +184,7 @@ function ConnectorCard({
     summary.activeConnections.length === 0 &&
     summary.activeAttempts.length === 0 &&
     connector.status === "available";
+  const isChannelConnector = ["slack", "telegram", "signal"].includes(connector.id);
 
   return (
     <Card className="space-y-4">
@@ -207,6 +227,35 @@ function ConnectorCard({
               <p className="mt-1 truncate text-xs text-[var(--ink-soft)]">
                 {connection.capabilities.map(humanize).join(", ") || "Connected"}
               </p>
+              <div className="mt-2 flex justify-end">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={Boolean(actionBusy)}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Disconnect ${connection.display_name || connection.account_key}?`
+                      )
+                    ) {
+                      void onAction(
+                        `${connector.id}:revoke:${connection.id}`,
+                        connector.id === "gmail" ? "revoke_gmail" : "revoke_connection",
+                        {
+                          connector_id: connector.id,
+                          account_key: connection.account_key,
+                          reason: "revoked from web connections",
+                        }
+                      );
+                    }
+                  }}
+                  className="px-2.5 py-1 text-xs"
+                >
+                  {actionBusy === `${connector.id}:revoke:${connection.id}`
+                    ? "Disconnecting..."
+                    : "Disconnect"}
+                </Button>
+              </div>
             </div>
           ))
         ) : (
@@ -264,44 +313,277 @@ function ConnectorCard({
         <p className="text-xs text-[var(--ink-soft)]">{nextStep}</p>
       ) : null}
 
+      {connector.id === "gmail" ? (
+        <GmailControls summary={summary} actionBusy={actionBusy} onAction={onAction} />
+      ) : null}
+
+      {isChannelConnector ? (
+        <ChannelControls
+          summary={summary}
+          canStartSetup={canStartSetup}
+          actionBusy={actionBusy}
+          onAction={onAction}
+        />
+      ) : null}
+
       {connector.docs_url ? (
-        <div className="flex flex-wrap items-center gap-3">
-          {canStartSetup ? (
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={busy}
-              onClick={() => onStartSetup(connector.id)}
-              className="px-3 py-1.5 text-xs"
-            >
-              {busy ? "Starting..." : "Start setup"}
-            </Button>
-          ) : null}
-          <a
-            href={connector.docs_url}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--teal)] underline"
-          >
-            Provider docs <ExternalLink size={12} />
-          </a>
-        </div>
-      ) : canStartSetup ? (
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={busy}
-          onClick={() => onStartSetup(connector.id)}
-          className="px-3 py-1.5 text-xs"
+        <a
+          href={connector.docs_url}
+          target="_blank"
+          rel="noreferrer"
+          className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--teal)] underline"
         >
-          {busy ? "Starting..." : "Start setup"}
-        </Button>
+          Provider docs <ExternalLink size={12} />
+        </a>
       ) : null}
     </Card>
   );
 }
 
-function BackfillPanel({ jobs }: { jobs: BackfillJob[] }) {
+function GmailControls({
+  summary,
+  actionBusy,
+  onAction,
+}: {
+  summary: ConnectorSummary;
+  actionBusy: string | null;
+  onAction: IntegrationActionHandler;
+}) {
+  const [clientSecretPath, setClientSecretPath] = useState("");
+  const [useEnvSecret, setUseEnvSecret] = useState(false);
+  const [authorizationResponse, setAuthorizationResponse] = useState("");
+  const [backfillQuery, setBackfillQuery] = useState("newer_than:30d");
+  const [maxMessages, setMaxMessages] = useState("100");
+
+  const setupManifest = asRecord(summary.connector.setup_manifest);
+  const defaultCapabilities = stringArray(setupManifest.default_capabilities);
+  const capabilities = defaultCapabilities.length
+    ? defaultCapabilities
+    : ["read", "search", "ingest"];
+  const pendingAttempt =
+    summary.activeAttempts[0] ||
+    summary.recentAttempts.find((attempt) =>
+      ["pending_user", "awaiting_input", "in_progress"].includes(attempt.status)
+    );
+  const connection = summary.activeConnections[0] || null;
+  const connectBusy = actionBusy === "gmail:connect";
+  const completeBusy = actionBusy === "gmail:complete";
+  const backfillBusy = actionBusy === "gmail:backfill";
+
+  return (
+    <div className="space-y-3 rounded-md border border-[var(--outline)] px-3 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-xs font-semibold text-[var(--ink-soft)]">
+          Gmail actions
+        </h3>
+        <Badge variant="muted">{capabilities.map(humanize).join(", ")}</Badge>
+      </div>
+
+      {!connection ? (
+        <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+          <div className="space-y-2">
+            <TextInput
+              value={clientSecretPath}
+              onChange={(event) => setClientSecretPath(event.target.value)}
+              placeholder="OAuth client JSON path"
+              className="py-2 text-xs"
+            />
+            <label className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
+              <input
+                type="checkbox"
+                checked={useEnvSecret}
+                onChange={(event) => setUseEnvSecret(event.target.checked)}
+                className="h-4 w-4 accent-[var(--teal)]"
+              />
+              Use explicitly configured environment client secret
+            </label>
+          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy)}
+            onClick={() =>
+              void onAction("gmail:connect", "connect_gmail", {
+                capabilities,
+                client_secret_path: clientSecretPath.trim() || undefined,
+                use_env_client_secret: useEnvSecret,
+              })
+            }
+            className="self-start px-3 py-2 text-xs"
+          >
+            {connectBusy ? "Starting..." : "Connect"}
+          </Button>
+        </div>
+      ) : (
+        <div className="grid gap-2 md:grid-cols-[1fr_8rem_auto]">
+          <TextInput
+            value={backfillQuery}
+            onChange={(event) => setBackfillQuery(event.target.value)}
+            placeholder="Gmail search query"
+            className="py-2 text-xs"
+          />
+          <TextInput
+            type="number"
+            min={1}
+            max={500}
+            value={maxMessages}
+            onChange={(event) => setMaxMessages(event.target.value)}
+            aria-label="Max messages"
+            className="py-2 text-xs"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy)}
+            onClick={() =>
+              void onAction("gmail:backfill", "start_gmail_backfill", {
+                account_key: connection.account_key,
+                query: backfillQuery.trim() || undefined,
+                max_messages: parseMaxMessages(maxMessages),
+              })
+            }
+            className="px-3 py-2 text-xs"
+          >
+            {backfillBusy ? "Queuing..." : "Import"}
+          </Button>
+        </div>
+      )}
+
+      {pendingAttempt ? (
+        <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+          <TextInput
+            value={authorizationResponse}
+            onChange={(event) => setAuthorizationResponse(event.target.value)}
+            placeholder="Paste redirected URL or authorization code"
+            className="py-2 text-xs"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy) || authorizationResponse.trim().length === 0}
+            onClick={() =>
+              void onAction("gmail:complete", "complete_gmail", {
+                attempt_id: pendingAttempt.attempt_id,
+                authorization_response: authorizationResponse.trim(),
+              })
+            }
+            className="px-3 py-2 text-xs"
+          >
+            {completeBusy ? "Completing..." : "Complete"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ChannelControls({
+  summary,
+  canStartSetup,
+  actionBusy,
+  onAction,
+}: {
+  summary: ConnectorSummary;
+  canStartSetup: boolean;
+  actionBusy: string | null;
+  onAction: IntegrationActionHandler;
+}) {
+  const connectorId = summary.connector.id;
+  const [settings, setSettings] = useState<Record<string, string>>({});
+  const setupManifest = asRecord(summary.connector.setup_manifest);
+  const settingKeys = channelSettingKeys(setupManifest, connectorId);
+  const envVars = stringArray(setupManifest.env_vars);
+  const startAttempt = summary.activeAttempts[0] || null;
+  const startBusy = actionBusy === `${connectorId}:start`;
+  const configureBusy = actionBusy === `${connectorId}:configure`;
+  const verifyBusy = actionBusy === `${connectorId}:verify`;
+  const configuredSettings = Object.fromEntries(
+    settingKeys
+      .map((key) => [key, settings[key]?.trim() || ""] as const)
+      .filter(([, value]) => value.length > 0)
+  );
+  const hasSettings = Object.keys(configuredSettings).length > 0;
+
+  return (
+    <div className="space-y-3 rounded-md border border-[var(--outline)] px-3 py-3">
+      <div className="grid gap-2 md:grid-cols-2">
+        {settingKeys.map((settingKey, index) => (
+          <TextInput
+            key={settingKey}
+            value={settings[settingKey] || ""}
+            onChange={(event) =>
+              setSettings((current) => ({
+                ...current,
+                [settingKey]: event.target.value,
+              }))
+            }
+            placeholder={`${humanize(settingKey)} (${settingPlaceholder(
+              settingKey,
+              envVars,
+              index
+            )})`}
+            className="py-2 text-xs"
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {canStartSetup ? (
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy)}
+            onClick={() =>
+              void onAction(`${connectorId}:start`, "start_setup", {
+                connector_id: connectorId,
+              })
+            }
+            className="px-3 py-1.5 text-xs"
+          >
+            {startBusy ? "Starting..." : "Start setup"}
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={Boolean(actionBusy) || !hasSettings}
+          onClick={() =>
+            void onAction(`${connectorId}:configure`, "configure_channel", {
+              connector_id: connectorId,
+              settings: configuredSettings,
+            })
+          }
+          className="px-3 py-1.5 text-xs"
+        >
+          {configureBusy ? "Saving..." : "Save config"}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={Boolean(actionBusy)}
+          onClick={() =>
+            void onAction(`${connectorId}:verify`, "verify_channel", {
+              connector_id: connectorId,
+              attempt_id: startAttempt?.attempt_id,
+            })
+          }
+          className="px-3 py-1.5 text-xs"
+        >
+          {verifyBusy ? "Checking..." : "Verify config"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function BackfillPanel({
+  jobs,
+  actionBusy,
+  onAction,
+}: {
+  jobs: BackfillJob[];
+  actionBusy: string | null;
+  onAction: IntegrationActionHandler;
+}) {
   return (
     <Card className="space-y-3">
       <div className="flex items-center justify-between">
@@ -312,28 +594,80 @@ function BackfillPanel({ jobs }: { jobs: BackfillJob[] }) {
         <p className="text-sm text-[var(--ink-soft)]">No recent backfill jobs.</p>
       ) : (
         <div className="space-y-2">
-          {jobs.slice(0, 8).map((job) => (
-            <div
-              key={job.job_id}
-              className="grid gap-2 rounded-md border border-[var(--outline)] px-3 py-2 text-sm md:grid-cols-[1fr_auto]"
-            >
-              <div className="min-w-0">
-                <p className="truncate font-medium">
-                  {job.connector_id} · {job.account_key}
-                </p>
-                <p className="truncate text-xs text-[var(--ink-soft)]">
-                  {job.cursor_key}
-                  {job.updated_at ? ` · ${formatDate(job.updated_at)}` : ""}
-                </p>
-                {job.error ? <p className="mt-1 text-xs text-red-700">{job.error}</p> : null}
+          {jobs.slice(0, 8).map((job) => {
+            const controlBusy = actionBusy?.startsWith(`backfill:${job.job_id}:`) ?? false;
+            const canControl =
+              job.connector_id === "gmail" &&
+              !["completed", "failed", "cancelled"].includes(job.status);
+            const pauseOrResume =
+              job.status === "paused" || job.pause_requested ? "resume" : "pause";
+            return (
+              <div
+                key={job.job_id}
+                className="grid gap-2 rounded-md border border-[var(--outline)] px-3 py-2 text-sm md:grid-cols-[1fr_auto]"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-medium">
+                    {job.connector_id} · {job.account_key}
+                  </p>
+                  <p className="truncate text-xs text-[var(--ink-soft)]">
+                    {job.cursor_key}
+                    {job.updated_at ? ` · ${formatDate(job.updated_at)}` : ""}
+                  </p>
+                  {job.error ? <p className="mt-1 text-xs text-red-700">{job.error}</p> : null}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 md:justify-end">
+                  {job.pause_requested ? <Badge variant="warning">pause requested</Badge> : null}
+                  {job.cancel_requested ? <Badge variant="error">cancel requested</Badge> : null}
+                  <Badge variant={jobVariant(job.status)}>{job.status}</Badge>
+                  {canControl ? (
+                    <>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        disabled={Boolean(actionBusy)}
+                        onClick={() =>
+                          void onAction(
+                            `backfill:${job.job_id}:${pauseOrResume}`,
+                            "control_gmail_backfill",
+                            {
+                              job_id: job.job_id,
+                              action: pauseOrResume,
+                              reason: `${pauseOrResume} requested from web connections`,
+                            }
+                          )
+                        }
+                        className="px-2.5 py-1 text-xs"
+                      >
+                        {controlBusy ? "Working..." : humanize(pauseOrResume)}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        disabled={Boolean(actionBusy)}
+                        onClick={() => {
+                          if (window.confirm(`Cancel Gmail backfill job ${job.job_id}?`)) {
+                            void onAction(
+                              `backfill:${job.job_id}:cancel`,
+                              "control_gmail_backfill",
+                              {
+                                job_id: job.job_id,
+                                action: "cancel",
+                                reason: "cancelled from web connections",
+                              }
+                            );
+                          }
+                        }}
+                        className="px-2.5 py-1 text-xs"
+                      >
+                        Cancel
+                      </Button>
+                    </>
+                  ) : null}
+                </div>
               </div>
-              <div className="flex items-center gap-2 md:justify-end">
-                {job.pause_requested ? <Badge variant="warning">pause requested</Badge> : null}
-                {job.cancel_requested ? <Badge variant="error">cancel requested</Badge> : null}
-                <Badge variant={jobVariant(job.status)}>{job.status}</Badge>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Card>
@@ -426,4 +760,68 @@ function formatDate(value: string): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+async function readActionPayload(response: Response): Promise<IntegrationActionResult> {
+  const text = await response.text();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text) as IntegrationActionResult;
+  } catch {
+    return { error: text };
+  }
+}
+
+function actionError(payload: IntegrationActionResult, status: number): string {
+  if (payload.error) return payload.error;
+  if (payload.detail) return payload.detail;
+  const output = asRecord(payload.output);
+  const outputError = asString(output.error);
+  if (outputError) return outputError;
+  return `Action failed (${status})`;
+}
+
+function actionNotice(payload: IntegrationActionResult): string {
+  if (payload.display_output) return payload.display_output;
+  const output = asRecord(payload.output);
+  return (
+    asString(output.next_step) ||
+    asString(output.user_next_step) ||
+    asString(output.status) ||
+    "Action complete."
+  );
+}
+
+function parseMaxMessages(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return 100;
+  return Math.min(500, Math.max(1, parsed));
+}
+
+function channelSettingKeys(
+  setupManifest: Record<string, unknown>,
+  connectorId: string
+): string[] {
+  const derived = stringArray(setupManifest.config_keys)
+    .map((key) => key.split(".").pop() || key)
+    .filter((key, index, all) => key.length > 0 && all.indexOf(key) === index);
+  if (derived.length > 0) return derived;
+  if (connectorId === "slack") return ["bot_token", "app_token", "allowed_channels"];
+  if (connectorId === "telegram") return ["bot_token", "allowed_chat_ids"];
+  if (connectorId === "signal") return ["phone_number", "api_url", "allowed_numbers"];
+  return [];
+}
+
+function settingPlaceholder(key: string, envVars: string[], index: number): string {
+  if (key.includes("token")) {
+    return envVars.find((item) => item.includes("TOKEN")) || "ENV_VAR_NAME";
+  }
+  if (key.includes("phone")) {
+    return envVars.find((item) => item.includes("PHONE")) || "+15551234567";
+  }
+  if (key.includes("api_url")) {
+    return envVars.find((item) => item.includes("API_URL")) || "http://localhost:8080";
+  }
+  if (key.startsWith("allowed")) return "* or comma-separated IDs";
+  return envVars[index] || "value";
 }
