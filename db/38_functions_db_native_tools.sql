@@ -669,10 +669,10 @@ BEGIN
             END IF;
             SELECT array_agg(DISTINCT value) INTO history_sources
             FROM jsonb_array_elements_text(p_args->'sources') t(value);
-            IF EXISTS (SELECT 1 FROM unnest(history_sources) s(v) WHERE v NOT IN ('turn', 'memory')) THEN
+            IF EXISTS (SELECT 1 FROM unnest(history_sources) s(v) WHERE v NOT IN ('turn', 'memory', 'desk')) THEN
                 RETURN tool_error(
-                    'history search sources must be ''turn'' and/or ''memory''; invalid: '
-                    || (SELECT string_agg(v, ', ' ORDER BY v) FROM unnest(history_sources) s(v) WHERE v NOT IN ('turn', 'memory')),
+                    'history search sources must be ''turn'', ''memory'', and/or ''desk''; invalid: '
+                    || (SELECT string_agg(v, ', ' ORDER BY v) FROM unnest(history_sources) s(v) WHERE v NOT IN ('turn', 'memory', 'desk')),
                     'invalid_params');
             END IF;
         ELSE

@@ -119,6 +119,13 @@ class TestMemoryEnv:
         assert len(workspace.loaded_memories) == 1
         assert workspace.loaded_memories[0]["id"] == "a"
 
+        workspace.loaded_documents = [{"document_id": "doc-1", "content": "doc"}]
+        workspace.notes = "note"
+        env.workspace_drop("all")
+        assert workspace.loaded_memories == []
+        assert workspace.loaded_documents == []
+        assert workspace.notes == ""
+
     def test_workspace_status(self):
         from services.rlm_memory_env import RLMMemoryEnv, RLMWorkspace
         from unittest.mock import MagicMock
@@ -135,6 +142,48 @@ class TestMemoryEnv:
         assert status["loaded_memories_count"] == 1
         assert status["notes_chars"] == len("some notes")
         assert status["stubs_count"] == 1
+
+    def test_source_document_workspace_syscalls(self):
+        from services.rlm_memory_env import RLMMemoryEnv, RLMWorkspace
+        from unittest.mock import MagicMock
+        from core.memory_repo import MemoryRepo
+
+        mock_repo = MagicMock(spec=MemoryRepo)
+        mock_repo.search_documents.return_value = [
+            {"document_id": "doc-1", "title": "With specification", "snippet": "bounded context"}
+        ]
+        mock_repo.fetch_documents.return_value = {
+            "documents": [
+                {"document_id": "doc-1", "title": "With specification", "content": "bounded context"}
+            ],
+            "count": 1,
+        }
+        mock_repo.load_documents_to_desk.return_value = {
+            "count": 1,
+            "desk_unit_ids": ["unit-1"],
+        }
+
+        workspace = RLMWorkspace()
+        env = RLMMemoryEnv(mock_repo, workspace)
+
+        stubs = env.document_search("With specification")
+        fetched = env.document_fetch(document_ids=["doc-1"])
+        loaded = env.document_load_to_desk(document_ids=["doc-1"], reason="need exact spec")
+
+        assert stubs == mock_repo.search_documents.return_value
+        assert fetched["count"] == 1
+        assert loaded["desk_unit_ids"] == ["unit-1"]
+        assert workspace.document_stubs == stubs
+        assert workspace.loaded_documents[0]["document_id"] == "doc-1"
+        status = env.workspace_status()
+        assert status["document_stubs_count"] == 1
+        assert status["loaded_documents_count"] == 1
+        assert status["metrics"]["document_search_count"] == 1
+        assert status["metrics"]["document_fetch_count"] == 1
+        assert status["metrics"]["document_load_count"] == 1
+
+        env.workspace_drop("loaded_documents", keep_ids=["missing"])
+        assert workspace.loaded_documents == []
 
 
 class TestReplToolBridge:

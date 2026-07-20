@@ -46,11 +46,27 @@ for m in memories:
     print(f"[{m['type']}] {m['content'][:200]}...")
 ```
 
+### document_search(query, *, limit=10, source_path=None, source_type=None)
+Search the source-document filing cabinet. Returns stubs only: document IDs,
+titles, paths, source types, snippets, and content hashes. Use this when exact
+ingested files, emails, web pages, channel messages, or large specifications may
+matter.
+
+### document_fetch(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, limit=10)
+Open exact source documents into the workspace for read-only inspection. This
+lets you read the file without turning it into durable memory or RecMem desk
+material.
+
+### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
+Load selected source documents onto the RecMem desk as searchable mid-term
+working material. Use deliberately for large specs or reference files you will
+need to search on demand in later turns.
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
-Summarize loaded memories into the notes buffer using a sub-LLM call. Use this when your workspace is getting full.
+Summarize loaded memories or loaded documents into the notes buffer using a sub-LLM call. Use this when your workspace is getting full. Buckets: `loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
 ### workspace_drop(bucket="loaded_memories", *, keep_ids=None)
-Drop workspace bucket contents. Optionally keep specific memory IDs.
+Drop workspace bucket contents. Optionally keep specific memory or document IDs. Buckets include `loaded_documents`.
 
 ### workspace_status()
 Returns current workspace sizes, budget usage, and metrics.
@@ -61,6 +77,10 @@ Returns current workspace sizes, budget usage, and metrics.
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once rather than one at a time.
 - Check `workspace_status()` if you've loaded many memories. If approaching budget limits, call `workspace_summarize()` then `workspace_drop()`.
 - The `context` variable already contains stubs for recent memories and contradictions. Use these as starting points.
+- Use `document_search()` before `document_fetch()` unless you already have
+  exact source document handles from memory provenance.
+- Use `document_load_to_desk()` only when the source should remain searchable
+  as RecMem desk material beyond the current heartbeat workspace.
 
 ## Tool Policy
 

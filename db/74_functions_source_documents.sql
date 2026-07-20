@@ -5,7 +5,9 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.document_search_default_limit', '10'::jsonb,
      'Default row budget for source-document search'),
     ('memory.document_search_max_limit', '50'::jsonb,
-     'Ceiling on source-document search rows; open_document retrieves exact content on demand')
+     'Ceiling on source-document search rows; open_document retrieves exact content on demand'),
+    ('memory.source_document_desk_chunk_chars', '8000'::jsonb,
+     'Default chunk size when loading source documents onto the RecMem desk')
 ON CONFLICT (key) DO NOTHING;
 
 CREATE OR REPLACE FUNCTION upsert_source_document(
@@ -303,5 +305,299 @@ BEGIN
         'next_offset', CASE WHEN truncated THEN start_offset + length(body) ELSE NULL END,
         'content', body
     );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION open_source_documents(
+    p_document_ids UUID[] DEFAULT NULL,
+    p_content_hashes TEXT[] DEFAULT NULL,
+    p_paths TEXT[] DEFAULT NULL,
+    p_offset INT DEFAULT 0,
+    p_max_chars INT DEFAULT NULL,
+    p_limit INT DEFAULT NULL,
+    p_exclude_sensitive BOOLEAN DEFAULT FALSE
+) RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    lim INT := LEAST(GREATEST(COALESCE(p_limit, 10), 1), 50);
+    start_offset INT := GREATEST(COALESCE(p_offset, 0), 0);
+    doc_ids UUID[] := ARRAY[]::UUID[];
+    documents JSONB := '[]'::jsonb;
+    total_matches INT := 0;
+BEGIN
+    IF COALESCE(array_length(p_document_ids, 1), 0) = 0
+       AND COALESCE(array_length(p_content_hashes, 1), 0) = 0
+       AND COALESCE(array_length(p_paths, 1), 0) = 0 THEN
+        RETURN jsonb_build_object('error', 'missing_selector');
+    END IF;
+
+    WITH requested AS (
+        SELECT ord::BIGINT AS ord, document_id, NULL::TEXT AS content_hash, NULL::TEXT AS path
+        FROM unnest(COALESCE(p_document_ids, ARRAY[]::UUID[])) WITH ORDINALITY AS ids(document_id, ord)
+        UNION ALL
+        SELECT (100000 + ord)::BIGINT AS ord, NULL::UUID AS document_id, content_hash, NULL::TEXT AS path
+        FROM unnest(COALESCE(p_content_hashes, ARRAY[]::TEXT[])) WITH ORDINALITY AS hashes(content_hash, ord)
+        WHERE NULLIF(trim(COALESCE(content_hash, '')), '') IS NOT NULL
+        UNION ALL
+        SELECT (200000 + ord)::BIGINT AS ord, NULL::UUID AS document_id, NULL::TEXT AS content_hash, path
+        FROM unnest(COALESCE(p_paths, ARRAY[]::TEXT[])) WITH ORDINALITY AS paths(path, ord)
+        WHERE NULLIF(trim(COALESCE(path, '')), '') IS NOT NULL
+    ),
+    matched AS (
+        SELECT
+            d.id,
+            MIN(r.ord) AS first_requested_at,
+            MAX(d.updated_at) AS newest_updated_at,
+            COUNT(*) OVER () AS total_count
+        FROM requested r
+        JOIN source_documents d ON d.status = 'active'
+          AND (NOT COALESCE(p_exclude_sensitive, FALSE)
+               OR COALESCE(d.source_attribution->>'sensitivity', '') <> 'private')
+          AND (
+              (r.document_id IS NOT NULL AND d.id = r.document_id)
+              OR (NULLIF(trim(COALESCE(r.content_hash, '')), '') IS NOT NULL
+                  AND d.content_hash = r.content_hash)
+              OR (NULLIF(trim(COALESCE(r.path, '')), '') IS NOT NULL
+                  AND (d.path = r.path OR d.path ILIKE '%' || r.path || '%'))
+          )
+        GROUP BY d.id
+        ORDER BY first_requested_at, newest_updated_at DESC, d.id
+        LIMIT lim
+    )
+    SELECT
+        COALESCE(array_agg(id ORDER BY first_requested_at, newest_updated_at DESC, id), ARRAY[]::UUID[]),
+        COALESCE(MAX(total_count), 0)
+    INTO doc_ids, total_matches
+    FROM matched;
+
+    SELECT COALESCE(
+        jsonb_agg(open_source_document(d.id, NULL, NULL, start_offset, p_max_chars, p_exclude_sensitive) ORDER BY d.ord),
+        '[]'::jsonb
+    )
+    INTO documents
+    FROM unnest(doc_ids) WITH ORDINALITY AS d(id, ord);
+
+    RETURN jsonb_build_object(
+        'documents', documents,
+        'count', jsonb_array_length(documents),
+        'total_matches', total_matches,
+        'limit', lim,
+        'offset', start_offset,
+        'max_chars', p_max_chars
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION load_source_documents_to_recmem(
+    p_document_ids UUID[] DEFAULT NULL,
+    p_content_hashes TEXT[] DEFAULT NULL,
+    p_paths TEXT[] DEFAULT NULL,
+    p_offset INT DEFAULT 0,
+    p_max_chars INT DEFAULT NULL,
+    p_chunk_chars INT DEFAULT NULL,
+    p_limit INT DEFAULT NULL,
+    p_exclude_sensitive BOOLEAN DEFAULT FALSE,
+    p_reason TEXT DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    lim INT := LEAST(GREATEST(COALESCE(p_limit, 10), 1), 50);
+    start_offset INT := GREATEST(COALESCE(p_offset, 0), 0);
+    chunk_chars INT := GREATEST(COALESCE(p_chunk_chars, get_config_int('memory.source_document_desk_chunk_chars'), 8000), 500);
+    payload JSONB;
+BEGIN
+    IF COALESCE(array_length(p_document_ids, 1), 0) = 0
+       AND COALESCE(array_length(p_content_hashes, 1), 0) = 0
+       AND COALESCE(array_length(p_paths, 1), 0) = 0 THEN
+        RETURN jsonb_build_object('error', 'missing_selector');
+    END IF;
+
+    WITH requested AS (
+        SELECT ord::BIGINT AS ord, document_id, NULL::TEXT AS content_hash, NULL::TEXT AS path
+        FROM unnest(COALESCE(p_document_ids, ARRAY[]::UUID[])) WITH ORDINALITY AS ids(document_id, ord)
+        UNION ALL
+        SELECT (100000 + ord)::BIGINT AS ord, NULL::UUID AS document_id, content_hash, NULL::TEXT AS path
+        FROM unnest(COALESCE(p_content_hashes, ARRAY[]::TEXT[])) WITH ORDINALITY AS hashes(content_hash, ord)
+        WHERE NULLIF(trim(COALESCE(content_hash, '')), '') IS NOT NULL
+        UNION ALL
+        SELECT (200000 + ord)::BIGINT AS ord, NULL::UUID AS document_id, NULL::TEXT AS content_hash, path
+        FROM unnest(COALESCE(p_paths, ARRAY[]::TEXT[])) WITH ORDINALITY AS paths(path, ord)
+        WHERE NULLIF(trim(COALESCE(path, '')), '') IS NOT NULL
+    ),
+    matched AS (
+        SELECT
+            d.*,
+            MIN(r.ord) AS first_requested_at,
+            COUNT(*) OVER () AS total_matches
+        FROM requested r
+        JOIN source_documents d ON d.status = 'active'
+          AND (NOT COALESCE(p_exclude_sensitive, FALSE)
+               OR COALESCE(d.source_attribution->>'sensitivity', '') <> 'private')
+          AND (
+              (r.document_id IS NOT NULL AND d.id = r.document_id)
+              OR (NULLIF(trim(COALESCE(r.content_hash, '')), '') IS NOT NULL
+                  AND d.content_hash = r.content_hash)
+              OR (NULLIF(trim(COALESCE(r.path, '')), '') IS NOT NULL
+                  AND (d.path = r.path OR d.path ILIKE '%' || r.path || '%'))
+          )
+        GROUP BY d.id
+        ORDER BY first_requested_at, d.updated_at DESC, d.id
+        LIMIT lim
+    ),
+    selected AS (
+        SELECT
+            m.*,
+            substring(
+                m.content FROM start_offset + 1
+                FOR CASE WHEN p_max_chars IS NULL OR p_max_chars <= 0 THEN length(m.content)
+                         ELSE p_max_chars END
+            ) AS selected_content
+        FROM matched m
+    ),
+    chunks AS (
+        SELECT
+            s.id AS document_id,
+            s.title,
+            s.source_type,
+            s.path,
+            s.file_type,
+            s.content_hash,
+            s.word_count,
+            s.size_bytes,
+            s.source_attribution AS document_source_attribution,
+            s.total_matches,
+            (chunk_start / chunk_chars)::INT AS chunk_index,
+            start_offset + chunk_start AS chunk_offset,
+            substring(s.selected_content FROM chunk_start + 1 FOR chunk_chars) AS chunk_content,
+            length(s.content) AS total_chars
+        FROM selected s
+        CROSS JOIN LATERAL generate_series(
+            0,
+            GREATEST(length(s.selected_content) - 1, 0),
+            chunk_chars
+        ) AS g(chunk_start)
+        WHERE length(s.selected_content) > 0
+    ),
+    upserted AS (
+        INSERT INTO subconscious_units (
+            source_identity,
+            content,
+            user_text,
+            assistant_text,
+            embedding_status,
+            route_status,
+            extraction_status,
+            importance,
+            source_attribution,
+            metadata,
+            idempotency_key,
+            access_count,
+            last_accessed
+        )
+        SELECT
+            'source_document:' || c.document_id::text || ':' || c.chunk_offset::text,
+            concat_ws(E'\n',
+                '[Source Document: ' || c.title || ']',
+                CASE WHEN c.path IS NOT NULL THEN '[Path: ' || c.path || ']' END,
+                '[Document ID: ' || c.document_id::text || ']',
+                '[Chunk: ' || c.chunk_index::text || ', chars '
+                    || c.chunk_offset::text || '-'
+                    || (c.chunk_offset + length(c.chunk_content))::text || ' of '
+                    || c.total_chars::text || ']',
+                '',
+                c.chunk_content
+            ),
+            NULL,
+            NULL,
+            'failed',
+            'raw_only',
+            'skipped',
+            0.2,
+            jsonb_strip_nulls(jsonb_build_object(
+                'kind', 'source_document_desk',
+                'ref', c.content_hash,
+                'label', c.title,
+                'content_hash', c.content_hash,
+                'path', c.path,
+                'source_document_id', c.document_id::text,
+                'document_id', c.document_id::text,
+                'sensitivity', CASE WHEN c.document_source_attribution->>'sensitivity' = 'private' THEN 'private' END
+            )),
+            jsonb_build_object(
+                'recmem', jsonb_strip_nulls(jsonb_build_object(
+                    'kind', 'source_document_desk',
+                    'loaded_at', CURRENT_TIMESTAMP,
+                    'reason', NULLIF(trim(COALESCE(p_reason, '')), ''),
+                    'document_id', c.document_id::text,
+                    'title', c.title,
+                    'path', c.path,
+                    'content_hash', c.content_hash,
+                    'chunk_index', c.chunk_index,
+                    'offset', c.chunk_offset,
+                    'end_offset', c.chunk_offset + length(c.chunk_content),
+                    'chunk_chars', chunk_chars,
+                    'total_matches', c.total_matches,
+                    'embedding_skipped', true,
+                    'routing_skipped', true,
+                    'extraction_skipped', true
+                ))
+            ),
+            'source_document_desk:' || c.document_id::text || ':' || c.chunk_offset::text || ':' || chunk_chars::text,
+            1,
+            CURRENT_TIMESTAMP
+        FROM chunks c
+        ON CONFLICT (idempotency_key) DO UPDATE
+        SET status = 'active',
+            access_count = subconscious_units.access_count + 1,
+            last_accessed = CURRENT_TIMESTAMP,
+            metadata = subconscious_units.metadata
+                || jsonb_build_object(
+                    'recmem',
+                    COALESCE(subconscious_units.metadata->'recmem', '{}'::jsonb)
+                    || COALESCE(EXCLUDED.metadata->'recmem', '{}'::jsonb)
+                    || jsonb_build_object('last_loaded_at', CURRENT_TIMESTAMP)
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        RETURNING
+            id,
+            source_attribution,
+            metadata,
+            created_at,
+            updated_at
+    )
+    SELECT jsonb_build_object(
+        'loaded_units', COALESCE(jsonb_agg(jsonb_build_object(
+            'unit_id', u.id::text,
+            'document_id', u.source_attribution->>'source_document_id',
+            'title', u.source_attribution->>'label',
+            'path', u.source_attribution->>'path',
+            'content_hash', u.source_attribution->>'content_hash',
+            'chunk_index', NULLIF(u.metadata#>>'{recmem,chunk_index}', '')::INT,
+            'offset', NULLIF(u.metadata#>>'{recmem,offset}', '')::INT,
+            'end_offset', NULLIF(u.metadata#>>'{recmem,end_offset}', '')::INT
+        ) ORDER BY u.source_attribution->>'label', NULLIF(u.metadata#>>'{recmem,offset}', '')::INT), '[]'::jsonb),
+        'desk_unit_ids', COALESCE(jsonb_agg(u.id::text ORDER BY u.source_attribution->>'label', NULLIF(u.metadata#>>'{recmem,offset}', '')::INT), '[]'::jsonb),
+        'count', COUNT(u.id),
+        'limit', lim,
+        'offset', start_offset,
+        'chunk_chars', chunk_chars,
+        'max_chars', p_max_chars,
+        'total_matches', COALESCE(MAX((u.metadata#>>'{recmem,total_matches}')::INT), COUNT(u.id))
+    )
+    INTO payload
+    FROM upserted u;
+
+    RETURN COALESCE(payload, jsonb_build_object(
+        'loaded_units', '[]'::jsonb,
+        'desk_unit_ids', '[]'::jsonb,
+        'count', 0,
+        'limit', lim,
+        'offset', start_offset,
+        'chunk_chars', chunk_chars,
+        'max_chars', p_max_chars
+    ));
 END;
 $$;

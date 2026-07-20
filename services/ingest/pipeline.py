@@ -219,6 +219,8 @@ class IngestionPipeline:
         *,
         title: str | None = None,
         source_type: str = "pasted_text",
+        path: str | None = None,
+        file_type: str = ".md",
     ) -> int:
         """Ingest raw text (pasted documents, job payloads) — no file needed."""
         metrics = IngestionMetrics(start_time=time.time())
@@ -232,8 +234,8 @@ class IngestionPipeline:
             source_type=source_type,
             content_hash=_hash_text(content),
             word_count=_word_count(content),
-            path=f"text:{_hash_text(content)[:12]}",
-            file_type=".md",
+            path=path or f"text:{_hash_text(content)[:12]}",
+            file_type=file_type,
         )
         return await self._ingest_content(
             content, doc, metrics, section_path=Path("pasted_text.md")
@@ -255,7 +257,7 @@ class IngestionPipeline:
         metrics.mode = mode.value
         metrics.source_type = doc.source_type
 
-        await self.store.store_source_document(
+        stored_doc = await self.store.store_source_document(
             title=doc.title,
             source_type=doc.source_type,
             content_hash=doc.content_hash,
@@ -266,6 +268,7 @@ class IngestionPipeline:
             source_attribution=self._source_payload(doc),
             metadata={"mode": mode.value},
         )
+        doc.document_id = str(stored_doc.get("document_id") or "") or None
 
         sections = self.sectioner.split(content, section_path)
         section_hashes = [_hash_text(s.content) for s in sections]
@@ -444,6 +447,9 @@ class IngestionPipeline:
             # The persist functions record the section receipt atomically
             # with persistence when this key rides the source (#85/#90).
             payload["section_hash"] = section_hash
+        if doc.document_id:
+            payload["source_document_id"] = doc.document_id
+            payload["document_id"] = doc.document_id
         if self.config.base_trust is not None:
             payload["trust"] = float(self.config.base_trust)
         if self.config.sensitivity:

@@ -66,11 +66,81 @@ async def test_source_document_search_open_and_memory_story(db_pool):
                 RETURNING id
                 """,
                 f"The nebula-retention clause exists for {marker}.",
-                json.dumps({"kind": "document", "ref": content_hash, "content_hash": content_hash}),
+                json.dumps({
+                    "kind": "document",
+                    "ref": content_hash,
+                    "content_hash": content_hash,
+                    "source_document_id": doc_id,
+                }),
                 json.dumps({"confidence": 0.8}),
             )
             story = _j(await conn.fetchval("SELECT get_memory_story($1::uuid)", mid))
             assert story["source_documents"][0]["document_id"] == doc_id
+
+            batch = _j(await conn.fetchval(
+                "SELECT open_source_documents(ARRAY[$1::uuid], NULL::text[], NULL::text[], 0, 20)",
+                doc_id,
+            ))
+            assert batch["count"] == 1
+            assert batch["documents"][0]["content"] == content[:20]
+            assert batch["documents"][0]["truncated"] is True
+
+            loaded = _j(await conn.fetchval(
+                """
+                SELECT load_source_documents_to_recmem(
+                    ARRAY[$1::uuid], NULL::text[], NULL::text[],
+                    0, NULL, 500, 10, false, 'test filing cabinet desk load'
+                )
+                """,
+                doc_id,
+            ))
+            assert loaded["count"] == 1
+            desk_unit_id = loaded["desk_unit_ids"][0]
+            assert loaded["loaded_units"][0]["document_id"] == doc_id
+
+            desk_hits = await conn.fetch(
+                """
+                SELECT source_kind, item_id::text, content
+                FROM search_cross_session_history($1, 5, ARRAY['desk']::text[])
+                """,
+                f"nebula-retention {marker}",
+            )
+            assert [(row["source_kind"], row["item_id"]) for row in desk_hits] == [
+                ("desk", desk_unit_id)
+            ]
+            assert "nebula-retention" in desk_hits[0]["content"]
+
+            turn_hits = await conn.fetch(
+                """
+                SELECT source_kind, item_id::text
+                FROM search_cross_session_history($1, 5, ARRAY['turn']::text[])
+                """,
+                f"nebula-retention {marker}",
+            )
+            assert all(row["item_id"] != desk_unit_id for row in turn_hits)
+
+            await conn.execute("SELECT set_config('memory.recmem_gc_enabled', 'true'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_gc_idle_days', '1'::jsonb)")
+            await conn.execute(
+                """
+                UPDATE subconscious_units
+                SET created_at = CURRENT_TIMESTAMP - INTERVAL '40 days',
+                    updated_at = CURRENT_TIMESTAMP - INTERVAL '40 days',
+                    last_accessed = CURRENT_TIMESTAMP - INTERVAL '40 days'
+                WHERE id = $1::uuid
+                """,
+                desk_unit_id,
+            )
+            gc = _j(await conn.fetchval("SELECT recmem_gc(10)"))
+            assert gc["archived_units"] >= 1
+            assert await conn.fetchval(
+                "SELECT status FROM subconscious_units WHERE id = $1::uuid",
+                desk_unit_id,
+            ) == "archived"
+            assert await conn.fetchval(
+                "SELECT status FROM source_documents WHERE id = $1::uuid",
+                doc_id,
+            ) == "active"
         finally:
             await tr.rollback()
 

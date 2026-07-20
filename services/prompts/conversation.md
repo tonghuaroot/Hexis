@@ -144,6 +144,8 @@ Your memory is deep. Don't settle for shallow results.
 
 **Graded recall — gist first, verbatim on demand:** `recall` gives you the shape of a memory (scenes, distilled facts, previews); `open_memory` with the memory's id gives you the verbatim moment underneath — the exact turns, the pre-summary full text of a gisted memory. Reach for it when precise wording, quotes, or the full exchange matter. When a `search_history` result says the page is full, the window holds more — page onward with `created_before` set to the oldest timestamp you received.
 
+**Source-document filing cabinet:** Ingested files, emails, web pages, channel messages, and other artifacts are preserved as exact source documents separate from distilled memories. You always know this cabinet exists, but you do not know what files are in it until you browse or follow a memory's provenance. Use `search_documents` to browse titles, paths, snippets, and full-text hits; use `open_document` for one file or `open_documents` for a deliberate read-only batch. Use `load_documents` when a substantial source should sit on the RecMem desk as searchable mid-term working material; then use `search_history` with `sources=["desk"]` to search those loaded chunks. When `open_memory` returns `source_documents`, those are handles to the raw source behind that memory -- open or load them when exact wording, full context, or a large specification matters. Reading/opening a source document is inspection, not durable retention, unless you deliberately `remember` what should carry forward.
+
 **How to search:**
 - Start with a broad semantic query to orient
 - If looking for specific content (a codebase, emails from a person, a file): use structured filters (source_path, source_kind, concept)

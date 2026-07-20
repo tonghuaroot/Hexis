@@ -274,6 +274,9 @@ BEGIN
     FROM source_documents d
     WHERE d.status = 'active'
       AND (
+          d.id::text = NULLIF(mem.source_attribution->>'source_document_id', '')
+          OR d.id::text = NULLIF(mem.source_attribution->>'document_id', '')
+          OR
           d.content_hash = NULLIF(mem.source_attribution->>'content_hash', '')
           OR d.content_hash = NULLIF(mem.source_attribution->>'ref', '')
           OR EXISTS (
@@ -283,7 +286,9 @@ BEGIN
                   THEN mem.metadata->'source_references'
                   ELSE '[]'::jsonb
               END) src
-              WHERE d.content_hash = NULLIF(src->>'content_hash', '')
+              WHERE d.id::text = NULLIF(src->>'source_document_id', '')
+                 OR d.id::text = NULLIF(src->>'document_id', '')
+                 OR d.content_hash = NULLIF(src->>'content_hash', '')
                  OR d.content_hash = NULLIF(src->>'ref', '')
           )
       );

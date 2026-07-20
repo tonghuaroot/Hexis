@@ -39,11 +39,28 @@ for m in memories:
     print(f"[{m['type']}] {m['content']}")
 ```
 
+### document_search(query, *, limit=10, source_path=None, source_type=None)
+Search the source-document filing cabinet. Returns stubs only: document IDs,
+titles, paths, source types, snippets, and content hashes. Use this when the
+answer may depend on exact ingested files, emails, web pages, channel messages,
+or large specifications rather than only distilled memories.
+
+### document_fetch(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, limit=10)
+Open exact source documents into the workspace for read-only inspection. This is
+like pulling files from the cabinet onto your private reading surface; it does
+not make them durable memories or RecMem desk material.
+
+### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
+Load selected source documents onto the RecMem desk as searchable mid-term
+working material. Use deliberately for large specs or reference files you will
+need to search on demand later.
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
-Summarize loaded memories into the notes buffer.
+Summarize loaded memories or loaded documents into the notes buffer. Buckets:
+`loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
 ### workspace_drop(bucket="loaded_memories", *, keep_ids=None)
-Drop workspace bucket contents.
+Drop workspace bucket contents. Buckets include `loaded_documents`.
 
 ### workspace_status()
 Returns workspace sizes and budget usage.
@@ -52,6 +69,10 @@ Returns workspace sizes and budget usage.
 
 - ALWAYS call `memory_search()` before `memory_fetch()`. Never fetch blindly.
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once.
+- Use `document_search()` before `document_fetch()` unless you already have
+  exact source document handles from memory provenance.
+- Use `document_load_to_desk()` only when the source should remain searchable
+  as desk material beyond the current REPL workspace.
 - Only fetch memories that are genuinely relevant to the conversation.
 - You do NOT need to search memories for every message. Use your judgment about when memory retrieval would add value.
 

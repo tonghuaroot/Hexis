@@ -5,7 +5,7 @@ category: system
 requires:
   tools: [recall, search_history, remember]
 contexts: [heartbeat, chat]
-bound_tools: [recall, search_history, remember, add_evidence, belief_history, open_memory, search_documents, open_document, sense_memory_availability, read_journal, write_journal, search_journal, manage_goals, manage_schedule, manage_backlog, list_document_fade_requests, resolve_document_fade, associate, trace_why, get_procedures, get_strategies]
+bound_tools: [recall, search_history, remember, add_evidence, belief_history, open_memory, search_documents, open_document, open_documents, load_documents, sense_memory_availability, read_journal, write_journal, search_journal, manage_goals, manage_schedule, manage_backlog, list_document_fade_requests, resolve_document_fade, associate, trace_why, get_procedures, get_strategies]
 ---
 
 # Core Memory and Continuity
@@ -27,8 +27,10 @@ Use this skill for ordinary continuity: recalling relevant memories, opening exa
 3. Use `search_history` for exact names, phrases, or details from earlier
    sessions, especially when semantic recall is weak or embeddings are unavailable.
 4. Use `search_documents` when the answer depends on an ingested source artifact
-   rather than only distilled memories; use `open_document` to retrieve exact
-   wording or the full raw source deliberately.
+   rather than only distilled memories. Use `open_document` or `open_documents`
+   for deliberate read-only inspection. Use `load_documents` when substantial
+   source material should sit on the RecMem desk for later `search_history` with
+   `sources=["desk"]`.
 5. Use `remember` when a durable fact, event, preference, promise, or decision should persist.
 6. Use journal tools only for deliberate permanent entries, not ordinary memory.
 7. Use goal, schedule, or backlog tools when the user asks for ongoing commitments or work tracking.

@@ -153,7 +153,28 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Free lexical recall across raw conversation turns and consolidated memory.
+CREATE OR REPLACE FUNCTION touch_subconscious_units(p_ids UUID[])
+RETURNS INT AS $$
+DECLARE
+    updated_count INT;
+BEGIN
+    IF p_ids IS NULL OR array_length(p_ids, 1) IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    UPDATE subconscious_units
+    SET access_count = access_count + 1,
+        last_accessed = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ANY(p_ids)
+      AND status = 'active';
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    RETURN COALESCE(updated_count, 0);
+END;
+$$ LANGUAGE plpgsql;
+
+-- Free lexical recall across raw conversation turns, desk-loaded source
+-- documents, and consolidated memory.
 -- This deliberately avoids get_embedding(): it remains available when an
 -- embedding provider is offline and is suitable for background review work.
 CREATE OR REPLACE FUNCTION search_cross_session_history(
@@ -227,7 +248,38 @@ BEGIN
         WHERE 'turn' = ANY(COALESCE(p_sources, ARRAY['turn', 'memory']::TEXT[]))
           AND (browse_mode OR numnode(q.query) > 0)
           AND s.status = 'active'
+          AND COALESCE(s.metadata#>>'{recmem,kind}', '') <> 'source_document_desk'
           AND (p_exclude_session_id IS NULL OR s.session_id IS DISTINCT FROM p_exclude_session_id)
+          AND (p_created_after IS NULL OR s.turn_at >= p_created_after)
+          AND (p_created_before IS NULL OR s.turn_at < p_created_before)
+          AND (NOT p_exclude_sensitive
+               OR COALESCE(s.source_attribution->>'sensitivity', '') <> 'private')
+          AND (browse_mode OR to_tsvector('english', s.content) @@ q.query)
+        ORDER BY rank DESC, occurred_at DESC, item_id
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 20), 1), browse_cap)
+    ),
+    desk_hits AS (
+        SELECT
+            'desk'::TEXT AS source_kind,
+            s.id AS item_id,
+            s.session_id,
+            CASE WHEN browse_mode AND length(s.content) > 500
+                 THEN left(s.content, 500) || ' …'
+                 ELSE s.content END AS content,
+            NULL::TEXT AS user_text,
+            NULL::TEXT AS assistant_text,
+            NULL::TEXT AS memory_type,
+            s.turn_at AS occurred_at,
+            CASE WHEN browse_mode THEN 0.0 ELSE ts_rank_cd(to_tsvector('english', s.content), q.query, 32) END::FLOAT AS rank,
+            ARRAY[s.id]::UUID[] AS source_unit_ids,
+            s.source_attribution,
+            s.metadata
+        FROM subconscious_units s
+        CROSS JOIN query_doc q
+        WHERE 'desk' = ANY(COALESCE(p_sources, ARRAY['turn', 'memory']::TEXT[]))
+          AND (browse_mode OR numnode(q.query) > 0)
+          AND s.status = 'active'
+          AND COALESCE(s.metadata#>>'{recmem,kind}', '') = 'source_document_desk'
           AND (p_created_after IS NULL OR s.turn_at >= p_created_after)
           AND (p_created_before IS NULL OR s.turn_at < p_created_before)
           AND (NOT p_exclude_sensitive
@@ -281,6 +333,8 @@ BEGIN
     SELECT hits.*
     FROM (
         SELECT * FROM turn_hits
+        UNION ALL
+        SELECT * FROM desk_hits
         UNION ALL
         SELECT * FROM memory_hits
     ) hits
@@ -1422,6 +1476,112 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION recmem_gc(
+    p_limit INT DEFAULT NULL
+) RETURNS JSONB AS $$
+DECLARE
+    gc_limit INT := GREATEST(COALESCE(p_limit, get_config_int('memory.recmem_gc_batch_size'), 200), 1);
+    idle_days INT := GREATEST(COALESCE(get_config_int('memory.recmem_gc_idle_days'), 30), 1);
+    consolidated_grace_days INT := GREATEST(COALESCE(get_config_int('memory.recmem_gc_consolidated_grace_days'), 7), 1);
+    task_retention_days INT := GREATEST(COALESCE(get_config_int('memory.recmem_gc_task_retention_days'), 14), 1);
+    archived_count INT := 0;
+    deleted_task_count INT := 0;
+BEGIN
+    IF NOT COALESCE(get_config_bool('memory.recmem_gc_enabled'), TRUE) THEN
+        RETURN jsonb_build_object('skipped', true, 'reason', 'disabled');
+    END IF;
+
+    WITH candidates AS (
+        SELECT
+            u.id,
+            CASE
+                WHEN u.route_status IN ('merged','episode_created') THEN 'consolidated'
+                ELSE 'idle_raw'
+            END AS reason
+        FROM subconscious_units u
+        WHERE u.status = 'active'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM recmem_consolidation_tasks t
+              WHERE t.status IN ('pending','in_progress')
+                AND (t.trigger_unit_id = u.id OR u.id = ANY(t.source_unit_ids))
+          )
+          AND (
+              (
+                  u.route_status IN ('merged','episode_created')
+                  AND u.consolidated_at IS NOT NULL
+                  AND GREATEST(COALESCE(u.last_accessed, '-infinity'::timestamptz), u.consolidated_at)
+                      < CURRENT_TIMESTAMP - (consolidated_grace_days * INTERVAL '1 day')
+              )
+              OR (
+                  u.route_status IN ('raw_only','route_failed')
+                  AND u.extraction_status IN ('extracted','skipped','failed')
+                  AND COALESCE(u.last_routed_at, u.updated_at, u.created_at)
+                      < CURRENT_TIMESTAMP - (idle_days * INTERVAL '1 day')
+                  AND COALESCE(u.last_accessed, u.created_at)
+                      < CURRENT_TIMESTAMP - (idle_days * INTERVAL '1 day')
+              )
+              OR (
+                  u.embedding_status = 'failed'
+                  AND u.extraction_status IN ('extracted','skipped','failed')
+                  AND COALESCE(u.last_accessed, u.created_at)
+                      < CURRENT_TIMESTAMP - (idle_days * INTERVAL '1 day')
+              )
+          )
+        ORDER BY COALESCE(u.last_accessed, u.consolidated_at, u.last_routed_at, u.created_at), u.id
+        LIMIT gc_limit
+        FOR UPDATE SKIP LOCKED
+    ),
+    archived AS (
+        UPDATE subconscious_units u
+        SET status = 'archived',
+            metadata = COALESCE(u.metadata, '{}'::jsonb)
+                || jsonb_build_object(
+                    'recmem',
+                    COALESCE(u.metadata->'recmem', '{}'::jsonb)
+                        || jsonb_build_object(
+                            'gc',
+                            jsonb_build_object(
+                                'archived_at', CURRENT_TIMESTAMP,
+                                'reason', c.reason
+                            )
+                        )
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        FROM candidates c
+        WHERE u.id = c.id
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO archived_count FROM archived;
+
+    WITH task_candidates AS (
+        SELECT id
+        FROM recmem_consolidation_tasks
+        WHERE status IN ('completed','dropped')
+          AND COALESCE(completed_at, updated_at, created_at)
+              < CURRENT_TIMESTAMP - (task_retention_days * INTERVAL '1 day')
+        ORDER BY COALESCE(completed_at, updated_at, created_at), id
+        LIMIT gc_limit
+        FOR UPDATE SKIP LOCKED
+    ),
+    deleted AS (
+        DELETE FROM recmem_consolidation_tasks t
+        USING task_candidates c
+        WHERE t.id = c.id
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO deleted_task_count FROM deleted;
+
+    RETURN jsonb_build_object(
+        'archived_units', archived_count,
+        'deleted_tasks', deleted_task_count,
+        'idle_days', idle_days,
+        'consolidated_grace_days', consolidated_grace_days,
+        'task_retention_days', task_retention_days
+    );
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION recmem_periodic_sweep(
     p_limit INT DEFAULT NULL
 ) RETURNS JSONB AS $$
@@ -1430,6 +1590,7 @@ DECLARE
     min_age_days INT := COALESCE(get_config_int('memory.recmem_sweep_min_rerouting_age_days'), 7);
     unit_id UUID;
     processed INT := 0;
+    gc_result JSONB;
 BEGIN
     FOR unit_id IN
         SELECT id
@@ -1452,7 +1613,8 @@ BEGIN
         processed := processed + 1;
     END LOOP;
 
-    RETURN jsonb_build_object('processed', processed);
+    gc_result := recmem_gc();
+    RETURN jsonb_build_object('processed', processed, 'gc', gc_result);
 END;
 $$ LANGUAGE plpgsql;
 

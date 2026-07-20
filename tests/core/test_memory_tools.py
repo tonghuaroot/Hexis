@@ -14,7 +14,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from core.tools.base import ToolContext, ToolExecutionContext
-from core.tools.memory import OpenDocumentHandler, RecallHandler, RememberHandler, SearchDocumentsHandler
+from core.tools.memory import (
+    LoadDocumentsHandler,
+    OpenDocumentHandler,
+    OpenDocumentsHandler,
+    RecallHandler,
+    RememberHandler,
+    SearchDocumentsHandler,
+    SearchHistoryHandler,
+)
 from tests.utils import get_test_identifier
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
@@ -56,6 +64,38 @@ class TestRecallThroughDbDispatcher:
             assert hits[0].get("retrieval_source"), hits[0]
         finally:
             await _cleanup(db_pool, marker)
+
+
+class TestSearchHistoryTouch:
+    async def test_search_history_marks_raw_turn_accessed(self, db_pool):
+        marker = get_test_identifier("historytouch")
+        source_identity = f"history-touch-{marker}"
+        async with db_pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT recmem_ingest_turn($1, $2, NULL, $3)",
+                f"desk paper {marker}",
+                "noted",
+                source_identity,
+            )
+            unit = json.loads(raw) if isinstance(raw, str) else raw
+            unit_id = unit["unit_id"]
+
+        try:
+            result = await SearchHistoryHandler().execute(
+                {"query": f"desk paper {marker}", "sources": ["turn"]},
+                _ctx(db_pool),
+            )
+            assert result.success, result.error
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT access_count, last_accessed FROM subconscious_units WHERE id = $1::uuid",
+                    unit_id,
+                )
+            assert row["access_count"] == 1
+            assert row["last_accessed"] is not None
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM subconscious_units WHERE id = $1::uuid", unit_id)
 
     async def test_structured_filters_use_structured_query(self, db_pool, ensure_embedding_service):
         marker = get_test_identifier("structuredrecall")
@@ -153,8 +193,42 @@ class TestSourceDocumentTools:
             assert opened.success, opened.error
             assert opened.output["content"] == content
             assert opened.output["truncated"] is False
+
+            batch = await OpenDocumentsHandler().execute(
+                {"document_ids": [doc_id], "max_chars": 12},
+                _ctx(db_pool),
+            )
+            assert batch.success, batch.error
+            assert batch.output["count"] == 1
+            assert batch.output["documents"][0]["content"] == content[:12]
+            assert batch.output["documents"][0]["truncated"] is True
+
+            loaded = await LoadDocumentsHandler().execute(
+                {
+                    "document_ids": [doc_id],
+                    "chunk_chars": 500,
+                    "reason": "test exact-source desk search",
+                },
+                _ctx(db_pool),
+            )
+            assert loaded.success, loaded.error
+            assert loaded.output["count"] == 1
+            desk_unit_id = loaded.output["desk_unit_ids"][0]
+
+            desk_hit = await SearchHistoryHandler().execute(
+                {"query": f"arclight {marker}", "sources": ["desk"]},
+                _ctx(db_pool),
+            )
+            assert desk_hit.success, desk_hit.error
+            assert desk_hit.output["count"] == 1
+            assert desk_hit.output["results"][0]["source_kind"] == "desk"
+            assert desk_hit.output["results"][0]["item_id"] == desk_unit_id
         finally:
             async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM subconscious_units WHERE metadata#>>'{recmem,content_hash}' = $1",
+                    content_hash,
+                )
                 await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
 
     async def test_document_handlers_registered(self):
@@ -163,3 +237,5 @@ class TestSourceDocumentTools:
         names = [handler.spec.name for handler in create_memory_tools()]
         assert "search_documents" in names
         assert "open_document" in names
+        assert "open_documents" in names
+        assert "load_documents" in names

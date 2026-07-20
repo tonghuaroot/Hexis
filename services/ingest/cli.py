@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional
 from uuid import UUID
 
 from .config import Config, IngestionMode, _hash_text
-from .pipeline import ArchivedContentProcessor, IngestionPipeline
+from .pipeline import IngestionPipeline
 from .store import MemoryStore
 
 # =========================================================================
@@ -247,18 +247,21 @@ async def _cmd_status_async(args: argparse.Namespace) -> None:
 
     try:
         if args.pending:
-            # Query for archived/pending memories
+            # Query the ingestion job queue; archived-content processing is
+            # retired in favor of preserved source documents.
             rows = await store._fetchval(
                 """
                 SELECT jsonb_agg(jsonb_build_object(
                     'id', id,
-                    'title', source_attribution->>'label',
-                    'hash', source_attribution->>'content_hash',
+                    'kind', kind,
+                    'hash', content_hash,
+                    'status', status,
+                    'attempts', attempts,
+                    'next_attempt_at', next_attempt_at,
                     'created_at', created_at
                 ))
-                FROM memories
-                WHERE type = 'episodic'
-                  AND metadata->>'awaiting_processing' = 'true'
+                FROM ingestion_jobs
+                WHERE status IN ('pending', 'in_progress')
                 ORDER BY created_at DESC
                 LIMIT 50
                 """
@@ -269,11 +272,16 @@ async def _cmd_status_async(args: argparse.Namespace) -> None:
                 print(json.dumps(pending, indent=2, default=str))
             else:
                 if not pending:
-                    print("No pending ingestions")
+                    print("No pending ingestion jobs")
                 else:
-                    print(f"Pending ingestions: {len(pending)}")
+                    print(f"Pending ingestion jobs: {len(pending)}")
                     for p in pending:
-                        print(f"  - {p.get('title', 'Unknown')} ({p.get('hash', '')[:8]}...)")
+                        print(
+                            "  - "
+                            f"{p.get('kind', 'unknown')} "
+                            f"{p.get('status', 'unknown')} "
+                            f"({str(p.get('hash') or '')[:8]}...)"
+                        )
         else:
             # General ingestion stats
             stats = await store._fetchval(
@@ -282,7 +290,8 @@ async def _cmd_status_async(args: argparse.Namespace) -> None:
                     'total_memories', (SELECT COUNT(*) FROM memories),
                     'episodic', (SELECT COUNT(*) FROM memories WHERE type = 'episodic'),
                     'semantic', (SELECT COUNT(*) FROM memories WHERE type = 'semantic'),
-                    'pending', (SELECT COUNT(*) FROM memories WHERE type = 'episodic' AND metadata->>'awaiting_processing' = 'true'),
+                    'source_documents', (SELECT COUNT(*) FROM source_documents WHERE status = 'active'),
+                    'pending_jobs', (SELECT COUNT(*) FROM ingestion_jobs WHERE status IN ('pending', 'in_progress')),
                     'recent_24h', (SELECT COUNT(*) FROM memories WHERE created_at > NOW() - INTERVAL '24 hours')
                 )
                 """
@@ -296,34 +305,24 @@ async def _cmd_status_async(args: argparse.Namespace) -> None:
                 print(f"  Total memories:     {stats_data.get('total_memories', 0)}")
                 print(f"  Episodic memories:  {stats_data.get('episodic', 0)}")
                 print(f"  Semantic memories:  {stats_data.get('semantic', 0)}")
-                print(f"  Pending processing: {stats_data.get('pending', 0)}")
+                print(f"  Source documents:   {stats_data.get('source_documents', 0)}")
+                print(f"  Pending jobs:       {stats_data.get('pending_jobs', 0)}")
                 print(f"  Last 24 hours:      {stats_data.get('recent_24h', 0)}")
     finally:
         await store.close()
 
 
 def _cmd_process(args: argparse.Namespace) -> None:
-    """Handle the process subcommand - upgrade archived content."""
+    """Handle the retired process subcommand."""
     asyncio.run(_cmd_process_async(args))
 
 
-async def _cmd_process_async(args: argparse.Namespace) -> None:
-    config = _build_config_from_args(args)
-    processor = ArchivedContentProcessor(config)
-
-    try:
-        if args.content_hash:
-            success = await processor.process_by_hash(args.content_hash)
-            print(f"Processed: {'Yes' if success else 'No (not found or failed)'}")
-        elif args.all_archived:
-            count = await processor.process_batch(limit=getattr(args, "limit", 10))
-            print(f"Processed {count} archived items")
-        else:
-            print("Error: Specify --content-hash or --all-archived")
-    except KeyboardInterrupt:
-        print("\nInterrupted by user")
-    finally:
-        await processor.close()
+async def _cmd_process_async(_args: argparse.Namespace) -> None:
+    print(
+        "Archived-content processing is retired. Ingested artifacts are now "
+        "preserved in source_documents. Use source-document tools to search, "
+        "open, or load them onto the RecMem desk."
+    )
 
 
 def main() -> None:
@@ -334,7 +333,7 @@ def main() -> None:
 Subcommands:
   ingest   Ingest files, directories, URLs, or stdin
   status   Show ingestion status and pending items
-  process  Process archived content that hasn't been fully engaged
+  process  Deprecated compatibility stub; archived processing is retired
 
 Examples:
   %(prog)s ingest --file doc.md --mode fast
@@ -342,7 +341,6 @@ Examples:
   %(prog)s ingest --url https://example.com/article
   echo "Some text" | %(prog)s ingest --stdin --stdin-type text
   %(prog)s status --pending
-  %(prog)s process --all-archived
         """,
     )
 
@@ -378,15 +376,15 @@ Examples:
 
     # Status subcommand
     status_p = subparsers.add_parser("status", help="Show ingestion status")
-    status_p.add_argument("--pending", action="store_true", help="Show pending/archived ingestions")
+    status_p.add_argument("--pending", action="store_true", help="Show pending ingestion jobs")
     status_p.add_argument("--json", action="store_true", help="Output as JSON")
     _add_common_args(status_p, env_defaults)
 
     # Process subcommand
-    process_p = subparsers.add_parser("process", help="Process archived content")
-    process_p.add_argument("--content-hash", type=str, help="Content hash of specific archived item")
-    process_p.add_argument("--all-archived", action="store_true", help="Process all archived items")
-    process_p.add_argument("--limit", type=int, default=10, help="Max items to process")
+    process_p = subparsers.add_parser("process", help="Deprecated: archived processing is retired")
+    process_p.add_argument("--content-hash", type=str, help=argparse.SUPPRESS)
+    process_p.add_argument("--all-archived", action="store_true", help=argparse.SUPPRESS)
+    process_p.add_argument("--limit", type=int, default=10, help=argparse.SUPPRESS)
     _add_common_args(process_p, env_defaults)
 
     args = parser.parse_args()

@@ -2,10 +2,11 @@
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from core.tools.base import ToolCategory, ToolContext
+from core.tools.base import ToolCategory, ToolContext, ToolExecutionContext
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +112,61 @@ class TestHybridIngestHandler:
         handler = HybridIngestHandler()
         errors = handler.validate({})
         assert any("path" in e.lower() for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# URLIngestHandler
+# ---------------------------------------------------------------------------
+
+class TestURLIngestHandler:
+    """Unit tests for URLIngestHandler."""
+
+    @pytest.mark.asyncio(loop_scope="session")
+    async def test_passes_url_as_source_path_to_pipeline(self, monkeypatch):
+        import core.tools.ingest as ingest_tools
+        import services.ingest as ingest_pkg
+        from core.tools.ingest import URLIngestHandler
+        from services.ingest import Config
+
+        url = "https://example.com/with/specification"
+        calls: list[dict] = []
+
+        async def fake_build_ingest_config(pool, **overrides):
+            return Config(llm_config={"provider": "openai", "model": "stub"}, verbose=False, **overrides)
+
+        class FakePipeline:
+            def __init__(self, config):
+                self.config = config
+
+            async def ingest_text(self, content, **kwargs):
+                calls.append({"content": content, **kwargs})
+                return 7
+
+            async def close(self):
+                calls.append({"closed": True})
+
+        monkeypatch.setattr(ingest_tools, "_fetch_url_content", lambda _url, _source_type: ("Exact URL text", "web"))
+        monkeypatch.setattr(ingest_tools, "_build_ingest_config", fake_build_ingest_config)
+        monkeypatch.setattr(ingest_pkg, "IngestionPipeline", FakePipeline)
+
+        registry = MagicMock()
+        registry.pool = MagicMock()
+        context = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="url-ingest-test",
+            registry=registry,
+        )
+
+        result = await URLIngestHandler().execute({"url": url, "mode": "fast"}, context)
+
+        assert result.success, result.error
+        assert result.output["memories_created"] == 7
+        assert calls[0]["content"] == "Exact URL text"
+        assert calls[0]["title"] == url
+        assert calls[0]["source_type"] == "web"
+        assert calls[0]["path"] == url
+        assert calls[0]["file_type"] == ".html"
+        assert calls[-1] == {"closed": True}
 
 
 # ---------------------------------------------------------------------------

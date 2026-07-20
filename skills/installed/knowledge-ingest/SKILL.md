@@ -5,7 +5,7 @@ category: knowledge
 requires:
   tools: [url_ingest, remember]
 contexts: [heartbeat, chat]
-bound_tools: [url_ingest, fast_ingest, slow_ingest, hybrid_ingest, remember, recall, search_documents, open_document, git_ingest]
+bound_tools: [url_ingest, fast_ingest, slow_ingest, hybrid_ingest, remember, recall, search_documents, open_document, open_documents, load_documents, git_ingest]
 ---
 
 # Knowledge Base Ingestion
@@ -25,9 +25,9 @@ Transform external content -- web pages, documents, raw text -- into structured 
 1. **Assess the source**: Before ingesting, determine what kind of content it is (article, documentation, transcript, raw notes). This guides how aggressively to summarize.
 2. **Fetch and parse**: For URLs, use `url_ingest` which handles fetching, HTML-to-text conversion, and chunking. For files or raw knowledge sources, use the fast/slow/hybrid ingestion tools as appropriate.
 3. **Check for duplicates**: Use `recall` with the URL or a key phrase from the content to see if it has already been ingested. Avoid storing the same source twice.
-4. **Chunk intelligently**: Long content is automatically chunked by the ingestion pipeline. Each chunk becomes a separate semantic memory linked by source metadata, and the raw source artifact remains searchable with `search_documents` and retrievable with `open_document`. Trust the pipeline's chunking; do not manually split content unless it is clearly failing.
+4. **Chunk intelligently**: Long content is automatically chunked by the ingestion pipeline. Each chunk becomes a separate semantic memory linked by source metadata, and the raw source artifact remains searchable with `search_documents` and retrievable with `open_document` or `open_documents`. Use `load_documents` when a large source should be deliberately placed on the RecMem desk for later exact search. Trust the pipeline's chunking; do not manually split content unless it is clearly failing.
 5. **Add context**: When storing via `remember`, include metadata about the source: URL, author, date published, and why it was ingested (which goal or topic it serves).
-6. **Verify ingestion**: After ingestion completes, run a quick `recall` on a key concept from the content to confirm distilled knowledge is retrievable. For exact wording or large specifications, use `search_documents` or `open_document` instead of expecting recall to carry the whole source.
+6. **Verify ingestion**: After ingestion completes, run a quick `recall` on a key concept from the content to confirm distilled knowledge is retrievable. For exact wording or large specifications, use `search_documents`, `open_document`, or `load_documents` instead of expecting recall to carry the whole source.
 7. **Connect to goals**: If the ingested content relates to an active goal, note the connection so future heartbeats can leverage it.
 
 ## Quality Guidelines

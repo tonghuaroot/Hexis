@@ -113,6 +113,60 @@ async def test_recmem_ingest_idempotency_and_claim(db_pool):
             await tr.rollback()
 
 
+async def test_recmem_gc_archives_idle_desk_units_but_keeps_recently_used(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await conn.execute("SELECT set_config('memory.recmem_gc_enabled', 'true'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_gc_idle_days', '1'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_gc_consolidated_grace_days', '1'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_gc_task_retention_days', '1'::jsonb)")
+
+            idle = await _insert_embedded_unit(conn, "gc-idle", route_status="raw_only")
+            used = await _insert_embedded_unit(conn, "gc-used", route_status="raw_only")
+            await conn.execute(
+                """
+                UPDATE subconscious_units
+                SET extraction_status = 'extracted',
+                    created_at = CURRENT_TIMESTAMP - INTERVAL '40 days',
+                    updated_at = CURRENT_TIMESTAMP - INTERVAL '40 days',
+                    last_routed_at = CURRENT_TIMESTAMP - INTERVAL '40 days'
+                WHERE id = ANY($1::uuid[])
+                """,
+                [idle, used],
+            )
+            assert await conn.fetchval("SELECT touch_subconscious_units(ARRAY[$1::uuid])", used) == 1
+
+            completed_task = await conn.fetchval(
+                """
+                INSERT INTO recmem_consolidation_tasks (
+                    task_type, status, completed_at, updated_at
+                )
+                VALUES (
+                    'episode_create',
+                    'completed',
+                    CURRENT_TIMESTAMP - INTERVAL '10 days',
+                    CURRENT_TIMESTAMP - INTERVAL '10 days'
+                )
+                RETURNING id
+                """
+            )
+
+            result = _json(await conn.fetchval("SELECT recmem_gc(20)"))
+
+            assert result["archived_units"] == 1
+            assert result["deleted_tasks"] == 1
+            assert await conn.fetchval("SELECT status FROM subconscious_units WHERE id = $1", idle) == "archived"
+            assert await conn.fetchval("SELECT status FROM subconscious_units WHERE id = $1", used) == "active"
+            assert await conn.fetchval(
+                "SELECT to_regclass('public.recmem_consolidation_tasks') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM recmem_consolidation_tasks WHERE id = $1)",
+                completed_task,
+            )
+        finally:
+            await tr.rollback()
+
+
 async def test_recmem_task_retry_uses_next_attempt_at(db_pool):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()

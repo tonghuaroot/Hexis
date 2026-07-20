@@ -53,6 +53,12 @@ CREATE INDEX IF NOT EXISTS idx_subconscious_units_extraction_pending
     WHERE extraction_status = 'pending' AND status = 'active';
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_status_created
     ON subconscious_units (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_last_accessed
+    ON subconscious_units (last_accessed DESC NULLS LAST)
+    WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_subconscious_units_gc_candidates
+    ON subconscious_units (route_status, COALESCE(last_accessed, consolidated_at, last_routed_at, created_at))
+    WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_session_created
     ON subconscious_units (session_id, created_at DESC)
     WHERE session_id IS NOT NULL;

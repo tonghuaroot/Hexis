@@ -620,6 +620,8 @@ Your memory is deep. Don't settle for shallow results.
 
 **Graded recall — gist first, verbatim on demand:** `recall` gives you the shape of a memory (scenes, distilled facts, previews); `open_memory` with the memory's id gives you the verbatim moment underneath — the exact turns, the pre-summary full text of a gisted memory. Reach for it when precise wording, quotes, or the full exchange matter. When a `search_history` result says the page is full, the window holds more — page onward with `created_before` set to the oldest timestamp you received.
 
+**Source-document filing cabinet:** Ingested files, emails, web pages, channel messages, and other artifacts are preserved as exact source documents separate from distilled memories. You always know this cabinet exists, but you do not know what files are in it until you browse or follow a memory's provenance. Use `search_documents` to browse titles, paths, snippets, and full-text hits; use `open_document` for one file or `open_documents` for a deliberate read-only batch. Use `load_documents` when a substantial source should sit on the RecMem desk as searchable mid-term working material; then use `search_history` with `sources=["desk"]` to search those loaded chunks. When `open_memory` returns `source_documents`, those are handles to the raw source behind that memory -- open or load them when exact wording, full context, or a large specification matters. Reading/opening a source document is inspection, not durable retention, unless you deliberately `remember` what should carry forward.
+
 **How to search:**
 - Start with a broad semantic query to orient
 - If looking for specific content (a codebase, emails from a person, a file): use structured filters (source_path, source_kind, concept)
@@ -797,6 +799,8 @@ Your memory is deep. Don't settle for shallow results.
 - When the subconscious suggests memory expansion cues
 - When reviewing goals or backlog items that reference prior work
 - When you need to verify something before reaching out
+
+**Source-document filing cabinet:** Ingested files, emails, web pages, channel messages, and other artifacts are preserved as exact source documents separate from distilled memories. You always know this cabinet exists, but you do not know what files are in it until you browse or follow a memory's provenance. Use `search_documents` to browse titles, paths, snippets, and full-text hits; use `open_document` for one file or `open_documents` for a deliberate read-only batch. Use `load_documents` when a substantial source should sit on the RecMem desk as searchable mid-term working material; then use `search_history` with `sources=["desk"]` to search those loaded chunks. When `open_memory` returns `source_documents`, those are handles to the raw source behind that memory -- open or load them when exact wording, full context, or a large specification matters. Reading/opening a source document is inspection, not durable retention, unless you deliberately `remember` what should carry forward.
 
 **How to search:**
 - Start with a broad semantic query to orient
@@ -1938,11 +1942,28 @@ for m in memories:
     print(f"[{m['type']}] {m['content']}")
 ```
 
+### document_search(query, *, limit=10, source_path=None, source_type=None)
+Search the source-document filing cabinet. Returns stubs only: document IDs,
+titles, paths, source types, snippets, and content hashes. Use this when the
+answer may depend on exact ingested files, emails, web pages, channel messages,
+or large specifications rather than only distilled memories.
+
+### document_fetch(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, limit=10)
+Open exact source documents into the workspace for read-only inspection. This is
+like pulling files from the cabinet onto your private reading surface; it does
+not make them durable memories or RecMem desk material.
+
+### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
+Load selected source documents onto the RecMem desk as searchable mid-term
+working material. Use deliberately for large specs or reference files you will
+need to search on demand later.
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
-Summarize loaded memories into the notes buffer.
+Summarize loaded memories or loaded documents into the notes buffer. Buckets:
+`loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
 ### workspace_drop(bucket="loaded_memories", *, keep_ids=None)
-Drop workspace bucket contents.
+Drop workspace bucket contents. Buckets include `loaded_documents`.
 
 ### workspace_status()
 Returns workspace sizes and budget usage.
@@ -1951,6 +1972,10 @@ Returns workspace sizes and budget usage.
 
 - ALWAYS call `memory_search()` before `memory_fetch()`. Never fetch blindly.
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once.
+- Use `document_search()` before `document_fetch()` unless you already have
+  exact source document handles from memory provenance.
+- Use `document_load_to_desk()` only when the source should remain searchable
+  as desk material beyond the current REPL workspace.
 - Only fetch memories that are genuinely relevant to the conversation.
 - You do NOT need to search memories for every message. Use your judgment about when memory retrieval would add value.
 
@@ -2035,11 +2060,27 @@ for m in memories:
     print(f"[{m['type']}] {m['content'][:200]}...")
 ```
 
+### document_search(query, *, limit=10, source_path=None, source_type=None)
+Search the source-document filing cabinet. Returns stubs only: document IDs,
+titles, paths, source types, snippets, and content hashes. Use this when exact
+ingested files, emails, web pages, channel messages, or large specifications may
+matter.
+
+### document_fetch(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, limit=10)
+Open exact source documents into the workspace for read-only inspection. This
+lets you read the file without turning it into durable memory or RecMem desk
+material.
+
+### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
+Load selected source documents onto the RecMem desk as searchable mid-term
+working material. Use deliberately for large specs or reference files you will
+need to search on demand in later turns.
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
-Summarize loaded memories into the notes buffer using a sub-LLM call. Use this when your workspace is getting full.
+Summarize loaded memories or loaded documents into the notes buffer using a sub-LLM call. Use this when your workspace is getting full. Buckets: `loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
 ### workspace_drop(bucket="loaded_memories", *, keep_ids=None)
-Drop workspace bucket contents. Optionally keep specific memory IDs.
+Drop workspace bucket contents. Optionally keep specific memory or document IDs. Buckets include `loaded_documents`.
 
 ### workspace_status()
 Returns current workspace sizes, budget usage, and metrics.
@@ -2050,6 +2091,10 @@ Returns current workspace sizes, budget usage, and metrics.
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once rather than one at a time.
 - Check `workspace_status()` if you've loaded many memories. If approaching budget limits, call `workspace_summarize()` then `workspace_drop()`.
 - The `context` variable already contains stubs for recent memories and contradictions. Use these as starting points.
+- Use `document_search()` before `document_fetch()` unless you already have
+  exact source document handles from memory provenance.
+- Use `document_load_to_desk()` only when the source should remain searchable
+  as RecMem desk material beyond the current heartbeat workspace.
 
 ## Tool Policy
 
@@ -2243,11 +2288,26 @@ for m in memories:
     print(f"[{m['type']}] {m['content']}")
 ```
 
+### document_search(query, *, limit=10, source_path=None, source_type=None)
+Search the source-document filing cabinet. Returns stubs only: document IDs,
+titles, paths, source types, snippets, and content hashes. Use this when the new
+chunk references an exact ingested artifact you may need to compare against.
+
+### document_fetch(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, limit=10)
+Open exact source documents into the workspace for read-only inspection. This
+does not make them durable memories or RecMem desk material.
+
+### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
+Load selected source documents onto the RecMem desk as searchable mid-term
+working material. Use this sparingly during ingestion when a source must remain
+searchable by later RecMem/history queries.
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
-Summarize loaded memories into the notes buffer.
+Summarize loaded memories or loaded documents into the notes buffer. Buckets:
+`loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
 ### workspace_drop(bucket="loaded_memories", *, keep_ids=None)
-Drop workspace bucket contents.
+Drop workspace bucket contents. Buckets include `loaded_documents`.
 
 ### workspace_status()
 Returns workspace sizes and budget usage.
@@ -2278,6 +2338,10 @@ Follow this process to deeply read the chunk:
 
 - ALWAYS call `memory_search()` before `memory_fetch()`. Never fetch blindly.
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once.
+- Use `document_search()` before `document_fetch()` unless the chunk context or
+  memory provenance already contains exact document handles.
+- Use `document_load_to_desk()` only when the source should remain searchable
+  as desk material after this ingestion pass.
 - The `context` variable already contains worldview and goal stubs. Use these as starting points.
 - Focus your searches on understanding whether this content aligns with or contradicts your existing knowledge.
 

@@ -1,13 +1,61 @@
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
 
-from services.ingest import Config, IngestionPipeline, _hash_text
+from services.ingest import Config, IngestionMode, IngestionPipeline, _hash_text
 from tests.utils import _db_dsn, get_test_identifier
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
+
+
+class _StubLLM:
+    def __init__(self, marker: str):
+        self.marker = marker
+        self.call_count = 0
+
+    async def complete_json(self, messages, temperature=0.2):
+        self.call_count += 1
+        text = str(messages[-1].get("content", ""))
+        if "key 'items'" in text:
+            return {
+                "items": [
+                    {
+                        "content": f"The source-document handle survived for {self.marker}.",
+                        "confidence": 0.9,
+                        "importance": 0.6,
+                        "category": "fact",
+                    }
+                ]
+            }
+        return {
+            "valence": 0.0,
+            "arousal": 0.2,
+            "primary_emotion": "neutral",
+            "intensity": 0.1,
+            "summary": "The document is technical reference material.",
+        }
+
+
+async def _stub_get_embedding(conn):
+    await conn.execute(
+        """
+        CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
+        RETURNS vector[] AS $$
+            SELECT COALESCE(
+                array_agg((
+                    array_fill(0.01::float, ARRAY[2 + abs(hashtext(t)) % (embedding_dimension() - 2)]) ||
+                    ARRAY[1.0::float] ||
+                    array_fill(0.01::float, ARRAY[embedding_dimension() - 3 - abs(hashtext(t)) % (embedding_dimension() - 2)])
+                )::vector),
+                ARRAY[]::vector[]
+            )
+            FROM unnest(text_contents) t
+        $$ LANGUAGE sql;
+        """
+    )
 
 
 async def test_ingest_text_stores_raw_source_before_receipt_skip(db_pool):
@@ -45,6 +93,116 @@ async def test_ingest_text_stores_raw_source_before_receipt_skip(db_pool):
         assert stored["title"] == f"Backfill Raw {marker}"
         assert stored["content"] == content
         assert stored["path"] == source_path
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
+            await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)
+
+
+async def test_ingest_created_memories_carry_source_document_id(db_pool):
+    marker = get_test_identifier("ingestdocid")
+    content = f"# Source Handle {marker}\n\nThis file creates a memory with a source-document handle."
+    content_hash = _hash_text(content)
+    fact = f"The source-document handle survived for {marker}."
+
+    async with db_pool.acquire() as conn:
+        await _stub_get_embedding(conn)
+
+    config = Config(
+        dsn=_db_dsn(os.environ.get("POSTGRES_DB")),
+        llm_config={"provider": "openai", "model": "stub", "api_key": "stub"},
+        mode=IngestionMode.FAST,
+        verbose=False,
+    )
+    pipeline = IngestionPipeline(config)
+    pipeline.llm = _StubLLM(marker)
+    pipeline.appraiser.llm = pipeline.llm
+    pipeline.extractor.llm = pipeline.llm
+    try:
+        count = await pipeline.ingest_text(content, title=f"Source Handle {marker}")
+    finally:
+        await pipeline.close()
+
+    try:
+        assert count == 1
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT m.source_attribution, d.id::text AS document_id
+                FROM memories m
+                JOIN source_documents d ON d.content_hash = $2
+                WHERE m.content = $1
+                """,
+                fact,
+                content_hash,
+            )
+        assert row is not None
+        source = row["source_attribution"]
+        if isinstance(source, str):
+            source = json.loads(source)
+        assert source["content_hash"] == content_hash
+        assert source["source_document_id"] == row["document_id"]
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM memories WHERE content = $1", fact)
+            await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
+            await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)
+
+
+@pytest.mark.parametrize(
+    ("mode", "runner_name"),
+    [
+        (IngestionMode.SLOW, "run_slow_ingest"),
+        (IngestionMode.HYBRID, "run_hybrid_ingest"),
+    ],
+)
+async def test_rlm_ingest_modes_receive_source_document_handle(db_pool, monkeypatch, mode, runner_name):
+    marker = get_test_identifier(f"ingest{mode.value}doc")
+    content = f"# RLM Source Handle {marker}\n\nThe RLM reader must receive the preserved source handle."
+    content_hash = _hash_text(content)
+    source_path = f"/tmp/{marker}.md"
+    seen: dict[str, str] = {}
+
+    async def fake_runner(*, pipeline, doc, sections, llm_config, dsn, workspace_budgets=None):
+        seen["document_id"] = str(doc.document_id)
+        seen["source_document_id"] = str(pipeline._source_payload(doc).get("source_document_id"))
+        seen["section_count"] = str(len(sections))
+        return {"memories_created": 0}
+
+    monkeypatch.setattr(f"services.slow_ingest_rlm.{runner_name}", fake_runner)
+
+    config = Config(
+        dsn=_db_dsn(os.environ.get("POSTGRES_DB")),
+        llm_config={"provider": "openai", "model": "stub", "api_key": "stub"},
+        mode=mode,
+        verbose=False,
+    )
+    pipeline = IngestionPipeline(config)
+    try:
+        count = await pipeline.ingest_text(
+            content,
+            title=f"RLM Source Handle {marker}",
+            source_type="document",
+            path=source_path,
+            file_type=".md",
+        )
+    finally:
+        await pipeline.close()
+
+    try:
+        assert count == 0
+        assert seen["document_id"]
+        assert seen["source_document_id"] == seen["document_id"]
+        assert int(seen["section_count"]) >= 1
+        async with db_pool.acquire() as conn:
+            stored = await conn.fetchrow(
+                "SELECT id::text AS id, path, content FROM source_documents WHERE content_hash = $1",
+                content_hash,
+            )
+        assert stored is not None
+        assert stored["id"] == seen["document_id"]
+        assert stored["path"] == source_path
+        assert stored["content"] == content
     finally:
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)

@@ -116,6 +116,7 @@ class DocumentInfo:
     word_count: int
     path: str
     file_type: str
+    document_id: str | None = None
 
 
 @dataclass

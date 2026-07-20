@@ -60,6 +60,12 @@ _DEFAULT_ASSESSMENT: dict[str, Any] = {
 _ASSESSMENT_KEYS = set(_DEFAULT_ASSESSMENT.keys())
 
 
+def _require_source_document(doc: DocumentInfo) -> None:
+    document_id = getattr(doc, "document_id", None)
+    if not isinstance(document_id, str) or not document_id.strip():
+        raise ValueError("slow/hybrid ingestion requires doc.document_id; call IngestionPipeline._ingest_content first")
+
+
 def _safe_assessment(raw: Any) -> dict[str, Any]:
     """Ensure assessment has all required keys with safe defaults."""
     if not isinstance(raw, dict):
@@ -240,6 +246,7 @@ async def run_slow_ingest(
     # Ensure store is connected
     if pipeline.store.client is None:
         await pipeline.store.connect()
+    _require_source_document(doc)
 
     # Fetch appraisal context (worldview, emotional state, goals)
     ctx = await pipeline.store.fetch_appraisal_context()
@@ -397,6 +404,7 @@ async def run_hybrid_ingest(
 
     if pipeline.store.client is None:
         await pipeline.store.connect()
+    _require_source_document(doc)
 
     ctx = await pipeline.store.fetch_appraisal_context()
     worldview_stubs = ctx.get("worldview", [])

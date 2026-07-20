@@ -49,11 +49,26 @@ for m in memories:
     print(f"[{m['type']}] {m['content']}")
 ```
 
+### document_search(query, *, limit=10, source_path=None, source_type=None)
+Search the source-document filing cabinet. Returns stubs only: document IDs,
+titles, paths, source types, snippets, and content hashes. Use this when the new
+chunk references an exact ingested artifact you may need to compare against.
+
+### document_fetch(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, limit=10)
+Open exact source documents into the workspace for read-only inspection. This
+does not make them durable memories or RecMem desk material.
+
+### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
+Load selected source documents onto the RecMem desk as searchable mid-term
+working material. Use this sparingly during ingestion when a source must remain
+searchable by later RecMem/history queries.
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
-Summarize loaded memories into the notes buffer.
+Summarize loaded memories or loaded documents into the notes buffer. Buckets:
+`loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
 ### workspace_drop(bucket="loaded_memories", *, keep_ids=None)
-Drop workspace bucket contents.
+Drop workspace bucket contents. Buckets include `loaded_documents`.
 
 ### workspace_status()
 Returns workspace sizes and budget usage.
@@ -84,6 +99,10 @@ Follow this process to deeply read the chunk:
 
 - ALWAYS call `memory_search()` before `memory_fetch()`. Never fetch blindly.
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once.
+- Use `document_search()` before `document_fetch()` unless the chunk context or
+  memory provenance already contains exact document handles.
+- Use `document_load_to_desk()` only when the source should remain searchable
+  as desk material after this ingestion pass.
 - The `context` variable already contains worldview and goal stubs. Use these as starting points.
 - Focus your searches on understanding whether this content aligns with or contradicts your existing knowledge.
 

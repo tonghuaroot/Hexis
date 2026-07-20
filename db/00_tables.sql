@@ -276,6 +276,8 @@ CREATE TABLE subconscious_units (
     importance FLOAT DEFAULT 0.3 CHECK (importance BETWEEN 0 AND 1),
     source_attribution JSONB NOT NULL DEFAULT '{}'::jsonb,
     trust_level FLOAT NOT NULL DEFAULT 0.95 CHECK (trust_level BETWEEN 0 AND 1),
+    access_count INTEGER NOT NULL DEFAULT 0,
+    last_accessed TIMESTAMPTZ,
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active','redacted','archived')),
     recurrence_cluster_id UUID,
@@ -650,7 +652,12 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.recmem_sweep_age_days', '14'::jsonb, 'Periodic sweep age for unconsolidated units'),
     ('memory.recmem_sweep_batch_size', '100'::jsonb, 'Max units re-routed per sweep run'),
     ('memory.recmem_sweep_interval_seconds', '86400'::jsonb, 'Seconds between RecMem raw-only recurrence sweeps'),
-    ('memory.recmem_sweep_min_rerouting_age_days', '7'::jsonb, 'Skip units routed within this window')
+    ('memory.recmem_sweep_min_rerouting_age_days', '7'::jsonb, 'Skip units routed within this window'),
+    ('memory.recmem_gc_enabled', 'true'::jsonb, 'Archive stale RecMem desk items during the periodic sweep'),
+    ('memory.recmem_gc_idle_days', '30'::jsonb, 'Archive raw RecMem units not accessed within this many days once routing/extraction is settled'),
+    ('memory.recmem_gc_consolidated_grace_days', '7'::jsonb, 'Keep raw units this many days after consolidation before archiving them from RecMem recall'),
+    ('memory.recmem_gc_task_retention_days', '14'::jsonb, 'Delete completed/dropped RecMem task rows after this many days'),
+    ('memory.recmem_gc_batch_size', '200'::jsonb, 'Maximum raw units and completed task rows cleaned per RecMem GC pass')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config_defaults (key, value, description) VALUES
     ('llm.recmem', 'null'::jsonb, 'Optional LLM override for RecMem consolidation prompts'),

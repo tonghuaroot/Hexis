@@ -1503,12 +1503,18 @@ class CognitiveMemory:
         # clock -- the up-ladder). Only episodic/semantic tiers are `memories`
         # rows; subconscious item_ids are raw units. The chat/hydrate path did not
         # reinforce before this. Advisory -- never fail recall on it.
-        recalled_ids = [memory.id for memory in memories if memory.tier in ("episodic", "semantic")]
+        recalled_ids = [memory.id for memory in memories if memory.tier != "subconscious"]
         if recalled_ids:
             try:
                 await conn.execute("SELECT touch_memories($1::uuid[])", recalled_ids)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to mark recalled memories as accessed: %s", exc)
+        raw_unit_ids = [memory.id for memory in memories if memory.tier == "subconscious"]
+        if raw_unit_ids:
+            try:
+                await conn.execute("SELECT touch_subconscious_units($1::uuid[])", raw_unit_ids)
+            except Exception as exc:
+                logger.warning("Failed to mark recalled RecMem units as accessed: %s", exc)
         return memories
 
     async def _find_partial_activations(self, conn: asyncpg.Connection, query: str) -> list[PartialActivation]:

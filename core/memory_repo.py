@@ -70,6 +70,92 @@ class MemoryRepo:
             rows = cur.fetchall()
             return [_serialize_row(row) for row in rows]
 
+    def search_documents(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        source_path: str | None = None,
+        source_type: str | None = None,
+        preview_chars: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Search preserved source documents, returning stubs only."""
+        conn = self._get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT document_id, title, source_type, path, file_type,
+                       content_hash, word_count, size_bytes, created_at,
+                       updated_at, rank, snippet
+                FROM search_source_documents(
+                    %s, %s, %s, %s, NULL, NULL, false, 0, %s, false
+                )
+                """,
+                (query, limit, source_path, source_type, preview_chars),
+            )
+            rows = cur.fetchall()
+            return [_serialize_row(row) for row in rows]
+
+    def fetch_documents(
+        self,
+        *,
+        document_ids: list[str] | None = None,
+        content_hashes: list[str] | None = None,
+        paths: list[str] | None = None,
+        offset: int = 0,
+        max_chars: int | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Open preserved source documents by id/hash/path."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT open_source_documents(
+                    %s::uuid[], %s::text[], %s::text[], %s::int, %s::int, %s::int, false
+                )
+                """,
+                (document_ids or [], content_hashes or [], paths or [], offset, max_chars, limit),
+            )
+            result = cur.fetchone()[0]
+            return json.loads(result) if isinstance(result, str) else (result or {})
+
+    def load_documents_to_desk(
+        self,
+        *,
+        document_ids: list[str] | None = None,
+        content_hashes: list[str] | None = None,
+        paths: list[str] | None = None,
+        offset: int = 0,
+        max_chars: int | None = None,
+        chunk_chars: int | None = None,
+        limit: int = 10,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Load preserved source documents onto the RecMem desk."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT load_source_documents_to_recmem(
+                    %s::uuid[], %s::text[], %s::text[], %s::int,
+                    %s::int, %s::int, %s::int, false, %s::text
+                )
+                """,
+                (
+                    document_ids or [],
+                    content_hashes or [],
+                    paths or [],
+                    offset,
+                    max_chars,
+                    chunk_chars,
+                    limit,
+                    reason,
+                ),
+            )
+            result = cur.fetchone()[0]
+            return json.loads(result) if isinstance(result, str) else (result or {})
+
     def recent_stubs(
         self, *, limit: int = 5, preview_chars: int = 256
     ) -> list[dict[str, Any]]:

@@ -26,11 +26,13 @@ hexis ingest --url https://example.com/article
 
 ## How It Works
 
-Ingestion is tiered and emotionally aware:
+Ingestion is tiered and source-preserving:
 
-1. Creates an **encounter memory** (the agent "encountered" this content)
-2. **Appraises** the content (importance, relevance, emotional valence)
-3. **Extracts** semantic knowledge based on the chosen mode
+1. Preserves the raw artifact in the source-document filing cabinet.
+2. Creates an **encounter memory** (the agent "encountered" this content).
+3. **Appraises** the content (importance, relevance, emotional valence).
+4. **Extracts** semantic knowledge based on the chosen mode, with each memory
+   carrying provenance back to the preserved source document.
 
 Content is deduplicated at two levels. Whole documents are receipt-tracked by
 content hash — re-ingesting an identical document is skipped. Individual
@@ -39,31 +41,29 @@ an existing memory **corroborates** it (the document is merged as a source, the
 belief's confidence rises through the audited revision policy, and a `SUPPORTS`
 edge links the reading encounter to the belief) instead of being re-stored.
 
-## Standard Modes
+## Ingestion Modes
 
 | Mode | Behavior | Best for |
 |------|----------|----------|
-| `auto` | Chooses based on content size | Default |
-| `deep` | Per-section appraisal + extraction | Short, high-value documents |
-| `standard` | Single appraisal + chunked extraction | General use |
-| `shallow` | Summary-only extraction | Broad corpora |
-| `archive` | Store encounter only (process later) | Large files, batch processing |
+| `fast` | Quick chunking + fact extraction + graph linking | Default and general use |
+| `slow` | Conscious mini-RLM loop per chunk | Short, high-value documents |
+| `hybrid` | Fast pass, then slow-processes high-signal chunks | Large or mixed-value documents |
 
 ```bash
-hexis ingest --input ./docs --mode auto       # auto-select
-hexis ingest --file paper.pdf --mode deep     # thorough extraction
-hexis ingest --input ./corpus --mode shallow  # light pass
+hexis ingest --input ./docs --mode fast
+hexis ingest --file paper.pdf --mode slow
+hexis ingest --input ./corpus --mode hybrid
 ```
 
-## Conscious Ingestion Modes (RLM)
+`auto`, `standard`, `deep`, and `shallow` are accepted as compatibility aliases
+for older scripts, but new workflows should use `fast`, `slow`, or `hybrid`.
 
-These modes use the RLM (Recursive Language Model) loop for conscious reading against the agent's existing knowledge:
+## Conscious Ingestion
 
-| Mode | Energy | Behavior |
-|------|--------|----------|
-| `fast` | 2 | Quick chunking + fact extraction + basic graph linking |
-| `slow` | 5 | Mini-RLM loop per chunk: searches related memories, compares against worldview, forms emotional reactions, decides to accept/contest/question each piece |
-| `hybrid` | 3 | Fast first pass, then slow-processes only high-signal chunks (importance > 0.7, worldview-contradicting, or goal-related) |
+`slow` and `hybrid` use the RLM loop for conscious reading against the
+agent's existing knowledge. The reader can search existing memories, compare the
+new document against worldview beliefs, and mark extracted claims as accepted,
+contested, or uncertain.
 
 ```bash
 # Conscious slow reading of an important document
@@ -73,7 +73,18 @@ hexis ingest --file philosophy.md --mode slow
 hexis ingest --input ./research/ --mode hybrid
 ```
 
-Contested content is stored with a `contested` flag and `CONTESTED_BECAUSE` graph edges linking to the beliefs that caused rejection.
+Contested content is stored with a `contested` flag and `CONTESTED_BECAUSE`
+graph edges linking to the beliefs that caused rejection.
+
+## Raw Source Documents
+
+Every ingestion path preserves the raw source first. The agent can later browse
+the filing cabinet with `search_documents`, open exact sources with
+`open_document` or `open_documents`, and deliberately load substantial sources
+onto the RecMem desk with `load_documents`. Desk-loaded chunks are mid-term
+working material: they are searchable with `search_history` using
+`sources=["desk"]`, but they are not permanent distilled memories unless the
+agent explicitly stores a durable memory.
 
 ## Input Sources
 
@@ -102,34 +113,25 @@ cat ./notes.md | hexis ingest --stdin --stdin-type markdown --stdin-title "notes
 | `--no-recursive` | Don't recurse into subdirectories |
 | `--quiet`, `-q` | Suppress verbose output |
 
-## Processing Archived Content
-
-If `auto` mode archives large content for later processing:
-
-```bash
-# Check what's pending
-hexis ingest status --pending
-
-# Process archived items
-hexis ingest process --all-archived --limit 10
-
-# Process a specific item
-hexis ingest process --content-hash <hash>
-```
-
 ## Tips
 
-- Start with `--mode auto`. Only force `deep` for known small/important content.
-- Use `--mode shallow` for broad corpora to avoid memory bloat.
+- Start with `--mode fast`. Use `slow` for known small/important content and
+  `hybrid` for large sources where only some sections deserve conscious reading.
 - Use `--permanent` sparingly -- it disables decay for created memories.
 - Use `--base-trust` for low-trust sources (e.g., random web pages).
 - The agent can also trigger ingestion autonomously during heartbeats via `fast_ingest`, `slow_ingest`, and `hybrid_ingest` tools.
 
 ## Troubleshooting
 
-**"I ingested a big folder and nothing happened"** -- `auto` mode may have chosen `archive` for large files. Run `hexis ingest status --pending` to check, then `hexis ingest process --all-archived`.
+**"I ingested a big folder and recall is sparse"** -- recall returns distilled
+memories, not whole files. Use `search_documents` to browse preserved raw
+sources, `open_document`/`open_documents` for exact reading, or `load_documents`
+to place substantial files on the RecMem desk for later exact search.
 
-**Duplicate content skipped** -- Ingestion receipts are content-hash based. If you need to re-ingest, either change the content or process the archived items. Note that near-duplicate *facts* are not lost — they corroborate the matched memory (source merged, confidence revised, audited in `belief_revision_audit`).
+**Duplicate content skipped** -- Ingestion receipts are content-hash based. If
+you need to re-ingest, change the content or clear the specific receipt. Note
+that near-duplicate *facts* are not lost -- they corroborate the matched memory
+(source merged, confidence revised, audited in `belief_revision_audit`).
 
 ## Related
 

@@ -35,7 +35,11 @@ def _make_pipeline(plan: list[dict[str, Any]]) -> MagicMock:
     """The pipeline's store is fully async now (#88) — AsyncMock throughout."""
     pipeline = MagicMock()
     pipeline._skip_section.return_value = False
-    pipeline._source_payload.return_value = {"kind": "document", "ref": "test-doc.md"}
+    pipeline._source_payload.return_value = {
+        "kind": "document",
+        "ref": "test-doc.md",
+        "source_document_id": "00000000-0000-0000-0000-000000000001",
+    }
     pipeline._create_encounter_memory = AsyncMock(return_value="encounter-1")
     store = pipeline.store = AsyncMock()
     store.client = object()  # already "connected"
@@ -60,6 +64,7 @@ def _section() -> MagicMock:
 def _doc() -> MagicMock:
     doc = MagicMock()
     doc.title = "Test Doc"
+    doc.document_id = "00000000-0000-0000-0000-000000000001"
     return doc
 
 

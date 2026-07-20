@@ -205,17 +205,7 @@ class SlowIngestHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        from core.agent_api import db_dsn_from_env
-        from services.ingest import (
-            DocumentInfo,
-            IngestionMode,
-            IngestionPipeline,
-            Sectioner,
-            _hash_text,
-            _word_count,
-            get_reader,
-        )
-        from services.slow_ingest_rlm import run_slow_ingest
+        from services.ingest import IngestionMode, IngestionPipeline
 
         path_str = str(arguments["path"]).strip()
         file_path = Path(path_str)
@@ -231,45 +221,15 @@ class SlowIngestHandler(ToolHandler):
         pipeline = IngestionPipeline(config)
 
         try:
-            reader = get_reader(file_path)
-            content = reader.read(file_path)
-            content_hash = _hash_text(content)
-
-            title = arguments.get("title") or file_path.stem
-            doc = DocumentInfo(
-                title=title,
-                source_type="file",
-                content_hash=content_hash,
-                word_count=_word_count(content),
-                path=path_str,
-                file_type=file_path.suffix.lower(),
-            )
-
-            sectioner = Sectioner(config.max_section_chars, config.chunk_overlap)
-            sections = sectioner.split(content, file_path)
-
-            dsn = config.dsn or db_dsn_from_env()
-            llm_cfg = pipeline.llm._cfg
-
-            result = await run_slow_ingest(
-                pipeline=pipeline,
-                doc=doc,
-                sections=sections,
-                llm_config=llm_cfg,
-                dsn=dsn,
-            )
+            count = await pipeline.ingest_file(file_path)
 
             return ToolResult.success_result(
                 {
-                    "memories_created": result["memories_created"],
-                    "chunks_processed": result["chunks_processed"],
+                    "memories_created": count,
                     "path": path_str,
                     "mode": "slow",
                 },
-                display_output=(
-                    f"Slow ingested {path_str}: {result['memories_created']} memories "
-                    f"from {result['chunks_processed']} chunks."
-                ),
+                display_output=f"Slow ingested {path_str}: {count} memories created.",
             )
         except Exception as e:
             logger.error("slow_ingest failed: %s", e)
@@ -331,17 +291,7 @@ class HybridIngestHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        from core.agent_api import db_dsn_from_env
-        from services.ingest import (
-            DocumentInfo,
-            IngestionMode,
-            IngestionPipeline,
-            Sectioner,
-            _hash_text,
-            _word_count,
-            get_reader,
-        )
-        from services.slow_ingest_rlm import run_hybrid_ingest
+        from services.ingest import IngestionMode, IngestionPipeline
 
         path_str = str(arguments["path"]).strip()
         file_path = Path(path_str)
@@ -357,47 +307,15 @@ class HybridIngestHandler(ToolHandler):
         pipeline = IngestionPipeline(config)
 
         try:
-            reader = get_reader(file_path)
-            content = reader.read(file_path)
-            content_hash = _hash_text(content)
-
-            title = arguments.get("title") or file_path.stem
-            doc = DocumentInfo(
-                title=title,
-                source_type="file",
-                content_hash=content_hash,
-                word_count=_word_count(content),
-                path=path_str,
-                file_type=file_path.suffix.lower(),
-            )
-
-            sectioner = Sectioner(config.max_section_chars, config.chunk_overlap)
-            sections = sectioner.split(content, file_path)
-
-            dsn = config.dsn or db_dsn_from_env()
-            llm_cfg = pipeline.llm._cfg
-
-            result = await run_hybrid_ingest(
-                pipeline=pipeline,
-                doc=doc,
-                sections=sections,
-                llm_config=llm_cfg,
-                dsn=dsn,
-            )
+            count = await pipeline.ingest_file(file_path)
 
             return ToolResult.success_result(
                 {
-                    "memories_created": result["memories_created"],
-                    "chunks_processed": result["chunks_processed"],
-                    "slow_chunks": result["slow_chunks"],
-                    "fast_chunks": result["fast_chunks"],
+                    "memories_created": count,
                     "path": path_str,
                     "mode": "hybrid",
                 },
-                display_output=(
-                    f"Hybrid ingested {path_str}: {result['memories_created']} memories "
-                    f"({result['slow_chunks']} slow, {result['fast_chunks']} fast chunks)."
-                ),
+                display_output=f"Hybrid ingested {path_str}: {count} memories created.",
             )
         except Exception as e:
             logger.error("hybrid_ingest failed: %s", e)
@@ -640,8 +558,6 @@ class URLIngestHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        import tempfile
-
         from services.ingest import IngestionMode, IngestionPipeline
 
         url = str(arguments["url"]).strip()
@@ -681,6 +597,8 @@ class URLIngestHandler(ToolHandler):
                 content,
                 title=arguments.get("title") or url,
                 source_type=source_type,
+                path=url,
+                file_type=".html" if source_type == "web" else f".{source_type}",
             )
 
             return ToolResult.success_result(

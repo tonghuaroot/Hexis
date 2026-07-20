@@ -8,6 +8,7 @@ These wrap the existing CognitiveMemory API.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -21,6 +22,8 @@ from .base import (
     ToolResult,
     ToolSpec,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def _try_db_memory_tool(tool_name: str, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult | None:
@@ -195,7 +198,7 @@ class SearchHistoryHandler(ToolHandler):
                     },
                     "sources": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["turn", "memory"]},
+                        "items": {"type": "string", "enum": ["turn", "memory", "desk"]},
                         "minItems": 1,
                         "uniqueItems": True,
                         "default": ["turn", "memory"],
@@ -243,11 +246,45 @@ class SearchHistoryHandler(ToolHandler):
                 pass
         db_result = await _try_db_memory_tool("search_history", args, context)
         if db_result is not None:
+            if db_result.success and context.registry and context.registry.pool:
+                await self._touch_history_results(db_result.output, context)
             return db_result
         return ToolResult.error_result(
             "execute_memory_tool dispatch failed (database unavailable or errored)",
             ToolErrorType.EXECUTION_FAILED,
         )
+
+    async def _touch_history_results(self, output: Any, context: ToolExecutionContext) -> None:
+        """Advisory access marking: browsing a desk item counts as using it."""
+        if not isinstance(output, dict):
+            return
+        raw_results = output.get("results")
+        if not isinstance(raw_results, list):
+            return
+        raw_unit_ids: list[UUID] = []
+        memory_ids: list[UUID] = []
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            try:
+                item_id = UUID(str(item.get("item_id") or ""))
+            except ValueError:
+                continue
+            if item.get("source_kind") in ("turn", "desk"):
+                raw_unit_ids.append(item_id)
+            elif item.get("source_kind") == "memory":
+                memory_ids.append(item_id)
+
+        if not raw_unit_ids and not memory_ids:
+            return
+        try:
+            async with context.registry.pool.acquire() as conn:
+                if raw_unit_ids:
+                    await conn.execute("SELECT touch_subconscious_units($1::uuid[])", raw_unit_ids)
+                if memory_ids:
+                    await conn.execute("SELECT touch_memories($1::uuid[])", memory_ids)
+        except Exception as exc:
+            logger.warning("Failed to mark search_history results as accessed: %s", exc)
 
 
 class RememberHandler(ToolHandler):
@@ -782,6 +819,286 @@ class OpenDocumentHandler(ToolHandler):
         title = str(payload.get("title") or payload.get("path") or payload.get("document_id") or "document")
         suffix = " (truncated)" if payload.get("truncated") else ""
         return ToolResult.success_result(payload, display_output=f"Opened source document: {title}{suffix}")
+
+
+class OpenDocumentsHandler(ToolHandler):
+    """Open a deliberate batch of preserved raw source documents."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="open_documents",
+            description=(
+                "Open multiple preserved raw source documents by document_ids, "
+                "content_hashes, or paths. Use this when a task needs a batch of "
+                "files/emails/specs from the source-document filing cabinet. Pass "
+                "max_chars to page large batches deliberately."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "document_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "UUIDs returned by search_documents or open_memory.source_documents.",
+                    },
+                    "content_hashes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact content hashes for source documents.",
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact or partial paths/URLs for source documents.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional per-document character budget. Omit to retrieve full documents.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 10,
+                    },
+                },
+                "required": [],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=2,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if not context.registry or not context.registry.pool:
+            return ToolResult.error_result("Database unavailable", ToolErrorType.EXECUTION_FAILED)
+
+        args = dict(arguments)
+
+        def _string_list(name: str) -> list[str]:
+            raw = args.get(name)
+            if raw is None:
+                return []
+            if not isinstance(raw, list):
+                raise ValueError(f"{name} must be an array")
+            return [str(item).strip() for item in raw if str(item).strip()]
+
+        try:
+            document_ids_raw = _string_list("document_ids")
+            content_hashes = _string_list("content_hashes")
+            paths = _string_list("paths")
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
+
+        if not document_ids_raw and not content_hashes and not paths:
+            return ToolResult.error_result(
+                "Provide document_ids, content_hashes, or paths.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        document_ids: list[UUID] = []
+        for raw_id in document_ids_raw:
+            try:
+                document_ids.append(UUID(raw_id))
+            except ValueError:
+                return ToolResult.error_result("document_ids must contain only uuids", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+            limit = max(1, min(int(args.get("limit") or 10), 50))
+            max_chars = args.get("max_chars")
+            if max_chars is not None:
+                max_chars = max(1, int(max_chars))
+        except (TypeError, ValueError):
+            return ToolResult.error_result("offset, limit, and max_chars must be integers", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    """
+                    SELECT open_source_documents(
+                        $1::uuid[], $2::text[], $3::text[], $4::int, $5::int, $6::int, $7::boolean
+                    )
+                    """,
+                    document_ids,
+                    content_hashes,
+                    paths,
+                    offset,
+                    max_chars,
+                    limit,
+                    bool(args.get("exclude_sensitive") or context.is_group),
+                )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(payload, dict):
+            return ToolResult.error_result("open_source_documents returned an invalid payload", ToolErrorType.EXECUTION_FAILED)
+        if payload.get("error") == "missing_selector":
+            return ToolResult.error_result("Provide document_ids, content_hashes, or paths.", ToolErrorType.INVALID_PARAMS)
+
+        docs = payload.get("documents") if isinstance(payload.get("documents"), list) else []
+        truncated_count = sum(1 for doc in docs if isinstance(doc, dict) and doc.get("truncated"))
+        suffix = f", {truncated_count} truncated" if truncated_count else ""
+        return ToolResult.success_result(payload, display_output=f"Opened {len(docs)} source document(s){suffix}")
+
+
+class LoadDocumentsHandler(ToolHandler):
+    """Load preserved source documents onto the RecMem desk."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="load_documents",
+            description=(
+                "Load one or more preserved raw source documents onto the RecMem "
+                "desk as searchable mid-term working material. Use this when a "
+                "large file/email/spec needs to stay available for on-demand "
+                "desk search during reasoning; use open_document(s) for read-only "
+                "inspection."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "document_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "UUIDs returned by search_documents or open_memory.source_documents.",
+                    },
+                    "content_hashes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact content hashes for source documents.",
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact or partial paths/URLs for source documents.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Optional total character window per document.",
+                    },
+                    "chunk_chars": {
+                        "type": "integer",
+                        "minimum": 500,
+                        "description": "Optional desk chunk size; defaults to memory.source_document_desk_chunk_chars.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 50,
+                        "default": 10,
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief reason this source needs to be on the desk.",
+                    },
+                },
+                "required": [],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=2,
+            is_read_only=False,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if not context.registry or not context.registry.pool:
+            return ToolResult.error_result("Database unavailable", ToolErrorType.EXECUTION_FAILED)
+
+        args = dict(arguments)
+
+        def _string_list(name: str) -> list[str]:
+            raw = args.get(name)
+            if raw is None:
+                return []
+            if not isinstance(raw, list):
+                raise ValueError(f"{name} must be an array")
+            return [str(item).strip() for item in raw if str(item).strip()]
+
+        try:
+            document_ids_raw = _string_list("document_ids")
+            content_hashes = _string_list("content_hashes")
+            paths = _string_list("paths")
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
+
+        if not document_ids_raw and not content_hashes and not paths:
+            return ToolResult.error_result(
+                "Provide document_ids, content_hashes, or paths.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        document_ids: list[UUID] = []
+        for raw_id in document_ids_raw:
+            try:
+                document_ids.append(UUID(raw_id))
+            except ValueError:
+                return ToolResult.error_result("document_ids must contain only uuids", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+            limit = max(1, min(int(args.get("limit") or 10), 50))
+            max_chars = args.get("max_chars")
+            if max_chars is not None:
+                max_chars = max(1, int(max_chars))
+            chunk_chars = args.get("chunk_chars")
+            if chunk_chars is not None:
+                chunk_chars = max(500, int(chunk_chars))
+        except (TypeError, ValueError):
+            return ToolResult.error_result("offset, limit, max_chars, and chunk_chars must be integers", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    """
+                    SELECT load_source_documents_to_recmem(
+                        $1::uuid[], $2::text[], $3::text[], $4::int,
+                        $5::int, $6::int, $7::int, $8::boolean, $9::text
+                    )
+                    """,
+                    document_ids,
+                    content_hashes,
+                    paths,
+                    offset,
+                    max_chars,
+                    chunk_chars,
+                    limit,
+                    bool(args.get("exclude_sensitive") or context.is_group),
+                    args.get("reason"),
+                )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(payload, dict):
+            return ToolResult.error_result("load_source_documents_to_recmem returned an invalid payload", ToolErrorType.EXECUTION_FAILED)
+        if payload.get("error") == "missing_selector":
+            return ToolResult.error_result("Provide document_ids, content_hashes, or paths.", ToolErrorType.INVALID_PARAMS)
+
+        count = int(payload.get("count") or 0)
+        return ToolResult.success_result(payload, display_output=f"Loaded {count} source document desk chunk(s)")
 
 
 class SenseMemoryAvailabilityHandler(ToolHandler):
@@ -1580,6 +1897,8 @@ def create_memory_tools() -> list[ToolHandler]:
         OpenMemoryHandler(),
         SearchDocumentsHandler(),
         OpenDocumentHandler(),
+        OpenDocumentsHandler(),
+        LoadDocumentsHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
         AssociateHandler(),
