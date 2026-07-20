@@ -553,6 +553,7 @@ class TestChannelConversation:
             chunks = await process_channel_message(msg, db_pool)
             assert chunks == ["ok"]
             assert chat_turn_mock.await_args.kwargs["is_group"] is True
+            assert chat_turn_mock.await_args.kwargs["surface"] == "channel"
         finally:
             async with db_pool.acquire() as conn:
                 await self._cleanup(conn, sender_id)

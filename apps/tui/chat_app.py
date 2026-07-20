@@ -64,6 +64,7 @@ class ChatScreen(Screen):
         self._tool_count = 0
         self._flush_timer: Any = None
         self._greet = False
+        self._chat_session_id = str(uuid.uuid4())
 
     def compose(self) -> ComposeResult:
         yield Static("", id="chat-header")
@@ -179,6 +180,7 @@ class ChatScreen(Screen):
         if cmd in ("/quit", "/exit"):
             self.app.exit(0)
         elif cmd == "/clear":
+            await self._clear_active_context("tui_clear_command")
             self._history.clear()
             await tr.remove_children()
             tr.write_info("Conversation cleared.")
@@ -237,6 +239,11 @@ class ChatScreen(Screen):
             except Exception as e:
                 tr.write_error(str(e))
         elif cmd == "/history":
+            try:
+                from services.chat import _hydrate_chat_history
+                self._history = await _hydrate_chat_history(app.pool, self._chat_session_id, self._history)
+            except Exception:
+                pass
             if not self._history:
                 tr.write_info("No conversation history yet.")
             else:
@@ -270,13 +277,15 @@ class ChatScreen(Screen):
     async def _stream_response(self, user_input: str) -> None:
         from core.agent_loop import AgentEvent
         from services.agent import stream_agent
+        from services.chat import _hydrate_chat_history
 
         app: HexisChatApp = self.app  # type: ignore[assignment]
         tr = self.query_one(Transcript)
         status = self.query_one(StatusBar)
         turn = self._current_turn
-        session_id = str(uuid.uuid4())
+        session_id = self._chat_session_id
         saw_token = False
+        self._history = await _hydrate_chat_history(app.pool, session_id, self._history)
 
         async for event in stream_agent(
             app.pool, app.registry,
@@ -369,11 +378,15 @@ class ChatScreen(Screen):
         app: HexisChatApp = self.app  # type: ignore[assignment]
         try:
             from core.cognitive_memory_api import CognitiveMemory
-            from services.chat import _remember_conversation
-            async with CognitiveMemory.connect(app.dsn) as mem_client:
-                await _remember_conversation(
-                    mem_client, user_message=user_input, assistant_message=assistant_text
-                )
+            from services.chat import _hydrate_chat_history, _remember_conversation
+            await _remember_conversation(
+                CognitiveMemory(app.pool),
+                user_message=user_input,
+                assistant_message=assistant_text,
+                session_id=self._chat_session_id,
+                surface="tui",
+            )
+            self._history = await _hydrate_chat_history(app.pool, self._chat_session_id, self._history)
         except Exception as e:
             if self._debug:
                 self.query_one(Transcript).write_info(f"[memory] not stored: {e}")
@@ -388,9 +401,22 @@ class ChatScreen(Screen):
             self.app.exit(0)
 
     async def action_clear_chat(self) -> None:
+        await self._clear_active_context("tui_clear_action")
         self._history.clear()
         await self.query_one(Transcript).remove_children()
         self.query_one(Transcript).write_info("Conversation cleared.")
+
+    async def _clear_active_context(self, reason: str) -> None:
+        app: HexisChatApp = self.app  # type: ignore[assignment]
+        try:
+            from core.cognitive_memory_api import CognitiveMemory
+            await CognitiveMemory(app.pool).clear_chat_session_context(
+                self._chat_session_id,
+                reason=reason,
+            )
+        except Exception as e:
+            if self._debug:
+                self.query_one(Transcript).write_info(f"[memory] context clear failed: {e}")
 
     def action_toggle_thinking(self) -> None:
         self._show_reasoning = not self._show_reasoning

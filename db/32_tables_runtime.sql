@@ -95,6 +95,50 @@ CREATE TABLE IF NOT EXISTS agent_turn_events (
 CREATE INDEX IF NOT EXISTS idx_agent_turn_events_turn_created
     ON agent_turn_events (turn_id, created_at);
 
+-- DB-owned chat session history. This is the portable short-term
+-- conversation substrate for app/API/TUI chat; UI-local history is rendering
+-- state, not continuity.
+CREATE TABLE IF NOT EXISTS chat_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    surface TEXT NOT NULL DEFAULT 'chat',
+    external_id TEXT,
+    title TEXT,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'archived')),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_active_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    cleared_at TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_external
+    ON chat_sessions (surface, external_id)
+    WHERE external_id IS NOT NULL AND status = 'active';
+CREATE INDEX IF NOT EXISTS idx_chat_sessions_active
+    ON chat_sessions (surface, status, last_active_at DESC);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    ordinal INT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant')),
+    content TEXT NOT NULL,
+    visible_in_context BOOLEAN NOT NULL DEFAULT TRUE,
+    source_message_id TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (session_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_session_ordinal
+    ON chat_messages (session_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_context
+    ON chat_messages (session_id, visible_in_context, ordinal DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_metadata
+    ON chat_messages USING GIN (metadata);
+
 CREATE TABLE IF NOT EXISTS workflow_step_runs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     workflow_id UUID NOT NULL REFERENCES workflow_executions(id) ON DELETE CASCADE,
@@ -202,3 +246,295 @@ CREATE INDEX IF NOT EXISTS idx_source_documents_content_fts
     WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_source_documents_source_attribution
     ON source_documents USING GIN (source_attribution);
+
+-- Raw channel-message source artifacts. Channel adapters write
+-- channel_messages; Postgres owns the exact source document, ingestion job
+-- link, provenance, and sensitivity classification for every message.
+CREATE TABLE IF NOT EXISTS channel_source_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_message_id UUID NOT NULL REFERENCES channel_messages(id) ON DELETE CASCADE,
+    session_id UUID NOT NULL REFERENCES channel_sessions(id) ON DELETE CASCADE,
+    channel_type TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+    platform_message_id TEXT,
+    source_document_id UUID REFERENCES source_documents(id) ON DELETE SET NULL,
+    ingestion_job_id UUID REFERENCES ingestion_jobs(id) ON DELETE SET NULL,
+    content_hash TEXT NOT NULL,
+    sensitivity TEXT NOT NULL DEFAULT 'private'
+        CHECK (sensitivity IN ('private', 'shared', 'public')),
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'redacted', 'archived', 'error')),
+    raw_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (channel_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_source_items_session
+    ON channel_source_items (session_id, direction, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_source_items_channel
+    ON channel_source_items (channel_type, channel_id, sender_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_source_items_document
+    ON channel_source_items (source_document_id) WHERE source_document_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_channel_source_items_metadata
+    ON channel_source_items USING GIN (raw_metadata);
+
+-- Channel adapter runtime visibility. Workers own the heartbeat writes;
+-- Postgres owns the state surface consumed by chat/CLI/UI setup flows.
+CREATE TABLE IF NOT EXISTS channel_adapter_runtime (
+    channel_type TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (status IN ('unknown', 'not_configured', 'configured', 'starting', 'running', 'stopped', 'error', 'missing_dependency')),
+    configured BOOLEAN NOT NULL DEFAULT FALSE,
+    running BOOLEAN NOT NULL DEFAULT FALSE,
+    worker_id TEXT,
+    pid INT,
+    last_checked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_started_at TIMESTAMPTZ,
+    last_stopped_at TIMESTAMPTZ,
+    last_error TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_adapter_runtime_status
+    ON channel_adapter_runtime (status, updated_at DESC);
+
+-- First-class personal-data connector setup. Long-lived secrets live in
+-- ~/.hexis/auth; the database owns connector identity, grants, setup state,
+-- provenance, and revocation status.
+CREATE TABLE IF NOT EXISTS integration_connectors (
+    id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    category TEXT NOT NULL,
+    auth_type TEXT NOT NULL
+        CHECK (auth_type IN ('oauth2', 'api_key', 'device_code', 'pairing', 'manual')),
+    status TEXT NOT NULL DEFAULT 'available'
+        CHECK (status IN ('available', 'planned', 'disabled')),
+    capability_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+    setup_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,
+    docs_url TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_connectors_status
+    ON integration_connectors (status, category, id);
+
+CREATE TABLE IF NOT EXISTS integration_connections (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connector_id TEXT NOT NULL REFERENCES integration_connectors(id) ON DELETE CASCADE,
+    account_key TEXT NOT NULL,
+    display_name TEXT,
+    status TEXT NOT NULL DEFAULT 'connected'
+        CHECK (status IN ('pending', 'connected', 'needs_reauth', 'revoked', 'error')),
+    credential_ref TEXT,
+    granted_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_channel TEXT,
+    source_session_id TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_error TEXT,
+    connected_at TIMESTAMPTZ,
+    last_verified_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (connector_id, account_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_integration_connections_status
+    ON integration_connections (connector_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_integration_connections_metadata
+    ON integration_connections USING GIN (metadata);
+
+CREATE TABLE IF NOT EXISTS connection_attempts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connector_id TEXT NOT NULL REFERENCES integration_connectors(id) ON DELETE CASCADE,
+    account_key TEXT,
+    status TEXT NOT NULL DEFAULT 'pending_user'
+        CHECK (status IN ('pending_user', 'awaiting_input', 'exchanging', 'complete', 'error', 'expired', 'cancelled')),
+    requested_capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+    requested_scopes TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    flow_state JSONB NOT NULL DEFAULT '{}'::jsonb,
+    authorization_url TEXT,
+    user_next_step TEXT,
+    source_channel TEXT,
+    source_session_id TEXT,
+    credential_ref TEXT,
+    error TEXT,
+    expires_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_connection_attempts_status
+    ON connection_attempts (connector_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_connection_attempts_session
+    ON connection_attempts (source_channel, source_session_id, created_at DESC);
+
+-- DB-owned connector backfill substrate. Provider adapters fetch pages and
+-- bodies; Postgres owns cursor state, retry/pause lifecycle, provider-item
+-- receipts, and the link from raw channel items to source_documents.
+CREATE TABLE IF NOT EXISTS connector_sync_cursors (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connection_id UUID NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+    connector_id TEXT NOT NULL,
+    account_key TEXT NOT NULL,
+    cursor_key TEXT NOT NULL DEFAULT 'default',
+    cursor_value JSONB NOT NULL DEFAULT '{}'::jsonb,
+    high_watermark TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'paused', 'error')),
+    last_started_at TIMESTAMPTZ,
+    last_completed_at TIMESTAMPTZ,
+    last_error TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (connection_id, cursor_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_connector_sync_cursors_status
+    ON connector_sync_cursors (connector_id, account_key, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS connector_backfill_jobs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connection_id UUID NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+    connector_id TEXT NOT NULL,
+    account_key TEXT NOT NULL,
+    cursor_key TEXT NOT NULL DEFAULT 'default',
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'in_progress', 'paused', 'completed', 'failed', 'cancelled')),
+    requested_range JSONB NOT NULL DEFAULT '{}'::jsonb,
+    progress JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result JSONB,
+    error TEXT,
+    attempts INT NOT NULL DEFAULT 0,
+    max_attempts INT NOT NULL DEFAULT 3,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claimed_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    pause_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connector_backfill_jobs_active
+    ON connector_backfill_jobs (connection_id, cursor_key)
+    WHERE status IN ('pending', 'in_progress', 'paused');
+CREATE INDEX IF NOT EXISTS idx_connector_backfill_jobs_pending
+    ON connector_backfill_jobs (status, next_attempt_at, created_at)
+    WHERE status IN ('pending', 'in_progress');
+
+CREATE TABLE IF NOT EXISTS connector_source_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connection_id UUID NOT NULL REFERENCES integration_connections(id) ON DELETE CASCADE,
+    connector_id TEXT NOT NULL,
+    account_key TEXT NOT NULL,
+    provider_item_id TEXT NOT NULL,
+    provider_thread_id TEXT,
+    item_kind TEXT NOT NULL DEFAULT 'message',
+    source_document_id UUID REFERENCES source_documents(id) ON DELETE SET NULL,
+    content_hash TEXT NOT NULL,
+    item_timestamp TIMESTAMPTZ,
+    labels TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    participants JSONB NOT NULL DEFAULT '[]'::jsonb,
+    attachments JSONB NOT NULL DEFAULT '[]'::jsonb,
+    ingestion_job_id UUID REFERENCES ingestion_jobs(id) ON DELETE SET NULL,
+    sensitivity TEXT NOT NULL DEFAULT 'private'
+        CHECK (sensitivity IN ('private', 'shared', 'public')),
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'redacted', 'archived')),
+    raw_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (connection_id, provider_item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_connector_source_items_provider
+    ON connector_source_items (connector_id, account_key, item_kind, provider_item_id);
+CREATE INDEX IF NOT EXISTS idx_connector_source_items_time
+    ON connector_source_items (connector_id, account_key, item_timestamp DESC)
+    WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_connector_source_items_metadata
+    ON connector_source_items USING GIN (raw_metadata);
+
+-- DB-owned connector action authorization. Provider adapters execute effects;
+-- Postgres owns durable grants, constraints, decisions, and audit.
+CREATE TABLE IF NOT EXISTS connector_action_tool_map (
+    tool_name TEXT PRIMARY KEY,
+    connector_id TEXT NOT NULL,
+    action_kind TEXT NOT NULL,
+    target_argument TEXT,
+    account_argument TEXT,
+    sensitivity TEXT NOT NULL DEFAULT 'external_action',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_connector_action_tool_map_connector
+    ON connector_action_tool_map (connector_id, action_kind)
+    WHERE enabled;
+
+CREATE TABLE IF NOT EXISTS connector_action_policies (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connector_id TEXT NOT NULL,
+    account_key TEXT,
+    action_kind TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'revoked', 'expired')),
+    contexts TEXT[] NOT NULL DEFAULT ARRAY['chat']::TEXT[],
+    allow_autonomous BOOLEAN NOT NULL DEFAULT FALSE,
+    requires_per_action_approval BOOLEAN NOT NULL DEFAULT TRUE,
+    constraints JSONB NOT NULL DEFAULT '{}'::jsonb,
+    granted_by TEXT NOT NULL DEFAULT 'user',
+    source_session_id TEXT,
+    rationale TEXT,
+    expires_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    revoke_reason TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_connector_action_policies_active
+    ON connector_action_policies (connector_id, action_kind, account_key, updated_at DESC)
+    WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS idx_connector_action_policies_constraints
+    ON connector_action_policies USING GIN (constraints);
+
+CREATE TABLE IF NOT EXISTS connector_action_audit (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    policy_id UUID REFERENCES connector_action_policies(id) ON DELETE SET NULL,
+    tool_execution_id UUID REFERENCES tool_executions(id) ON DELETE SET NULL,
+    connector_id TEXT NOT NULL,
+    account_key TEXT,
+    action_kind TEXT NOT NULL,
+    target TEXT,
+    tool_name TEXT NOT NULL,
+    tool_context TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('allowed', 'denied', 'failed', 'pending')),
+    reason TEXT,
+    arguments JSONB NOT NULL DEFAULT '{}'::jsonb,
+    context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    external_receipt JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_connector_action_audit_policy
+    ON connector_action_audit (policy_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_connector_action_audit_connector
+    ON connector_action_audit (connector_id, account_key, action_kind, created_at DESC);

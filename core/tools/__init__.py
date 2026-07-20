@@ -180,6 +180,30 @@ from .sessions import (
     create_session_tools,
     ManageSessionsHandler,
 )
+from .integrations import (
+    create_integration_tools,
+    IntegrationSetupStatusHandler,
+    StartIntegrationSetupHandler,
+    ConfigureChannelIntegrationHandler,
+    VerifyChannelIntegrationHandler,
+    GmailSetupStatusHandler,
+    ConnectGmailHandler,
+    CompleteGmailConnectionHandler,
+    RevokeGmailConnectionHandler,
+    StartGmailBackfillHandler,
+    GmailBackfillStatusHandler,
+    ControlGmailBackfillHandler,
+    ConnectorActionPolicyStatusHandler,
+    GrantConnectorActionPolicyHandler,
+    RevokeConnectorActionPolicyHandler,
+)
+from .gmail_actions import (
+    create_gmail_action_tools,
+    GmailSendHandler,
+    GmailReplyHandler,
+    GmailLabelHandler,
+    GmailSpamTriageHandler,
+)
 
 __all__ = [
     # Base classes
@@ -304,4 +328,24 @@ __all__ = [
     # Sub-agent session tools
     "create_session_tools",
     "ManageSessionsHandler",
+    "create_integration_tools",
+    "IntegrationSetupStatusHandler",
+    "StartIntegrationSetupHandler",
+    "ConfigureChannelIntegrationHandler",
+    "VerifyChannelIntegrationHandler",
+    "GmailSetupStatusHandler",
+    "ConnectGmailHandler",
+    "CompleteGmailConnectionHandler",
+    "RevokeGmailConnectionHandler",
+    "StartGmailBackfillHandler",
+    "GmailBackfillStatusHandler",
+    "ControlGmailBackfillHandler",
+    "ConnectorActionPolicyStatusHandler",
+    "GrantConnectorActionPolicyHandler",
+    "RevokeConnectorActionPolicyHandler",
+    "create_gmail_action_tools",
+    "GmailSendHandler",
+    "GmailReplyHandler",
+    "GmailLabelHandler",
+    "GmailSpamTriageHandler",
 ]

@@ -247,6 +247,8 @@ DECLARE
     v_sender_name TEXT := p_message->>'sender_name';
     v_content TEXT := COALESCE(p_message->>'content', '');
     v_platform_message_id TEXT := p_message->>'message_id';
+    v_metadata JSONB := COALESCE(p_message->'metadata', '{}'::jsonb);
+    v_is_group BOOLEAN := COALESCE(NULLIF(p_message->>'is_group', '')::BOOLEAN, FALSE);
     cost FLOAT;
     multiplier FLOAT;
     effective_cost FLOAT;
@@ -302,7 +304,18 @@ BEGIN
         'inbound',
         v_content,
         v_platform_message_id,
-        jsonb_build_object('channel_type', v_channel_type, 'sender_name', v_sender_name)
+        v_metadata || jsonb_build_object(
+            'channel_type', v_channel_type,
+            'channel_id', v_channel_id,
+            'sender_id', v_sender_id,
+            'sender_name', v_sender_name,
+            'is_group', v_is_group,
+            'message_id', v_platform_message_id,
+            'reply_to_id', NULLIF(p_message->>'reply_to_id', ''),
+            'thread_id', NULLIF(p_message->>'thread_id', ''),
+            'attachments', COALESCE(p_message->'attachments', '[]'::jsonb),
+            'timestamp', NULLIF(p_message->>'timestamp', '')
+        )
     );
 
     RETURN jsonb_build_object(

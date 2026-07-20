@@ -42,7 +42,7 @@ from core.cognitive_memory_api import CognitiveMemory
 from core.gateway import EventSource, Gateway
 from core.tools import create_default_registry
 from services.agent import stream_agent
-from services.chat import _remember_conversation
+from services.chat import _hydrate_chat_history, _remember_conversation
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +406,7 @@ async def _openai_agent_events(
     pool = _pool
     if pool is None:
         raise RuntimeError("Server not ready (no DB pool)")
+    history = await _hydrate_chat_history(pool, session_id, history)
 
     try:
         await Gateway(pool).record(
@@ -448,6 +449,7 @@ async def _remember_openai_chat(
             user_message=user_message,
             assistant_message=assistant_message,
             session_id=session_id,
+            surface="openai_compat",
         )
     except Exception:
         logger.exception("OpenAI-compatible chat memory formation failed")
@@ -1150,6 +1152,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         registry = create_default_registry(pool)
         agent_profile = await get_agent_profile_context(pool=pool)
         addenda = await _resolve_prompt_addenda(pool, req.prompt_addenda)
+        history = await _hydrate_chat_history(pool, session_id, history)
 
         full_text = ""
         conscious_started = False
@@ -1271,6 +1274,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     assistant_message=full_text,
                     session_id=session_id,
                     emotional_state=appraisal_affect,
+                    surface="api",
                 )
                 yield _sse_event("log", {
                     "id": str(uuid.uuid4()),

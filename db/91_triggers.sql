@@ -57,3 +57,9 @@ CREATE TRIGGER trg_hmx_emotional_trigger_provenance
     BEFORE INSERT ON emotional_triggers
     FOR EACH ROW
     EXECUTE FUNCTION hmx_default_emotional_trigger_provenance();
+
+DROP TRIGGER IF EXISTS trg_channel_message_source_artifact ON channel_messages;
+CREATE TRIGGER trg_channel_message_source_artifact
+    AFTER INSERT ON channel_messages
+    FOR EACH ROW
+    EXECUTE FUNCTION channel_message_source_artifact_trigger();

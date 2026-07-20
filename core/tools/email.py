@@ -27,6 +27,11 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+GMAIL_SETUP_HINT = (
+    "Gmail credentials not configured. Use the gmail-connector-setup skill "
+    "and call connect_gmail to start OAuth setup in this conversation."
+)
+
 
 class EmailSendHandler(ToolHandler):
     """Send email via SMTP."""
@@ -397,7 +402,7 @@ class EmailListHandler(ToolHandler):
             return ToolResult(
                 success=False,
                 output=None,
-                error="Gmail credentials not configured. Set up OAuth credentials via config.",
+                error=GMAIL_SETUP_HINT,
                 error_type=ToolErrorType.AUTH_FAILED,
             )
 
@@ -500,7 +505,8 @@ class EmailReadHandler(ToolHandler):
             name="email_read",
             description=(
                 "Read the full content of a specific email by its message ID. "
-                "Use email_list or email_search first to get message IDs."
+                "Use email_list or email_search first to get message IDs. "
+                "Setting mark_read=true changes Gmail state and requires connector action authorization outside chat."
             ),
             parameters={
                 "type": "object",
@@ -512,7 +518,7 @@ class EmailReadHandler(ToolHandler):
                     "mark_read": {
                         "type": "boolean",
                         "default": False,
-                        "description": "Mark the message as read after fetching",
+                        "description": "Mark the message as read after fetching. This changes Gmail state.",
                     },
                 },
                 "required": ["message_id"],
@@ -536,7 +542,7 @@ class EmailReadHandler(ToolHandler):
             return ToolResult(
                 success=False,
                 output=None,
-                error="Gmail credentials not configured.",
+                error=GMAIL_SETUP_HINT,
                 error_type=ToolErrorType.AUTH_FAILED,
             )
 
@@ -670,7 +676,7 @@ class EmailSearchHandler(ToolHandler):
             return ToolResult(
                 success=False,
                 output=None,
-                error="Gmail credentials not configured.",
+                error=GMAIL_SETUP_HINT,
                 error_type=ToolErrorType.AUTH_FAILED,
             )
 
@@ -874,7 +880,7 @@ class IngestEmailsHandler(ToolHandler):
             return ToolResult(
                 success=False,
                 output=None,
-                error="Gmail credentials not configured",
+                error=GMAIL_SETUP_HINT,
                 error_type=ToolErrorType.AUTH_FAILED,
             )
 

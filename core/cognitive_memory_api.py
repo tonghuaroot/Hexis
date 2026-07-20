@@ -716,6 +716,68 @@ class CognitiveMemory:
             result = _coerce_json(raw) if raw is not None else {}
             return dict(result) if isinstance(result, dict) else {}
 
+    async def hydrate_chat_session(
+        self,
+        session_id: UUID | str,
+        *,
+        limit: int | None = None,
+        include_system: bool = False,
+    ) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT hydrate_chat_session($1::uuid, $2::int, $3::bool)",
+                _uuid_text_or_none(session_id),
+                limit,
+                include_system,
+            )
+            result = _coerce_json(raw) if raw is not None else {}
+            messages = result.get("messages", []) if isinstance(result, dict) else []
+            return list(messages) if isinstance(messages, list) else []
+
+    async def record_chat_session_turn(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        session_id: UUID | str,
+        surface: str = "chat",
+        context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        async with self._pool.acquire() as conn:
+            raw = await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2::text,
+                    $3::text,
+                    $4::text,
+                    $5::jsonb
+                )
+                """,
+                _uuid_text_or_none(session_id),
+                user_text,
+                assistant_text,
+                surface,
+                _to_jsonb_arg(context or {}),
+            )
+            result = _coerce_json(raw) if raw is not None else {}
+            return dict(result) if isinstance(result, dict) else {}
+
+    async def clear_chat_session_context(
+        self,
+        session_id: UUID | str,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        async with self._pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT clear_chat_session_context($1::uuid, $2::text)",
+                _uuid_text_or_none(session_id),
+                reason,
+            )
+            result = _coerce_json(raw) if raw is not None else {}
+            return dict(result) if isinstance(result, dict) else {}
+
     async def hydrate_recmem(
         self,
         query: str,
@@ -1557,6 +1619,19 @@ class CognitiveMemorySync:
 
     def remember_turn_raw(self, user_text: str, assistant_text: str, **kwargs: Any) -> dict[str, Any]:
         return self._loop.run_until_complete(self._async.remember_turn_raw(user_text, assistant_text, **kwargs))
+
+    def hydrate_chat_session(self, session_id: UUID | str, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._loop.run_until_complete(self._async.hydrate_chat_session(session_id, **kwargs))
+
+    def record_chat_session_turn(self, user_text: str, assistant_text: str, **kwargs: Any) -> dict[str, Any]:
+        return self._loop.run_until_complete(
+            self._async.record_chat_session_turn(user_text, assistant_text, **kwargs)
+        )
+
+    def clear_chat_session_context(self, session_id: UUID | str, **kwargs: Any) -> dict[str, Any]:
+        return self._loop.run_until_complete(
+            self._async.clear_chat_session_context(session_id, **kwargs)
+        )
 
     def hydrate_recmem(self, query: str, **kwargs: Any) -> list[Memory]:
         return self._loop.run_until_complete(self._async.hydrate_recmem(query, **kwargs))

@@ -174,6 +174,30 @@ def _is_channel_configured(channel_type: str, config: dict[str, Any]) -> bool:
     return False
 
 
+async def _record_adapter_runtime(
+    conn: asyncpg.Connection,
+    channel_type: str,
+    status: str,
+    *,
+    configured: bool,
+    running: bool,
+    error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    try:
+        await conn.fetchval(
+            "SELECT record_channel_adapter_status($1, $2, $3, $4, $5, $6::jsonb)",
+            channel_type,
+            status,
+            configured,
+            running,
+            error,
+            json.dumps(metadata or {}),
+        )
+    except Exception:
+        logger.debug("Failed to record channel adapter runtime for %s", channel_type, exc_info=True)
+
+
 async def _ensure_configured_adapters_running(manager, conn: asyncpg.Connection, channels: list[str] | None) -> int:
     """
     Detect newly-configured channels and start their adapters.
@@ -185,10 +209,28 @@ async def _ensure_configured_adapters_running(manager, conn: asyncpg.Connection,
 
     for channel_type in _wanted_channel_types(channels):
         if channel_type in manager.adapters:
+            adapter = manager.adapters[channel_type]
+            connected = bool(getattr(adapter, "is_connected", False))
+            await _record_adapter_runtime(
+                conn,
+                channel_type,
+                "running" if connected else "configured",
+                configured=True,
+                running=connected,
+                metadata={"source": "channel_worker_config_scan"},
+            )
             continue
 
         config = await _load_channel_config(conn, channel_type)
         if not _is_channel_configured(channel_type, config):
+            await _record_adapter_runtime(
+                conn,
+                channel_type,
+                "not_configured",
+                configured=False,
+                running=False,
+                metadata={"source": "channel_worker_config_scan"},
+            )
             continue
 
         try:
@@ -199,6 +241,14 @@ async def _ensure_configured_adapters_running(manager, conn: asyncpg.Connection,
                     adapter = DiscordAdapter(config)
                 except ImportError:
                     logger.warning("discord.py not installed, skipping Discord channel")
+                    await _record_adapter_runtime(
+                        conn,
+                        channel_type,
+                        "missing_dependency",
+                        configured=True,
+                        running=False,
+                        error="discord.py is not installed",
+                    )
                     continue
 
             elif channel_type == "telegram":
@@ -208,6 +258,14 @@ async def _ensure_configured_adapters_running(manager, conn: asyncpg.Connection,
                     adapter = TelegramAdapter(config)
                 except ImportError:
                     logger.warning("python-telegram-bot not installed, skipping Telegram channel")
+                    await _record_adapter_runtime(
+                        conn,
+                        channel_type,
+                        "missing_dependency",
+                        configured=True,
+                        running=False,
+                        error="python-telegram-bot is not installed",
+                    )
                     continue
 
             elif channel_type == "slack":
@@ -217,6 +275,14 @@ async def _ensure_configured_adapters_running(manager, conn: asyncpg.Connection,
                     adapter = SlackAdapter(config)
                 except ImportError:
                     logger.warning("slack-bolt not installed, skipping Slack channel")
+                    await _record_adapter_runtime(
+                        conn,
+                        channel_type,
+                        "missing_dependency",
+                        configured=True,
+                        running=False,
+                        error="slack-bolt is not installed",
+                    )
                     continue
 
             elif channel_type == "signal":
@@ -241,16 +307,40 @@ async def _ensure_configured_adapters_running(manager, conn: asyncpg.Connection,
                     adapter = MatrixAdapter(config)
                 except ImportError:
                     logger.warning("matrix-nio not installed, skipping Matrix channel")
+                    await _record_adapter_runtime(
+                        conn,
+                        channel_type,
+                        "missing_dependency",
+                        configured=True,
+                        running=False,
+                        error="matrix-nio is not installed",
+                    )
                     continue
 
             else:
                 continue
 
             if await manager.ensure_started(adapter):
+                await _record_adapter_runtime(
+                    conn,
+                    channel_type,
+                    "starting",
+                    configured=True,
+                    running=True,
+                    metadata={"source": "channel_worker_config_scan"},
+                )
                 started += 1
 
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to start channel adapter: %s", channel_type)
+            await _record_adapter_runtime(
+                conn,
+                channel_type,
+                "error",
+                configured=True,
+                running=False,
+                error=str(exc),
+            )
 
     return started
 

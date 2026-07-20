@@ -31,20 +31,38 @@ def _coerce_json(value: Any) -> Any:
     return value
 
 
+def _attachment_payload(value: Any) -> Any:
+    if hasattr(value, "to_dict") and callable(value.to_dict):
+        return value.to_dict()
+    if isinstance(value, dict):
+        return value
+    return str(value)
+
+
+def _channel_message_payload(msg: ChannelMessage) -> dict[str, Any]:
+    return {
+        "channel_type": msg.channel_type,
+        "channel_id": msg.channel_id,
+        "sender_id": msg.sender_id,
+        "sender_name": msg.sender_name,
+        "content": msg.content,
+        "message_id": msg.message_id,
+        "reply_to_id": msg.reply_to_id,
+        "thread_id": msg.thread_id,
+        "attachments": [_attachment_payload(att) for att in msg.attachments],
+        "metadata": dict(msg.metadata or {}),
+        "timestamp": msg.timestamp.isoformat() if msg.timestamp else None,
+        "is_group": msg.is_group,
+    }
+
+
 async def _prepare_channel_turn_db(
     conn: asyncpg.Connection,
     msg: ChannelMessage,
 ) -> dict[str, Any]:
     raw = await conn.fetchval(
         "SELECT prepare_channel_turn($1::jsonb)",
-        json.dumps({
-            "channel_type": msg.channel_type,
-            "channel_id": msg.channel_id,
-            "sender_id": msg.sender_id,
-            "sender_name": msg.sender_name,
-            "content": msg.content,
-            "message_id": msg.message_id,
-        }),
+        json.dumps(_channel_message_payload(msg), default=str),
     )
     result = _coerce_json(raw)
     return result if isinstance(result, dict) else {}
@@ -164,6 +182,7 @@ async def process_channel_message(
             pool=pool,
             user_label=msg.sender_name,
             is_group=msg.is_group,
+            surface="channel",
         )
 
         assistant_text = result.get("assistant", "")
@@ -212,7 +231,7 @@ async def stream_channel_message(
     from channels.streaming import StreamCoalescer
     from core.agent_api import db_dsn_from_env
     from core.llm_config import load_llm_config
-    from services.chat import stream_chat_turn
+    from services.chat import _hydrate_chat_history, stream_chat_turn
 
     try:
         async with pool.acquire() as conn:
@@ -271,6 +290,7 @@ async def stream_channel_message(
             pool=pool,
             user_label=msg.sender_name,
             is_group=msg.is_group,
+            surface="channel",
         ):
             collected.append(token)
             await coalescer.push(token)
@@ -279,9 +299,12 @@ async def stream_channel_message(
         assistant_text = "".join(collected)
 
         # Update session and log
-        new_history = list(history)
-        new_history.append({"role": "user", "content": user_content})
-        new_history.append({"role": "assistant", "content": assistant_text})
+        fallback_history = [
+            *history,
+            {"role": "user", "content": user_content},
+            {"role": "assistant", "content": assistant_text},
+        ]
+        new_history = await _hydrate_chat_history(pool, session_id, fallback_history)
 
         async with pool.acquire() as conn:
             await _finalize_channel_turn_db(

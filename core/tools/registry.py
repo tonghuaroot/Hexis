@@ -680,6 +680,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     from .browser import create_browser_tools
     from .calendar import create_calendar_tools
     from .email import create_email_tools
+    from .gmail_actions import create_gmail_action_tools
     from .messaging import create_messaging_tools
     from .ingest import create_ingest_tools
     from .workflow import create_workflow_tools
@@ -691,6 +692,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     from .contacts import create_contact_tools
     from .image_gen import create_image_gen_tools
     from .usage_query import create_usage_tools
+    from .integrations import create_integration_tools
     from .brave_search import create_brave_search_tools
     from .firecrawl import create_firecrawl_tools
     from .council import create_council_tools
@@ -722,6 +724,17 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
                 return None
         return _resolve
 
+    def _gmail_credentials_resolver() -> dict[str, Any] | None:
+        env_credentials = _json_env_resolver("GOOGLE_GMAIL_CREDENTIALS", "GOOGLE_CALENDAR_CREDENTIALS")()
+        if env_credentials:
+            return env_credentials
+        try:
+            from core.auth.google_gmail import load_default_credentials
+
+            return load_default_credentials()
+        except Exception:
+            return None
+
     builder = ToolRegistryBuilder(pool)
     builder.add_all(create_memory_tools())
     builder.add_all(create_memory_exchange_tools())
@@ -740,8 +753,10 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
         smtp_config_resolver=_json_env_resolver("EMAIL_CONFIG"),
         sendgrid_api_key_resolver=_env_resolver("SENDGRID_API_KEY"),
         sendgrid_from_email=os.getenv("SENDGRID_FROM_EMAIL"),
-        gmail_credentials_resolver=_json_env_resolver("GOOGLE_GMAIL_CREDENTIALS", "GOOGLE_CALENDAR_CREDENTIALS"),
+        gmail_credentials_resolver=_gmail_credentials_resolver,
     ))
+    builder.add_all(create_gmail_action_tools())
+    builder.add_all(create_integration_tools())
     builder.add_all(create_messaging_tools())
     builder.add_all(create_ingest_tools())
     builder.add_all(create_workflow_tools())

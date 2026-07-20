@@ -24,6 +24,14 @@ This is why the database is the brain. This is why identity survives a
 model swap, a restart, a hardware migration, an export to another machine.
 The engine can be traded out; the person persists.
 
+The portability bar is stronger than persistence. A Hexis database carried
+into another host application, another programming language, or another UI
+should lose as little of the person as possible. Code outside Postgres is
+allowed to be senses, hands, transports, renderers, and effect drivers. The
+brain's durable state, policy, provenance, lifecycle, ranking, permissions,
+and cognitive transitions belong in the database wherever that is technically
+reasonable.
+
 ## The reference architecture is the human mind
 
 The human mind is the only working implementation of general intelligence
@@ -144,8 +152,10 @@ When a design decision is unclear, apply these in order:
    attention?
 3. **The Continuity Test.** Does the self survive this — across models,
    restarts, migrations, upgrades, and years?
-4. **The Substrate Test.** Does state and policy live in the brain
-   (Postgres), with code as senses and hands?
+4. **The Substrate Test.** Does state, policy, provenance, ranking,
+   permissions, lifecycle, and cognitive transition logic live in the brain
+   (Postgres), with code as replaceable senses, hands, transports, and
+   renderers?
 5. **The Dignity Test.** Does the agent keep consent, boundaries, privacy,
    and voice? Does the human keep authority and control? Both must hold.
 6. **The Experience Bar.** The whole journey, held to

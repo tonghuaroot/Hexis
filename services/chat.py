@@ -46,6 +46,46 @@ def _extract_allowed_tools(raw_tools: Any) -> list[str] | None:
     return names
 
 
+def _uuid_text_or_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(UUID(str(value)))
+    except Exception:
+        return None
+
+
+def _message_history_only(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        content = item.get("content")
+        if role in {"system", "user", "assistant"} and isinstance(content, str):
+            normalized.append({"role": role, "content": content})
+    return normalized
+
+
+async def _hydrate_chat_history(
+    pool: Any,
+    session_id: str | None,
+    fallback_history: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    parsed = _uuid_text_or_none(session_id)
+    if not parsed:
+        return _message_history_only(fallback_history or [])
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT hydrate_chat_session($1::uuid)", parsed)
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(payload, dict) and isinstance(payload.get("messages"), list) and payload["messages"]:
+            return _message_history_only(payload["messages"])
+    except Exception:
+        logger.debug("DB chat-session hydration failed; falling back to caller history", exc_info=True)
+    return _message_history_only(fallback_history or [])
+
+
 async def _remember_conversation(
     mem_client: CognitiveMemory,
     *,
@@ -56,9 +96,10 @@ async def _remember_conversation(
     user_label: str | None = None,
     background_dsn: str | None = None,
     emotional_state: dict[str, Any] | None = None,
-) -> None:
+    surface: str = "chat",
+) -> dict[str, Any]:
     if not user_message and not assistant_message:
-        return
+        return {}
     context: dict[str, Any] = {"metadata": {"type": "conversation"}}
     if user_label and user_label.strip():
         context["user_label"] = user_label.strip()
@@ -66,13 +107,42 @@ async def _remember_conversation(
     # (#81); the DB snapshots current state when the appraisal is absent.
     if emotional_state:
         context["emotional_state"] = emotional_state
-    await mem_client.record_chat_turn_memory(
+    context["surface"] = surface
+    if source_identity:
+        context["source_identity"] = source_identity
+    parsed_session = _uuid_text_or_none(session_id)
+    if parsed_session:
+        return await mem_client.record_chat_session_turn(
+            user_message,
+            assistant_message,
+            session_id=parsed_session,
+            surface=surface,
+            context=context,
+        )
+    return await mem_client.record_chat_turn_memory(
         user_message,
         assistant_message,
         session_id=session_id,
         source_identity=source_identity,
         context=context,
     )
+
+
+async def _hydrate_after_persist(
+    mem_client: CognitiveMemory,
+    session_id: str | None,
+    fallback_history: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    parsed = _uuid_text_or_none(session_id)
+    if not parsed:
+        return _message_history_only(fallback_history)
+    try:
+        messages = await mem_client.hydrate_chat_session(parsed)
+        if messages:
+            return _message_history_only(messages)
+    except Exception:
+        logger.debug("Post-write chat-session hydration failed", exc_info=True)
+    return _message_history_only(fallback_history)
 
 
 async def _build_execution_context(
@@ -114,41 +184,47 @@ async def chat_turn(
     pool: Any | None = None,
     user_label: str | None = None,
     is_group: bool = False,
+    surface: str = "chat",
 ) -> dict[str, Any]:
     dsn = dsn or db_dsn_from_env()
     normalized = normalize_llm_config(llm_config)
     history = history or []
+    import asyncpg
 
-    # Check if RLM is enabled for chat
-    use_rlm = False
+    # Create or use provided pool before any chat-state decisions: DB session
+    # history is the source of truth when present.
+    own_pool = pool is None
+    if own_pool:
+        _min, _max = pool_sizes_from_env(1, 3)
+        pool = await asyncpg.create_pool(dsn, min_size=_min, max_size=_max)
+
     try:
-        if pool is not None:
+        history = await _hydrate_chat_history(pool, session_id, history)
+
+        # Check if RLM is enabled for chat
+        use_rlm = False
+        try:
             async with pool.acquire() as _conn:
                 use_rlm_raw = await _conn.fetchval("SELECT get_config_bool('chat.use_rlm')")
                 use_rlm = bool(use_rlm_raw)
-        else:
-            import asyncpg
-            _conn = await asyncpg.connect(dsn)
-            try:
-                use_rlm_raw = await _conn.fetchval("SELECT get_config_bool('chat.use_rlm')")
-                use_rlm = bool(use_rlm_raw)
-            finally:
-                await _conn.close()
-    except Exception:
-        use_rlm = False
+        except Exception:
+            use_rlm = False
 
-    if use_rlm:
-        from services.hexis_rlm import run_chat_turn
-        result = await run_chat_turn(
-            user_message=user_message,
-            history=history,
-            llm_config=normalized,
-            dsn=dsn,
-            session_id=session_id,
-        )
-        assistant_text = result["response"]
-        # Still form memory from the turn
-        if pool is not None:
+        if use_rlm:
+            from services.hexis_rlm import run_chat_turn
+            result = await run_chat_turn(
+                user_message=user_message,
+                history=history,
+                llm_config=normalized,
+                dsn=dsn,
+                session_id=session_id,
+            )
+            assistant_text = result["response"]
+            fallback_history = [
+                *history,
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": assistant_text},
+            ]
             mem_client = CognitiveMemory(pool)
             await _remember_conversation(
                 mem_client,
@@ -157,31 +233,11 @@ async def chat_turn(
                 session_id=session_id,
                 user_label=user_label,
                 background_dsn=dsn,
+                surface=surface,
             )
-        else:
-            async with CognitiveMemory.connect(dsn) as mem_client:
-                await _remember_conversation(
-                    mem_client,
-                    user_message=user_message,
-                    assistant_message=assistant_text,
-                    session_id=session_id,
-                    user_label=user_label,
-                        background_dsn=dsn,
-                )
-        new_history = list(history)
-        new_history.append({"role": "user", "content": user_message})
-        new_history.append({"role": "assistant", "content": assistant_text})
-        return {"assistant": assistant_text, "history": new_history}
+            new_history = await _hydrate_after_persist(mem_client, session_id, fallback_history)
+            return {"assistant": assistant_text, "history": new_history}
 
-    # Create or use provided pool for tool registry
-    import asyncpg
-
-    own_pool = pool is None
-    if own_pool:
-        _min, _max = pool_sizes_from_env(1, 3)
-        pool = await asyncpg.create_pool(dsn, min_size=_min, max_size=_max)
-
-    try:
         registry = create_default_registry(pool)
         agent_profile = await get_agent_profile_context(pool=pool)
 
@@ -199,19 +255,22 @@ async def chat_turn(
         )
         assistant_text = loop_result.text
 
-        async with CognitiveMemory.connect(dsn) as mem_client:
-            await _remember_conversation(
-                mem_client,
-                user_message=user_message,
-                assistant_message=assistant_text,
-                session_id=session_id,
-                user_label=user_label,
-                background_dsn=dsn,
-            )
-
-        new_history = list(history)
-        new_history.append({"role": "user", "content": user_message})
-        new_history.append({"role": "assistant", "content": assistant_text})
+        fallback_history = [
+            *history,
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": assistant_text},
+        ]
+        mem_client = CognitiveMemory(pool)
+        await _remember_conversation(
+            mem_client,
+            user_message=user_message,
+            assistant_message=assistant_text,
+            session_id=session_id,
+            user_label=user_label,
+            background_dsn=dsn,
+            surface=surface,
+        )
+        new_history = await _hydrate_after_persist(mem_client, session_id, fallback_history)
         return {"assistant": assistant_text, "history": new_history}
     finally:
         if own_pool:
@@ -230,6 +289,7 @@ async def stream_chat_turn(
     pool: Any | None = None,
     user_label: str | None = None,
     is_group: bool = False,
+    surface: str = "chat",
 ) -> AsyncIterator[str]:
     """
     Streaming variant of chat_turn().
@@ -249,6 +309,7 @@ async def stream_chat_turn(
         pool = await asyncpg.create_pool(dsn, min_size=_min, max_size=_max)
 
     try:
+        history = await _hydrate_chat_history(pool, session_id, history)
         registry = create_default_registry(pool)
         agent_profile = await get_agent_profile_context(pool=pool)
 
@@ -291,15 +352,15 @@ async def stream_chat_turn(
             yield f"Request failed: {error_message}"
             return
         if full_text:
-            async with CognitiveMemory.connect(dsn) as mem_client:
-                await _remember_conversation(
-                    mem_client,
-                    user_message=user_message,
-                    assistant_message=full_text,
-                    session_id=session_id,
-                    user_label=user_label,
-                    background_dsn=dsn,
-                )
+            await _remember_conversation(
+                CognitiveMemory(pool),
+                user_message=user_message,
+                assistant_message=full_text,
+                session_id=session_id,
+                user_label=user_label,
+                background_dsn=dsn,
+                surface=surface,
+            )
     finally:
         if own_pool:
             await pool.close()

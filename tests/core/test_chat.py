@@ -43,6 +43,7 @@ class _RememberMem:
         self.remember_calls = []
         self.link_calls = []
         self.record_chat_turn_memory_calls = []
+        self.record_chat_session_turn_calls = []
 
     async def remember_turn_raw(self, *args, **kwargs):
         self.raw_calls.append((args, kwargs))
@@ -60,15 +61,38 @@ class _RememberMem:
         self.record_chat_turn_memory_calls.append((args, kwargs))
         return {"direct_promoted": True, "raw": {"status": "stored"}}
 
+    async def record_chat_session_turn(self, *args, **kwargs):
+        self.record_chat_session_turn_calls.append((args, kwargs))
+        return {"session": {"session_id": kwargs.get("session_id")}, "history": {"messages": []}}
 
-async def test_remember_conversation_calls_record_chat_turn_memory():
+
+async def test_remember_conversation_calls_record_chat_session_turn_for_uuid():
+    mem = _RememberMem()
+    session_id = str(uuid4())
+
+    await chat_mod._remember_conversation(  # noqa: SLF001
+        mem,
+        user_message="remember this important preference",
+        assistant_message="noted",
+        session_id=session_id,
+        source_identity="chat:test",
+        surface="cli",
+    )
+
+    assert len(mem.record_chat_session_turn_calls) == 1
+    assert mem.record_chat_session_turn_calls[0][0][0] == "remember this important preference"
+    assert mem.record_chat_session_turn_calls[0][1]["session_id"] == session_id
+    assert mem.record_chat_session_turn_calls[0][1]["surface"] == "cli"
+
+
+async def test_remember_conversation_falls_back_for_non_uuid_session():
     mem = _RememberMem()
 
     await chat_mod._remember_conversation(  # noqa: SLF001
         mem,
         user_message="remember this important preference",
         assistant_message="noted",
-        session_id=str(uuid4()),
+        session_id="channel:legacy:session",
         source_identity="chat:test",
     )
 
@@ -135,7 +159,10 @@ async def test_chat_turn_basic_flow(monkeypatch, db_pool):
     )
 
     assert result["assistant"] == "hello there"
-    assert mem.remembered
+    assert result["history"][-2:] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello there"},
+    ]
 
 
 async def test_chat_turn_tool_loop(monkeypatch, db_pool):
@@ -196,6 +223,52 @@ async def test_chat_turn_tool_loop(monkeypatch, db_pool):
     )
 
     assert result["assistant"] == "final response"
+
+
+async def test_chat_turn_hydrates_db_session_history_before_agent(monkeypatch, db_pool):
+    session_id = str(uuid4())
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO config (key, value, description) VALUES ('chat.use_rlm', 'false', 'test override') "
+            "ON CONFLICT (key) DO UPDATE SET value = 'false'"
+        )
+        await conn.fetchval("SELECT append_chat_message($1::uuid, 'user', 'db says alpha')", session_id)
+        await conn.fetchval("SELECT append_chat_message($1::uuid, 'assistant', 'db says beta')", session_id)
+
+    captured: dict[str, object] = {}
+
+    class AgentResult:
+        text = "fresh response"
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["history"] = kwargs["history"]
+        return AgentResult()
+
+    async def fake_agent_profile(_dsn=None, **_kwargs):
+        return {}
+
+    async def fake_remember_conversation(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(chat_mod, "run_agent", fake_run_agent)
+    monkeypatch.setattr(chat_mod, "get_agent_profile_context", fake_agent_profile)
+    monkeypatch.setattr(chat_mod, "_remember_conversation", fake_remember_conversation)
+
+    result = await chat_mod.chat_turn(
+        user_message="continue",
+        history=[{"role": "user", "content": "stale caller history"}],
+        llm_config={"provider": "openai", "model": "gpt-4o"},
+        dsn="postgresql://unused",
+        pool=db_pool,
+        session_id=session_id,
+    )
+
+    assert result["assistant"] == "fresh response"
+    assert captured["history"] == [
+        {"role": "user", "content": "db says alpha"},
+        {"role": "assistant", "content": "db says beta"},
+    ]
 
 
 async def test_stream_chat_turn_reports_empty_timeout_without_memory(monkeypatch):

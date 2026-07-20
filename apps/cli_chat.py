@@ -138,14 +138,13 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
     from core.llm_config import load_llm_config
     from core.tools import ToolContext, create_default_registry
     from services.agent import stream_agent
-    from services.chat import _build_system_prompt, _remember_conversation
+    from services.chat import _build_system_prompt, _hydrate_chat_history, _remember_conversation
     from rich.panel import Panel
     from rich.table import Table
 
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=5)
     history: list[dict[str, Any]] = []
-    # One stable id for the whole REPL session so per-turn memory dedup works
-    # (the per-turn stream session id below is separate — it keys each agent run).
+    # One stable id for the whole REPL session; the DB owns active context for it.
     chat_session_id = str(uuid.uuid4())
 
     try:
@@ -234,8 +233,15 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                         _print_commands()
 
                     elif cmd == "/clear":
+                        try:
+                            await CognitiveMemory(pool).clear_chat_session_context(
+                                chat_session_id,
+                                reason="cli_clear_command",
+                            )
+                        except Exception:
+                            logger.warning("chat session context clear failed", exc_info=True)
                         history.clear()
-                        console.print("[muted]Local context reset (long-term memories are kept).[/muted]\n")
+                        console.print("[muted]Active context reset (long-term memories are kept).[/muted]\n")
 
                     elif cmd == "/recall":
                         query = cmd_parts[1] if len(cmd_parts) > 1 else ""
@@ -290,6 +296,7 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                         console.print()
 
                     elif cmd == "/history":
+                        history = await _hydrate_chat_history(pool, chat_session_id, history)
                         if not history:
                             console.print("[muted]No conversation history yet.[/muted]\n")
                         else:
@@ -307,9 +314,10 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
 
             # Normal message — stream response via unified agent runner
             # (subconscious pre-phase → memory hydration → conscious loop)
-            session_id = str(uuid.uuid4())
+            session_id = chat_session_id
 
             try:
+                history = await _hydrate_chat_history(pool, session_id, history)
                 raw_buf = ""   # full raw model output
                 shown = ""     # what we've actually printed (scaffolding-stripped)
                 turn_timed_out = False
@@ -441,30 +449,34 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
 
                 console.print()
 
-                # Update CLI-local history. Synthetic greet turns are displayed
-                # only; they are not real user-authored context.
-                _append_visible_turn(
-                    history,
-                    user_input=user_input,
-                    assistant_text=clean_text,
-                    was_greet=was_greet,
-                )
-
                 if was_greet:
                     continue
 
-                # Memory formation (advisory — never blocks, but fails loud in
-                # logs). record_chat_turn_memory derives the stable dedup key.
+                fallback_history = [
+                    *history,
+                    {"role": "user", "content": user_input},
+                    {"role": "assistant", "content": clean_text},
+                ]
+
+                # DB turn recording writes active transcript + long-term turn
+                # memory from one call; local history remains only a fallback.
                 try:
-                    async with CognitiveMemory.connect(dsn) as mem_client:
-                        await _remember_conversation(
-                            mem_client,
-                            user_message=user_input,
-                            assistant_message=clean_text,
-                            session_id=chat_session_id,
-                        )
+                    await _remember_conversation(
+                        CognitiveMemory(pool),
+                        user_message=user_input,
+                        assistant_message=clean_text,
+                        session_id=chat_session_id,
+                        surface="cli",
+                    )
+                    history = await _hydrate_chat_history(pool, chat_session_id, fallback_history)
                 except Exception:
                     logger.warning("memory formation failed", exc_info=True)
+                    _append_visible_turn(
+                        history,
+                        user_input=user_input,
+                        assistant_text=clean_text,
+                        was_greet=False,
+                    )
                     if debug:
                         err_console.print("[muted](memory not stored this turn — see logs)[/muted]")
 

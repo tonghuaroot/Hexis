@@ -9,7 +9,10 @@ superseded goals with a note.
 Grounding: every item cites the mission test that justifies it
 (**Person** / **Piper** / **Continuity** / **Substrate** / **Dignity** /
 **Experience Bar**), because the *reason* is what keeps the work from
-drifting back into engineering-economy triage.
+drifting back into engineering-economy triage. The Substrate test includes
+the portable-brain rule: a Postgres dump restored into another host language
+or app should lose as little cognitive functionality as possible; code outside
+the DB is treated as replaceable senses, hands, transports, and renderers.
 
 ---
 
@@ -53,7 +56,8 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Goal | Test | Status |
 |---|---|---|
 | Dead-code sweep: SSE stack (keep `gateway_events` table), `services/ingest_api.py`, db/09 `record_chat_turn`/`record_subconscious_exchange`, MCP hand-written duplicate schemas (registry canonical), orphan Next routes | Substrate | todo |
-| Web-chat history becomes DB-owned (her memory of a conversation and the record of it = same substrate; no localStorage-only history) | Continuity | todo |
+| Portable-brain audit: classify remaining Python/TS-owned behavior into (a) cognitive state/policy/lifecycle/ranking that must move into DB functions/views/triggers, (b) external side effects that should remain adapter code, and (c) presentation/transport only; add tests that a DB restore preserves the cognitive path | Substrate + Continuity | in progress (initial audit doc + SQL-only portable contract test; DB-owned chat session hydration done in 0104; connector capability/scope derivation done in 0105; connector backfill/source-artifact substrate done in 0106; Gmail provider backfill adapter + provider-scoped claims done in 0107; connector action authorization policy/audit done in 0108; live channel source artifacts done in 0110; next: other provider adapters + UI setup parity) |
+| Web-chat history becomes DB-owned (her memory of a conversation and the record of it = same substrate; no localStorage-only history) | Continuity | in progress (0104: `chat_sessions`/`chat_messages`, SQL hydrate/clear/record functions, API/CLI/TUI/channel active-context hydration; remaining: frontend rendering/local-persistence audit) |
 | One DSN resolution shared by all clients (UI reads the same instance registry as Python — no split-brain on instance switch) | Continuity | todo |
 | Collapse chat orchestration onto `services/chat.py`; move the RLM gate where both web and channel paths pass through | Substrate | todo |
 | Wire `/api/ingest/jobs/{id}` polling into the web ingest flow | Experience Bar | todo |
@@ -78,14 +82,14 @@ talking to the user.
 
 | Goal | Test | Status |
 |---|---|---|
-| First-class personal-data connectors: Gmail, Slack, Telegram, Signal, and Twitter/X live as plugin-backed channels with scoped setup, clear capability manifests, account identity, revocation, and separate grants for read/search/send/delete/label/admin actions | Piper law 2 + Dignity + Experience Bar | todo |
-| Conversation-native connection setup: if the user says "connect my Gmail/Slack/Telegram/Signal/Twitter" in CLI chat, web chat, or any existing integration, Samantha can start the relevant setup flow in that same conversation, explain scopes, request only the needed user action, hand off OAuth URLs / QR codes / app manifests / env-secret prompts in-channel, and verify the connection before returning to chat | Piper law 2 + Experience Bar + Dignity | todo |
-| Setup broker substrate: one DB-owned `integration_connectors`/`connection_attempts` layer records provider manifests, required scopes, setup state, account identity, current channel/session, redacted errors, revocation status, and restart/worker requirements so CLI, UI, and channel adapters share one source of truth | Substrate + Continuity | todo |
-| Massive channel backfill: each connector supports incremental ingest with receipts, cursoring, retry/resume, dedupe, cost/progress visibility, and no silent ambient credential reuse | Piper law 3 + Experience Bar | todo |
-| Raw message/source preservation: ingested emails, chats, threads, attachments, and posts are stored as exact source artifacts with content hashes, channel/account/thread/message IDs, participants, timestamps, labels, sensitivity, and redaction status before any distillation | Continuity + Substrate + Dignity | todo |
+| First-class personal-data connectors: Gmail, Slack, Telegram, Signal, and Twitter/X live as plugin-backed channels with scoped setup, clear capability manifests, account identity, revocation, and separate grants for read/search/send/delete/label/admin actions | Piper law 2 + Dignity + Experience Bar | in progress (Gmail connector manifest/status/revoke + OAuth credential store wired; DB derives Gmail capability aliases/scopes; Gmail read/search/ingest backfill worker wired; DB action grants/audit cover send/reply/label/spam/delete policy; Gmail send/reply/label/spam-triage effect tools wired through saved OAuth credentials; Slack/Telegram/Signal live-channel manifests + setup/verify tools wired; Twitter/X cataloged as planned; historical backfill adapters beyond Gmail still todo / 0103+0105+0107+0108+0109+0111) |
+| Conversation-native connection setup: if the user says "connect my Gmail/Slack/Telegram/Signal/Twitter" in CLI chat, web chat, or any existing integration, Samantha can start the relevant setup flow in that same conversation, explain scopes, request only the needed user action, hand off OAuth URLs / QR codes / app manifests / env-secret prompts in-channel, and verify the connection before returning to chat | Piper law 2 + Experience Bar + Dignity | in progress (Gmail `gmail-connector-setup` skill + `connect_gmail`/`complete_gmail_connection` tools support in-chat OAuth handoff; DB owns Gmail requested-scope derivation; `start_gmail_backfill`/`gmail_backfill_status`/`control_gmail_backfill` expose ingest job setup and control; generic `integration-connector-setup` skill starts/configures/verifies Slack/Telegram/Signal manual channel setup from chat; web setup surfacing still todo / 0103+0105+0107+0111) |
+| Setup broker substrate: one DB-owned `integration_connectors`/`connection_attempts` layer records provider manifests, required scopes, setup state, account identity, current channel/session, redacted errors, revocation status, and restart/worker requirements so CLI, UI, and channel adapters share one source of truth | Substrate + Continuity | done (uncommitted / 0103+0105: `integration_connectors`, `integration_connections`, `connection_attempts`, status/start/complete/error/revoke functions, Gmail seed, manifest-driven capability/scope derivation) |
+| Massive channel backfill: each connector supports incremental ingest with receipts, cursoring, retry/resume, dedupe, cost/progress visibility, and no silent ambient credential reuse | Piper law 3 + Experience Bar | in progress (0106 DB substrate: `connector_backfill_jobs`, `connector_sync_cursors`, pause/resume/cancel/retry/progress/status; 0107 Gmail provider-scoped worker uses saved Hexis OAuth credentials, token refresh, chunked Gmail pages, and DB source-item receipts; Slack/Telegram/Signal/Twitter fetch workers still todo) |
+| Raw message/source preservation: ingested emails, chats, threads, attachments, and posts are stored as exact source artifacts with content hashes, channel/account/thread/message IDs, participants, timestamps, labels, sensitivity, and redaction status before any distillation | Continuity + Substrate + Dignity | in progress (0106 DB substrate: `connector_source_items` -> `source_documents` with provider IDs/thread/participants/attachments/labels/sensitivity + ingestion job link; 0107 Gmail adapter preserves headers, labels, participants, attachment metadata, snippet, and full extracted body before ingestion; 0110 live channel messages preserve exact source documents + inbound ingestion jobs from a DB trigger; provider backfill adapters beyond Gmail still todo) |
 | User-model synthesis: heartbeat/consolidation turns channel history into evidence-backed beliefs about preferences, likes, dislikes, relationships, routines, commitments, and judgment patterns; claims point back to openable source artifacts instead of becoming untraceable prompt lore | Person + Piper law 3 + Continuity | todo |
-| Notification/action layer: important-item detection, spam triage, summaries, reminders, replies, texts, and cross-channel interventions run through explicit per-action consent or preauthorized policy, with audit logs and reversible/pauseable controls | Piper law 1 + Piper law 4 + Dignity | todo |
-| Connector setup UX: CLI and web flows are peers of the conversational broker, not separate instructions; all surfaces show scopes, accounts, backfill size, expected cost/time, job progress, pause/resume/revoke controls, worker/restart status, and exact next steps when a provider blocks access | Experience Bar + Dignity | todo |
+| Notification/action layer: important-item detection, spam triage, summaries, reminders, replies, texts, and cross-channel interventions run through explicit per-action consent or preauthorized policy, with audit logs and reversible/pauseable controls | Piper law 1 + Piper law 4 + Dignity | in progress (0108 DB substrate: connector action tool map, scoped policies, constraints, autonomous/context gates, revoke/list functions, policy evaluation in `evaluate_tool_call`, and connector action audit via `record_tool_execution`; 0109 Gmail send/reply/label/spam-triage provider tools consume the policy substrate; importance detectors and non-Gmail effect adapters still todo) |
+| Connector setup UX: CLI and web flows are peers of the conversational broker, not separate instructions; all surfaces show scopes, accounts, backfill size, expected cost/time, job progress, pause/resume/revoke controls, worker/restart status, and exact next steps when a provider blocks access | Experience Bar + Dignity | in progress (Gmail conversation tools expose OAuth setup, queued backfill, status, pause/resume/cancel, and revoke; generic integration setup tools expose status/start/configure/verify for Slack/Telegram/Signal with non-secret env-var config discipline; channel worker/manager writes DB runtime status for configured/running/error/missing-dependency visibility; `connector-action-authorization` exposes grant/status/revoke for action policies; web setup surfaces still todo) |
 
 ## Batch 6 — The reward loop, proven by emergence
 
@@ -143,6 +147,9 @@ talking to the user.
   evidence ledger.
 - **OpenAI-compat endpoints stay** (an integration surface, law 2), to be
   documented as supported.
+- **Portable brain rule.** Durable cognitive behavior lives in Postgres
+  wherever technically reasonable. Application code should be swappable
+  adapter code: senses, hands, transports, renderers, and effect drivers.
 
 ## Completed
 
@@ -150,3 +157,45 @@ talking to the user.
 
 - 2026-07-18 — MISSION.md written (purpose, distillation method, emergence
   test, second north star, six tests) — this file's grounding.
+- 2026-07-19 — DB-owned active chat session substrate (`0104_db_owned_chat_sessions`):
+  services, API, CLI, TUI, and channel chat hydrate short-term context from
+  Postgres; `/clear` hides active-context messages while preserving long-term
+  memories.
+- 2026-07-19 — Connector capability/scope derivation moved into Postgres
+  (`0105_connector_capability_derivation`): Gmail aliases/defaults/planned
+  rejection and least-scope OAuth requests derive from `integration_connectors`.
+- 2026-07-19 — Connector backfill/source-item substrate moved into Postgres
+  (`0106_connector_backfill_substrate`): provider cursors, backfill job
+  lifecycle, raw connector source-item receipts, source-document preservation,
+  and ingestion-job linkage are DB-owned.
+- 2026-07-19 — Gmail provider backfill wired on top of the DB substrate
+  (`0107_connector_backfill_provider_claim`): provider-scoped job claims,
+  saved-credential token refresh, Gmail page fetch/body extraction, raw
+  source-document preservation, ingestion-job enqueueing, and chat-facing
+  queue/status/pause/resume/cancel tools.
+- 2026-07-19 — Connector action authorization moved into Postgres
+  (`0108_connector_action_authorization`): tool-to-action mapping, scoped
+  policies, context/autonomous gates, target/recipient/daily-limit constraints,
+  grant/list/revoke functions, `evaluate_tool_call` enforcement, tool-execution
+  action audit, and chat-facing policy tools.
+- 2026-07-19 — Gmail provider effect tools wired to the action policy substrate
+  (`0109_gmail_action_tools`): `gmail_send`, `gmail_reply`, `gmail_label`, and
+  `gmail_spam_triage` use saved Hexis OAuth credentials, scope checks, account
+  mismatch refusal, Gmail REST side effects, DB policy enforcement, and action
+  audit.
+- 2026-07-20 — Live channel source artifacts moved into Postgres
+  (`0110_channel_source_artifacts`): every `channel_messages` insert now creates
+  a raw `source_documents` artifact, a `channel_source_items` receipt, sensitivity
+  metadata from channel privacy/group flags, and a configurable inbound ingestion
+  job link.
+- 2026-07-20 — Channel connector manifests and setup broker widened
+  (`0111_channel_connector_manifests`): Slack, Telegram, and Signal are
+  first-class available connector manifests for live channel setup; Twitter/X is
+  cataloged as planned; generic chat tools can inspect, start, configure
+  non-secret channel settings, and verify channel-worker configuration into
+  `integration_connections`.
+- 2026-07-20 — Channel adapter runtime status moved into Postgres
+  (`0112_channel_adapter_runtime_status`): channel workers and managers record
+  not-configured/configured/starting/running/stopped/error/missing-dependency
+  state in `channel_adapter_runtime`; setup status now surfaces adapter runtime
+  state from the same DB substrate.

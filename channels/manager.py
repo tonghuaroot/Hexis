@@ -8,6 +8,7 @@ conversation handler and providing a unified send interface for outbound.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -85,6 +86,7 @@ class ChannelManager:
     async def _start_adapter(self, ctype: str, adapter: ChannelAdapter) -> None:
         """Start a single adapter with error isolation."""
         try:
+            await self._record_runtime_status(ctype, "starting", configured=True, running=True)
 
             async def on_message(msg: ChannelMessage) -> None:
                 await self._handle_message(msg)
@@ -98,19 +100,59 @@ class ChannelManager:
             self._tasks[ctype] = task
             logger.info("Started channel adapter: %s", ctype)
 
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to start channel adapter: %s", ctype)
+            await self._record_runtime_status(
+                ctype,
+                "error",
+                configured=True,
+                running=False,
+                error=str(exc),
+            )
 
     async def _run_adapter(self, ctype: str, adapter: ChannelAdapter, on_message) -> None:
         """Run an adapter with restart-on-crash."""
         while self._running:
             try:
+                await self._record_runtime_status(ctype, "running", configured=True, running=True)
                 await adapter.start(on_message)
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as exc:
                 logger.exception("Channel adapter %s crashed, restarting in 10s", ctype)
+                await self._record_runtime_status(
+                    ctype,
+                    "error",
+                    configured=True,
+                    running=False,
+                    error=str(exc),
+                )
                 await asyncio.sleep(10)
+        await self._record_runtime_status(ctype, "stopped", configured=True, running=False)
+
+    async def _record_runtime_status(
+        self,
+        channel_type: str,
+        status: str,
+        *,
+        configured: bool,
+        running: bool,
+        error: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT record_channel_adapter_status($1, $2, $3, $4, $5, $6::jsonb)",
+                    channel_type,
+                    status,
+                    configured,
+                    running,
+                    error,
+                    json.dumps(metadata or {"source": "channel_manager"}),
+                )
+        except Exception:
+            logger.debug("Failed to record channel adapter runtime for %s", channel_type, exc_info=True)
 
     async def _handle_message(self, msg: ChannelMessage) -> None:
         """Handle an inbound message by routing to conversation handler."""
@@ -224,6 +266,7 @@ class ChannelManager:
         for ctype, adapter in self._adapters.items():
             try:
                 await adapter.stop()
+                await self._record_runtime_status(ctype, "stopped", configured=True, running=False)
                 logger.info("Stopped channel adapter: %s", ctype)
             except Exception:
                 logger.exception("Error stopping channel adapter: %s", ctype)

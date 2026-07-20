@@ -32,6 +32,7 @@ from services.recmem import (
     run_recmem_sweep_step,
 )
 from services.extraction import run_conscious_extraction_step
+from services.gmail_backfill import run_gmail_backfill_step
 from services.summarization import run_memory_summarization_step
 from services.skill_improvement import run_skill_improvement_review_step
 from services.reconsolidation import run_reconsolidation_step
@@ -469,6 +470,16 @@ class MaintenanceWorker:
         except Exception:
             logger.exception("ingestion job step failed")
 
+    async def _run_gmail_backfill_jobs(self) -> None:
+        if not self.pool:
+            return
+        try:
+            handled = await run_gmail_backfill_step(self.pool)
+            if handled:
+                logger.info("Gmail connector backfill jobs handled: %s", handled)
+        except Exception:
+            logger.exception("Gmail connector backfill step failed")
+
     async def _run_recmem_if_enabled(self) -> None:
         if not self.pool:
             return
@@ -576,6 +587,7 @@ class MaintenanceWorker:
                     await self._run_extraction_if_enabled()
                     await self._run_origin_seed_if_enabled()
                     await self._run_skill_improvement_if_due()
+                    await self._run_gmail_backfill_jobs()
                     await self._run_ingestion_jobs()
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")
