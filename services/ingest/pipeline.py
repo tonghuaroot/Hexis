@@ -95,10 +95,12 @@ class IngestionPipeline:
         self.extractor = KnowledgeExtractor(self.llm)
         self.store = MemoryStore(config)
         self.stats = {"files_processed": 0, "memories_created": 0, "errors": 0}
+        self.last_result: dict[str, Any] = {}
         # DB-owned spreadsheet row cap; capping always warns (readers.py).
         XlsxReader.MAX_ROWS_PER_SHEET = max(1, int(config.xlsx_max_rows_per_sheet or 5000))
 
     async def ingest_file(self, file_path: Path) -> int:
+        self.last_result = {}
         metrics = IngestionMetrics(start_time=time.time())
         if _should_cancel(self.config):
             raise RuntimeError("Ingestion cancelled")
@@ -227,6 +229,7 @@ class IngestionPipeline:
         recursive: bool = True,
         exclude_dirs: set[str] | None = None,
     ) -> int:
+        self.last_result = {}
         if _should_cancel(self.config):
             raise RuntimeError("Ingestion cancelled")
         if not dir_path.exists() or not dir_path.is_dir():
@@ -253,11 +256,27 @@ class IngestionPipeline:
             async with file_slots:
                 return await self.ingest_file(file_path)
 
-        counts = await asyncio.gather(*[_one(f) for f in files])
-        return sum(counts)
+        previous_auto_load = self.config.auto_load_to_desk
+        self.config.auto_load_to_desk = False
+        try:
+            counts = await asyncio.gather(*[_one(f) for f in files])
+        finally:
+            self.config.auto_load_to_desk = previous_auto_load
+        total = sum(counts)
+        self.last_result = {
+            "memories_created": total,
+            "bulk_ingest": True,
+            "files_processed": len(files),
+            "desk_load": {
+                "skipped": True,
+                "reason": "bulk_directory_ingest",
+            },
+        }
+        return total
 
     async def ingest_url(self, url: str, title: str | None = None) -> int:
         """Ingest content from a URL."""
+        self.last_result = {}
         metrics = IngestionMetrics(start_time=time.time())
 
         if self.config.verbose:
@@ -331,6 +350,7 @@ class IngestionPipeline:
         file_type: str = ".md",
     ) -> int:
         """Ingest raw text (pasted documents, job payloads) — no file needed."""
+        self.last_result = {}
         metrics = IngestionMetrics(start_time=time.time())
         metrics.source_size_bytes = len(content.encode("utf-8"))
         if not title:
@@ -439,6 +459,8 @@ class IngestionPipeline:
             except Exception as exc:
                 _emit(self.config, f"  Warning: source chunk persistence failed: {exc}")
 
+        await self._auto_load_source_to_desk(doc)
+
         # Receipt gate (#85): completion is asserted by receipts, never by the
         # encounter's existence. Doc-complete row -> skip; receipted sections
         # drop out (resume); the enc: sentinel hands back the encounter.
@@ -449,6 +471,7 @@ class IngestionPipeline:
         if doc_ref in receipts:
             if self.config.verbose:
                 _emit(self.config, f"  Already ingested (hash={doc_ref[:8]}...). Skipping.")
+            self.last_result["memories_created"] = 0
             return 0
         done_sections = {h for h in section_hashes if h in receipts}
         if done_sections and self.config.verbose:
@@ -458,7 +481,9 @@ class IngestionPipeline:
 
         # Slow/hybrid mode: delegate to RLM-based ingestion
         if mode in (IngestionMode.SLOW, IngestionMode.HYBRID):
-            return await self._run_rlm_ingest(mode, doc, sections, metrics, llm_calls_start)
+            count = await self._run_rlm_ingest(mode, doc, sections, metrics, llm_calls_start)
+            self.last_result["memories_created"] = count
+            return count
 
         # FAST mode: small docs (<=deep_max_words) get per-section appraisal;
         # larger docs get a single doc-level appraisal. All sections processed.
@@ -578,7 +603,57 @@ class IngestionPipeline:
             memories_created=len(created_ids), source_path=doc.path,
         )
 
+        self.last_result["memories_created"] = len(created_ids)
         return len(created_ids)
+
+    async def _auto_load_source_to_desk(self, doc: DocumentInfo) -> None:
+        """Put newly preserved single-source intake on the RecMem desk.
+
+        Bulk walkers disable config.auto_load_to_desk for the duration of their
+        run; connector backfills also skip so large historical imports do not
+        flood mid-term working memory.
+        """
+        source_payload = {
+            "source_document_id": doc.document_id,
+            "source_document_ids": [doc.document_id] if doc.document_id else [],
+            "source_title": doc.title,
+            "source_path": doc.path,
+            "source_type": doc.source_type,
+            "content_hash": doc.content_hash,
+        }
+        self.last_result.update(source_payload)
+
+        if not doc.document_id:
+            self.last_result["desk_load"] = {
+                "skipped": True,
+                "reason": "missing_source_document_id",
+            }
+            return
+
+        acquisition = (self.config.acquisition or "user").strip().lower()
+        if acquisition == "connector":
+            self.last_result["desk_load"] = {
+                "skipped": True,
+                "reason": "connector_backfill",
+            }
+            return
+
+        if not self.config.auto_load_to_desk:
+            self.last_result["desk_load"] = {
+                "skipped": True,
+                "reason": "bulk_ingest",
+            }
+            return
+
+        reason = self.config.acquired_reason or f"ingested source: {doc.title}"
+        try:
+            self.last_result["desk_load"] = await self.store.load_source_documents_to_recmem(
+                [doc.document_id],
+                reason=reason,
+            )
+        except Exception as exc:
+            self.last_result["desk_load"] = {"error": str(exc)}
+            _emit(self.config, f"  Warning: source preserved but desk load failed: {exc}")
 
     def _sample_content(self, content: str, limit: int = 2000) -> str:
         if len(content) <= limit:

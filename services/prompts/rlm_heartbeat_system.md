@@ -61,6 +61,9 @@ material.
 Load selected source documents onto the RecMem desk as searchable mid-term
 working material. Use deliberately for large specs or reference files you will
 need to search on demand in later turns.
+Single-source user/agent ingestion already places the new source on the desk
+as incoming work; bulk corpus and connector imports stay in the cabinet until
+you pull specific sources onto the desk.
 
 ### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
 Passage-level cabinet search: hybrid full-text + embedding retrieval over
@@ -102,8 +105,9 @@ Returns current workspace sizes, budget usage, and metrics.
 - The `context` variable already contains stubs for recent memories and contradictions. Use these as starting points.
 - Use `document_search()` before `document_fetch()` unless you already have
   exact source document handles from memory provenance.
-- Use `document_load_to_desk()` only when the source should remain searchable
-  as RecMem desk material beyond the current heartbeat workspace.
+- Use `document_load_to_desk()` when the source should remain searchable as
+  RecMem desk material beyond the current heartbeat workspace, or when a
+  bulk-imported source needs to be pulled from the cabinet.
 - Check `desk_list()` before re-loading a source you may already have.
 - Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
   will do.

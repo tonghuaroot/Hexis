@@ -83,6 +83,11 @@ def _acquisition_override(arguments: dict[str, Any], context: "ToolExecutionCont
     return overrides
 
 
+def _pipeline_result(pipeline: Any) -> dict[str, Any]:
+    result = getattr(pipeline, "last_result", None)
+    return dict(result) if isinstance(result, dict) else {}
+
+
 class FastIngestHandler(ToolHandler):
     """Fast (shallow) content ingestion.
 
@@ -148,13 +153,16 @@ class FastIngestHandler(ToolHandler):
 
         try:
             count = await pipeline.ingest_file(file_path)
+            details = _pipeline_result(pipeline)
 
+            output = {
+                "memories_created": count,
+                "path": path_str,
+                "mode": "fast",
+                **details,
+            }
             return ToolResult.success_result(
-                {
-                    "memories_created": count,
-                    "path": path_str,
-                    "mode": "fast",
-                },
+                output,
                 display_output=f"Fast ingested {path_str}: {count} memories created.",
             )
         except Exception as e:
@@ -237,13 +245,16 @@ class SlowIngestHandler(ToolHandler):
 
         try:
             count = await pipeline.ingest_file(file_path)
+            details = _pipeline_result(pipeline)
 
+            output = {
+                "memories_created": count,
+                "path": path_str,
+                "mode": "slow",
+                **details,
+            }
             return ToolResult.success_result(
-                {
-                    "memories_created": count,
-                    "path": path_str,
-                    "mode": "slow",
-                },
+                output,
                 display_output=f"Slow ingested {path_str}: {count} memories created.",
             )
         except Exception as e:
@@ -323,13 +334,16 @@ class HybridIngestHandler(ToolHandler):
 
         try:
             count = await pipeline.ingest_file(file_path)
+            details = _pipeline_result(pipeline)
 
+            output = {
+                "memories_created": count,
+                "path": path_str,
+                "mode": "hybrid",
+                **details,
+            }
             return ToolResult.success_result(
-                {
-                    "memories_created": count,
-                    "path": path_str,
-                    "mode": "hybrid",
-                },
+                output,
                 display_output=f"Hybrid ingested {path_str}: {count} memories created.",
             )
         except Exception as e:
@@ -428,13 +442,16 @@ class GitIngestHandler(ToolHandler):
                 recursive=True,
                 exclude_dirs=IngestionPipeline.GIT_IGNORE_DIRS,
             )
+            details = _pipeline_result(pipeline)
 
+            output = {
+                "memories_created": count,
+                "repo": repo,
+                "branch": branch,
+                **details,
+            }
             return ToolResult.success_result(
-                {
-                    "memories_created": count,
-                    "repo": repo,
-                    "branch": branch,
-                },
+                output,
                 display_output=f"Ingested {repo}: {count} memories created.",
             )
         except subprocess.CalledProcessError as e:
@@ -629,15 +646,18 @@ class URLIngestHandler(ToolHandler):
                 path=url,
                 file_type=".html" if source_type == "web" else f".{source_type}",
             )
+            details = _pipeline_result(pipeline)
 
+            output = {
+                "memories_created": count,
+                "url": url,
+                "mode": mode_str,
+                "source_type": source_type,
+                "content_chars": len(content),
+                **details,
+            }
             return ToolResult.success_result(
-                {
-                    "memories_created": count,
-                    "url": url,
-                    "mode": mode_str,
-                    "source_type": source_type,
-                    "content_chars": len(content),
-                },
+                output,
                 display_output=(
                     f"Ingested {url} ({source_type}, {mode_str}): {count} memories "
                     f"created from {len(content):,} chars."

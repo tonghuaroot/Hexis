@@ -620,7 +620,7 @@ Your memory is deep. Don't settle for shallow results.
 
 **Graded recall — gist first, verbatim on demand:** `recall` gives you the shape of a memory (scenes, distilled facts, previews); `open_memory` with the memory's id gives you the verbatim moment underneath — the exact turns, the pre-summary full text of a gisted memory. Reach for it when precise wording, quotes, or the full exchange matter. When a `search_history` result says the page is full, the window holds more — page onward with `created_before` set to the oldest timestamp you received.
 
-**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists; you learn what is in it by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
+**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists. Single-source user/agent ingestion also lands on the RecMem desk immediately as incoming work; bulk corpus and connector backfills stay in the cabinet until you deliberately pull relevant sources onto the desk. You learn what is in the cabinet by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
 
 1. `recall` for history, preferences, and distilled facts.
 2. If a recalled memory carries `source_documents` or `source_chunks` handles and exactness matters, open the source behind it (`open_document`, `open_document_chunk`).
@@ -811,7 +811,7 @@ Your memory is deep. Don't settle for shallow results.
 - When reviewing goals or backlog items that reference prior work
 - When you need to verify something before reaching out
 
-**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists; you learn what is in it by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
+**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists. Single-source user/agent ingestion also lands on the RecMem desk immediately as incoming work; bulk corpus and connector backfills stay in the cabinet until you deliberately pull relevant sources onto the desk. You learn what is in the cabinet by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
 
 1. `recall` for history, preferences, and distilled facts.
 2. If a recalled memory carries `source_documents` or `source_chunks` handles and exactness matters, open the source behind it (`open_document`, `open_document_chunk`).
@@ -1979,6 +1979,9 @@ not make them durable memories or RecMem desk material.
 Load selected source documents onto the RecMem desk as searchable mid-term
 working material. Use deliberately for large specs or reference files you will
 need to search on demand later.
+Single-source user/agent ingestion already places the new source on the desk
+as incoming work; bulk corpus and connector imports stay in the cabinet until
+you pull specific sources onto the desk.
 
 ### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
 Passage-level cabinet search: hybrid full-text + embedding retrieval over
@@ -2019,8 +2022,9 @@ Returns workspace sizes and budget usage.
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once.
 - Use `document_search()` before `document_fetch()` unless you already have
   exact source document handles from memory provenance.
-- Use `document_load_to_desk()` only when the source should remain searchable
-  as desk material beyond the current REPL workspace.
+- Use `document_load_to_desk()` when the source should remain searchable as
+  desk material beyond the current REPL workspace, or when a bulk-imported
+  source needs to be pulled from the cabinet.
 - Check `desk_list()` before re-loading a source you may already have.
 - Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
   will do.
@@ -2123,6 +2127,9 @@ material.
 Load selected source documents onto the RecMem desk as searchable mid-term
 working material. Use deliberately for large specs or reference files you will
 need to search on demand in later turns.
+Single-source user/agent ingestion already places the new source on the desk
+as incoming work; bulk corpus and connector imports stay in the cabinet until
+you pull specific sources onto the desk.
 
 ### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
 Passage-level cabinet search: hybrid full-text + embedding retrieval over
@@ -2164,8 +2171,9 @@ Returns current workspace sizes, budget usage, and metrics.
 - The `context` variable already contains stubs for recent memories and contradictions. Use these as starting points.
 - Use `document_search()` before `document_fetch()` unless you already have
   exact source document handles from memory provenance.
-- Use `document_load_to_desk()` only when the source should remain searchable
-  as RecMem desk material beyond the current heartbeat workspace.
+- Use `document_load_to_desk()` when the source should remain searchable as
+  RecMem desk material beyond the current heartbeat workspace, or when a
+  bulk-imported source needs to be pulled from the cabinet.
 - Check `desk_list()` before re-loading a source you may already have.
 - Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
   will do.
@@ -2373,8 +2381,9 @@ does not make them durable memories or RecMem desk material.
 
 ### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
 Load selected source documents onto the RecMem desk as searchable mid-term
-working material. Use this sparingly during ingestion when a source must remain
-searchable by later RecMem/history queries.
+working material. Single-source user/agent ingestion already places the new
+source on the desk as incoming work; bulk corpus and connector imports stay in
+the cabinet until you pull specific sources onto the desk.
 
 ### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
 Passage-level cabinet search: hybrid full-text + embedding retrieval over
@@ -2437,8 +2446,9 @@ Follow this process to deeply read the chunk:
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once.
 - Use `document_search()` before `document_fetch()` unless the chunk context or
   memory provenance already contains exact document handles.
-- Use `document_load_to_desk()` only when the source should remain searchable
-  as desk material after this ingestion pass.
+- Use `document_load_to_desk()` when the source should remain searchable as
+  desk material after this ingestion pass, or when a bulk-imported source needs
+  to be pulled from the cabinet.
 - Check `desk_list()` before re-loading a source you may already have.
 - Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
   will do.

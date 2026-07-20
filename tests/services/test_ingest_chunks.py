@@ -153,6 +153,10 @@ async def test_ingest_writes_durable_chunks_with_exact_offsets(db_pool):
         assert [c["id"] for c in after] == [c["id"] for c in chunks]
     finally:
         async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
             await conn.execute("DELETE FROM memories WHERE content = $1", fact)
             await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
             await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)

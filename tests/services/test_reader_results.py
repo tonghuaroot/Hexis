@@ -208,6 +208,10 @@ async def test_ingest_file_preserves_artifact_and_records_run(db_pool, tmp_path)
     finally:
         async with db_pool.acquire() as conn:
             await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
+            await conn.execute(
                 "DELETE FROM memories WHERE source_attribution->>'content_hash' = $1", content_hash
             )
             await conn.execute("DELETE FROM source_artifacts WHERE sha256 = $1", raw_sha)
@@ -280,6 +284,10 @@ async def test_large_artifact_goes_to_managed_directory(db_pool, tmp_path, monke
         assert row["no_db_bytes"] is True
     finally:
         async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
             await conn.execute(
                 "DELETE FROM memories WHERE source_attribution->>'content_hash' = $1", content_hash
             )

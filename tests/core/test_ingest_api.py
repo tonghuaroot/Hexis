@@ -20,6 +20,7 @@ async def test_stream_ingestion_emits_logs(monkeypatch, tmp_path):
 
         async def ingest_file(self, target):
             self.config.log(f"ingest_file:{target}")
+            self.config.log(f"acquisition:{self.config.acquisition}")
 
         async def ingest_directory(self, target, recursive=False):
             self.config.log(f"ingest_dir:{target}:{recursive}")
@@ -46,5 +47,6 @@ async def test_stream_ingestion_emits_logs(monkeypatch, tmp_path):
         logs.append(event["text"])
 
     assert any("ingest_file" in line for line in logs)
+    assert "acquisition:user" in logs
     assert any("stats" in line for line in logs)
     assert session_id not in ingest_api._INGESTION_CANCEL  # noqa: SLF001

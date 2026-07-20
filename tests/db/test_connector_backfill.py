@@ -229,4 +229,5 @@ async def test_connector_source_item_preserves_raw_artifact_and_ingestion_receip
     assert row["sensitivity"] == "private"
     assert _j(row["raw_metadata"])["seen_again"] is True
     assert job["payload"]["provider_item_id"] == f"msg-{marker}"
+    assert job["payload"]["acquisition"] == "connector"
     assert "content" not in job

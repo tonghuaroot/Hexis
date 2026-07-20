@@ -60,8 +60,9 @@ does not make them durable memories or RecMem desk material.
 
 ### document_load_to_desk(document_ids=None, content_hashes=None, paths=None, *, offset=0, max_chars=None, chunk_chars=None, limit=10, reason=None)
 Load selected source documents onto the RecMem desk as searchable mid-term
-working material. Use this sparingly during ingestion when a source must remain
-searchable by later RecMem/history queries.
+working material. Single-source user/agent ingestion already places the new
+source on the desk as incoming work; bulk corpus and connector imports stay in
+the cabinet until you pull specific sources onto the desk.
 
 ### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
 Passage-level cabinet search: hybrid full-text + embedding retrieval over
@@ -124,8 +125,9 @@ Follow this process to deeply read the chunk:
 - Batch `memory_fetch()` calls -- fetch multiple IDs at once.
 - Use `document_search()` before `document_fetch()` unless the chunk context or
   memory provenance already contains exact document handles.
-- Use `document_load_to_desk()` only when the source should remain searchable
-  as desk material after this ingestion pass.
+- Use `document_load_to_desk()` when the source should remain searchable as
+  desk material after this ingestion pass, or when a bulk-imported source needs
+  to be pulled from the cabinet.
 - Check `desk_list()` before re-loading a source you may already have.
 - Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
   will do.

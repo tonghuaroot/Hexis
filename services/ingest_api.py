@@ -65,6 +65,7 @@ async def stream_ingestion(
             min_importance_floor=min_importance,
             permanent=permanent,
             base_trust=base_trust,
+            acquisition="user",
             verbose=True,
             log=log,
             cancel_check=cancel_event.is_set,

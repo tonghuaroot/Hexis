@@ -103,7 +103,7 @@ Your memory is deep. Don't settle for shallow results.
 - When reviewing goals or backlog items that reference prior work
 - When you need to verify something before reaching out
 
-**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists; you learn what is in it by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
+**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists. Single-source user/agent ingestion also lands on the RecMem desk immediately as incoming work; bulk corpus and connector backfills stay in the cabinet until you deliberately pull relevant sources onto the desk. You learn what is in the cabinet by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
 
 1. `recall` for history, preferences, and distilled facts.
 2. If a recalled memory carries `source_documents` or `source_chunks` handles and exactness matters, open the source behind it (`open_document`, `open_document_chunk`).

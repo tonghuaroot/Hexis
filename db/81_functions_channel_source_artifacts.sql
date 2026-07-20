@@ -181,6 +181,7 @@ BEGIN
                     'sender_id', row_session.sender_id,
                     'direction', row_message.direction,
                     'platform_message_id', row_message.platform_message_id,
+                    'acquisition', 'connector',
                     'sensitivity', normalized_sensitivity
                 ),
                 row_message.content,

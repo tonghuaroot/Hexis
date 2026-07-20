@@ -95,8 +95,180 @@ async def test_ingest_text_stores_raw_source_before_receipt_skip(db_pool):
         assert stored["path"] == source_path
     finally:
         async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
             await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
             await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)
+
+
+async def test_single_source_ingest_auto_loads_source_to_recmem_desk(db_pool):
+    marker = get_test_identifier("ingestdesk")
+    content = f"# Desk Incoming {marker}\n\nA single ingested source should land on the RecMem desk first."
+    content_hash = _hash_text(content)
+    source_path = f"text:{content_hash[:12]}"
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "SELECT record_ingestion_receipt($1, $1, NULL, 0, $2)",
+            content_hash,
+            source_path,
+        )
+
+    config = Config(
+        dsn=_db_dsn(os.environ.get("POSTGRES_DB")),
+        llm_config={"provider": "openai", "model": "stub", "api_key": "stub"},
+        verbose=False,
+    )
+    pipeline = IngestionPipeline(config)
+    try:
+        count = await pipeline.ingest_text(content, title=f"Desk Incoming {marker}")
+        details = dict(pipeline.last_result)
+    finally:
+        await pipeline.close()
+
+    try:
+        assert count == 0
+        assert details["source_document_id"]
+        assert details["source_document_ids"] == [details["source_document_id"]]
+        assert details["content_hash"] == content_hash
+        assert details["desk_load"]["count"] >= 1
+        assert details["desk_load"]["desk_unit_ids"]
+
+        async with db_pool.acquire() as conn:
+            desk_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM subconscious_units
+                WHERE status = 'active'
+                  AND metadata#>>'{recmem,kind}' = 'source_document_desk'
+                  AND source_attribution->>'source_document_id' = $1
+                  AND source_attribution->>'content_hash' = $2
+                """,
+                details["source_document_id"],
+                content_hash,
+            )
+        assert desk_count >= 1
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
+            await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
+            await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)
+
+
+async def test_connector_acquisition_skips_auto_recmem_desk_load(db_pool):
+    marker = get_test_identifier("ingestconn")
+    content = f"# Connector Backfill {marker}\n\nHistorical connector imports stay in the cabinet."
+    content_hash = _hash_text(content)
+    source_path = f"text:{content_hash[:12]}"
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "SELECT record_ingestion_receipt($1, $1, NULL, 0, $2)",
+            content_hash,
+            source_path,
+        )
+
+    config = Config(
+        dsn=_db_dsn(os.environ.get("POSTGRES_DB")),
+        llm_config={"provider": "openai", "model": "stub", "api_key": "stub"},
+        acquisition="connector",
+        verbose=False,
+    )
+    pipeline = IngestionPipeline(config)
+    try:
+        count = await pipeline.ingest_text(content, title=f"Connector Backfill {marker}")
+        details = dict(pipeline.last_result)
+    finally:
+        await pipeline.close()
+
+    try:
+        assert count == 0
+        assert details["source_document_id"]
+        assert details["desk_load"] == {"skipped": True, "reason": "connector_backfill"}
+        async with db_pool.acquire() as conn:
+            desk_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM subconscious_units
+                WHERE metadata#>>'{recmem,kind}' = 'source_document_desk'
+                  AND source_attribution->>'content_hash' = $1
+                """,
+                content_hash,
+            )
+        assert desk_count == 0
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
+            await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
+            await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)
+
+
+async def test_directory_bulk_ingest_skips_auto_recmem_desk_load(db_pool, tmp_path):
+    marker = get_test_identifier("ingestbulk")
+    files = []
+    for idx in range(2):
+        content = f"# Bulk File {idx} {marker}\n\nA corpus import should not flood the RecMem desk."
+        path = tmp_path / f"bulk-{idx}-{marker}.md"
+        path.write_text(content, encoding="utf-8")
+        content_hash = _hash_text(content)
+        files.append((path, content_hash))
+
+    async with db_pool.acquire() as conn:
+        for path, content_hash in files:
+            await conn.execute(
+                "SELECT record_ingestion_receipt($1, $1, NULL, 0, $2)",
+                content_hash,
+                str(path),
+            )
+
+    config = Config(
+        dsn=_db_dsn(os.environ.get("POSTGRES_DB")),
+        llm_config={"provider": "openai", "model": "stub", "api_key": "stub"},
+        verbose=False,
+    )
+    pipeline = IngestionPipeline(config)
+    try:
+        count = await pipeline.ingest_directory(tmp_path, recursive=False)
+        details = dict(pipeline.last_result)
+    finally:
+        await pipeline.close()
+
+    content_hashes = [content_hash for _, content_hash in files]
+    try:
+        assert count == 0
+        assert details["bulk_ingest"] is True
+        assert details["files_processed"] == len(files)
+        assert details["desk_load"] == {"skipped": True, "reason": "bulk_directory_ingest"}
+        async with db_pool.acquire() as conn:
+            desk_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM subconscious_units
+                WHERE metadata#>>'{recmem,kind}' = 'source_document_desk'
+                  AND source_attribution->>'content_hash' = ANY($1::text[])
+                """,
+                content_hashes,
+            )
+        assert desk_count == 0
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = ANY($1::text[])",
+                content_hashes,
+            )
+            await conn.execute(
+                "DELETE FROM source_documents WHERE content_hash = ANY($1::text[])",
+                content_hashes,
+            )
+            await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = ANY($1::text[])", content_hashes)
 
 
 async def test_ingest_created_memories_carry_source_document_id(db_pool):
@@ -144,6 +316,10 @@ async def test_ingest_created_memories_carry_source_document_id(db_pool):
         assert source["source_document_id"] == row["document_id"]
     finally:
         async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
             await conn.execute("DELETE FROM memories WHERE content = $1", fact)
             await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
             await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)
@@ -205,5 +381,9 @@ async def test_rlm_ingest_modes_receive_source_document_handle(db_pool, monkeypa
         assert stored["content"] == content
     finally:
         async with db_pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM subconscious_units WHERE source_attribution->>'content_hash' = $1",
+                content_hash,
+            )
             await conn.execute("DELETE FROM source_documents WHERE content_hash = $1", content_hash)
             await conn.execute("DELETE FROM ingestion_receipts WHERE doc_ref = $1", content_hash)

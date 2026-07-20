@@ -77,6 +77,62 @@ async def test_artifact_job_reads_preserved_bytes(db_pool, monkeypatch):
             await conn.execute("DELETE FROM source_artifacts WHERE sha256 = $1", sha)
 
 
+async def test_connector_shaped_job_infers_connector_acquisition(db_pool, monkeypatch):
+    marker = get_test_identifier("connectorjob")
+    seen: dict[str, object] = {}
+
+    async with db_pool.acquire() as conn:
+        job_id = await conn.fetchval(
+            "SELECT enqueue_ingestion_job('text', $1::jsonb, $2, $3)",
+            json.dumps({
+                "title": f"Connector job {marker}",
+                "mode": "fast",
+                "source_type": "email",
+                "connector_id": "gmail",
+                "provider_item_id": f"msg-{marker}",
+            }),
+            f"Connector body {marker}",
+            f"connector:{marker}",
+        )
+
+    async def fake_ingest_text(self, content, **kwargs):
+        seen["acquisition"] = self.config.acquisition
+        seen["source_type"] = kwargs.get("source_type")
+        self.last_result = {
+            "source_document_id": "00000000-0000-0000-0000-000000000001",
+            "desk_load": {"skipped": True, "reason": "connector_backfill"},
+        }
+        return 0
+
+    from services.ingest.pipeline import IngestionPipeline
+
+    monkeypatch.setattr(IngestionPipeline, "ingest_text", fake_ingest_text)
+
+    config = Config(
+        dsn=_db_dsn(os.environ.get("POSTGRES_DB")),
+        llm_config={"provider": "openai", "model": "stub", "api_key": "stub"},
+        verbose=False,
+    )
+    try:
+        handled = await run_ingestion_jobs_step(db_pool, config_override=config)
+        assert handled >= 1
+        assert seen["acquisition"] == "connector"
+        assert seen["source_type"] == "email"
+        assert config.acquisition is None
+
+        async with db_pool.acquire() as conn:
+            job = await conn.fetchrow(
+                "SELECT status, result FROM ingestion_jobs WHERE id = $1::uuid", job_id
+            )
+        assert job["status"] == "completed"
+        result = _j(job["result"])
+        assert result["memories_created"] == 0
+        assert result["desk_load"] == {"skipped": True, "reason": "connector_backfill"}
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM ingestion_jobs WHERE id = $1::uuid", job_id)
+
+
 async def test_artifact_job_requires_artifact_id(db_pool):
     async with db_pool.acquire() as conn:
         with pytest.raises(Exception, match="artifact_id"):

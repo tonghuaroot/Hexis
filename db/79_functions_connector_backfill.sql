@@ -799,6 +799,7 @@ BEGIN
                     'account_key', row_connection.account_key,
                     'provider_item_id', provider_id,
                     'provider_thread_id', NULLIF(btrim(COALESCE(p_provider_thread_id, '')), ''),
+                    'acquisition', 'connector',
                     'sensitivity', normalized_sensitivity
                 ),
                 p_content,
@@ -817,6 +818,7 @@ BEGIN
                     'account_key', row_connection.account_key,
                     'provider_item_id', provider_id,
                     'provider_thread_id', NULLIF(btrim(COALESCE(p_provider_thread_id, '')), ''),
+                    'acquisition', 'connector',
                     'sensitivity', normalized_sensitivity
                 ),
                 p_content,

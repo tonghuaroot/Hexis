@@ -122,6 +122,7 @@ async def test_channel_messages_preserve_raw_source_and_queue_inbound_ingestion(
     assert inbound["job_content"] == content
     assert job_payload["source_document_id"] == inbound["source_document_id"]
     assert job_payload["source_type"] == "channel_message"
+    assert job_payload["acquisition"] == "connector"
     assert replay["ingestion_job_id"] == inbound["ingestion_job_id"]
     assert int(item_count) == 1
     assert outbound["content"] == "noted"

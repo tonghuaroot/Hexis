@@ -13,11 +13,30 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 _PROGRESS_INTERVAL_SECONDS = 15.0
+
+
+def _infer_acquisition(payload: dict[str, Any]) -> str | None:
+    explicit = str(payload.get("acquisition") or "").strip()
+    if explicit:
+        return explicit
+    connector_markers = (
+        "connector_id",
+        "account_key",
+        "provider_item_id",
+        "provider_thread_id",
+        "platform_message_id",
+        "channel_type",
+        "channel_id",
+    )
+    if any(str(payload.get(key) or "").strip() for key in connector_markers):
+        return "connector"
+    return None
 
 
 async def _process_job(pool, job: dict[str, Any], *, config_override=None) -> None:
@@ -34,15 +53,16 @@ async def _process_job(pool, job: dict[str, Any], *, config_override=None) -> No
 
     cancel_flag = {"set": False}
     if config_override is not None:
-        config = config_override
+        config = replace(config_override)
     else:
         config = await _build_ingest_config(pool, mode=IngestionMode(mode_value))
     config.verbose = False
     config.cancel_check = lambda: cancel_flag["set"]
     if str(payload.get("sensitivity") or "").strip().lower() == "private":
         config.sensitivity = "private"
-    if str(payload.get("acquisition") or "").strip():
-        config.acquisition = str(payload["acquisition"]).strip()
+    acquisition = _infer_acquisition(payload)
+    if acquisition:
+        config.acquisition = acquisition
     pipeline = IngestionPipeline(config)
 
     async def _ingest_artifact() -> int:
@@ -112,11 +132,14 @@ async def _process_job(pool, job: dict[str, Any], *, config_override=None) -> No
                 cancel_flag["set"] = True
 
         count = task.result()
+        result = {"memories_created": count}
+        if isinstance(getattr(pipeline, "last_result", None), dict):
+            result.update(pipeline.last_result)
         async with pool.acquire() as conn:
             await conn.fetchval(
                 "SELECT complete_ingestion_job($1::uuid, $2::jsonb)",
                 job_id,
-                json.dumps({"memories_created": count}),
+                json.dumps(result),
             )
         logger.info("ingestion job %s completed: %s memories", job_id, count)
     except Exception as exc:

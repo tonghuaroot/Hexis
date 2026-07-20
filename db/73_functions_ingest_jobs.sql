@@ -214,5 +214,7 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('ingest.max_parallel_files', '2'::jsonb,
      'Files ingested concurrently during a directory walk'),
     ('ingest.llm_json_retries', '1'::jsonb,
-     'Re-asks when an ingestion completion parses to empty JSON (transient HTTP retry lives at the provider layer)')
+     'Re-asks when an ingestion completion parses to empty JSON (transient HTTP retry lives at the provider layer)'),
+    ('ingest.auto_load_to_desk', 'true'::jsonb,
+     'Automatically place newly ingested single-source user/agent documents on the RecMem desk; bulk and connector imports opt out')
 ON CONFLICT (key) DO NOTHING;

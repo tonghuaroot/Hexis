@@ -100,6 +100,10 @@ class Config:
     acquisition: str | None = None
     acquired_reason: str | None = None
 
+    # Newly ingested single sources land on the RecMem desk first, like an
+    # incoming letter. Bulk corpus imports and connector backfills opt out.
+    auto_load_to_desk: bool = True
+
     def resolve_artifact_dir(self) -> Path:
         raw = self.artifact_dir or os.environ.get("HEXIS_ARTIFACT_DIR") or "~/.hexis/artifacts"
         return Path(raw).expanduser()
@@ -348,6 +352,7 @@ INGEST_CONFIG_KEYS = {
     "llm_json_retries": "ingest.llm_json_retries",
     "artifact_max_db_bytes": "ingest.artifact_max_db_bytes",
     "xlsx_max_rows_per_sheet": "ingest.xlsx_max_rows_per_sheet",
+    "auto_load_to_desk": "ingest.auto_load_to_desk",
 }
 
 

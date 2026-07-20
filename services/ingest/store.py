@@ -184,6 +184,35 @@ class MemoryStore:
             raise RuntimeError(f"upsert_source_document_chunks: {result['error']}")
         return result
 
+    async def load_source_documents_to_recmem(
+        self,
+        document_ids: list[str],
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Place preserved source documents on the RecMem desk.
+
+        This delegates to the DB-owned loader so chunking, idempotency, access
+        stamps, and cleanup metadata stay in Postgres.
+        """
+        if self.client is None:
+            await self.connect()
+        raw = await self._fetchval(
+            """
+            SELECT load_source_documents_to_recmem(
+                $1::uuid[], NULL::text[], NULL::text[], 0,
+                NULL::int, NULL::int, NULL::int, FALSE, $2::text
+            )
+            """,
+            document_ids,
+            reason,
+        )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        result = parsed if isinstance(parsed, dict) else {}
+        if result.get("error"):
+            raise RuntimeError(f"load_source_documents_to_recmem: {result['error']}")
+        return result
+
     async def upsert_source_artifact(
         self,
         *,
