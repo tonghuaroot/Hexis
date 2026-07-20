@@ -41,6 +41,25 @@ _FINAL_RE = re.compile(r"^\s*FINAL\((.*)\)\s*$", re.MULTILINE | re.DOTALL)
 MAX_OUTPUT_CHARS = 20_000
 
 
+def _workspace_metrics(workspace: RLMWorkspace) -> dict[str, Any]:
+    """Return every retrieval/workspace counter the RLM can affect."""
+    return {
+        "search_count": workspace.metrics.search_count,
+        "fetch_count": workspace.metrics.fetch_count,
+        "fetched_chars_total": workspace.metrics.fetched_chars_total,
+        "document_search_count": workspace.metrics.document_search_count,
+        "document_fetch_count": workspace.metrics.document_fetch_count,
+        "document_load_count": workspace.metrics.document_load_count,
+        "document_chunk_search_count": workspace.metrics.document_chunk_search_count,
+        "document_chunk_fetch_count": workspace.metrics.document_chunk_fetch_count,
+        "document_chunk_load_count": workspace.metrics.document_chunk_load_count,
+        "desk_list_count": workspace.metrics.desk_list_count,
+        "desk_fetch_count": workspace.metrics.desk_fetch_count,
+        "desk_pin_count": workspace.metrics.desk_pin_count,
+        "summarize_events": workspace.metrics.summarize_events,
+    }
+
+
 def find_code_blocks(text: str) -> list[str]:
     """Find REPL code blocks wrapped in ```repl ... ```."""
     return [m.group(1).strip() for m in _CODE_BLOCK_RE.finditer(text)]
@@ -412,10 +431,7 @@ async def run_heartbeat_decision(
         "metrics": {
             "iterations": result["iterations"],
             "message_count": result["message_count"],
-            "search_count": workspace.metrics.search_count,
-            "fetch_count": workspace.metrics.fetch_count,
-            "fetched_chars_total": workspace.metrics.fetched_chars_total,
-            "summarize_events": workspace.metrics.summarize_events,
+            **_workspace_metrics(workspace),
             "tool_calls": len(bridge.get_call_records()),
             "tool_energy_spent": bridge.get_total_energy_spent(),
             "total_duration_seconds": round(duration, 2),
@@ -483,6 +499,8 @@ async def run_chat_turn(
     async with _session_lock:
         if session_id and session_id in _chat_sessions:
             repl = _chat_sessions[session_id]
+            repl.bind_memory_env(memory_env)
+            repl.bind_llm_query(llm_query_fn)
             # Add new user message as context
             repl.load_context(user_message, index=repl._context_count)
         else:
@@ -547,8 +565,8 @@ async def run_chat_turn(
         "response": result["final_answer"],
         "metrics": {
             "iterations": result["iterations"],
-            "search_count": workspace.metrics.search_count,
-            "fetch_count": workspace.metrics.fetch_count,
+            "message_count": result["message_count"],
+            **_workspace_metrics(workspace),
             "total_duration_seconds": round(duration, 2),
         },
     }

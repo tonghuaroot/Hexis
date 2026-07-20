@@ -182,8 +182,7 @@ class HexisLocalREPL:
 
         # Memory syscalls
         if memory_env is not None:
-            for name, fn in memory_env.get_repl_functions().items():
-                self.globals[name] = fn
+            self.bind_memory_env(memory_env)
 
         # Tool bridge
         if tool_bridge is not None:
@@ -193,7 +192,7 @@ class HexisLocalREPL:
 
         # Sub-LLM query
         if llm_query_fn is not None:
-            self.globals["llm_query"] = llm_query_fn
+            self.bind_llm_query(llm_query_fn)
 
         # Load context
         if context_payload is not None:
@@ -224,6 +223,20 @@ class HexisLocalREPL:
             self.execute_code(f"context = {var_name}")
 
         self._context_count = max(self._context_count, index + 1)
+
+    def bind_memory_env(self, memory_env: RLMMemoryEnv) -> None:
+        """Bind memory syscalls to the current turn's workspace.
+
+        Persistent chat sessions keep local variables across turns, but their
+        memory syscalls must point at the fresh per-turn workspace so retrieval
+        metrics and budget enforcement describe the turn that just ran.
+        """
+        for name, fn in memory_env.get_repl_functions().items():
+            self.globals[name] = fn
+
+    def bind_llm_query(self, llm_query_fn: Any) -> None:
+        """Bind the current turn's synchronous LLM helper."""
+        self.globals["llm_query"] = llm_query_fn
 
     def execute_code(self, code: str) -> REPLResult:
         """Execute code in the persistent namespace and return result."""

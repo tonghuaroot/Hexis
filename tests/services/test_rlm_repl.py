@@ -159,6 +159,38 @@ class TestHexisLocalREPL:
         finally:
             repl.cleanup()
 
+    def test_memory_syscalls_can_rebind_to_new_workspace(self):
+        """Persistent chat REPLs keep variables but need per-turn metrics."""
+        from unittest.mock import MagicMock
+        from services.rlm_memory_env import RLMMemoryEnv, RLMWorkspace
+        from core.memory_repo import MemoryRepo
+
+        repo_1 = MagicMock(spec=MemoryRepo)
+        repo_1.search_stubs.return_value = [{"memory_id": "first"}]
+        workspace_1 = RLMWorkspace()
+        env_1 = RLMMemoryEnv(repo_1, workspace_1)
+
+        repo_2 = MagicMock(spec=MemoryRepo)
+        repo_2.search_stubs.return_value = [{"memory_id": "second"}]
+        workspace_2 = RLMWorkspace()
+        env_2 = RLMMemoryEnv(repo_2, workspace_2)
+
+        repl = HexisLocalREPL()
+        repl.setup(context_payload={"turn": 1}, memory_env=env_1)
+        try:
+            first = repl.execute_code("hits = memory_search('alpha')\nprint(hits[0]['memory_id'])")
+            assert "first" in first.stdout
+            assert workspace_1.metrics.search_count == 1
+
+            repl.bind_memory_env(env_2)
+            second = repl.execute_code("hits = memory_search('beta')\nprint(hits[0]['memory_id'])")
+            assert "second" in second.stdout
+            assert workspace_1.metrics.search_count == 1
+            assert workspace_2.metrics.search_count == 1
+            assert "hits" in repl.locals
+        finally:
+            repl.cleanup()
+
     def test_context_manager(self):
         """REPL works as context manager."""
         with HexisLocalREPL() as repl:
