@@ -8,6 +8,7 @@ import {
   Layers,
   LayoutDashboard,
   MessageCircle,
+  Plug,
   Settings,
   Target,
   X,
@@ -37,6 +38,7 @@ const navItems = [
   { href: "/documents", label: "Documents", icon: FolderOpen },
   { href: "/desk", label: "Desk", icon: Layers },
   { href: "/ingest", label: "Ingest", icon: FilePlus2 },
+  { href: "/connections", label: "Connections", icon: Plug },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
