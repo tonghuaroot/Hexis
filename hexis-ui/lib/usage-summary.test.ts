@@ -8,22 +8,22 @@ describe("summarizeUsageByModel", () => {
       {
         provider: "openai-codex",
         model: "gpt-5.6-terra",
-        call_count: 3n,
-        total_tokens: 0n,
+        call_count: BigInt(3),
+        total_tokens: BigInt(0),
         total_cost: "0",
       },
       {
         provider: "openai-codex",
         model: "gpt-5.6-terra",
-        call_count: 14n,
-        total_tokens: 1200n,
+        call_count: BigInt(14),
+        total_tokens: BigInt(1200),
         total_cost: "1.25",
       },
       {
         provider: "openai-codex",
         model: "gpt-5.5",
-        call_count: 2n,
-        total_tokens: 800n,
+        call_count: BigInt(2),
+        total_tokens: BigInt(800),
         total_cost: "2.50",
       },
     ]);

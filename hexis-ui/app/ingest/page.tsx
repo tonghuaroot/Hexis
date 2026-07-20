@@ -16,6 +16,14 @@ import {
 import { Card } from "../components/ui/card";
 import { PageHeader } from "../components/ui/page-header";
 import { Spinner } from "../components/ui/spinner";
+import {
+  IngestJob,
+  isActiveIngestJob,
+  mergeIngestJobs,
+  normalizeIngestJob,
+} from "./jobs";
+
+type PendingFileState = "queued" | "uploading" | "accepted" | "failed";
 
 type PendingFile = {
   id: string;
@@ -23,20 +31,9 @@ type PendingFile = {
   name: string;
   size: number;
   sensitivity: "private" | null;
-  state: "queued" | "uploading" | "accepted" | "failed";
+  state: PendingFileState;
   detail?: string;
-};
-
-type IngestJob = {
-  id: string;
-  kind: string;
-  status: string;
-  title: string | null;
-  attempts: number;
-  error: string | null;
-  result: { memories_created?: number } | null;
-  created_at: string;
-  completed_at: string | null;
+  jobId?: string;
 };
 
 function formatBytes(size: number): string {
@@ -61,29 +58,79 @@ export default function IngestPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [jobs, setJobs] = useState<IngestJob[]>([]);
+  const [trackedJobIds, setTrackedJobIds] = useState<string[]>([]);
   const [jobsLoading, setJobsLoading] = useState(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const hasActiveJobs = trackedJobIds.length > 0 || jobs.some(isActiveIngestJob);
 
-  const fetchJobs = useCallback(async () => {
-    try {
-      const res = await fetch("/api/ingest/jobs?limit=25", { cache: "no-store" });
-      if (!res.ok) return;
-      const data = await res.json();
-      setJobs(data.jobs || []);
-    } catch {
-      // Job polling is advisory; the submit flows surface their own errors.
-    } finally {
-      setJobsLoading(false);
+  const trackAcceptedJob = useCallback((job: IngestJob) => {
+    setJobs((prev) => mergeIngestJobs(prev, [job]));
+    if (isActiveIngestJob(job)) {
+      setTrackedJobIds((prev) => (prev.includes(job.id) ? prev : [job.id, ...prev]));
     }
   }, []);
 
+  const fetchJobs = useCallback(async () => {
+    const recentJobs: IngestJob[] = [];
+    try {
+      const res = await fetch("/api/ingest/jobs?limit=25", { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        for (const item of Array.isArray(data.jobs) ? data.jobs : []) {
+          const job = normalizeIngestJob(item);
+          if (job) recentJobs.push(job);
+        }
+      }
+    } catch {
+      // Keep polling tracked jobs even when the recent-list proxy is unavailable.
+    }
+
+    const exactJobs: IngestJob[] = [];
+    const missingIds = new Set<string>();
+    await Promise.all(
+      trackedJobIds.map(async (id) => {
+        try {
+          const exact = await fetch(`/api/ingest/jobs/${encodeURIComponent(id)}`, {
+            cache: "no-store",
+          });
+          if (exact.status === 404) {
+            missingIds.add(id);
+            return;
+          }
+          if (!exact.ok) return;
+          const job = normalizeIngestJob(await exact.json());
+          if (job) exactJobs.push(job);
+        } catch {
+          // Keep the job tracked and visible; the next poll may succeed.
+        }
+      })
+    );
+
+    const exactById = new Map(exactJobs.map((job) => [job.id, job]));
+    setTrackedJobIds((prev) =>
+      prev.filter((id) => {
+        if (missingIds.has(id)) return false;
+        const job = exactById.get(id);
+        return job ? isActiveIngestJob(job) : true;
+      })
+    );
+    setJobs((prev) => {
+      const unresolvedTracked = prev.filter(
+        (job) =>
+          trackedJobIds.includes(job.id) &&
+          !missingIds.has(job.id) &&
+          !exactById.has(job.id)
+      );
+      return mergeIngestJobs([...recentJobs, ...unresolvedTracked], exactJobs);
+    });
+    setJobsLoading(false);
+  }, [trackedJobIds]);
+
   useEffect(() => {
     fetchJobs();
-    const active = jobs.some((job) => job.status === "pending" || job.status === "in_progress");
-    const timer = window.setInterval(fetchJobs, active ? 3000 : 15000);
+    const timer = window.setInterval(fetchJobs, hasActiveJobs ? 3000 : 15000);
     return () => window.clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchJobs, jobs.some((job) => job.status === "pending" || job.status === "in_progress")]);
+  }, [fetchJobs, hasActiveJobs]);
 
   const addFiles = (files: FileList | File[] | null) => {
     if (!files) return;
@@ -118,8 +165,25 @@ export default function IngestPage() {
         if (item.sensitivity) form.append("sensitivity", item.sensitivity);
         const res = await fetch("/api/ingest/file", { method: "POST", body: form });
         if (res.ok) {
+          const body = await res.json();
+          const job = normalizeIngestJob(
+            {
+              id: body.job_id,
+              kind: "artifact",
+              status: "pending",
+              title: body.filename || item.name,
+              result: null,
+              payload: body,
+            },
+            { title: item.name }
+          );
+          if (job) trackAcceptedJob(job);
           accepted += 1;
-          setPending((prev) => prev.map((p) => (p.id === item.id ? { ...p, state: "accepted" } : p)));
+          setPending((prev) =>
+            prev.map((p) =>
+              p.id === item.id ? { ...p, state: "accepted", jobId: job?.id } : p
+            )
+          );
         } else {
           let detail = `${res.status}`;
           try {
@@ -151,7 +215,6 @@ export default function IngestPage() {
         setPending((prev) => prev.filter((p) => p.state !== "accepted"));
       }, 2500);
     }
-    fetchJobs();
   };
 
   const submitPaste = async () => {
@@ -178,8 +241,17 @@ export default function IngestPage() {
       setPasteText("");
       setPasteTitle("");
       setPastePrivate(false);
+      const body = await res.json();
+      const job = normalizeIngestJob({
+        id: body.job_id,
+        kind: "text",
+        status: "pending",
+        title: body.title || pasteTitle.trim() || "Pasted text",
+        result: null,
+        payload: body,
+      });
+      if (job) trackAcceptedJob(job);
       setNotice("Text accepted — extraction runs in the background below.");
-      fetchJobs();
     } catch (err) {
       setErrorNotice(err instanceof Error ? err.message : "Paste ingestion failed.");
     } finally {
@@ -209,9 +281,18 @@ export default function IngestPage() {
         const body = await res.text();
         throw new Error(`URL ingestion failed (${res.status}): ${body.slice(0, 160)}`);
       }
+      const body = await res.json();
+      const job = normalizeIngestJob({
+        id: body.job_id,
+        kind: "url",
+        status: "pending",
+        title: body.url || target,
+        result: null,
+        payload: body,
+      });
+      if (job) trackAcceptedJob(job);
       setUrl("");
       setNotice("URL accepted — fetch and extraction run in the background below.");
-      fetchJobs();
     } catch (err) {
       setErrorNotice(err instanceof Error ? err.message : "URL ingestion failed.");
     } finally {
@@ -340,7 +421,9 @@ export default function IngestPage() {
                   <span className="flex-none text-[var(--ink-soft)]">{formatBytes(item.size)}</span>
                   <span className="min-w-0 flex-1 truncate text-[var(--ink-soft)]">
                     {item.state === "uploading" ? "uploading…" : null}
-                    {item.state === "accepted" ? "accepted ✓" : null}
+                    {item.state === "accepted"
+                      ? `accepted${item.jobId ? ` · ${item.jobId.slice(0, 8)}` : ""}`
+                      : null}
                     {item.state === "failed" ? `failed: ${item.detail}` : null}
                   </span>
                   <button

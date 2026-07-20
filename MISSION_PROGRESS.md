@@ -60,7 +60,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 | Web-chat history becomes DB-owned (her memory of a conversation and the record of it = same substrate; no localStorage-only history) | Continuity | in progress (0104: `chat_sessions`/`chat_messages`, SQL hydrate/clear/record functions, API/CLI/TUI/channel active-context hydration; remaining: frontend rendering/local-persistence audit) |
 | One DSN resolution shared by all clients (UI reads the same instance registry as Python — no split-brain on instance switch) | Continuity | todo |
 | Collapse chat orchestration onto `services/chat.py`; move the RLM gate where both web and channel paths pass through | Substrate | todo |
-| Wire `/api/ingest/jobs/{id}` polling into the web ingest flow | Experience Bar | todo |
+| Wire `/api/ingest/jobs/{id}` polling into the web ingest flow | Experience Bar | done (uncommitted: exact Next proxy + accepted-job tracking) |
 
 ## Batch 5 — Life-channel ingestion and authorized agency
 
@@ -199,3 +199,11 @@ talking to the user.
   not-configured/configured/starting/running/stopped/error/missing-dependency
   state in `channel_adapter_runtime`; setup status now surfaces adapter runtime
   state from the same DB substrate.
+- 2026-07-20 — Source-document desk intake (`0123_ingest_auto_desk`): single
+  user/agent source ingests now land on the RecMem desk immediately, while bulk
+  corpus imports and connector backfills remain in the filing cabinet until
+  pulled deliberately.
+- 2026-07-20 — Web ingest exact job tracking: file, text, and URL submissions
+  now surface immediate job receipts and poll `/api/ingest/jobs/{id}` through
+  the Next proxy, so accepted work stays visible even when the recent job list
+  has not caught up yet.

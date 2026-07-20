@@ -30,6 +30,15 @@ text + rationale + the real failure each was learned from: `HEXIS_EXPERIENCE_BAR
 The deeper reason these slip through one at a time (an abstraction/altitude failure)
 is written up in `why_i_suck_and_how_to_fix_it.md`.
 
+## Local scratch and storage
+
+Do not put downloaded PDFs, generated research briefs, one-off scripts, or other
+temporary analysis artifacts in the source repo. Use
+`$XDG_CACHE_HOME/hexis` when `XDG_CACHE_HOME` is set, otherwise
+`~/.cache/hexis`. If an artifact later becomes product documentation, source
+code, or a checked-in test fixture, move it into the appropriate repo path
+intentionally and commit it like any other source change.
+
 ## Everything else
 
 See `CLAUDE.md` for project overview, structure, build/test commands, the venv +
