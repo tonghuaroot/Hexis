@@ -1101,6 +1101,455 @@ class LoadDocumentsHandler(ToolHandler):
         return ToolResult.success_result(payload, display_output=f"Loaded {count} source document desk chunk(s)")
 
 
+class SearchDocumentChunksHandler(ToolHandler):
+    """Hybrid passage-level search over durable source chunks."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="search_document_chunks",
+            description=(
+                "Passage-level search of the source-document filing cabinet: "
+                "hybrid full-text + embedding retrieval over durable chunks with "
+                "citable locators (page, section, sheet row). Prefer this over "
+                "search_documents when you need the exact passage rather than "
+                "the whole file; each hit carries rank_components explaining "
+                "why it ranked."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language or web-search query over chunk text.",
+                    },
+                    "document_id": {
+                        "type": "string",
+                        "description": "Optional UUID to scope the search to one document.",
+                    },
+                    "source_path": {
+                        "type": "string",
+                        "description": "Optional partial path/URL filter.",
+                    },
+                    "source_type": {
+                        "type": "string",
+                        "description": "Optional source type filter, e.g. document, web, email, spreadsheet.",
+                    },
+                    "locator_kind": {
+                        "type": "string",
+                        "enum": ["char", "page", "section", "sheet_row", "slide", "message"],
+                        "description": "Optional locator-kind filter (e.g. sheet_row for spreadsheet rows).",
+                    },
+                    "sheet_name": {
+                        "type": "string",
+                        "description": "Optional exact sheet name for spreadsheet chunks.",
+                    },
+                    "page_start": {"type": "integer", "minimum": 1},
+                    "page_end": {"type": "integer", "minimum": 1},
+                    "created_after": {"type": "string"},
+                    "created_before": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0},
+                    "snippet_chars": {"type": "integer", "minimum": 80, "maximum": 2000, "default": 400},
+                },
+                "required": [],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=0,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if not context.registry or not context.registry.pool:
+            return ToolResult.error_result("Database unavailable", ToolErrorType.EXECUTION_FAILED)
+
+        args = dict(arguments)
+        has_selector = any(
+            str(args.get(name) or "").strip()
+            for name in ("query", "document_id", "source_path", "source_type",
+                         "locator_kind", "sheet_name")
+        ) or args.get("page_start") or args.get("page_end")
+        if not has_selector:
+            return ToolResult.error_result(
+                "Provide query or a scope filter (document_id, source_path, source_type, locator_kind, sheet_name, page range).",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        document_id: UUID | None = None
+        if str(args.get("document_id") or "").strip():
+            try:
+                document_id = UUID(str(args["document_id"]).strip())
+            except ValueError:
+                return ToolResult.error_result("document_id must be a uuid", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            limit = max(1, min(int(args.get("limit") or 10), 50))
+            offset = max(0, int(args.get("offset") or 0))
+            snippet_chars = max(80, min(int(args.get("snippet_chars") or 400), 2000))
+            page_start = int(args["page_start"]) if args.get("page_start") is not None else None
+            page_end = int(args["page_end"]) if args.get("page_end") is not None else None
+        except (TypeError, ValueError):
+            return ToolResult.error_result("limit, offset, snippet_chars, and page bounds must be integers", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM search_source_chunks(
+                        $1::text, $2::int, $3::uuid, $4::text, $5::text,
+                        $6::text, $7::text, $8::int, $9::int,
+                        NULLIF($10::text, '')::timestamptz,
+                        NULLIF($11::text, '')::timestamptz,
+                        $12::boolean, $13::int, $14::int
+                    )
+                    """,
+                    args.get("query"),
+                    limit,
+                    document_id,
+                    args.get("source_path"),
+                    args.get("source_type"),
+                    args.get("locator_kind"),
+                    args.get("sheet_name"),
+                    page_start,
+                    page_end,
+                    args.get("created_after"),
+                    args.get("created_before"),
+                    bool(args.get("exclude_sensitive") or context.is_group),
+                    offset,
+                    snippet_chars,
+                )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+        chunks = []
+        documents = set()
+        for row in rows:
+            components = row["rank_components"]
+            if isinstance(components, str):
+                components = json.loads(components)
+            locator = row["locator"]
+            if isinstance(locator, str):
+                locator = json.loads(locator)
+            documents.add(str(row["document_id"]))
+            chunks.append({
+                "chunk_id": str(row["chunk_id"]),
+                "document_id": str(row["document_id"]),
+                "chunk_index": row["chunk_index"],
+                "title": row["title"],
+                "path": row["path"],
+                "source_type": row["source_type"],
+                "locator_kind": row["locator_kind"],
+                "locator": locator,
+                "heading_path": list(row["heading_path"] or []),
+                "page_start": row["page_start"],
+                "page_end": row["page_end"],
+                "sheet_name": row["sheet_name"],
+                "snippet": row["snippet"],
+                "content_hash": row["content_hash"],
+                "rank": row["rank"],
+                "rank_components": components,
+            })
+        return ToolResult.success_result(
+            {"chunks": chunks, "count": len(chunks), "offset": offset, "limit": limit},
+            display_output=f"Found {len(chunks)} chunk(s) across {len(documents)} document(s)",
+        )
+
+
+class OpenDocumentChunkHandler(ToolHandler):
+    """Open exact source chunks with citation locators and scroll handles."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="open_document_chunk",
+            description=(
+                "Open exact passages of a preserved source document by chunk id, "
+                "chunk range, or page range. Returns full chunk content with its "
+                "locator (page/section/sheet row) for citation, plus "
+                "prev/next_chunk_id handles for scrolling. Inspection only — use "
+                "load_document_chunks to keep passages searchable on the desk."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "One chunk UUID from search_document_chunks or open_memory.source_chunks.",
+                    },
+                    "chunk_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Multiple chunk UUIDs (opened in the order given).",
+                    },
+                    "document_id": {
+                        "type": "string",
+                        "description": "Document UUID when selecting by chunk_index or page range.",
+                    },
+                    "chunk_start": {"type": "integer", "minimum": 0},
+                    "chunk_end": {"type": "integer", "minimum": 0},
+                    "page_start": {"type": "integer", "minimum": 1},
+                    "page_end": {"type": "integer", "minimum": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+                },
+                "required": [],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=1,
+            is_read_only=True,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if not context.registry or not context.registry.pool:
+            return ToolResult.error_result("Database unavailable", ToolErrorType.EXECUTION_FAILED)
+
+        args = dict(arguments)
+        raw_ids = [str(args.get("chunk_id") or "").strip()] if str(args.get("chunk_id") or "").strip() else []
+        for item in args.get("chunk_ids") or []:
+            if str(item).strip():
+                raw_ids.append(str(item).strip())
+        chunk_ids: list[UUID] = []
+        for raw_id in raw_ids:
+            try:
+                chunk_ids.append(UUID(raw_id))
+            except ValueError:
+                return ToolResult.error_result("chunk ids must be uuids", ToolErrorType.INVALID_PARAMS)
+
+        document_id: UUID | None = None
+        if str(args.get("document_id") or "").strip():
+            try:
+                document_id = UUID(str(args["document_id"]).strip())
+            except ValueError:
+                return ToolResult.error_result("document_id must be a uuid", ToolErrorType.INVALID_PARAMS)
+
+        if not chunk_ids and document_id is None:
+            return ToolResult.error_result(
+                "Provide chunk_id(s), or document_id with a chunk/page range.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        try:
+            limit = max(1, min(int(args.get("limit") or 10), 50))
+            ints = {}
+            for name in ("chunk_start", "chunk_end", "page_start", "page_end"):
+                ints[name] = int(args[name]) if args.get(name) is not None else None
+        except (TypeError, ValueError):
+            return ToolResult.error_result("range bounds and limit must be integers", ToolErrorType.INVALID_PARAMS)
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    """
+                    SELECT open_source_chunks(
+                        $1::uuid[], $2::uuid, $3::int, $4::int, $5::int, $6::int,
+                        $7::int, $8::boolean
+                    )
+                    """,
+                    chunk_ids or None,
+                    document_id,
+                    ints["chunk_start"],
+                    ints["chunk_end"],
+                    ints["page_start"],
+                    ints["page_end"],
+                    limit,
+                    bool(args.get("exclude_sensitive") or context.is_group),
+                )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(payload, dict):
+            return ToolResult.error_result("open_source_chunks returned an invalid payload", ToolErrorType.EXECUTION_FAILED)
+        if payload.get("error") == "missing_selector":
+            return ToolResult.error_result("Provide chunk_id(s) or document_id with a range.", ToolErrorType.INVALID_PARAMS)
+        if payload.get("error") == "not_found":
+            return ToolResult.error_result(
+                "No matching chunks — re-run search_document_chunks; the source may have been re-ingested with new chunk ids.",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+
+        for chunk in payload.get("chunks") or []:
+            citation_bits = [chunk.get("path") or chunk.get("title") or ""]
+            if chunk.get("page_start"):
+                pages = str(chunk["page_start"])
+                if chunk.get("page_end") and chunk["page_end"] != chunk["page_start"]:
+                    pages += f"-{chunk['page_end']}"
+                citation_bits.append(f"page {pages}")
+            elif chunk.get("sheet_name"):
+                citation_bits.append(f"sheet {chunk['sheet_name']}")
+            elif chunk.get("heading_path"):
+                citation_bits.append(" > ".join(chunk["heading_path"]))
+            else:
+                citation_bits.append(f"chunk {chunk.get('chunk_index')}")
+            chunk["citation"] = ", ".join(bit for bit in citation_bits if bit)
+
+        count = int(payload.get("count") or 0)
+        return ToolResult.success_result(payload, display_output=f"Opened {count} chunk(s)")
+
+
+class LoadDocumentChunksHandler(ToolHandler):
+    """Load selected source chunks onto the RecMem desk."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="load_document_chunks",
+            description=(
+                "Place selected source-document chunks on the RecMem desk as "
+                "searchable mid-term working material — by chunk ids, by "
+                "document + query (top matching passages), or by document + "
+                "page range. Give a reason; pin=true protects them from desk "
+                "cleanup while actively needed. Search them later with "
+                "search_history sources=[\"desk\"]."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "chunk_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Chunk UUIDs from search_document_chunks.",
+                    },
+                    "document_id": {
+                        "type": "string",
+                        "description": "Document UUID when loading by query or page range.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "With document_id: load the top matching passages for this query.",
+                    },
+                    "page_start": {"type": "integer", "minimum": 1},
+                    "page_end": {"type": "integer", "minimum": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief reason these passages need to stay on the desk.",
+                    },
+                    "pin": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Pin the loaded items so desk cleanup keeps them.",
+                    },
+                },
+                "required": [],
+            },
+            category=ToolCategory.MEMORY,
+            energy_cost=2,
+            is_read_only=False,
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        if not context.registry or not context.registry.pool:
+            return ToolResult.error_result("Database unavailable", ToolErrorType.EXECUTION_FAILED)
+
+        args = dict(arguments)
+        chunk_ids: list[UUID] = []
+        for item in args.get("chunk_ids") or []:
+            if not str(item).strip():
+                continue
+            try:
+                chunk_ids.append(UUID(str(item).strip()))
+            except ValueError:
+                return ToolResult.error_result("chunk_ids must contain only uuids", ToolErrorType.INVALID_PARAMS)
+
+        document_id: UUID | None = None
+        if str(args.get("document_id") or "").strip():
+            try:
+                document_id = UUID(str(args["document_id"]).strip())
+            except ValueError:
+                return ToolResult.error_result("document_id must be a uuid", ToolErrorType.INVALID_PARAMS)
+
+        if not chunk_ids and document_id is None:
+            return ToolResult.error_result(
+                "Provide chunk_ids, or document_id (optionally with query or page range).",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        try:
+            limit = max(1, min(int(args.get("limit") or 5), 20))
+            page_start = int(args["page_start"]) if args.get("page_start") is not None else None
+            page_end = int(args["page_end"]) if args.get("page_end") is not None else None
+        except (TypeError, ValueError):
+            return ToolResult.error_result("limit and page bounds must be integers", ToolErrorType.INVALID_PARAMS)
+
+        exclude_sensitive = bool(args.get("exclude_sensitive") or context.is_group)
+        query = str(args.get("query") or "").strip()
+        session_uuid: UUID | None = None
+        if context.session_id:
+            try:
+                session_uuid = UUID(str(context.session_id))
+            except ValueError:
+                session_uuid = None
+
+        try:
+            async with context.registry.pool.acquire() as conn:
+                # document_id + query: resolve the top matching passages first.
+                if not chunk_ids and document_id is not None and query:
+                    rows = await conn.fetch(
+                        """
+                        SELECT chunk_id FROM search_source_chunks(
+                            $1::text, $2::int, $3::uuid, NULL, NULL, NULL, NULL,
+                            $4::int, $5::int, NULL, NULL, $6::boolean
+                        )
+                        """,
+                        query, limit, document_id, page_start, page_end, exclude_sensitive,
+                    )
+                    chunk_ids = [row["chunk_id"] for row in rows]
+                    if not chunk_ids:
+                        return ToolResult.error_result(
+                            "No passages matched that query in this document — try search_document_chunks with different wording.",
+                            ToolErrorType.EXECUTION_FAILED,
+                        )
+                    document_id = None  # ids are now the selector
+
+                raw = await conn.fetchval(
+                    """
+                    SELECT load_source_chunks_to_recmem(
+                        $1::uuid[], $2::uuid, NULL, NULL, $3::int, $4::int,
+                        $5::int, $6::boolean, $7::text, $8::uuid, $9::text, NULL, $10::boolean
+                    )
+                    """,
+                    chunk_ids or None,
+                    document_id,
+                    page_start,
+                    page_end,
+                    limit,
+                    exclude_sensitive,
+                    args.get("reason"),
+                    session_uuid,
+                    context.tool_context.value if context.tool_context else None,
+                    bool(args.get("pin")),
+                )
+        except Exception as e:
+            return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
+
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(payload, dict):
+            return ToolResult.error_result("load_source_chunks_to_recmem returned an invalid payload", ToolErrorType.EXECUTION_FAILED)
+        if payload.get("error") == "missing_selector":
+            return ToolResult.error_result("Provide chunk_ids or document_id.", ToolErrorType.INVALID_PARAMS)
+
+        count = int(payload.get("count") or 0)
+        return ToolResult.success_result(
+            payload,
+            display_output=(
+                f"Loaded {count} chunk(s) onto the desk — search them with "
+                'search_history sources=["desk"], list with list_desk'
+            ),
+        )
+
+
 class SenseMemoryAvailabilityHandler(ToolHandler):
     """Quick feeling-of-knowing check before full recall."""
 
@@ -1899,6 +2348,9 @@ def create_memory_tools() -> list[ToolHandler]:
         OpenDocumentHandler(),
         OpenDocumentsHandler(),
         LoadDocumentsHandler(),
+        SearchDocumentChunksHandler(),
+        OpenDocumentChunkHandler(),
+        LoadDocumentChunksHandler(),
         SenseMemoryAvailabilityHandler(),
         ExploreConceptHandler(),
         AssociateHandler(),

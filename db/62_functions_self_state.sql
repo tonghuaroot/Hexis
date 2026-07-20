@@ -221,6 +221,7 @@ DECLARE
     units JSONB;
     gisted_members JSONB;
     documents JSONB;
+    chunks JSONB;
 BEGIN
     SELECT id, type, content, importance, trust_level, fidelity, status,
            created_at, superseded_by, source_attribution, metadata
@@ -293,6 +294,33 @@ BEGIN
           )
       );
 
+    -- Chunk-grain provenance: the exact passage a memory was extracted from,
+    -- with its locator (page/section/sheet row) for citation.
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'chunk_id', c.id,
+        'document_id', c.source_document_id,
+        'chunk_index', c.chunk_index,
+        'locator_kind', c.locator_kind,
+        'locator', c.locator,
+        'heading_path', to_jsonb(c.heading_path),
+        'page_start', c.page_start,
+        'page_end', c.page_end,
+        'sheet_name', c.sheet_name
+    ) ORDER BY c.chunk_index), '[]'::jsonb)
+    INTO chunks
+    FROM source_document_chunks c
+    JOIN source_documents cd ON cd.id = c.source_document_id AND cd.status = 'active'
+    WHERE c.id::text = NULLIF(mem.source_attribution->>'chunk_id', '')
+       OR EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(CASE
+               WHEN jsonb_typeof(mem.metadata->'source_references') = 'array'
+               THEN mem.metadata->'source_references'
+               ELSE '[]'::jsonb
+           END) src
+           WHERE c.id::text = NULLIF(src->>'chunk_id', '')
+       );
+
     RETURN jsonb_strip_nulls(jsonb_build_object(
         'memory', jsonb_build_object(
             'id', mem.id,
@@ -311,6 +339,7 @@ BEGIN
         'full_content', NULLIF(mem.metadata#>>'{consolidation,full_content}', ''),
         'source_units', units,
         'source_documents', CASE WHEN documents = '[]'::jsonb THEN NULL ELSE documents END,
+        'source_chunks', CASE WHEN chunks = '[]'::jsonb THEN NULL ELSE chunks END,
         'superseded_members', CASE WHEN gisted_members = '[]'::jsonb THEN NULL ELSE gisted_members END,
         'superseded_by', mem.superseded_by,
         'evidence', jsonb_build_object(

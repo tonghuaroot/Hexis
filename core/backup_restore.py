@@ -79,7 +79,60 @@ def backup(dsn: str | None = None, out_dir: str | None = None, label: str | None
     )
     if r2.returncode != 0:
         print(f"note: backup completed but backup_status was not recorded: {(r2.stderr or '').strip()}")
+
+    # Filesystem-stored source artifacts (originals larger than
+    # ingest.artifact_max_db_bytes) live outside the dump — tar them as a
+    # side-car so the backup preserves original artifacts too. Advisory.
+    try:
+        _backup_artifact_dir(path)
+    except Exception as exc:
+        print(f"note: artifact-directory side-car not written: {exc}")
     return path
+
+
+def _artifact_dir() -> Path:
+    return Path(os.environ.get("HEXIS_ARTIFACT_DIR") or "~/.hexis/artifacts").expanduser()
+
+
+def _backup_artifact_dir(dump_path: Path) -> None:
+    import tarfile
+
+    src = _artifact_dir()
+    if not src.is_dir() or not any(src.iterdir()):
+        return
+    side_car = dump_path.with_suffix(dump_path.suffix + ".artifacts.tar")
+    with tarfile.open(side_car, "w") as tar:
+        tar.add(src, arcname="artifacts")
+    print(f"artifact side-car: {side_car}")
+
+
+def _restore_artifact_dir(dump_path: Path) -> None:
+    import tarfile
+
+    side_car = dump_path.with_suffix(dump_path.suffix + ".artifacts.tar")
+    if not side_car.exists():
+        return
+    dest = _artifact_dir()
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(side_car, "r") as tar:
+        for member in tar.getmembers():
+            rel = Path(member.name)
+            if rel.parts and rel.parts[0] == "artifacts":
+                rel = Path(*rel.parts[1:])
+            if not rel.parts or rel.is_absolute() or ".." in rel.parts:
+                continue
+            target = dest / rel
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                # Content-addressed: never overwrite an existing artifact.
+                if target.exists():
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                extracted = tar.extractfile(member)
+                if extracted is not None:
+                    target.write_bytes(extracted.read())
+    print(f"artifact side-car restored into {dest}")
 
 
 def restore(backup_path: str, dsn: str | None = None) -> None:
@@ -118,3 +171,10 @@ def restore(backup_path: str, dsn: str | None = None) -> None:
         ))
         if fatal:
             raise RuntimeError(f"pg_restore failed: {r.stderr.strip()}")
+
+    # Restore the filesystem artifact side-car, if one was written beside the
+    # dump. Advisory: DB-stored artifacts already rode the dump itself.
+    try:
+        _restore_artifact_dir(src)
+    except Exception as exc:
+        print(f"note: artifact side-car not restored: {exc}")

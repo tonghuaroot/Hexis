@@ -620,7 +620,18 @@ Your memory is deep. Don't settle for shallow results.
 
 **Graded recall — gist first, verbatim on demand:** `recall` gives you the shape of a memory (scenes, distilled facts, previews); `open_memory` with the memory's id gives you the verbatim moment underneath — the exact turns, the pre-summary full text of a gisted memory. Reach for it when precise wording, quotes, or the full exchange matter. When a `search_history` result says the page is full, the window holds more — page onward with `created_before` set to the oldest timestamp you received.
 
-**Source-document filing cabinet:** Ingested files, emails, web pages, channel messages, and other artifacts are preserved as exact source documents separate from distilled memories. You always know this cabinet exists, but you do not know what files are in it until you browse or follow a memory's provenance. Use `search_documents` to browse titles, paths, snippets, and full-text hits; use `open_document` for one file or `open_documents` for a deliberate read-only batch. Use `load_documents` when a substantial source should sit on the RecMem desk as searchable mid-term working material; then use `search_history` with `sources=["desk"]` to search those loaded chunks. When `open_memory` returns `source_documents`, those are handles to the raw source behind that memory -- open or load them when exact wording, full context, or a large specification matters. Reading/opening a source document is inspection, not durable retention, unless you deliberately `remember` what should carry forward.
+**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists; you learn what is in it by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
+
+1. `recall` for history, preferences, and distilled facts.
+2. If a recalled memory carries `source_documents` or `source_chunks` handles and exactness matters, open the source behind it (`open_document`, `open_document_chunk`).
+3. For questions about a large or exact source, search the cabinet: `search_documents` for files, `search_document_chunks` for passages -- chunk hits carry locators (page, section, sheet row) you can cite.
+4. If a source will feed multi-step reasoning, load it onto the RecMem desk with a reason: `load_documents` or `load_document_chunks`.
+5. While reasoning, search the desk (`search_history` with `sources=["desk"]`); `list_desk` shows what is already there -- check before re-loading.
+6. When a source is too large, scroll deliberately: `open_desk_item` or `open_document` with offset paging. Never dump a whole file into context.
+7. Cite exact handles -- document, chunk, page, path -- for factual claims.
+8. `remember` only durable conclusions; `pin_desk_item` what stays actively needed; `clear_desk` when the work is done. When you fetch a web resource worth keeping, ingest it (`url_ingest`) -- but for freshness-sensitive facts, fetch the live web rather than trusting a stale ingested copy.
+
+Do not: pretend recall holds a whole file when it holds distilled facts; dump huge documents into context; store private source text as permanent memory merely because you opened it; ignore extraction warnings on results; or stop after one weak search when the answer likely exists -- refine the query and try the next rung.
 
 **How to search:**
 - Start with a broad semantic query to orient
@@ -800,7 +811,18 @@ Your memory is deep. Don't settle for shallow results.
 - When reviewing goals or backlog items that reference prior work
 - When you need to verify something before reaching out
 
-**Source-document filing cabinet:** Ingested files, emails, web pages, channel messages, and other artifacts are preserved as exact source documents separate from distilled memories. You always know this cabinet exists, but you do not know what files are in it until you browse or follow a memory's provenance. Use `search_documents` to browse titles, paths, snippets, and full-text hits; use `open_document` for one file or `open_documents` for a deliberate read-only batch. Use `load_documents` when a substantial source should sit on the RecMem desk as searchable mid-term working material; then use `search_history` with `sources=["desk"]` to search those loaded chunks. When `open_memory` returns `source_documents`, those are handles to the raw source behind that memory -- open or load them when exact wording, full context, or a large specification matters. Reading/opening a source document is inspection, not durable retention, unless you deliberately `remember` what should carry forward.
+**Source-document filing cabinet -- the retrieval ladder:** Ingested files, emails, web pages, and channel messages are preserved as exact source documents with durable, citable chunks, separate from distilled memories. You always know this cabinet exists; you learn what is in it by searching it or following a memory's provenance. Climb this ladder and stop at the first rung that truly answers:
+
+1. `recall` for history, preferences, and distilled facts.
+2. If a recalled memory carries `source_documents` or `source_chunks` handles and exactness matters, open the source behind it (`open_document`, `open_document_chunk`).
+3. For questions about a large or exact source, search the cabinet: `search_documents` for files, `search_document_chunks` for passages -- chunk hits carry locators (page, section, sheet row) you can cite.
+4. If a source will feed multi-step reasoning, load it onto the RecMem desk with a reason: `load_documents` or `load_document_chunks`.
+5. While reasoning, search the desk (`search_history` with `sources=["desk"]`); `list_desk` shows what is already there -- check before re-loading.
+6. When a source is too large, scroll deliberately: `open_desk_item` or `open_document` with offset paging. Never dump a whole file into context.
+7. Cite exact handles -- document, chunk, page, path -- for factual claims.
+8. `remember` only durable conclusions; `pin_desk_item` what stays actively needed; `clear_desk` when the work is done. When you fetch a web resource worth keeping, ingest it (`url_ingest`) -- but for freshness-sensitive facts, fetch the live web rather than trusting a stale ingested copy.
+
+Do not: pretend recall holds a whole file when it holds distilled facts; dump huge documents into context; store private source text as permanent memory merely because you opened it; ignore extraction warnings on results; or stop after one weak search when the answer likely exists -- refine the query and try the next rung.
 
 **How to search:**
 - Start with a broad semantic query to orient
@@ -1958,6 +1980,29 @@ Load selected source documents onto the RecMem desk as searchable mid-term
 working material. Use deliberately for large specs or reference files you will
 need to search on demand later.
 
+### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
+Passage-level cabinet search: hybrid full-text + embedding retrieval over
+durable source chunks. Returns stubs with citable locators (page, section,
+sheet row) and rank_components. Prefer this over document_fetch when one
+passage will do instead of a whole file.
+
+### document_chunk_fetch(chunk_ids=None, *, document_id=None, chunk_start=None, chunk_end=None, page_start=None, page_end=None, limit=10)
+Open exact passages (with prev/next scroll handles) into the workspace —
+inspection only, budget-capped like memory_fetch.
+
+### document_chunk_load_to_desk(chunk_ids=None, *, document_id=None, page_start=None, page_end=None, limit=10, reason=None, pin=False)
+Put selected passages on the RecMem desk for later desk search. pin=True keeps
+them through desk cleanup while actively needed.
+
+### desk_list(*, limit=20, offset=0, document_id=None, pinned_only=False)
+See what is already on the desk before re-loading a source.
+
+### desk_fetch(desk_unit_id, *, offset=0, max_chars=None)
+Read one desk item with offset windowing (scroll long items window by window).
+
+### desk_pin(desk_unit_id, *, pinned=True, note=None)
+Pin or unpin a desk item; pinned items survive desk cleanup (never redaction).
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
 Summarize loaded memories or loaded documents into the notes buffer. Buckets:
 `loaded_memories`, `loaded_documents`, `notes`, or `all`.
@@ -1976,6 +2021,9 @@ Returns workspace sizes and budget usage.
   exact source document handles from memory provenance.
 - Use `document_load_to_desk()` only when the source should remain searchable
   as desk material beyond the current REPL workspace.
+- Check `desk_list()` before re-loading a source you may already have.
+- Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
+  will do.
 - Only fetch memories that are genuinely relevant to the conversation.
 - You do NOT need to search memories for every message. Use your judgment about when memory retrieval would add value.
 
@@ -2076,6 +2124,29 @@ Load selected source documents onto the RecMem desk as searchable mid-term
 working material. Use deliberately for large specs or reference files you will
 need to search on demand in later turns.
 
+### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
+Passage-level cabinet search: hybrid full-text + embedding retrieval over
+durable source chunks. Returns stubs with citable locators (page, section,
+sheet row) and rank_components. Prefer this over document_fetch when one
+passage will do instead of a whole file.
+
+### document_chunk_fetch(chunk_ids=None, *, document_id=None, chunk_start=None, chunk_end=None, page_start=None, page_end=None, limit=10)
+Open exact passages (with prev/next scroll handles) into the workspace —
+inspection only, budget-capped like memory_fetch.
+
+### document_chunk_load_to_desk(chunk_ids=None, *, document_id=None, page_start=None, page_end=None, limit=10, reason=None, pin=False)
+Put selected passages on the RecMem desk for later desk search. pin=True keeps
+them through desk cleanup while actively needed.
+
+### desk_list(*, limit=20, offset=0, document_id=None, pinned_only=False)
+See what is already on the desk before re-loading a source.
+
+### desk_fetch(desk_unit_id, *, offset=0, max_chars=None)
+Read one desk item with offset windowing (scroll long items window by window).
+
+### desk_pin(desk_unit_id, *, pinned=True, note=None)
+Pin or unpin a desk item; pinned items survive desk cleanup (never redaction).
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
 Summarize loaded memories or loaded documents into the notes buffer using a sub-LLM call. Use this when your workspace is getting full. Buckets: `loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
@@ -2095,6 +2166,9 @@ Returns current workspace sizes, budget usage, and metrics.
   exact source document handles from memory provenance.
 - Use `document_load_to_desk()` only when the source should remain searchable
   as RecMem desk material beyond the current heartbeat workspace.
+- Check `desk_list()` before re-loading a source you may already have.
+- Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
+  will do.
 
 ## Tool Policy
 
@@ -2302,6 +2376,29 @@ Load selected source documents onto the RecMem desk as searchable mid-term
 working material. Use this sparingly during ingestion when a source must remain
 searchable by later RecMem/history queries.
 
+### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
+Passage-level cabinet search: hybrid full-text + embedding retrieval over
+durable source chunks. Returns stubs with citable locators (page, section,
+sheet row) and rank_components. Prefer this over document_fetch when one
+passage will do instead of a whole file.
+
+### document_chunk_fetch(chunk_ids=None, *, document_id=None, chunk_start=None, chunk_end=None, page_start=None, page_end=None, limit=10)
+Open exact passages (with prev/next scroll handles) into the workspace —
+inspection only, budget-capped like memory_fetch.
+
+### document_chunk_load_to_desk(chunk_ids=None, *, document_id=None, page_start=None, page_end=None, limit=10, reason=None, pin=False)
+Put selected passages on the RecMem desk for later desk search. pin=True keeps
+them through desk cleanup while actively needed.
+
+### desk_list(*, limit=20, offset=0, document_id=None, pinned_only=False)
+See what is already on the desk before re-loading a source.
+
+### desk_fetch(desk_unit_id, *, offset=0, max_chars=None)
+Read one desk item with offset windowing (scroll long items window by window).
+
+### desk_pin(desk_unit_id, *, pinned=True, note=None)
+Pin or unpin a desk item; pinned items survive desk cleanup (never redaction).
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
 Summarize loaded memories or loaded documents into the notes buffer. Buckets:
 `loaded_memories`, `loaded_documents`, `notes`, or `all`.
@@ -2342,6 +2439,9 @@ Follow this process to deeply read the chunk:
   memory provenance already contains exact document handles.
 - Use `document_load_to_desk()` only when the source should remain searchable
   as desk material after this ingestion pass.
+- Check `desk_list()` before re-loading a source you may already have.
+- Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
+  will do.
 - The `context` variable already contains worldview and goal stubs. Use these as starting points.
 - Focus your searches on understanding whether this content aligns with or contradicts your existing knowledge.
 

@@ -38,6 +38,16 @@ docker exec -i hexis_brain psql -U hexis_user hexis_memory < backup_20260214.sql
 
 The agent can create backups autonomously via the `database_backup` tool during heartbeats or in chat.
 
+### Original Source Artifacts
+
+Ingested originals up to `ingest.artifact_max_db_bytes` (25 MB default) are
+stored in the database as `source_artifacts` rows, so they ride every
+`pg_dump`/`hexis backup` automatically. Larger originals live in the managed
+artifact directory (`$HEXIS_ARTIFACT_DIR`, default `~/.hexis/artifacts`);
+`hexis backup` tars that directory as a side-car next to the dump
+(`<backup>.dump.artifacts.tar`) and `hexis restore` unpacks it again —
+content-addressed files are never overwritten on restore.
+
 ## Config Export/Import
 
 Export the agent's configuration (identity, tools, goals) for portability:

@@ -31,6 +31,12 @@ class WorkspaceMetrics:
     document_search_count: int = 0
     document_fetch_count: int = 0
     document_load_count: int = 0
+    document_chunk_search_count: int = 0
+    document_chunk_fetch_count: int = 0
+    document_chunk_load_count: int = 0
+    desk_list_count: int = 0
+    desk_fetch_count: int = 0
+    desk_pin_count: int = 0
     summarize_events: int = 0
 
 
@@ -41,6 +47,8 @@ class RLMWorkspace:
     memory_stubs: list[dict] = field(default_factory=list)
     loaded_memories: list[dict] = field(default_factory=list)
     document_stubs: list[dict] = field(default_factory=list)
+    document_chunk_stubs: list[dict] = field(default_factory=list)
+    desk_stubs: list[dict] = field(default_factory=list)
     loaded_documents: list[dict] = field(default_factory=list)
     notes: str = ""
     metrics: WorkspaceMetrics = field(default_factory=WorkspaceMetrics)
@@ -202,6 +210,140 @@ class RLMMemoryEnv:
         return payload
 
     # ------------------------------------------------------------------
+    # Source chunk search/fetch/load (passage grain)
+    # ------------------------------------------------------------------
+
+    def document_chunk_search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        document_id: str | None = None,
+        source_path: str | None = None,
+        source_type: str | None = None,
+    ) -> list[dict]:
+        """Passage-level cabinet search: hybrid lexical+vector over durable
+        chunks. Returns stubs with citable locators (page/section/sheet)."""
+        stubs = self._repo.search_document_chunks(
+            query,
+            limit=limit,
+            document_id=document_id,
+            source_path=source_path,
+            source_type=source_type,
+        )
+        self._workspace.document_chunk_stubs = stubs
+        self._workspace.metrics.document_chunk_search_count += 1
+        logger.debug("document_chunk_search: query=%r returned %d stubs", query[:60], len(stubs))
+        return stubs
+
+    def document_chunk_fetch(
+        self,
+        chunk_ids: list[str] | None = None,
+        *,
+        document_id: str | None = None,
+        chunk_start: int | None = None,
+        chunk_end: int | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Open exact passages (with prev/next handles) into the workspace."""
+        payload = self._repo.fetch_document_chunks(
+            chunk_ids=chunk_ids,
+            document_id=document_id,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            page_start=page_start,
+            page_end=page_end,
+            limit=limit,
+        )
+        chunks = payload.get("chunks") if isinstance(payload, dict) else []
+        if isinstance(chunks, list):
+            self._workspace.loaded_documents.extend(chunks)
+            chars = sum(len(c.get("content", "")) for c in chunks if isinstance(c, dict))
+        else:
+            chars = 0
+        self._workspace.metrics.document_chunk_fetch_count += 1
+        self._workspace.metrics.fetched_chars_total += chars
+        self._enforce_budgets()
+        return payload
+
+    def document_chunk_load_to_desk(
+        self,
+        chunk_ids: list[str] | None = None,
+        *,
+        document_id: str | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+        limit: int = 10,
+        reason: str | None = None,
+        pin: bool = False,
+    ) -> dict[str, Any]:
+        """Put selected passages on the RecMem desk for later desk search."""
+        payload = self._repo.load_document_chunks_to_desk(
+            chunk_ids=chunk_ids,
+            document_id=document_id,
+            page_start=page_start,
+            page_end=page_end,
+            limit=limit,
+            reason=reason,
+            pin=pin,
+        )
+        self._workspace.metrics.document_chunk_load_count += 1
+        return payload
+
+    # ------------------------------------------------------------------
+    # Desk syscalls
+    # ------------------------------------------------------------------
+
+    def desk_list(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        document_id: str | None = None,
+        pinned_only: bool = False,
+    ) -> list[dict]:
+        """See what is already on the desk before re-loading a source."""
+        stubs = self._repo.list_desk(
+            limit=limit,
+            offset=offset,
+            document_id=document_id,
+            pinned_only=pinned_only,
+        )
+        self._workspace.desk_stubs = stubs
+        self._workspace.metrics.desk_list_count += 1
+        return stubs
+
+    def desk_fetch(
+        self,
+        desk_unit_id: str,
+        *,
+        offset: int = 0,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Read (and scroll) one desk item; counts toward workspace budget."""
+        if max_chars is None:
+            max_chars = self._workspace.budgets.max_per_memory_chars
+        payload = self._repo.fetch_desk_item(
+            desk_unit_id, offset=offset, max_chars=max_chars
+        )
+        if isinstance(payload, dict) and payload.get("content"):
+            self._workspace.loaded_documents.append(payload)
+            self._workspace.metrics.fetched_chars_total += len(payload.get("content", ""))
+        self._workspace.metrics.desk_fetch_count += 1
+        self._enforce_budgets()
+        return payload
+
+    def desk_pin(
+        self, desk_unit_id: str, *, pinned: bool = True, note: str | None = None
+    ) -> dict[str, Any]:
+        """Pin (or unpin) a desk item so desk cleanup keeps it."""
+        payload = self._repo.pin_desk_item(desk_unit_id, pinned=pinned, note=note)
+        self._workspace.metrics.desk_pin_count += 1
+        return payload
+
+    # ------------------------------------------------------------------
     # Workspace management
     # ------------------------------------------------------------------
 
@@ -310,6 +452,8 @@ class RLMMemoryEnv:
             "notes_chars": len(self._workspace.notes),
             "stubs_count": len(self._workspace.memory_stubs),
             "document_stubs_count": len(self._workspace.document_stubs),
+            "document_chunk_stubs_count": len(self._workspace.document_chunk_stubs),
+            "desk_stubs_count": len(self._workspace.desk_stubs),
             "budgets": {
                 "max_loaded_memories": self._workspace.budgets.max_loaded_memories,
                 "max_loaded_chars": self._workspace.budgets.max_loaded_chars,
@@ -322,6 +466,12 @@ class RLMMemoryEnv:
                 "document_search_count": self._workspace.metrics.document_search_count,
                 "document_fetch_count": self._workspace.metrics.document_fetch_count,
                 "document_load_count": self._workspace.metrics.document_load_count,
+                "document_chunk_search_count": self._workspace.metrics.document_chunk_search_count,
+                "document_chunk_fetch_count": self._workspace.metrics.document_chunk_fetch_count,
+                "document_chunk_load_count": self._workspace.metrics.document_chunk_load_count,
+                "desk_list_count": self._workspace.metrics.desk_list_count,
+                "desk_fetch_count": self._workspace.metrics.desk_fetch_count,
+                "desk_pin_count": self._workspace.metrics.desk_pin_count,
                 "summarize_events": self._workspace.metrics.summarize_events,
             },
         }
@@ -388,6 +538,12 @@ class RLMMemoryEnv:
             "document_search": self.document_search,
             "document_fetch": self.document_fetch,
             "document_load_to_desk": self.document_load_to_desk,
+            "document_chunk_search": self.document_chunk_search,
+            "document_chunk_fetch": self.document_chunk_fetch,
+            "document_chunk_load_to_desk": self.document_chunk_load_to_desk,
+            "desk_list": self.desk_list,
+            "desk_fetch": self.desk_fetch,
+            "desk_pin": self.desk_pin,
             "workspace_summarize": self.workspace_summarize,
             "workspace_drop": self.workspace_drop,
             "workspace_status": self.workspace_status,

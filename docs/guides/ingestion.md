@@ -86,6 +86,48 @@ working material: they are searchable with `search_history` using
 `sources=["desk"]`, but they are not permanent distilled memories unless the
 agent explicitly stores a durable memory.
 
+## Durable Chunks, Artifacts, and Extraction Runs
+
+Beyond the normalized text, ingestion now preserves three more layers:
+
+- **Source chunks** (`source_document_chunks`): stable, citable slices with
+  locators — page ranges for PDFs, sheet/row ranges for spreadsheets, heading
+  paths for Markdown/DOCX. Chunk ids and embeddings survive re-ingestion of
+  unchanged content. The agent searches them with `search_document_chunks`
+  (hybrid full-text + vector, with inspectable `rank_components`), opens exact
+  passages with `open_document_chunk`, and loads them onto the desk with
+  `load_document_chunks`. Pre-existing documents gain chunks via
+  `hexis ingest backfill-chunks`; embeddings are generated in the background
+  by the maintenance worker.
+- **Original artifacts** (`source_artifacts`): the exact bytes a document was
+  extracted from, captured *before* the parser runs. A failed parse never
+  loses the source — the artifact is preserved with a `failed` extraction run
+  so you can fix dependencies and re-ingest. Bytes up to
+  `ingest.artifact_max_db_bytes` (25 MB default) live in-DB (and ride
+  `hexis backup`); larger files go to `$HEXIS_ARTIFACT_DIR`
+  (default `~/.hexis/artifacts`), tarred as a backup side-car.
+- **Extraction runs** (`source_extraction_runs`): which extractor produced the
+  text, with structured warnings — `ocr_used`, `image_only_page`,
+  `truncated_rows`, `unsupported_feature`. Warnings surface in
+  `open_document`, search results, `hexis docs info`, and `hexis ingest status`.
+
+## Where Ingestion Comes From
+
+All paths converge on the same pipeline and receipts:
+
+1. **CLI bulk** — `hexis ingest --file/--input/--url/--github/--stdin`.
+2. **Chat** — large pastes become attachments; dropped/picked files upload
+   their original bytes (`POST /api/ingest/file`) and ingest as durable
+   background jobs.
+3. **Web UI** — the **Ingest** page: multi-file upload, paste box, URL field,
+   and a live job list showing what ran, what is pending, and what failed and why.
+4. **The agent itself** — `url_ingest`/`git_ingest` during heartbeats. Sources
+   are stamped with `acquisition` provenance (`user`, `agent`, `connector`):
+   user-provided sources never auto-fade (retention asks you first), while
+   agent-acquired sources may be archived autonomously by the daily retention
+   pass once truly idle (`retention.agent_source_*` config, ships dark behind
+   `retention.enabled`).
+
 ## Input Sources
 
 ```bash

@@ -57,6 +57,7 @@ Treat those statements as unverified.
 | | |
 |---|---|
 | **Multi-layered memory** | Episodic, semantic, procedural, strategic, and working memory — vector search + knowledge graph (Apache AGE) |
+| **Filing cabinet & desk** | Every ingested file/email/page is preserved verbatim with citable chunks (page, section, sheet row); the agent searches the cabinet, loads passages onto a mid-term desk, scrolls, pins, and cites exact sources |
 | **Evidence-based beliefs** | Confidence revises as evidence accrues; every change audited; the agent can explain *why* it believes anything |
 | **Automatic memory formation** | A subconscious sweep turns salient conversation and heartbeat moments into durable memories — unprompted |
 | **Truthful action language** | "I've stored that" is checked against actual tool calls; unsupported claims get a visible `[Correction]` |
@@ -176,6 +177,8 @@ hexis doctor                  # health check
 hexis up [--profile active]   # start services
 hexis down                    # stop services
 hexis ingest --input ./docs   # knowledge ingestion
+hexis docs search "query"     # search preserved source documents
+hexis desk list               # what's loaded as working material
 hexis mcp                     # MCP server
 hexis ui                      # web UI
 hexis tools list              # list tools

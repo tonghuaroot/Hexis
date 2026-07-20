@@ -5,7 +5,7 @@ category: system
 requires:
   tools: [recall, search_history, remember]
 contexts: [heartbeat, chat]
-bound_tools: [recall, search_history, remember, add_evidence, belief_history, open_memory, search_documents, open_document, open_documents, load_documents, sense_memory_availability, read_journal, write_journal, search_journal, manage_goals, manage_schedule, manage_backlog, list_document_fade_requests, resolve_document_fade, associate, trace_why, get_procedures, get_strategies]
+bound_tools: [recall, search_history, remember, add_evidence, belief_history, open_memory, search_documents, open_document, open_documents, load_documents, search_document_chunks, open_document_chunk, load_document_chunks, list_desk, open_desk_item, pin_desk_item, unpin_desk_item, clear_desk, sense_memory_availability, read_journal, write_journal, search_journal, manage_goals, manage_schedule, manage_backlog, list_document_fade_requests, resolve_document_fade, associate, trace_why, get_procedures, get_strategies]
 ---
 
 # Core Memory and Continuity
@@ -26,11 +26,16 @@ Use this skill for ordinary continuity: recalling relevant memories, opening exa
 2. Use `recall` for targeted retrieval. Prefer specific queries over broad ones.
 3. Use `search_history` for exact names, phrases, or details from earlier
    sessions, especially when semantic recall is weak or embeddings are unavailable.
-4. Use `search_documents` when the answer depends on an ingested source artifact
-   rather than only distilled memories. Use `open_document` or `open_documents`
-   for deliberate read-only inspection. Use `load_documents` when substantial
-   source material should sit on the RecMem desk for later `search_history` with
-   `sources=["desk"]`.
+4. When the answer depends on an ingested source rather than distilled memory,
+   climb the cabinet ladder: `search_documents` for files or
+   `search_document_chunks` for citable passages -> `open_document` /
+   `open_document_chunk` for read-only inspection -> `load_documents` /
+   `load_document_chunks` (with a reason) when the material must stay
+   searchable -> `search_history` with `sources=["desk"]` while reasoning ->
+   `open_desk_item` to scroll long items -> cite the document/chunk/page
+   handle. Run `list_desk` first -- do not re-load what is already on the
+   desk. `pin_desk_item` what stays actively needed; `clear_desk` when done
+   (cleared items archive; sources stay in the cabinet).
 5. Use `remember` when a durable fact, event, preference, promise, or decision should persist.
 6. Use journal tools only for deliberate permanent entries, not ordinary memory.
 7. Use goal, schedule, or backlog tools when the user asks for ongoing commitments or work tracking.

@@ -278,6 +278,11 @@ CREATE TABLE subconscious_units (
     trust_level FLOAT NOT NULL DEFAULT 0.95 CHECK (trust_level BETWEEN 0 AND 1),
     access_count INTEGER NOT NULL DEFAULT 0,
     last_accessed TIMESTAMPTZ,
+    -- Desk pinning: a pinned item is actively-needed working material and is
+    -- protected from idle GC (a typed column, not metadata — the desk-load
+    -- upsert merges metadata.recmem and would clobber a flag there).
+    pinned_at TIMESTAMPTZ,
+    pinned_by TEXT,
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active','redacted','archived')),
     recurrence_cluster_id UUID,

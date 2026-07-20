@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import UUID
 
-from .config import Config, IngestionMode, _hash_text
+from .config import Config, IngestionMode, _emit, _hash_text, _normalize_mode
 from .pipeline import IngestionPipeline
+from .sectioning import CHUNKER_VERSION, Sectioner
 from .store import MemoryStore
 
 # =========================================================================
@@ -131,6 +132,8 @@ def _build_config_from_args(args: argparse.Namespace) -> Config:
         permanent=getattr(args, "permanent", False),
         base_trust=getattr(args, "base_trust", None),
         sensitivity=getattr(args, "sensitivity", None),
+        # CLI ingestion is always the user's own act.
+        acquisition="user",
         verbose=not getattr(args, "quiet", False),
         # DB-owned policy (#91); dataclass defaults cover absent keys.
         **db_settings,
@@ -291,6 +294,9 @@ async def _cmd_status_async(args: argparse.Namespace) -> None:
                     'episodic', (SELECT COUNT(*) FROM memories WHERE type = 'episodic'),
                     'semantic', (SELECT COUNT(*) FROM memories WHERE type = 'semantic'),
                     'source_documents', (SELECT COUNT(*) FROM source_documents WHERE status = 'active'),
+                    'source_chunks', (SELECT COUNT(*) FROM source_document_chunks),
+                    'chunks_pending_embedding', (SELECT COUNT(*) FROM source_document_chunks WHERE embedding_status IN ('pending', 'in_progress')),
+                    'artifacts', (SELECT COUNT(*) FROM source_artifacts WHERE status = 'active'),
                     'pending_jobs', (SELECT COUNT(*) FROM ingestion_jobs WHERE status IN ('pending', 'in_progress')),
                     'recent_24h', (SELECT COUNT(*) FROM memories WHERE created_at > NOW() - INTERVAL '24 hours')
                 )
@@ -298,16 +304,139 @@ async def _cmd_status_async(args: argparse.Namespace) -> None:
             )
             stats_data = json.loads(stats) if stats else {}
 
+            runs_raw = await store._fetchval(
+                """
+                SELECT jsonb_agg(run_doc) FROM (
+                    SELECT jsonb_build_object(
+                        'title', COALESCE(d.title, '(extraction failed — artifact preserved)'),
+                        'status', r.status,
+                        'extractor', r.extractor_name
+                            || CASE WHEN r.extractor_version <> '' THEN ' ' || r.extractor_version ELSE '' END,
+                        'warnings', COALESCE((
+                            SELECT string_agg(w->>'code', ', ')
+                            FROM jsonb_array_elements(r.warnings) w
+                        ), ''),
+                        'errors', COALESCE((
+                            SELECT string_agg(e->>'message', '; ')
+                            FROM jsonb_array_elements(r.errors) e
+                        ), ''),
+                        'completed_at', r.completed_at
+                    ) AS run_doc
+                    FROM source_extraction_runs r
+                    LEFT JOIN source_documents d ON d.id = r.source_document_id
+                    ORDER BY r.created_at DESC
+                    LIMIT 10
+                ) sub
+                """
+            )
+            runs = json.loads(runs_raw) if isinstance(runs_raw, str) else (runs_raw or [])
+            stats_data["recent_extraction_runs"] = runs or []
+
             if args.json:
-                print(json.dumps(stats_data, indent=2))
+                print(json.dumps(stats_data, indent=2, default=str))
             else:
                 print("Ingestion Status:")
                 print(f"  Total memories:     {stats_data.get('total_memories', 0)}")
                 print(f"  Episodic memories:  {stats_data.get('episodic', 0)}")
                 print(f"  Semantic memories:  {stats_data.get('semantic', 0)}")
                 print(f"  Source documents:   {stats_data.get('source_documents', 0)}")
+                print(f"  Source chunks:      {stats_data.get('source_chunks', 0)} "
+                      f"({stats_data.get('chunks_pending_embedding', 0)} awaiting embedding)")
+                print(f"  Original artifacts: {stats_data.get('artifacts', 0)}")
                 print(f"  Pending jobs:       {stats_data.get('pending_jobs', 0)}")
                 print(f"  Last 24 hours:      {stats_data.get('recent_24h', 0)}")
+                if runs:
+                    print("\nRecent extraction runs:")
+                    for run in runs:
+                        line = f"  [{run.get('status')}] {run.get('title')} — {run.get('extractor')}"
+                        if run.get("warnings"):
+                            line += f" ⚠ {run['warnings']}"
+                        if run.get("errors"):
+                            line += f" ✗ {run['errors']}"
+                        print(line)
+    finally:
+        await store.close()
+
+
+def _cmd_backfill_chunks(args: argparse.Namespace) -> None:
+    """Handle the backfill-chunks subcommand."""
+    asyncio.run(_cmd_backfill_chunks_async(args))
+
+
+async def _cmd_backfill_chunks_async(args: argparse.Namespace) -> None:
+    """Re-chunk stored source documents that have no durable chunks yet (or
+    whose chunks came from an older sectioner). Locators are re-derived from
+    the inline markers readers leave in stored content ("[Page N]", ...).
+    Embedding happens in the background maintenance worker afterwards."""
+    config = _build_config_from_args(args)
+    store = MemoryStore(config)
+    await store.connect()
+    sectioner = Sectioner(config.max_section_chars, config.chunk_overlap)
+
+    limit = getattr(args, "limit", None)
+    processed = 0
+    chunk_total = 0
+    failures: list[str] = []
+    seen: set[str] = set()
+    try:
+        while True:
+            batch = 20 if limit is None else max(1, min(20, limit - processed))
+            raw = await store._fetchval(
+                "SELECT source_chunk_backfill_candidates($1::int, $2::text)",
+                batch, CHUNKER_VERSION,
+            )
+            candidates = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            candidates = [c for c in candidates if c.get("document_id") not in seen]
+            if not candidates:
+                break
+            for cand in candidates:
+                doc_id = str(cand["document_id"])
+                seen.add(doc_id)
+                title = cand.get("title") or doc_id[:8]
+                row = await store._fetchval(
+                    """
+                    SELECT jsonb_build_object('content', content, 'file_type', file_type)
+                    FROM source_documents WHERE id = $1::uuid AND status = 'active'
+                    """,
+                    doc_id,
+                )
+                doc = json.loads(row) if isinstance(row, str) else (row or {})
+                content = doc.get("content")
+                if not content:
+                    continue
+                file_type = doc.get("file_type") or ".txt"
+                if not file_type.startswith("."):
+                    file_type = f".{file_type}"
+                try:
+                    sections = sectioner.split(content, Path(f"document{file_type}"))
+                    result = await store.upsert_source_document_chunks(
+                        doc_id, sections, CHUNKER_VERSION
+                    )
+                except Exception as exc:
+                    failures.append(f"{title}: {exc}")
+                    print(f"  FAILED  {title}: {exc}")
+                    continue
+                count = int(result.get("count") or 0)
+                chunk_total += count
+                processed += 1
+                print(
+                    f"  {title}: {count} chunks "
+                    f"({result.get('unchanged', 0)} unchanged, "
+                    f"{result.get('re_embedded', 0)} re-embed, "
+                    f"{result.get('trimmed', 0)} trimmed)"
+                )
+                if limit is not None and processed >= limit:
+                    break
+            if limit is not None and processed >= limit:
+                break
+        print(f"\nBackfilled {processed} document(s), {chunk_total} chunk(s).")
+        if failures:
+            print(f"{len(failures)} document(s) failed — see lines above; re-run to retry.")
+        if chunk_total:
+            print(
+                "Embeddings are generated in the background by the maintenance "
+                "worker (docker compose --profile active up -d, or hexis worker)."
+            )
     finally:
         await store.close()
 
@@ -331,9 +460,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Subcommands:
-  ingest   Ingest files, directories, URLs, or stdin
-  status   Show ingestion status and pending items
-  process  Deprecated compatibility stub; archived processing is retired
+  ingest           Ingest files, directories, URLs, or stdin
+  status           Show ingestion status and pending items
+  backfill-chunks  Chunk stored source documents that predate durable chunks
+  process          Deprecated compatibility stub; archived processing is retired
 
 Examples:
   %(prog)s ingest --file doc.md --mode fast
@@ -341,6 +471,7 @@ Examples:
   %(prog)s ingest --url https://example.com/article
   echo "Some text" | %(prog)s ingest --stdin --stdin-type text
   %(prog)s status --pending
+  %(prog)s backfill-chunks --limit 100
         """,
     )
 
@@ -380,6 +511,17 @@ Examples:
     status_p.add_argument("--json", action="store_true", help="Output as JSON")
     _add_common_args(status_p, env_defaults)
 
+    # Backfill-chunks subcommand
+    backfill_p = subparsers.add_parser(
+        "backfill-chunks",
+        help="Chunk stored source documents that have no durable chunks yet",
+    )
+    backfill_p.add_argument(
+        "--limit", type=int, default=None,
+        help="Maximum documents to backfill this run (default: all)",
+    )
+    _add_common_args(backfill_p, env_defaults)
+
     # Process subcommand
     process_p = subparsers.add_parser("process", help="Deprecated: archived processing is retired")
     process_p.add_argument("--content-hash", type=str, help=argparse.SUPPRESS)
@@ -406,6 +548,8 @@ Examples:
         _cmd_ingest(args)
     elif args.subcommand == "status":
         _cmd_status(args)
+    elif args.subcommand == "backfill-chunks":
+        _cmd_backfill_chunks(args)
     elif args.subcommand == "process":
         _cmd_process(args)
 

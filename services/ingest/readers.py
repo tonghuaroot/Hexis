@@ -19,17 +19,65 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import UUID
 
-from .config import Section, _extract_title
+from .config import Anchor, Section, _extract_title
 
 # =========================================================================
 # DOCUMENT READERS
 # =========================================================================
 
 
+@dataclass
+class ReaderWarning:
+    """A structured extraction warning: recorded in source_extraction_runs
+    and surfaced wherever the document is opened. Codes in use:
+    truncated_rows, ocr_used, ocr_unavailable, image_only_page,
+    unsupported_feature, fallback_parser, empty_extraction."""
+
+    code: str
+    message: str
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"code": self.code, "message": self.message}
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
+
+
+@dataclass
+class ReaderResult:
+    """What a reader produces: normalized text plus everything needed for
+    durable preservation and citation — structural anchors for locators,
+    structured warnings for the extraction run, and (where the reader is the
+    only one who sees them, e.g. web fetches) the original artifact bytes."""
+
+    text: str
+    warnings: list[ReaderWarning] = field(default_factory=list)
+    anchors: list[Anchor] = field(default_factory=list)
+    artifact_bytes: bytes | None = None
+    artifact_mime: str | None = None
+    extractor_name: str = ""
+    extractor_version: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def warnings_payload(self) -> list[dict[str, Any]]:
+        return [w.to_dict() for w in self.warnings]
+
+
+def _module_version(module: Any) -> str:
+    return str(getattr(module, "__version__", "") or "")
+
+
 class DocumentReader:
     @staticmethod
     def read(file_path: Path) -> str:
         raise NotImplementedError
+
+    @classmethod
+    def read_result(cls, file_path: Path) -> ReaderResult:
+        """Rich read: text + warnings + anchors. Default wraps the legacy
+        read(); format-aware readers override to add locators and warnings."""
+        return ReaderResult(text=cls.read(file_path), extractor_name=cls.__name__)
 
 
 class MarkdownReader(DocumentReader):
@@ -94,15 +142,16 @@ class WebReader(DocumentReader):
 
     @staticmethod
     def read(url: str) -> str:
+        return WebReader.read_result(url).text
+
+    @classmethod
+    def read_result(cls, url: str) -> ReaderResult:  # type: ignore[override]
         try:
             import trafilatura
         except ImportError:
-            import subprocess
-
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "trafilatura", "--break-system-packages", "-q"]
+            raise RuntimeError(
+                "Web reader requires trafilatura: pip install hexis[web]"
             )
-            import trafilatura
 
         downloaded = trafilatura.fetch_url(url)
         if not downloaded:
@@ -126,7 +175,24 @@ class WebReader(DocumentReader):
         if date:
             header_parts.append(f"[Date: {date}]")
 
-        return "\n".join(header_parts) + "\n\n" + content
+        fetched_at = datetime.now(timezone.utc).isoformat()
+        return ReaderResult(
+            text="\n".join(header_parts) + "\n\n" + content,
+            # The fetched HTML is the original artifact — the reader is the
+            # only place that ever sees it.
+            artifact_bytes=downloaded.encode("utf-8", errors="replace")
+            if isinstance(downloaded, str) else bytes(downloaded),
+            artifact_mime="text/html",
+            extractor_name="trafilatura",
+            extractor_version=_module_version(trafilatura),
+            metadata={
+                "url": url,
+                "fetched_at": fetched_at,
+                "title": title,
+                "author": author,
+                "date": str(date) if date else None,
+            },
+        )
 
 
 class YouTubeTranscriptReader(DocumentReader):
@@ -304,25 +370,105 @@ class DataReader(DocumentReader):
 
 
 class PDFReader(DocumentReader):
+    OCR_DPI = 200
+
     @staticmethod
     def read(file_path: Path) -> str:
+        return PDFReader.read_result(file_path).text
+
+    @classmethod
+    def read_result(cls, file_path: Path) -> ReaderResult:
         try:
             import pdfplumber
         except ImportError:
-            import subprocess
-
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "pdfplumber", "--break-system-packages", "-q"]
+            raise RuntimeError(
+                "PDF reader requires pdfplumber: pip install hexis[pdf]"
             )
-            import pdfplumber
 
-        text_parts: list[str] = []
+        warnings: list[ReaderWarning] = []
+        anchors: list[Anchor] = []
+        parts: list[str] = []
+        ocr = cls._ocr_backend(warnings)
+        ocr_pages: list[int] = []
+        image_only_pages: list[int] = []
+        pos = 0
+
         with pdfplumber.open(file_path) as pdf:
             for i, page in enumerate(pdf.pages):
-                page_text = page.extract_text()
-                if page_text:
-                    text_parts.append(f"[Page {i + 1}]\n{page_text}")
-        return "\n\n".join(text_parts)
+                page_no = i + 1
+                page_text = (page.extract_text() or "").strip()
+                if not page_text and ocr is not None:
+                    page_text = cls._ocr_page(file_path, i, ocr, warnings)
+                    if page_text:
+                        ocr_pages.append(page_no)
+                if not page_text:
+                    image_only_pages.append(page_no)
+                    page_text = "[No extractable text on this page]"
+                piece = f"[Page {page_no}]\n{page_text}"
+                if parts:
+                    pos += 2  # "\n\n" separator
+                anchors.append(Anchor(kind="page", value=page_no, char_offset=pos))
+                parts.append(piece)
+                pos += len(piece)
+
+        if ocr_pages:
+            warnings.append(ReaderWarning(
+                code="ocr_used",
+                message=f"OCR extracted text from {len(ocr_pages)} page(s) with no text layer",
+                detail={"pages": ocr_pages},
+            ))
+        if image_only_pages:
+            warnings.append(ReaderWarning(
+                code="image_only_page",
+                message=f"{len(image_only_pages)} page(s) have no extractable text",
+                detail={"pages": image_only_pages},
+            ))
+
+        return ReaderResult(
+            text="\n\n".join(parts),
+            warnings=warnings,
+            anchors=anchors,
+            extractor_name="pdfplumber",
+            extractor_version=_module_version(pdfplumber),
+        )
+
+    @classmethod
+    def _ocr_backend(cls, warnings: list[ReaderWarning]):
+        """OCR needs pypdfium2 (rasterize, no system deps) + pytesseract
+        (tesseract binary). Missing pieces degrade to a warning, never a
+        crash — the pages are flagged image_only instead."""
+        try:
+            import pypdfium2  # noqa: F401
+            import pytesseract  # noqa: F401
+        except ImportError:
+            warnings.append(ReaderWarning(
+                code="ocr_unavailable",
+                message="OCR fallback unavailable (pip install hexis[ocr] and the tesseract binary)",
+            ))
+            return None
+        return True
+
+    @classmethod
+    def _ocr_page(cls, file_path: Path, page_index: int, ocr, warnings: list[ReaderWarning]) -> str:
+        import pypdfium2 as pdfium
+        import pytesseract
+
+        try:
+            doc = pdfium.PdfDocument(str(file_path))
+            try:
+                bitmap = doc[page_index].render(scale=cls.OCR_DPI / 72)
+                image = bitmap.to_pil()
+            finally:
+                doc.close()
+            return (pytesseract.image_to_string(image) or "").strip()
+        except Exception as exc:
+            if not any(w.code == "ocr_unavailable" for w in warnings):
+                warnings.append(ReaderWarning(
+                    code="ocr_unavailable",
+                    message=f"OCR failed: {exc}",
+                    detail={"page": page_index + 1},
+                ))
+            return ""
 
 
 class ImageReader(DocumentReader):
@@ -332,34 +478,43 @@ class ImageReader(DocumentReader):
 
     @classmethod
     def read(cls, file_path: Path) -> str:
-        try:
-            from PIL import Image
-        except ImportError:
-            import subprocess
+        return cls.read_result(file_path).text
 
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "Pillow", "--break-system-packages", "-q"]
-            )
-            from PIL import Image
-
+    @classmethod
+    def read_result(cls, file_path: Path) -> ReaderResult:
         try:
             import pytesseract
+            from PIL import Image
         except ImportError:
-            import subprocess
-
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "pytesseract", "--break-system-packages", "-q"]
+            raise RuntimeError(
+                "Image reader requires Pillow and pytesseract: pip install hexis[ocr] "
+                "(plus the tesseract binary)"
             )
-            import pytesseract
 
+        warnings: list[ReaderWarning] = []
         try:
             image = Image.open(file_path)
             text = pytesseract.image_to_string(image)
-            if not text.strip():
-                return f"[Image: {file_path.name}]\n[No text detected via OCR]"
-            return f"[Image: {file_path.name}]\n[OCR Extracted Text]\n\n{text}"
         except Exception as e:
-            return f"[Image: {file_path.name}]\n[OCR failed: {e}]"
+            raise RuntimeError(f"OCR failed for {file_path.name}: {e}")
+        if not text.strip():
+            warnings.append(ReaderWarning(
+                code="empty_extraction",
+                message="No text detected via OCR",
+            ))
+            body = f"[Image: {file_path.name}]\n[No text detected via OCR]"
+        else:
+            warnings.append(ReaderWarning(
+                code="ocr_used",
+                message="Text extracted via OCR",
+            ))
+            body = f"[Image: {file_path.name}]\n[OCR Extracted Text]\n\n{text}"
+        return ReaderResult(
+            text=body,
+            warnings=warnings,
+            extractor_name="pytesseract",
+            extractor_version=_module_version(pytesseract),
+        )
 
 
 class AudioReader(DocumentReader):
@@ -372,12 +527,9 @@ class AudioReader(DocumentReader):
         try:
             import whisper
         except ImportError:
-            import subprocess
-
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "openai-whisper", "--break-system-packages", "-q"]
+            raise RuntimeError(
+                "Audio reader requires openai-whisper: pip install hexis[media]"
             )
-            import whisper
 
         try:
             model = whisper.load_model("base")
@@ -400,22 +552,16 @@ class VideoReader(DocumentReader):
         try:
             from moviepy.editor import VideoFileClip
         except ImportError:
-            import subprocess
-
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "moviepy", "--break-system-packages", "-q"]
+            raise RuntimeError(
+                "Video reader requires moviepy: pip install hexis[media]"
             )
-            from moviepy.editor import VideoFileClip
 
         try:
             import whisper
         except ImportError:
-            import subprocess
-
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "openai-whisper", "--break-system-packages", "-q"]
+            raise RuntimeError(
+                "Video reader requires openai-whisper: pip install hexis[media]"
             )
-            import whisper
 
         import tempfile
 
@@ -452,8 +598,14 @@ class DocxReader(DocumentReader):
 
     EXTENSIONS = {".docx"}
 
+    _HEADING_RE = re.compile(r"^Heading (\d+)$")
+
     @classmethod
     def read(cls, file_path: Path) -> str:
+        return cls.read_result(file_path).text
+
+    @classmethod
+    def read_result(cls, file_path: Path) -> ReaderResult:
         try:
             import docx
         except ImportError:
@@ -462,16 +614,54 @@ class DocxReader(DocumentReader):
             )
 
         doc = docx.Document(file_path)
+        header = f"[Format: DOCX]\n[File: {file_path.name}]\n\n"
         parts: list[str] = []
+        anchors: list[Anchor] = []
+        heading_stack: list[tuple[int, str]] = []
+        pos = len(header)
+
         for para in doc.paragraphs:
             text = para.text.strip()
-            if text:
-                parts.append(text)
+            if not text:
+                continue
+            style_name = str(getattr(getattr(para, "style", None), "name", "") or "")
+            m = cls._HEADING_RE.match(style_name)
+            if m:
+                level = int(m.group(1))
+                heading_stack = [h for h in heading_stack if h[0] < level]
+                heading_stack.append((level, text))
+                anchors.append(Anchor(
+                    kind="heading",
+                    value=[t for _, t in heading_stack],
+                    char_offset=pos,
+                ))
+            parts.append(text)
+            pos += len(text) + 1  # "\n" joiner
+
+        table_count = 0
         for table in doc.tables:
+            table_count += 1
             for row in table.rows:
                 cells = [cell.text.strip() for cell in row.cells]
-                parts.append("\t".join(cells))
-        return f"[Format: DOCX]\n[File: {file_path.name}]\n\n" + "\n".join(parts)
+                line = "\t".join(cells)
+                parts.append(line)
+                pos += len(line) + 1
+
+        warnings: list[ReaderWarning] = []
+        if table_count:
+            warnings.append(ReaderWarning(
+                code="unsupported_feature",
+                message=f"{table_count} table(s) flattened to tab-separated rows (appended after body text)",
+                detail={"feature": "table_structure", "tables": table_count},
+            ))
+
+        return ReaderResult(
+            text=header + "\n".join(parts),
+            warnings=warnings,
+            anchors=anchors,
+            extractor_name="python-docx",
+            extractor_version=_module_version(docx),
+        )
 
 
 class RtfReader(DocumentReader):
@@ -695,14 +885,21 @@ class PptxReader(DocumentReader):
 
 
 class XlsxReader(DocumentReader):
-    """Reader for Excel .xlsx/.xls files."""
+    """Reader for Excel .xlsx files. Legacy .xls is not supported (openpyxl
+    cannot read it) — get_reader fails loud with a convert-to-xlsx hint."""
 
-    EXTENSIONS = {".xlsx", ".xls"}
+    EXTENSIONS = {".xlsx"}
 
-    MAX_ROWS_PER_SHEET = 500
+    # Overridden from config ingest.xlsx_max_rows_per_sheet by the pipeline.
+    # Capping is never silent: it always emits a truncated_rows warning.
+    MAX_ROWS_PER_SHEET = 5000
 
     @classmethod
     def read(cls, file_path: Path) -> str:
+        return cls.read_result(file_path).text
+
+    @classmethod
+    def read_result(cls, file_path: Path) -> ReaderResult:
         try:
             import openpyxl
         except ImportError:
@@ -711,21 +908,56 @@ class XlsxReader(DocumentReader):
             )
 
         wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
+        sheet_names = list(wb.sheetnames)
+        header = f"[Format: XLSX]\n[File: {file_path.name}]\n[Sheets: {len(sheet_names)}]"
         parts: list[str] = []
-        for sheet_name in wb.sheetnames:
+        anchors: list[Anchor] = []
+        warnings: list[ReaderWarning] = []
+        pos = len(header) + 2  # "\n\n" after the header
+
+        for sheet_name in sheet_names:
             ws = wb[sheet_name]
-            rows: list[str] = []
+            if parts:
+                pos += 2  # "\n\n" between sheets
+            sheet_marker = f"[Sheet: {sheet_name}]"
+            anchors.append(Anchor(kind="sheet", value=sheet_name, char_offset=pos))
+            lines: list[str] = [sheet_marker]
+            pos += len(sheet_marker) + 1  # marker + "\n"
+            emitted = 0
+            total = 0
             for i, row in enumerate(ws.iter_rows(values_only=True)):
+                total += 1
                 if i >= cls.MAX_ROWS_PER_SHEET:
-                    rows.append(f"... (truncated at {cls.MAX_ROWS_PER_SHEET} rows)")
-                    break
+                    continue  # keep counting for the warning total
                 cells = [str(c) if c is not None else "" for c in row]
-                rows.append("\t".join(cells))
-            parts.append(f"[Sheet: {sheet_name}]\n" + "\n".join(rows))
+                line = "\t".join(cells)
+                anchors.append(Anchor(kind="row", value=i + 1, char_offset=pos))
+                lines.append(line)
+                pos += len(line) + 1
+                emitted += 1
+            if total > emitted:
+                notice = f"... (truncated: showing {emitted} of {total} rows)"
+                lines.append(notice)
+                pos += len(notice) + 1
+                warnings.append(ReaderWarning(
+                    code="truncated_rows",
+                    message=f"Sheet '{sheet_name}' truncated to {emitted} of {total} rows "
+                            f"(raise ingest.xlsx_max_rows_per_sheet to keep more)",
+                    detail={"sheet": sheet_name, "emitted": emitted, "total": total},
+                ))
+            pos -= 1  # the last line has no trailing "\n" inside the join
+            parts.append("\n".join(lines))
         wb.close()
 
-        header = f"[Format: XLSX]\n[File: {file_path.name}]\n[Sheets: {len(wb.sheetnames)}]"
-        return f"{header}\n\n" + "\n\n".join(parts)
+        return ReaderResult(
+            text=f"{header}\n\n" + "\n\n".join(parts),
+            warnings=warnings,
+            anchors=anchors,
+            extractor_name="openpyxl",
+            extractor_version=_module_version(openpyxl),
+            # Formulas are read as their last-calculated values (data_only).
+            metadata={"formulas": "values_only", "sheets": sheet_names},
+        )
 
 
 class NotebookReader(DocumentReader):
@@ -797,6 +1029,13 @@ class RssReader(DocumentReader):
 
 def get_reader(file_path: Path) -> DocumentReader:
     suffix = file_path.suffix.lower()
+    if suffix == ".xls":
+        # openpyxl cannot read legacy .xls; claiming support would just crash
+        # inside the parser. Fail loud with the fix.
+        raise RuntimeError(
+            "Legacy .xls is not supported; convert it to .xlsx "
+            "(e.g. with LibreOffice: soffice --convert-to xlsx) and re-ingest."
+        )
     if suffix == ".pdf":
         return PDFReader()
     if suffix in [".md", ".markdown"]:

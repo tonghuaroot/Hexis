@@ -116,6 +116,32 @@ session by default because the live conversation is already in context. Set
 Inactive memories, expired memories, and redacted or archived raw turns are
 never returned.
 
+### Exact Sources: the Filing Cabinet and the Desk
+
+Distilled memories never carry whole files. When exact wording matters, the
+agent climbs the retrieval ladder over two additional layers:
+
+- **Filing cabinet** — every ingested file/email/page preserved verbatim
+  (`source_documents`) with durable, citable chunks
+  (`source_document_chunks`). Search with `search_documents` (file grain) or
+  `search_document_chunks` (passage grain — hybrid full-text + vector, each
+  hit carrying a locator like page 4, sheet `Vendors` row 12, or a heading
+  path, plus DB-generated `rank_components` explaining the score). Open exact
+  passages with `open_document` / `open_document_chunk`; open results include
+  any extraction warnings (OCR used, rows truncated).
+- **RecMem desk** — mid-term working material. `load_documents` /
+  `load_document_chunks` place sources on the desk with a reason; then
+  `search_history` with `sources=["desk"]` searches them while reasoning.
+  `list_desk` shows what is loaded, `open_desk_item` scrolls long items
+  window by window, `pin_desk_item` protects what stays actively needed, and
+  `clear_desk` archives the rest — the cabinet copy always survives.
+
+From the terminal the same surfaces are `hexis docs ...` and `hexis desk ...`
+(see the [CLI Reference](../reference/cli.md)); in the web UI they are the
+**Documents** and **Desk** pages. `open_memory` on a distilled memory returns
+`source_documents` and `source_chunks` handles, so provenance is always one
+hop away.
+
 ### Hydrate (Context Building)
 
 Hydrate gathers a rich context package for LLM prompts -- memories, goals, identity, worldview:

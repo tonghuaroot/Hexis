@@ -41,13 +41,55 @@ async def _process_job(pool, job: dict[str, Any], *, config_override=None) -> No
     config.cancel_check = lambda: cancel_flag["set"]
     if str(payload.get("sensitivity") or "").strip().lower() == "private":
         config.sensitivity = "private"
+    if str(payload.get("acquisition") or "").strip():
+        config.acquisition = str(payload["acquisition"]).strip()
     pipeline = IngestionPipeline(config)
+
+    async def _ingest_artifact() -> int:
+        """Re-read preserved original bytes and run the file pipeline. The
+        artifact row is the durable source; the temp file is scratch."""
+        import tempfile
+        from pathlib import Path
+
+        artifact_id = str(payload.get("artifact_id") or "")
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT bytes, storage_kind, storage_ref, original_filename, sha256
+                FROM source_artifacts WHERE id = $1::uuid AND status = 'active'
+                """,
+                artifact_id,
+            )
+        if row is None:
+            raise RuntimeError(f"artifact {artifact_id} not found or not active")
+        if row["bytes"] is not None:
+            data = bytes(row["bytes"])
+        elif row["storage_kind"] == "filesystem" and row["storage_ref"]:
+            artifact_path = config.resolve_artifact_dir() / row["storage_ref"]
+            if not artifact_path.exists():
+                raise RuntimeError(
+                    f"artifact file missing: {artifact_path} — check HEXIS_ARTIFACT_DIR"
+                )
+            data = artifact_path.read_bytes()
+        else:
+            raise RuntimeError(
+                f"artifact {artifact_id} has no bytes and no filesystem reference"
+            )
+
+        suffix = Path(str(row["original_filename"] or payload.get("filename") or "upload.txt")).suffix or ".txt"
+        with tempfile.TemporaryDirectory(prefix="hexis_artifact_") as tmpdir:
+            name = str(row["original_filename"] or payload.get("filename") or f"upload{suffix}")
+            tmp_path = Path(tmpdir) / name
+            tmp_path.write_bytes(data)
+            return await pipeline.ingest_file(tmp_path)
 
     async def _ingest() -> int:
         if job["kind"] == "url":
             return await pipeline.ingest_url(
                 str(payload.get("url") or ""), title=payload.get("title")
             )
+        if job["kind"] == "artifact":
+            return await _ingest_artifact()
         return await pipeline.ingest_text(
             job.get("content") or "",
             title=payload.get("title"),

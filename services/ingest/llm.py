@@ -172,7 +172,7 @@ class KnowledgeExtractor:
             "APPRAISAL:\n"
             f"{json.dumps(appraisal.__dict__, ensure_ascii=False)}\n\n"
             "CONTENT:\n"
-            f"{section.content}\n\n"
+            f"{section.extraction_view()}\n\n"
             f"{guidance}\n\n"
             "Return JSON with key 'items' as an array of objects:\n"
             "  {content, category, confidence, importance, why, connections, supports, contradicts, concepts}\n"

@@ -82,6 +82,28 @@ class Config:
     # channels and HMX exports; the agent still sees it in 1:1.
     sensitivity: str | None = None
 
+    # Original-artifact preservation: bytes at or under this size are stored
+    # in-DB (rides pg_dump backups); larger artifacts go to artifact_dir as
+    # content-addressed files. artifact_dir=None resolves to
+    # $HEXIS_ARTIFACT_DIR or ~/.hexis/artifacts.
+    artifact_max_db_bytes: int = 26214400
+    artifact_dir: str | None = None
+
+    # Spreadsheet row cap per sheet — capping always warns, never silent.
+    xlsx_max_rows_per_sheet: int = 5000
+
+    # Acquisition provenance: who decided this source should exist —
+    # 'user' (CLI, chat drops, UI uploads), 'agent' (the agent fetched and
+    # chose to keep it), or 'connector' (backfill). Drives retention policy:
+    # user-provided sources never auto-fade; agent-acquired ones may be
+    # archived by the daily subconscious pass.
+    acquisition: str | None = None
+    acquired_reason: str | None = None
+
+    def resolve_artifact_dir(self) -> Path:
+        raw = self.artifact_dir or os.environ.get("HEXIS_ARTIFACT_DIR") or "~/.hexis/artifacts"
+        return Path(raw).expanduser()
+
     # Concurrency (#90): bounded LLM fan-out and directory parallelism.
     max_parallel_llm: int = 4
     max_parallel_files: int = 2
@@ -102,10 +124,67 @@ class Config:
 
 
 @dataclass
+class Anchor:
+    """A structural marker inside extracted text: `kind` at `char_offset`.
+
+    Anchors are how readers (or marker re-parsing for stored content) tell
+    the sectioner where pages, sheets, rows, slides, messages, and headings
+    begin, so chunks can carry citable locators.
+    """
+
+    kind: str  # 'page' | 'sheet' | 'row' | 'heading' | 'slide' | 'message'
+    value: Any  # page number, sheet name, row index, heading-path list, ...
+    char_offset: int
+
+
+@dataclass
 class Section:
+    """One durable chunk of a document.
+
+    Invariant: ``content == document_content[char_start:char_end]`` — the
+    exact substring, so chunk offsets are citable. Overlap context for the
+    extraction LLM lives in ``context_prefix`` and never mutates content
+    (``extraction_view()`` is what the model sees).
+    """
+
     title: str
     content: str
     index: int
+    char_start: int = 0
+    char_end: int = 0
+    locator_kind: str = "char"
+    heading_path: list[str] = field(default_factory=list)
+    page_start: int | None = None
+    page_end: int | None = None
+    sheet_name: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
+    context_prefix: str = ""
+
+    def extraction_view(self) -> str:
+        """Content as presented to the extraction LLM: overlap prefix + exact text."""
+        if self.context_prefix:
+            return f"...{self.context_prefix}\n\n{self.content}"
+        return self.content
+
+    def locator(self) -> dict[str, Any]:
+        """Compact citation payload for this chunk."""
+        loc: dict[str, Any] = {"kind": self.locator_kind, "char_start": self.char_start, "char_end": self.char_end}
+        if self.title:
+            loc["title"] = self.title
+        if self.heading_path:
+            loc["heading_path"] = list(self.heading_path)
+        if self.page_start is not None:
+            loc["page_start"] = self.page_start
+        if self.page_end is not None:
+            loc["page_end"] = self.page_end
+        if self.sheet_name is not None:
+            loc["sheet"] = self.sheet_name
+        if self.row_start is not None:
+            loc["row_start"] = self.row_start
+        if self.row_end is not None:
+            loc["row_end"] = self.row_end
+        return loc
 
 
 @dataclass
@@ -117,6 +196,9 @@ class DocumentInfo:
     path: str
     file_type: str
     document_id: str | None = None
+    # chunk_index -> source_document_chunks.id, populated once durable
+    # chunks are upserted; rides into memory provenance as chunk handles.
+    chunk_ids: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -264,6 +346,8 @@ INGEST_CONFIG_KEYS = {
     "max_parallel_llm": "ingest.max_parallel_llm",
     "max_parallel_files": "ingest.max_parallel_files",
     "llm_json_retries": "ingest.llm_json_retries",
+    "artifact_max_db_bytes": "ingest.artifact_max_db_bytes",
+    "xlsx_max_rows_per_sheet": "ingest.xlsx_max_rows_per_sheet",
 }
 
 

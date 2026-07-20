@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import sys
@@ -47,6 +48,7 @@ from .readers import (
     LatexReader,
     NotebookReader,
     PptxReader,
+    ReaderResult,
     RssReader,
     RtfReader,
     VideoReader,
@@ -54,7 +56,7 @@ from .readers import (
     XlsxReader,
     get_reader,
 )
-from .sectioning import Sectioner
+from .sectioning import CHUNKER_VERSION, Sectioner
 from .store import MemoryStore
 
 # =========================================================================
@@ -93,6 +95,8 @@ class IngestionPipeline:
         self.extractor = KnowledgeExtractor(self.llm)
         self.store = MemoryStore(config)
         self.stats = {"files_processed": 0, "memories_created": 0, "errors": 0}
+        # DB-owned spreadsheet row cap; capping always warns (readers.py).
+        XlsxReader.MAX_ROWS_PER_SHEET = max(1, int(config.xlsx_max_rows_per_sheet or 5000))
 
     async def ingest_file(self, file_path: Path) -> int:
         metrics = IngestionMetrics(start_time=time.time())
@@ -101,21 +105,41 @@ class IngestionPipeline:
         if not file_path.exists():
             _emit(self.config, f"File not found: {file_path}")
             return 0
+        if file_path.suffix.lower() == ".xls":
+            _emit(self.config, "Legacy .xls is not supported; convert it to .xlsx "
+                               "(e.g. soffice --convert-to xlsx) and re-ingest.")
+            return 0
         if file_path.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
             _emit(self.config, f"Unsupported file type: {file_path.suffix}")
             return 0
         if self.config.verbose:
             _emit(self.config, f"\nProcessing: {file_path}")
 
+        # Preserve the original bytes BEFORE extraction: a failed parse never
+        # loses the source, and a better extractor can re-run later.
+        artifact_info = None
+        try:
+            artifact_info = self._prepare_artifact(
+                file_path.read_bytes(),
+                original_filename=file_path.name,
+                mime_type=mimetypes.guess_type(str(file_path))[0],
+            )
+        except Exception as exc:
+            _emit(self.config, f"  Warning: could not capture original artifact: {exc}")
+
         reader = get_reader(file_path)
         try:
-            content = reader.read(file_path)
+            reader_result = reader.read_result(file_path)
+            content = reader_result.text
             metrics.source_size_bytes = len(content.encode("utf-8"))
         except Exception as exc:
             _emit(self.config, f"  Error reading file: {exc}")
             self.stats["errors"] += 1
             metrics.errors.append(str(exc))
+            await self._preserve_failed_extraction(reader, artifact_info, exc, file_path)
             return 0
+        for warning in reader_result.warnings:
+            _emit(self.config, f"  Extraction warning [{warning.code}]: {warning.message}")
 
         doc = DocumentInfo(
             title=_extract_title(content, file_path),
@@ -125,7 +149,71 @@ class IngestionPipeline:
             path=str(file_path),
             file_type=file_path.suffix.lower(),
         )
-        return await self._ingest_content(content, doc, metrics, section_path=file_path)
+        return await self._ingest_content(
+            content, doc, metrics, section_path=file_path,
+            reader_result=reader_result, artifact_info=artifact_info,
+        )
+
+    def _prepare_artifact(
+        self,
+        raw: bytes,
+        *,
+        original_filename: str | None,
+        mime_type: str | None,
+        storage_kind: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Decide where the original bytes live: in-DB up to the configured
+        threshold (rides pg_dump backups), else a content-addressed file in
+        the managed artifact directory."""
+        from .artifacts import prepare_artifact_info
+
+        return prepare_artifact_info(
+            raw,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            storage_kind=storage_kind,
+            metadata=metadata,
+            max_db_bytes=self.config.artifact_max_db_bytes,
+            artifact_dir=self.config.resolve_artifact_dir(),
+        )
+
+    async def _preserve_failed_extraction(
+        self,
+        reader: Any,
+        artifact_info: dict[str, Any] | None,
+        exc: Exception,
+        file_path: Path,
+    ) -> None:
+        """Reader failure: the artifact is still preserved (document-less)
+        and the failed run recorded, so the user can see what failed and why
+        — and a re-ingest after fixing deps re-links by sha256."""
+        if artifact_info is None:
+            return
+        try:
+            artifact = await self.store.upsert_source_artifact(
+                sha256=artifact_info["sha256"],
+                storage_kind=artifact_info["storage_kind"],
+                data=artifact_info.get("bytes"),
+                storage_ref=artifact_info.get("storage_ref"),
+                source_document_id=None,
+                original_filename=artifact_info.get("original_filename"),
+                mime_type=artifact_info.get("mime_type"),
+                byte_size=artifact_info.get("byte_size"),
+                metadata=artifact_info.get("metadata"),
+            )
+            await self.store.record_extraction_run(
+                document_id=None,
+                artifact_id=artifact.get("artifact_id"),
+                extractor_name=type(reader).__name__,
+                status="failed",
+                errors=[{"message": str(exc), "path": str(file_path)}],
+            )
+            _emit(self.config,
+                  f"  Original artifact preserved (sha256={artifact_info['sha256'][:12]}...); "
+                  "fix the reader/dependencies and re-ingest to retry.")
+        except Exception as exc2:
+            _emit(self.config, f"  Warning: could not preserve failed-extraction artifact: {exc2}")
 
     GIT_IGNORE_DIRS = {
         ".git", "node_modules", "__pycache__", ".venv", "venv",
@@ -175,9 +263,28 @@ class IngestionPipeline:
         if self.config.verbose:
             _emit(self.config, f"\nFetching: {url}")
 
+        reader_result: ReaderResult | None = None
+        artifact_info: dict[str, Any] | None = None
         try:
-            content = WebReader.read(url)
+            reader_result = WebReader.read_result(url)
+            content = reader_result.text
             metrics.source_size_bytes = len(content.encode("utf-8"))
+            if reader_result.artifact_bytes:
+                # The fetched HTML is the original artifact for a web source.
+                try:
+                    artifact_info = self._prepare_artifact(
+                        reader_result.artifact_bytes,
+                        original_filename=None,
+                        mime_type=reader_result.artifact_mime or "text/html",
+                        storage_kind="url",
+                        metadata={
+                            "url": url,
+                            "fetched_at": reader_result.metadata.get("fetched_at"),
+                        },
+                    )
+                    artifact_info["storage_ref"] = artifact_info.get("storage_ref") or url
+                except Exception as exc:
+                    _emit(self.config, f"  Warning: could not capture web artifact: {exc}")
         except Exception:
             # Fallback: try as RSS/Atom feed
             try:
@@ -210,7 +317,8 @@ class IngestionPipeline:
             file_type=".html",
         )
         return await self._ingest_content(
-            content, doc, metrics, section_path=Path("web_content.md")
+            content, doc, metrics, section_path=Path("web_content.md"),
+            reader_result=reader_result, artifact_info=artifact_info,
         )
 
     async def ingest_text(
@@ -248,6 +356,8 @@ class IngestionPipeline:
         metrics: IngestionMetrics,
         *,
         section_path: Path,
+        reader_result: ReaderResult | None = None,
+        artifact_info: dict[str, Any] | None = None,
     ) -> int:
         """The single ingestion core (#89): every entry point — file, URL,
         raw text, stdin — reduces to a reader over this."""
@@ -270,8 +380,64 @@ class IngestionPipeline:
         )
         doc.document_id = str(stored_doc.get("document_id") or "") or None
 
-        sections = self.sectioner.split(content, section_path)
+        # Artifact link + extraction receipt: warnings become a durable,
+        # inspectable record instead of vanishing into logs. Failures here
+        # never block memory extraction — warn loud, continue.
+        if doc.document_id:
+            artifact_id = None
+            try:
+                if artifact_info is not None:
+                    artifact = await self.store.upsert_source_artifact(
+                        sha256=artifact_info["sha256"],
+                        storage_kind=artifact_info["storage_kind"],
+                        data=artifact_info.get("bytes"),
+                        storage_ref=artifact_info.get("storage_ref"),
+                        source_document_id=doc.document_id,
+                        original_filename=artifact_info.get("original_filename"),
+                        mime_type=artifact_info.get("mime_type"),
+                        byte_size=artifact_info.get("byte_size"),
+                        metadata=artifact_info.get("metadata"),
+                    )
+                    artifact_id = artifact.get("artifact_id")
+                else:
+                    # No separate artifact: the normalized content IS the source.
+                    await self.store.set_original_hash(doc.document_id, doc.content_hash)
+            except Exception as exc:
+                _emit(self.config, f"  Warning: artifact preservation failed: {exc}")
+            if reader_result is not None:
+                try:
+                    await self.store.record_extraction_run(
+                        document_id=doc.document_id,
+                        artifact_id=artifact_id,
+                        extractor_name=reader_result.extractor_name or "unknown",
+                        extractor_version=reader_result.extractor_version,
+                        status="completed",
+                        warnings=reader_result.warnings_payload(),
+                        metadata=reader_result.metadata,
+                    )
+                except Exception as exc:
+                    _emit(self.config, f"  Warning: extraction-run record failed: {exc}")
+
+        sections = self.sectioner.split(
+            content, section_path,
+            anchors=reader_result.anchors if reader_result and reader_result.anchors else None,
+        )
         section_hashes = [_hash_text(s.content) for s in sections]
+
+        # Durable chunks land before the receipt gate so documents ingested
+        # under older versions still gain chunks on a re-run. Chunk failure
+        # never blocks memory extraction — warn loud, continue.
+        if doc.document_id:
+            try:
+                chunk_result = await self.store.upsert_source_document_chunks(
+                    doc.document_id, sections, CHUNKER_VERSION
+                )
+                doc.chunk_ids = {
+                    i: str(cid)
+                    for i, cid in enumerate(chunk_result.get("chunk_ids") or [])
+                }
+            except Exception as exc:
+                _emit(self.config, f"  Warning: source chunk persistence failed: {exc}")
 
         # Receipt gate (#85): completion is asserted by receipts, never by the
         # encounter's existence. Doc-complete row -> skip; receipted sections
@@ -364,7 +530,8 @@ class IngestionPipeline:
                     continue
                 total_extractions += len(extractions)
                 new_memories = await self._create_semantic_memories(
-                    doc, encounter_id, appraisal, extractions, section_hash=s_hash)
+                    doc, encounter_id, appraisal, extractions,
+                    section_hash=s_hash, chunk_index=section.index)
                 dedup_count += len(extractions) - len(new_memories)
                 created_ids.extend(new_memories)
         else:
@@ -387,7 +554,8 @@ class IngestionPipeline:
                     continue
                 total_extractions += len(extractions)
                 new_memories = await self._create_semantic_memories(
-                    doc, encounter_id, appraisal, extractions, section_hash=s_hash)
+                    doc, encounter_id, appraisal, extractions,
+                    section_hash=s_hash, chunk_index=section.index)
                 dedup_count += len(extractions) - len(new_memories)
                 created_ids.extend(new_memories)
 
@@ -433,7 +601,13 @@ class IngestionPipeline:
             pass
         return ctx
 
-    def _source_payload(self, doc: DocumentInfo, *, section_hash: str | None = None) -> dict[str, Any]:
+    def _source_payload(
+        self,
+        doc: DocumentInfo,
+        *,
+        section_hash: str | None = None,
+        chunk_index: int | None = None,
+    ) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         payload = {
             "kind": doc.source_type,
@@ -450,10 +624,19 @@ class IngestionPipeline:
         if doc.document_id:
             payload["source_document_id"] = doc.document_id
             payload["document_id"] = doc.document_id
+        if chunk_index is not None:
+            chunk_id = doc.chunk_ids.get(chunk_index)
+            if chunk_id:
+                payload["chunk_id"] = chunk_id
+                payload["chunk_index"] = chunk_index
         if self.config.base_trust is not None:
             payload["trust"] = float(self.config.base_trust)
         if self.config.sensitivity:
             payload["sensitivity"] = str(self.config.sensitivity)
+        if self.config.acquisition:
+            payload["acquisition"] = str(self.config.acquisition)
+        if self.config.acquired_reason:
+            payload["acquired_reason"] = str(self.config.acquired_reason)
         return payload
 
     async def _create_archive_encounter(self, doc: DocumentInfo) -> str | None:
@@ -516,13 +699,14 @@ class IngestionPipeline:
         extractions: list[Extraction],
         *,
         section_hash: str | None = None,
+        chunk_index: int | None = None,
     ) -> list[str]:
         """Thin wrapper: the whole post-LLM persistence pass runs atomically
         in the DB (db/66 ingest_persist_extractions) — routing, corroboration
         via the audited belief-revision policy, creation, concept links,
         worldview-hint edges, provenance edges, decay, and the section
         receipt (#85)."""
-        source = self._source_payload(doc, section_hash=section_hash)
+        source = self._source_payload(doc, section_hash=section_hash, chunk_index=chunk_index)
         result = await self.store.persist_extractions(
             extractions,
             source,

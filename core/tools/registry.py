@@ -673,6 +673,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     from .memory_exchange import create_memory_exchange_tools
     from .journal import create_journal_tools
     from .documents import create_document_tools
+    from .desk import create_desk_tools
     from .web import create_web_tools
     from .filesystem import create_filesystem_tools
     from .shell import create_shell_tools
@@ -741,6 +742,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     builder.add_all(create_skill_tools())
     builder.add_all(create_journal_tools())
     builder.add_all(create_document_tools())
+    builder.add_all(create_desk_tools())
     builder.add_all(create_web_tools())
     builder.add_all(create_filesystem_tools())
     builder.add_all(create_shell_tools())

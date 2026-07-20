@@ -25,6 +25,7 @@ from services.external_calls import ExternalCallProcessor
 from services.heartbeat_agentic import finalize_heartbeat, run_agentic_heartbeat
 from services.heartbeat_runner import execute_heartbeat_decision
 from services.hmx_reembedding import run_hmx_reembed_step
+from services.source_chunks import run_source_chunk_embed_step
 from services.recmem import (
     run_recmem_consolidation_step,
     run_recmem_embed_step,
@@ -514,6 +515,19 @@ class MaintenanceWorker:
                 if result.get("skipped"):
                     break
 
+    async def _run_source_chunk_embedding(self) -> None:
+        """Embed pending source-document chunks (deferred from ingestion so
+        the pipeline never blocks on the embedding sidecar)."""
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                result = await run_source_chunk_embed_step(conn)
+            if not result.get("skipped"):
+                logger.info("Source chunk embed step: %s", result)
+        except Exception:
+            logger.exception("source chunk embed step failed")
+
     async def _run_memory_rest_if_enabled(self) -> None:
         """Drain the memory-consolidation summarization queue (LLM compaction +
         distill-upward). Consolidation/pruning themselves run in the DB maintenance
@@ -583,6 +597,7 @@ class MaintenanceWorker:
                     await self._run_subconscious_if_due()
                     await self._run_reconsolidation_if_pending()
                     await self._run_recmem_if_enabled()
+                    await self._run_source_chunk_embedding()
                     await self._run_memory_rest_if_enabled()
                     await self._run_extraction_if_enabled()
                     await self._run_origin_seed_if_enabled()

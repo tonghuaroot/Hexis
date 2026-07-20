@@ -214,6 +214,8 @@ _HELP_GROUPS = [
         ("recall", "Search memories by semantic query"),
         ("goals", "Manage agent goals"),
         ("ingest", "Ingest documents and knowledge"),
+        ("docs", "Search and read the source-document filing cabinet"),
+        ("desk", "RecMem desk: list, read, pin, clear working material"),
         ("export", "Export memory as an HMX exchange"),
         ("import", "Inspect or import an HMX exchange"),
         ("import-review", "Review staged HMX records"),
@@ -459,6 +461,70 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--no-docker", action="store_true", help="Skip docker compose checks")
     status.add_argument("--raw", action="store_true", help="Show raw status (legacy format)")
     status.set_defaults(func="status")
+
+    # Source-document filing cabinet (docs) + RecMem desk (desk)
+    docs = sub.add_parser("docs", parents=[_db], help="Search and read the source-document filing cabinet")
+    docs.set_defaults(func="docs")
+    docs_sub = docs.add_subparsers(dest="docs_command")
+    docs_search_p = docs_sub.add_parser("search", parents=[_db], help="Search documents (or passages with --chunks)")
+    docs_search_p.add_argument("query", nargs="*", help="Search query (omit to browse with --path/--type)")
+    docs_search_p.add_argument("--chunks", action="store_true", help="Passage-level hybrid search with citable locators")
+    docs_search_p.add_argument("--path", default=None, help="Partial path/URL filter")
+    docs_search_p.add_argument("--type", default=None, help="Source type filter (document, web, email, ...)")
+    docs_search_p.add_argument("--limit", type=int, default=10)
+    docs_search_p.add_argument("--offset", type=int, default=0)
+    docs_search_p.add_argument("--json", action="store_true", help="Output JSON")
+    docs_search_p.set_defaults(func="docs_search")
+    docs_open_p = docs_sub.add_parser("open", parents=[_db], help="Read a document (verbatim, paged)")
+    docs_open_p.add_argument("ref", help="Document id, content hash, or (partial) path")
+    docs_open_p.add_argument("--offset", type=int, default=0, help="Character offset to start from")
+    docs_open_p.add_argument("--chars", type=int, default=4000, help="Window size in characters")
+    docs_open_p.add_argument("--page", default=None, help="Open a page or page range, e.g. 4 or 4-7")
+    docs_open_p.add_argument("--json", action="store_true", help="Output JSON")
+    docs_open_p.set_defaults(func="docs_open")
+    docs_info_p = docs_sub.add_parser("info", parents=[_db], help="Provenance, chunks, artifact, and extraction warnings")
+    docs_info_p.add_argument("ref", help="Document id, content hash, or (partial) path")
+    docs_info_p.add_argument("--json", action="store_true", help="Output JSON")
+    docs_info_p.set_defaults(func="docs_info")
+    docs_load_p = docs_sub.add_parser("load", parents=[_db], help="Load a document (or page range) onto the RecMem desk")
+    docs_load_p.add_argument("ref", help="Document id, content hash, or (partial) path")
+    docs_load_p.add_argument("--pages", default=None, help="Only these pages, e.g. 4 or 4-7")
+    docs_load_p.add_argument("--reason", default=None, help="Why this needs to be on the desk")
+    docs_load_p.add_argument("--pin", action="store_true", help="Pin the loaded items (desk cleanup keeps them)")
+    docs_load_p.add_argument("--json", action="store_true", help="Output JSON")
+    docs_load_p.set_defaults(func="docs_load")
+
+    desk = sub.add_parser("desk", parents=[_db], help="RecMem desk: list, read, pin, and clear working material")
+    desk.set_defaults(func="desk")
+    desk_sub = desk.add_subparsers(dest="desk_command")
+    desk_list_p = desk_sub.add_parser("list", parents=[_db], help="List what is on the desk")
+    desk_list_p.add_argument("--pinned", action="store_true", help="Pinned items only")
+    desk_list_p.add_argument("--limit", type=int, default=50)
+    desk_list_p.add_argument("--json", action="store_true", help="Output JSON")
+    desk_list_p.set_defaults(func="desk_list")
+    desk_open_p = desk_sub.add_parser("open", parents=[_db], help="Read a desk item (paged)")
+    desk_open_p.add_argument("id", help="Desk item id (the 8-char prefix from `hexis desk list` works)")
+    desk_open_p.add_argument("--offset", type=int, default=0)
+    desk_open_p.add_argument("--chars", type=int, default=4000)
+    desk_open_p.add_argument("--json", action="store_true", help="Output JSON")
+    desk_open_p.set_defaults(func="desk_open")
+    desk_search_p = desk_sub.add_parser("search", parents=[_db], help="Full-text search across desk items")
+    desk_search_p.add_argument("query", nargs="+")
+    desk_search_p.add_argument("--limit", type=int, default=10)
+    desk_search_p.add_argument("--json", action="store_true", help="Output JSON")
+    desk_search_p.set_defaults(func="desk_search")
+    desk_pin_p = desk_sub.add_parser("pin", parents=[_db], help="Pin a desk item (cleanup keeps it)")
+    desk_pin_p.add_argument("id")
+    desk_pin_p.set_defaults(func="desk_pin")
+    desk_unpin_p = desk_sub.add_parser("unpin", parents=[_db], help="Unpin a desk item")
+    desk_unpin_p.add_argument("id")
+    desk_unpin_p.set_defaults(func="desk_unpin")
+    desk_clear_p = desk_sub.add_parser("clear", parents=[_db], help="Archive desk items (sources stay in the cabinet)")
+    desk_clear_p.add_argument("ids", nargs="*", help="Specific desk item ids")
+    desk_clear_p.add_argument("--doc", default=None, help="Clear every item loaded from this document id")
+    desk_clear_p.add_argument("--all", action="store_true", help="Clear the whole (unpinned) desk")
+    desk_clear_p.add_argument("--include-pinned", action="store_true", help="Also clear pinned items")
+    desk_clear_p.set_defaults(func="desk_clear")
 
     retention = sub.add_parser("retention", parents=[_db], help="Show memory-retention status")
     retention.add_argument("--json", action="store_true", help="Output JSON")
@@ -3511,7 +3577,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
             # the `ingest` subcommand when the user passed flags.
             if fwd_argv and fwd_argv[0] == "--":
                 fwd_argv = fwd_argv[1:]
-            if fwd_argv and fwd_argv[0] not in {"ingest", "status", "process", "-h", "--help"}:
+            if fwd_argv and fwd_argv[0] not in {"ingest", "status", "process", "backfill-chunks", "-h", "--help"}:
                 fwd_argv = ["ingest", *fwd_argv]
 
         return _run_module(forward_map[cmd], fwd_argv)
@@ -3565,6 +3631,40 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return asyncio.run(_instance_clone(args.source, args.target, args.description))
     if func == "instance_import":
         return asyncio.run(_instance_import(args.name, args.database, args.description))
+
+    # Filing cabinet + desk commands (DB-backed; don't need docker)
+    if func in {"docs", "docs_search", "docs_open", "docs_info", "docs_load",
+                "desk", "desk_list", "desk_open", "desk_search",
+                "desk_pin", "desk_unpin", "desk_clear"}:
+        from apps import cli_docs
+
+        dsn = _get_dsn(args)
+        if func in {"docs", "docs_search"}:
+            if func == "docs":
+                # Bare `hexis docs` → browse help with the next step.
+                parser._subcommands.choices["docs"].print_help()  # type: ignore[attr-defined]
+                return 0
+            return asyncio.run(cli_docs.docs_search(dsn, args))
+        if func == "docs_open":
+            return asyncio.run(cli_docs.docs_open(dsn, args))
+        if func == "docs_info":
+            return asyncio.run(cli_docs.docs_info(dsn, args))
+        if func == "docs_load":
+            return asyncio.run(cli_docs.docs_load(dsn, args))
+        if func == "desk":
+            return asyncio.run(cli_docs.desk_list(dsn, argparse.Namespace(limit=50, pinned=False, json=False)))
+        if func == "desk_list":
+            return asyncio.run(cli_docs.desk_list(dsn, args))
+        if func == "desk_open":
+            return asyncio.run(cli_docs.desk_open(dsn, args))
+        if func == "desk_search":
+            return asyncio.run(cli_docs.desk_search(dsn, args))
+        if func == "desk_pin":
+            return asyncio.run(cli_docs.desk_pin(dsn, args, pinned=True))
+        if func == "desk_unpin":
+            return asyncio.run(cli_docs.desk_pin(dsn, args, pinned=False))
+        if func == "desk_clear":
+            return asyncio.run(cli_docs.desk_clear(dsn, args))
 
     # Consent management commands (DB-backed; don't need docker)
     if func == "consents":

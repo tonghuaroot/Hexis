@@ -1485,6 +1485,7 @@ DECLARE
     consolidated_grace_days INT := GREATEST(COALESCE(get_config_int('memory.recmem_gc_consolidated_grace_days'), 7), 1);
     task_retention_days INT := GREATEST(COALESCE(get_config_int('memory.recmem_gc_task_retention_days'), 14), 1);
     archived_count INT := 0;
+    redacted_source_count INT := 0;
     deleted_task_count INT := 0;
 BEGIN
     IF NOT COALESCE(get_config_bool('memory.recmem_gc_enabled'), TRUE) THEN
@@ -1500,6 +1501,8 @@ BEGIN
             END AS reason
         FROM subconscious_units u
         WHERE u.status = 'active'
+          -- Pinned desk material is actively needed: idle GC never takes it.
+          AND u.pinned_at IS NULL
           AND NOT EXISTS (
               SELECT 1
               FROM recmem_consolidation_tasks t
@@ -1554,6 +1557,46 @@ BEGIN
     )
     SELECT COUNT(*) INTO archived_count FROM archived;
 
+    -- Privacy sweep: desk material whose source document was redacted or
+    -- archived goes immediately, regardless of idle time — and pinning does
+    -- NOT protect against redaction.
+    WITH redacted_candidates AS (
+        SELECT u.id
+        FROM subconscious_units u
+        JOIN source_documents d
+          ON u.metadata #>> '{recmem,document_id}' ~ '^[0-9a-fA-F-]{36}$'
+         AND d.id = (u.metadata #>> '{recmem,document_id}')::uuid
+        WHERE u.status = 'active'
+          AND u.metadata #>> '{recmem,kind}' = 'source_document_desk'
+          AND d.status IN ('redacted', 'archived')
+        ORDER BY u.id
+        LIMIT gc_limit
+        FOR UPDATE OF u SKIP LOCKED
+    ),
+    redacted_archived AS (
+        UPDATE subconscious_units u
+        SET status = 'archived',
+            pinned_at = NULL,
+            pinned_by = NULL,
+            metadata = COALESCE(u.metadata, '{}'::jsonb)
+                || jsonb_build_object(
+                    'recmem',
+                    COALESCE(u.metadata->'recmem', '{}'::jsonb)
+                        || jsonb_build_object(
+                            'gc',
+                            jsonb_build_object(
+                                'archived_at', CURRENT_TIMESTAMP,
+                                'reason', 'source_redacted'
+                            )
+                        )
+                ),
+            updated_at = CURRENT_TIMESTAMP
+        FROM redacted_candidates c
+        WHERE u.id = c.id
+        RETURNING 1
+    )
+    SELECT COUNT(*) INTO redacted_source_count FROM redacted_archived;
+
     WITH task_candidates AS (
         SELECT id
         FROM recmem_consolidation_tasks
@@ -1574,6 +1617,7 @@ BEGIN
 
     RETURN jsonb_build_object(
         'archived_units', archived_count,
+        'redacted_source_units', redacted_source_count,
         'deleted_tasks', deleted_task_count,
         'idle_days', idle_days,
         'consolidated_grace_days', consolidated_grace_days,

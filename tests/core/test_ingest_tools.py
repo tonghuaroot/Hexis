@@ -563,11 +563,15 @@ class TestReaderExtensionCoverage:
         reader = get_reader(Path("test.xlsx"))
         assert isinstance(reader, XlsxReader)
 
-    def test_xls_reader(self):
-        from services.ingest import XlsxReader, get_reader
+    def test_xls_fails_loud_with_conversion_hint(self):
+        # Legacy .xls was never actually readable (openpyxl can't parse it);
+        # it now fails loud with the fix instead of crashing in the parser.
+        import pytest
 
-        reader = get_reader(Path("test.xls"))
-        assert isinstance(reader, XlsxReader)
+        from services.ingest import get_reader
+
+        with pytest.raises(RuntimeError, match="convert it to .xlsx"):
+            get_reader(Path("test.xls"))
 
     def test_ipynb_reader(self):
         from services.ingest import NotebookReader, get_reader
@@ -583,9 +587,11 @@ class TestSupportedExtensions:
         from services.ingest import IngestionPipeline
 
         expected = {".docx", ".rtf", ".tex", ".bib", ".eml", ".mbox",
-                    ".epub", ".pptx", ".xlsx", ".xls", ".ipynb"}
+                    ".epub", ".pptx", ".xlsx", ".ipynb"}
         for ext in expected:
             assert ext in IngestionPipeline.SUPPORTED_EXTENSIONS, f"{ext} not in SUPPORTED_EXTENSIONS"
+        # Legacy .xls is deliberately unsupported (fail-loud in get_reader).
+        assert ".xls" not in IngestionPipeline.SUPPORTED_EXTENSIONS
 
 
 class TestInferSourceType:

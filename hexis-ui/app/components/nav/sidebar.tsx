@@ -3,6 +3,9 @@
 import {
   Activity,
   Brain,
+  FilePlus2,
+  FolderOpen,
+  Layers,
   LayoutDashboard,
   MessageCircle,
   Settings,
@@ -31,6 +34,9 @@ const navItems = [
   { href: "/chat", label: "Conversation", icon: MessageCircle },
   { href: "/goals", label: "Goals", icon: Target },
   { href: "/memories", label: "Memory", icon: Brain },
+  { href: "/documents", label: "Documents", icon: FolderOpen },
+  { href: "/desk", label: "Desk", icon: Layers },
+  { href: "/ingest", label: "Ingest", icon: FilePlus2 },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

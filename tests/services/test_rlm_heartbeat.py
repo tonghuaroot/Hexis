@@ -185,6 +185,67 @@ class TestMemoryEnv:
         env.workspace_drop("loaded_documents", keep_ids=["missing"])
         assert workspace.loaded_documents == []
 
+    def test_source_chunk_and_desk_syscalls(self):
+        from services.rlm_memory_env import RLMMemoryEnv, RLMWorkspace
+        from unittest.mock import MagicMock
+        from core.memory_repo import MemoryRepo
+
+        mock_repo = MagicMock(spec=MemoryRepo)
+        mock_repo.search_document_chunks.return_value = [
+            {"chunk_id": "chunk-1", "document_id": "doc-1", "chunk_index": 3,
+             "snippet": "the retention window", "rank_components": {"lexical": 1.0}}
+        ]
+        mock_repo.fetch_document_chunks.return_value = {
+            "chunks": [{"chunk_id": "chunk-1", "content": "the retention window is 90 days"}],
+            "count": 1,
+        }
+        mock_repo.load_document_chunks_to_desk.return_value = {
+            "count": 1, "desk_unit_ids": ["unit-9"],
+        }
+        mock_repo.list_desk.return_value = [
+            {"desk_unit_id": "unit-9", "chunk_id": "chunk-1", "pinned": False}
+        ]
+        mock_repo.fetch_desk_item.return_value = {
+            "desk_unit_id": "unit-9", "content": "the retention window is 90 days",
+            "truncated": False,
+        }
+        mock_repo.pin_desk_item.return_value = {"desk_unit_id": "unit-9", "pinned": True}
+
+        workspace = RLMWorkspace()
+        env = RLMMemoryEnv(mock_repo, workspace)
+
+        stubs = env.document_chunk_search("retention window", document_id="doc-1")
+        fetched = env.document_chunk_fetch(["chunk-1"])
+        loaded = env.document_chunk_load_to_desk(["chunk-1"], reason="multi-step", pin=True)
+        desk = env.desk_list()
+        item = env.desk_fetch("unit-9")
+        pin = env.desk_pin("unit-9")
+
+        assert workspace.document_chunk_stubs == stubs
+        assert fetched["count"] == 1
+        assert loaded["desk_unit_ids"] == ["unit-9"]
+        assert workspace.desk_stubs == desk
+        assert item["content"].startswith("the retention window")
+        assert pin["pinned"] is True
+        # Fetched chunk + desk content both count toward the char budget.
+        assert workspace.loaded_documents and len(workspace.loaded_documents) == 2
+
+        status = env.workspace_status()
+        assert status["document_chunk_stubs_count"] == 1
+        assert status["desk_stubs_count"] == 1
+        assert status["metrics"]["document_chunk_search_count"] == 1
+        assert status["metrics"]["document_chunk_fetch_count"] == 1
+        assert status["metrics"]["document_chunk_load_count"] == 1
+        assert status["metrics"]["desk_list_count"] == 1
+        assert status["metrics"]["desk_fetch_count"] == 1
+        assert status["metrics"]["desk_pin_count"] == 1
+
+        # All six syscalls are exposed to the REPL namespace.
+        fns = env.get_repl_functions()
+        for name in ("document_chunk_search", "document_chunk_fetch",
+                     "document_chunk_load_to_desk", "desk_list", "desk_fetch", "desk_pin"):
+            assert name in fns
+
 
 class TestReplToolBridge:
     """Unit tests for the sync-to-async tool bridge."""

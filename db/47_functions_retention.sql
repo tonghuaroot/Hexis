@@ -435,7 +435,13 @@ BEGIN
         END LOOP;
     END IF;
 
-    RETURN jsonb_build_object('pruned', v_pruned, 'reviews_expired', v_expired);
+    -- (c) agent-acquired sources: the ownership-based tier the agent may
+    -- retire on its own (user-provided sources only fade via approval).
+    RETURN jsonb_build_object(
+        'pruned', v_pruned,
+        'reviews_expired', v_expired,
+        'agent_sources', run_agent_source_retention()
+    );
 END;
 $$;
 
@@ -758,6 +764,34 @@ BEGIN
         FOREACH v_id IN ARRAY v_ids LOOP
             IF delete_memory_fully(v_id) THEN v_affected := v_affected + 1; END IF;
         END LOOP;
+        -- Approval cascades to the filing cabinet: the source document is
+        -- archived (tombstone kept, never silently deleted), its durable
+        -- chunks are removed, and preserved artifact bytes are released.
+        -- Desk copies are swept by recmem_gc's archived-source pass.
+        DELETE FROM source_document_chunks c
+        USING source_documents d
+        WHERE c.source_document_id = d.id
+          AND d.content_hash = v_hash;
+        UPDATE source_artifacts a
+        SET bytes = NULL,
+            status = 'archived',
+            metadata = a.metadata || jsonb_build_object(
+                'retention', jsonb_build_object(
+                    'bytes_released_at', CURRENT_TIMESTAMP,
+                    'reason', 'document_fade_approved')),
+            updated_at = CURRENT_TIMESTAMP
+        FROM source_documents d
+        WHERE a.source_document_id = d.id
+          AND d.content_hash = v_hash
+          AND a.status <> 'redacted';
+        UPDATE source_documents
+        SET status = 'archived',
+            metadata = metadata || jsonb_build_object(
+                'retention', jsonb_build_object(
+                    'archived_at', CURRENT_TIMESTAMP,
+                    'reason', 'document_fade_approved')),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE content_hash = v_hash AND status = 'active';
         UPDATE document_fade_requests SET status = 'approved', decided_at = CURRENT_TIMESTAMP
          WHERE content_hash = v_hash;
         RETURN jsonb_build_object('decision', 'approve', 'label', v_label, 'faded', v_affected);
@@ -768,6 +802,116 @@ BEGIN
          WHERE content_hash = v_hash;
         RETURN jsonb_build_object('decision', 'keep', 'label', v_label, 'kept', v_affected);
     END IF;
+END;
+$$;
+
+-- ============================================================================
+-- Agent-acquired source retention (ownership-based two-tier policy).
+--
+-- User-provided sources (CLI, uploads, chat drops, connectors) are the
+-- USER's data: they never auto-fade — only the fade-request → approval flow
+-- above touches them. Sources the AGENT chose to keep on its own
+-- (source_attribution->>'acquisition' = 'agent': url_ingest/git_ingest from
+-- a heartbeat) are the agent's working set, so the daily subconscious pass
+-- may archive them autonomously once truly idle — reversibly (doc archived,
+-- chunks kept, artifact bytes kept). Escalates to a user fade request
+-- instead when the source is heavily referenced by memories.
+-- ============================================================================
+
+INSERT INTO config_defaults (key, value, description) VALUES
+    ('retention.agent_source_idle_days', '60'::jsonb,
+     'Archive agent-acquired sources untouched (chunks, desk, memories) for this many days'),
+    ('retention.agent_source_escalate_memories', '5'::jsonb,
+     'Agent-acquired sources cited by at least this many active memories escalate to a user fade request instead of auto-archiving'),
+    ('retention.agent_source_batch', '5'::jsonb,
+     'Agent-acquired sources processed per daily retention pass')
+ON CONFLICT (key) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION run_agent_source_retention()
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_idle_days FLOAT := GREATEST(COALESCE(get_config_float('retention.agent_source_idle_days'), 60), 1);
+    v_escalate INT := GREATEST(COALESCE(get_config_int('retention.agent_source_escalate_memories'), 5), 1);
+    v_batch INT := GREATEST(COALESCE(get_config_int('retention.agent_source_batch'), 5), 1);
+    v_archived INT := 0;
+    v_escalated INT := 0;
+    rec RECORD;
+    v_memory_count INT;
+BEGIN
+    IF NOT COALESCE(get_config_bool('retention.enabled'), false) THEN
+        RETURN jsonb_build_object('skipped', true);
+    END IF;
+
+    FOR rec IN
+        SELECT d.id, d.content_hash, d.title
+        FROM source_documents d
+        WHERE d.status = 'active'
+          AND d.source_attribution->>'acquisition' = 'agent'
+          AND age_in_days(d.last_ingested_at) >= v_idle_days
+          -- no recently-touched chunks
+          AND NOT EXISTS (
+              SELECT 1 FROM source_document_chunks c
+              WHERE c.source_document_id = d.id
+                AND c.last_accessed IS NOT NULL
+                AND age_in_days(c.last_accessed) < v_idle_days
+          )
+          -- nothing of it still on the active desk
+          AND NOT EXISTS (
+              SELECT 1 FROM subconscious_units u
+              WHERE u.status = 'active'
+                AND u.metadata #>> '{recmem,kind}' = 'source_document_desk'
+                AND u.metadata #>> '{recmem,document_id}' = d.id::text
+          )
+          -- no recently-reinforced memories citing it
+          AND NOT EXISTS (
+              SELECT 1 FROM memories m
+              WHERE m.status = 'active'
+                AND m.source_attribution->>'content_hash' = d.content_hash
+                AND age_in_days(GREATEST(m.last_reinforced, m.last_accessed, m.created_at)) < v_idle_days
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM document_fade_requests r
+              WHERE r.content_hash = d.content_hash AND r.status = 'pending'
+          )
+        ORDER BY d.last_ingested_at
+        LIMIT v_batch
+    LOOP
+        SELECT count(*) INTO v_memory_count
+        FROM memories m
+        WHERE m.status = 'active'
+          AND m.source_attribution->>'content_hash' = rec.content_hash;
+
+        IF v_memory_count >= v_escalate THEN
+            -- Heavily referenced: this rose to user-attention level.
+            INSERT INTO document_fade_requests (content_hash, label, memory_count)
+            VALUES (rec.content_hash, rec.title, v_memory_count)
+            ON CONFLICT (content_hash) DO NOTHING;
+            IF FOUND THEN
+                PERFORM queue_outbox_message(
+                    'A while back I fetched "' || COALESCE(rec.title, 'a web source')
+                    || '" on my own and built ' || v_memory_count || ' memories from it, '
+                    || 'but I haven''t drawn on it lately. Want me to let it fade, or keep it?',
+                    'document_fade', 'retention');
+                v_escalated := v_escalated + 1;
+            END IF;
+        ELSE
+            -- Low-stakes: archive reversibly (chunks and artifact bytes kept;
+            -- re-ingesting or un-archiving restores full retrieval).
+            UPDATE source_documents
+            SET status = 'archived',
+                metadata = metadata || jsonb_build_object(
+                    'retention', jsonb_build_object(
+                        'archived_at', CURRENT_TIMESTAMP,
+                        'reason', 'agent_source_idle')),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = rec.id AND status = 'active';
+            v_archived := v_archived + 1;
+        END IF;
+    END LOOP;
+
+    RETURN jsonb_build_object('archived', v_archived, 'escalated', v_escalated);
 END;
 $$;
 

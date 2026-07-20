@@ -156,6 +156,140 @@ class MemoryRepo:
             result = cur.fetchone()[0]
             return json.loads(result) if isinstance(result, str) else (result or {})
 
+    def search_document_chunks(
+        self,
+        query: str | None,
+        *,
+        limit: int = 10,
+        document_id: str | None = None,
+        source_path: str | None = None,
+        source_type: str | None = None,
+        snippet_chars: int = 400,
+    ) -> list[dict[str, Any]]:
+        """Hybrid passage-level search over durable source chunks (stubs)."""
+        conn = self._get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT chunk_id, document_id, chunk_index, title, path,
+                       source_type, locator_kind, locator, heading_path,
+                       page_start, page_end, sheet_name, snippet, content_hash,
+                       rank, rank_components
+                FROM search_source_chunks(
+                    %s, %s, %s::uuid, %s, %s, NULL, NULL, NULL, NULL,
+                    NULL, NULL, false, 0, %s
+                )
+                """,
+                (query, limit, document_id, source_path, source_type, snippet_chars),
+            )
+            rows = cur.fetchall()
+            return [_serialize_row(row) for row in rows]
+
+    def fetch_document_chunks(
+        self,
+        *,
+        chunk_ids: list[str] | None = None,
+        document_id: str | None = None,
+        chunk_start: int | None = None,
+        chunk_end: int | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Open exact chunks with locators and prev/next scroll handles."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT open_source_chunks(
+                    %s::uuid[], %s::uuid, %s::int, %s::int, %s::int, %s::int, %s::int, false
+                )
+                """,
+                (chunk_ids or None, document_id, chunk_start, chunk_end,
+                 page_start, page_end, limit),
+            )
+            result = cur.fetchone()[0]
+            return json.loads(result) if isinstance(result, str) else (result or {})
+
+    def load_document_chunks_to_desk(
+        self,
+        *,
+        chunk_ids: list[str] | None = None,
+        document_id: str | None = None,
+        page_start: int | None = None,
+        page_end: int | None = None,
+        limit: int = 10,
+        reason: str | None = None,
+        pin: bool = False,
+    ) -> dict[str, Any]:
+        """Load selected chunks onto the RecMem desk."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT load_source_chunks_to_recmem(
+                    %s::uuid[], %s::uuid, NULL, NULL, %s::int, %s::int,
+                    %s::int, false, %s, NULL, 'rlm', NULL, %s
+                )
+                """,
+                (chunk_ids or None, document_id, page_start, page_end,
+                 limit, reason, bool(pin)),
+            )
+            result = cur.fetchone()[0]
+            return json.loads(result) if isinstance(result, str) else (result or {})
+
+    def list_desk(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        document_id: str | None = None,
+        pinned_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List current RecMem desk items."""
+        conn = self._get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT * FROM list_recmem_desk(
+                    %s::int, %s::int, %s::uuid, %s, NULL, NULL, false
+                )
+                """,
+                (limit, offset, document_id, bool(pinned_only)),
+            )
+            rows = cur.fetchall()
+            return [_serialize_row(row) for row in rows]
+
+    def fetch_desk_item(
+        self,
+        desk_unit_id: str,
+        *,
+        offset: int = 0,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Open one desk item with offset windowing (scroll)."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT open_recmem_desk_item(%s::uuid, %s::int, %s::int, false)",
+                (desk_unit_id, offset, max_chars),
+            )
+            result = cur.fetchone()[0]
+            return json.loads(result) if isinstance(result, str) else (result or {})
+
+    def pin_desk_item(
+        self, desk_unit_id: str, *, pinned: bool = True, note: str | None = None
+    ) -> dict[str, Any]:
+        """Pin/unpin a desk item."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pin_recmem_desk_item(%s::uuid, %s, 'rlm', %s)",
+                (desk_unit_id, bool(pinned), note),
+            )
+            result = cur.fetchone()[0]
+            return json.loads(result) if isinstance(result, str) else (result or {})
+
     def recent_stubs(
         self, *, limit: int = 5, preview_chars: int = 256
     ) -> list[dict[str, Any]]:

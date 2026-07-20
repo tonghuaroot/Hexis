@@ -11,7 +11,9 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('ingest.job_retry_base_seconds', '60'::jsonb,
      'Base for exponential retry backoff when an ingestion job fails'),
     ('ingest.job_batch_size', '1'::jsonb,
-     'Ingestion jobs claimed per maintenance tick')
+     'Ingestion jobs claimed per maintenance tick'),
+    ('ingest.upload_max_bytes', '104857600'::jsonb,
+     'Maximum file size accepted by the upload API; larger files use the synchronous CLI path')
 ON CONFLICT (key) DO NOTHING;
 
 
@@ -27,11 +29,14 @@ DECLARE
     existing UUID;
     job_id UUID;
 BEGIN
-    IF p_kind NOT IN ('text', 'url') THEN
-        RAISE EXCEPTION 'ingestion job kind must be text or url, not %', p_kind;
+    IF p_kind NOT IN ('text', 'url', 'artifact') THEN
+        RAISE EXCEPTION 'ingestion job kind must be text, url, or artifact, not %', p_kind;
     END IF;
     IF p_kind = 'text' AND NULLIF(p_content, '') IS NULL THEN
         RAISE EXCEPTION 'text ingestion jobs require content';
+    END IF;
+    IF p_kind = 'artifact' AND NULLIF(p_payload->>'artifact_id', '') IS NULL THEN
+        RAISE EXCEPTION 'artifact ingestion jobs require payload.artifact_id';
     END IF;
     IF p_content IS NOT NULL AND length(p_content) > cap THEN
         RAISE EXCEPTION 'content is % chars; the job cap is % — use the synchronous CLI path (hexis ingest) for oversized documents',

@@ -62,6 +62,29 @@ Load selected source documents onto the RecMem desk as searchable mid-term
 working material. Use deliberately for large specs or reference files you will
 need to search on demand in later turns.
 
+### document_chunk_search(query, *, limit=10, document_id=None, source_path=None, source_type=None)
+Passage-level cabinet search: hybrid full-text + embedding retrieval over
+durable source chunks. Returns stubs with citable locators (page, section,
+sheet row) and rank_components. Prefer this over document_fetch when one
+passage will do instead of a whole file.
+
+### document_chunk_fetch(chunk_ids=None, *, document_id=None, chunk_start=None, chunk_end=None, page_start=None, page_end=None, limit=10)
+Open exact passages (with prev/next scroll handles) into the workspace —
+inspection only, budget-capped like memory_fetch.
+
+### document_chunk_load_to_desk(chunk_ids=None, *, document_id=None, page_start=None, page_end=None, limit=10, reason=None, pin=False)
+Put selected passages on the RecMem desk for later desk search. pin=True keeps
+them through desk cleanup while actively needed.
+
+### desk_list(*, limit=20, offset=0, document_id=None, pinned_only=False)
+See what is already on the desk before re-loading a source.
+
+### desk_fetch(desk_unit_id, *, offset=0, max_chars=None)
+Read one desk item with offset windowing (scroll long items window by window).
+
+### desk_pin(desk_unit_id, *, pinned=True, note=None)
+Pin or unpin a desk item; pinned items survive desk cleanup (never redaction).
+
 ### workspace_summarize(bucket="loaded_memories", *, into="notes", max_chars=None)
 Summarize loaded memories or loaded documents into the notes buffer using a sub-LLM call. Use this when your workspace is getting full. Buckets: `loaded_memories`, `loaded_documents`, `notes`, or `all`.
 
@@ -81,6 +104,9 @@ Returns current workspace sizes, budget usage, and metrics.
   exact source document handles from memory provenance.
 - Use `document_load_to_desk()` only when the source should remain searchable
   as RecMem desk material beyond the current heartbeat workspace.
+- Check `desk_list()` before re-loading a source you may already have.
+- Fetch chunks (`document_chunk_fetch`), not whole documents, when a passage
+  will do.
 
 ## Tool Policy
 

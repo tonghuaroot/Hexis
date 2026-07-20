@@ -66,3 +66,4 @@ logs/
 .tmp/
 .reference/
 .notes/
+evals/out/

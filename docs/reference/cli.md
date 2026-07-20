@@ -223,6 +223,24 @@ Channels: `discord`, `telegram`, `slack`, `signal`, `whatsapp`, `imessage`, `mat
 | `hexis mcp [--dsn DSN]` | Start MCP server (stdio) |
 | `hexis api [--host HOST] [--port PORT]` | Start FastAPI server |
 
+### Filing Cabinet and Desk
+
+The source-document filing cabinet holds every ingested artifact verbatim;
+the RecMem desk holds passages deliberately loaded as mid-term working
+material. Every command's output includes the exact next step.
+
+| Command | Description |
+|---------|-------------|
+| `hexis docs search <query> [--chunks] [--path P] [--type T] [--limit N] [--json]` | Search documents; `--chunks` for passage-level hybrid search with citable locators |
+| `hexis docs open <id\|hash\|path> [--offset N] [--chars N] [--page A[-B]] [--json]` | Read a document verbatim (paged), or open a PDF page range |
+| `hexis docs info <id\|hash\|path> [--json]` | Provenance, chunk counts, original artifact, extraction runs and warnings |
+| `hexis docs load <id\|hash\|path> [--pages A-B] [--reason TEXT] [--pin] [--json]` | Load a document (or page range) onto the RecMem desk |
+| `hexis desk list [--pinned] [--json]` | List what is on the desk |
+| `hexis desk open <item-id> [--offset N] [--chars N]` | Read a desk item (paged; 8-char id prefixes work) |
+| `hexis desk search <query> [--limit N]` | Full-text search across desk items |
+| `hexis desk pin <item-id>` / `hexis desk unpin <item-id>` | Protect an item from desk cleanup / release it |
+| `hexis desk clear [ids ...] [--doc DOC_ID] [--all] [--include-pinned]` | Archive desk items (sources always stay in the cabinet) |
+
 ### Ingestion
 
 | Command | Description |
@@ -231,10 +249,10 @@ Channels: `discord`, `telegram`, `slack`, `signal`, `whatsapp`, `imessage`, `mat
 | `hexis ingest --input DIR` | Ingest a directory |
 | `hexis ingest --url URL` | Ingest a URL |
 | `hexis ingest --stdin --stdin-type TYPE --stdin-title TITLE` | Ingest from stdin |
-| `hexis ingest status [--pending] [--json]` | Show ingestion status |
-| `hexis ingest process [--all-archived] [--limit N] [--content-hash H]` | Process archived items |
+| `hexis ingest status [--pending] [--json]` | Show ingestion status, chunk/artifact counts, and recent extraction runs with warnings |
+| `hexis ingest backfill-chunks [--limit N]` | Chunk stored documents that predate durable chunks (embedding happens in the background worker) |
 
-Common flags: `--mode {auto,deep,standard,shallow,archive,fast,slow,hybrid}`, `--min-importance F`, `--permanent`, `--base-trust F`, `--no-recursive`, `--quiet`
+Common flags: `--mode {fast,slow,hybrid}`, `--min-importance F`, `--permanent`, `--base-trust F`, `--no-recursive`, `--quiet`
 
 ## hexis init
 

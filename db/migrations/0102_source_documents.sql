@@ -127,6 +127,9 @@ BEGIN
 END;
 $$;
 
+-- Replay guard: 0118 changes this function's return type; a fresh replay
+-- (baseline + migrations) already has the newer shape, so drop-first.
+DROP FUNCTION IF EXISTS search_source_documents(TEXT, INT, TEXT, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, BOOLEAN, INT, INT, BOOLEAN);
 CREATE OR REPLACE FUNCTION search_source_documents(
     p_query TEXT DEFAULT NULL,
     p_limit INT DEFAULT NULL,

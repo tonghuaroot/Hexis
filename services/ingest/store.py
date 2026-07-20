@@ -138,6 +138,141 @@ class MemoryStore:
         parsed = json.loads(raw) if isinstance(raw, str) else raw
         return parsed if isinstance(parsed, dict) else {}
 
+    async def upsert_source_document_chunks(
+        self,
+        document_id: str,
+        sections: list[Any],
+        chunker_version: str,
+    ) -> dict[str, Any]:
+        """Persist the durable chunk set for a document (db/83
+        upsert_source_document_chunks): keep-if-unchanged ids/embeddings,
+        trailing trim, locators for citation."""
+        if self.client is None:
+            await self.connect()
+        payload = []
+        for s in sections:
+            entry: dict[str, Any] = {
+                "chunk_index": s.index,
+                "locator_kind": s.locator_kind,
+                "locator": s.locator(),
+                "heading_path": list(s.heading_path or []),
+                "content": s.content,
+                "char_start": s.char_start,
+                "char_end": s.char_end,
+                "metadata": {"title": s.title} if s.title else {},
+            }
+            if s.page_start is not None:
+                entry["page_start"] = s.page_start
+            if s.page_end is not None:
+                entry["page_end"] = s.page_end
+            if s.sheet_name is not None:
+                entry["sheet_name"] = s.sheet_name
+            if s.row_start is not None:
+                entry["row_start"] = s.row_start
+            if s.row_end is not None:
+                entry["row_end"] = s.row_end
+            payload.append(entry)
+        raw = await self._fetchval(
+            "SELECT upsert_source_document_chunks($1::uuid, $2::jsonb, $3::text)",
+            document_id,
+            json.dumps(payload),
+            chunker_version,
+        )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        result = parsed if isinstance(parsed, dict) else {}
+        if result.get("error"):
+            raise RuntimeError(f"upsert_source_document_chunks: {result['error']}")
+        return result
+
+    async def upsert_source_artifact(
+        self,
+        *,
+        sha256: str,
+        storage_kind: str,
+        data: bytes | None = None,
+        storage_ref: str | None = None,
+        source_document_id: str | None = None,
+        original_filename: str | None = None,
+        mime_type: str | None = None,
+        byte_size: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Preserve the original artifact (db/74 upsert_source_artifact):
+        sha256-deduped, never rewrites bytes, links the document once known."""
+        if self.client is None:
+            await self.connect()
+        raw = await self._fetchval(
+            """
+            SELECT upsert_source_artifact(
+                $1::text, $2::text, $3::bytea, $4::text, $5::uuid,
+                $6::text, $7::text, $8::bigint, $9::jsonb
+            )
+            """,
+            sha256,
+            storage_kind,
+            data,
+            storage_ref,
+            source_document_id,
+            original_filename,
+            mime_type,
+            byte_size,
+            json.dumps(metadata or {}),
+        )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, dict) else {}
+
+    async def record_extraction_run(
+        self,
+        *,
+        document_id: str | None,
+        artifact_id: str | None,
+        extractor_name: str,
+        extractor_version: str = "",
+        status: str = "completed",
+        warnings: list[dict[str, Any]] | None = None,
+        errors: list[dict[str, Any]] | None = None,
+        started_at: Any = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record one extractor run with structured warnings (db/74
+        record_source_extraction_run)."""
+        if self.client is None:
+            await self.connect()
+        raw = await self._fetchval(
+            """
+            SELECT record_source_extraction_run(
+                $1::uuid, $2::uuid, $3::text, $4::text, $5::text,
+                $6::jsonb, $7::jsonb, $8::timestamptz, $9::jsonb
+            )
+            """,
+            document_id,
+            artifact_id,
+            extractor_name,
+            extractor_version,
+            status,
+            json.dumps(warnings or []),
+            json.dumps(errors or []),
+            started_at,
+            json.dumps(metadata or {}),
+        )
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, dict) else {}
+
+    async def set_original_hash(self, document_id: str, original_hash: str) -> None:
+        """For sources with no separate artifact (pasted text), the content
+        itself is the original — record its hash once."""
+        if self.client is None:
+            await self.connect()
+        await self._exec(
+            """
+            UPDATE source_documents
+            SET original_hash = $2
+            WHERE id = $1::uuid AND status <> 'redacted' AND original_hash IS NULL
+            """,
+            document_id,
+            original_hash,
+        )
+
     async def set_affective_state(self, appraisal: Appraisal) -> None:
         if self.client is None:
             await self.connect()

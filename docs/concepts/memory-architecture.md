@@ -97,6 +97,25 @@ Three performance tiers:
 2. **Neighborhood expansion** -- precomputed associative neighbors
 3. **Temporal context** -- memories in the same episode get a boost
 
+### Four Layers of Information Access
+
+Distilled memories are one layer of a larger model. The agent works with
+information the way a person works with a filing cabinet, a desk, and their
+own recollection:
+
+| Layer | What it holds | Lifetime |
+|-------|---------------|----------|
+| **Long-term memory** | Distilled, confidence-bearing facts and events (`memories`) | Permanent (decay/retention-managed) |
+| **Filing cabinet** | Exact preserved sources — files, emails, pages — with citable chunks (`source_documents`, `source_document_chunks`, original bytes in `source_artifacts`) | Durable; user data never auto-fades |
+| **RecMem desk** | Passages deliberately loaded for multi-step reasoning; searchable, scrollable, pinnable, GC'd when idle | Mid-term |
+| **Current context** | The live prompt window | One turn |
+
+The agent climbs a retrieval ladder across these layers: recall first, follow
+provenance to the exact source when wording matters, search the cabinet
+(passage-grain search is hybrid lexical + vector with inspectable rank
+components), load onto the desk for sustained work, scroll rather than dump,
+and cite exact handles — document, chunk, page, path.
+
 ### Worldview Integration
 
 Beliefs (stored as worldview memories) filter and weight other memories. When new information contradicts existing beliefs, `CONTRADICTS` graph edges are created and the coherence drive is nudged upward to surface the tension. For semantic beliefs, contradiction also revises confidence through the audited belief-revision policy — except protected memories, where the contradiction is flagged for review but never applied.

@@ -11,6 +11,7 @@ import {
   Inbox,
   Lock,
   LockOpen,
+  Paperclip,
   Send,
   Settings2,
   Trash2,
@@ -46,6 +47,23 @@ type PastedAttachment = {
   // default HMX export (#92); toggled per-chip before sending.
   sensitivity: "private" | null;
 };
+
+// A dropped/picked file; on send it uploads to POST /api/ingest/file, which
+// preserves the original bytes as a source artifact and runs the standard
+// ingestion pipeline in the background (PDF, DOCX, XLSX, ...).
+type FileAttachment = {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  sensitivity: "private" | null;
+};
+
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 // The agent's outbox is her always-available way to reach the user; the
 // channel worker tees every user-bound message into web_inbox (db/76), and
@@ -178,6 +196,8 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<PastedAttachment[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [ready, setReady] = useState<boolean | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>({});
   const [promptAddenda, setPromptAddenda] = useState<string[]>([]);
@@ -444,15 +464,102 @@ export default function ChatPage() {
     );
   };
 
+  const addFiles = (files: FileList | File[] | null) => {
+    if (!files) return;
+    const items = Array.from(files).filter((file) => file.size > 0);
+    if (!items.length) return;
+    setFileAttachments((prev) => [
+      ...prev,
+      ...items.map((file) => ({
+        id: crypto.randomUUID(),
+        file,
+        name: file.name,
+        size: file.size,
+        sensitivity: null as "private" | null,
+      })),
+    ]);
+  };
+
+  const handleComposerDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer?.files?.length) return;
+    event.preventDefault();
+    addFiles(event.dataTransfer.files);
+  };
+
+  const removeFileAttachment = (id: string) => {
+    setFileAttachments((prev) => prev.filter((attachment) => attachment.id !== id));
+  };
+
+  const toggleFileAttachmentPrivacy = (id: string) => {
+    setFileAttachments((prev) =>
+      prev.map((attachment) =>
+        attachment.id === id
+          ? { ...attachment, sensitivity: attachment.sensitivity === "private" ? null : "private" }
+          : attachment
+      )
+    );
+  };
+
   const handleSend = async () => {
-    if ((!input.trim() && attachments.length === 0) || sending) return;
+    if ((!input.trim() && attachments.length === 0 && fileAttachments.length === 0) || sending) return;
 
     // Attachments ingest as documents (durable) AND ride the turn's prompt
     // addenda (immediate sight); the visible message carries only a note.
     const toIngest = attachments;
     setAttachments([]);
+    const filesToUpload = fileAttachments;
+    setFileAttachments([]);
     const attachmentAddenda = toIngest.map(attachmentAddendum);
     const ingestNotes: string[] = [];
+
+    // Dropped files upload as original bytes: preserved as source artifacts
+    // first, then ingested by a durable background job.
+    for (const attachment of filesToUpload) {
+      try {
+        const form = new FormData();
+        form.append("file", attachment.file, attachment.name);
+        form.append("mode", "fast");
+        if (attachment.sensitivity) form.append("sensitivity", attachment.sensitivity);
+        const res = await fetch("/api/ingest/file", { method: "POST", body: form });
+        if (res.ok) {
+          ingestNotes.push(
+            `[Attached file "${attachment.name}" (${formatBytes(attachment.size)}) — original preserved, being ingested into memory${
+              attachment.sensitivity === "private" ? " as private (kept out of group conversations and exports)" : ""
+            }. Search it later with search_documents / search_document_chunks.]`
+          );
+          attachmentAddenda.push(
+            [
+              `----- ATTACHED FILE: ${attachment.name} -----`,
+              "The user attached this file to their message. Its original bytes are preserved and it is being ingested in the background — the text is not inlined here.",
+              "Once ingestion completes (usually under a minute), search_documents / search_document_chunks will find it and open_document can read it verbatim.",
+            ].join("\n")
+          );
+        } else {
+          const detail = await res.text();
+          ingestNotes.push(
+            `[Attached file "${attachment.name}" could not be uploaded: ${res.status}]`
+          );
+          appendLog({
+            id: crypto.randomUUID(),
+            category: "error",
+            title: "Upload error",
+            detail: `File "${attachment.name}" failed (${res.status}): ${detail.slice(0, 200)}`,
+            ts: Date.now(),
+          });
+        }
+      } catch (err) {
+        ingestNotes.push(
+          `[Attached file "${attachment.name}" could not be uploaded: network error]`
+        );
+        appendLog({
+          id: crypto.randomUUID(),
+          category: "error",
+          title: "Upload error",
+          detail: `File "${attachment.name}": ${err instanceof Error ? err.message : String(err)}`,
+          ts: Date.now(),
+        });
+      }
+    }
     for (const attachment of toIngest) {
       try {
         const res = await fetch("/api/ingest", {
@@ -892,6 +999,48 @@ export default function ChatPage() {
                 </button>
               </div>
             ) : null}
+            {fileAttachments.length > 0 ? (
+              <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
+                {fileAttachments.map((attachment) => (
+                  <span key={attachment.id} className="flex items-center gap-2 rounded-md border border-[var(--outline)] bg-[#f5f7f5] px-2 py-1 text-xs">
+                    <Paperclip size={13} className="flex-none text-[var(--teal)]" />
+                    <span className="max-w-56 truncate font-medium">{attachment.name}</span>
+                    <span className="text-[var(--ink-soft)]">{formatBytes(attachment.size)}</span>
+                    <button
+                      type="button"
+                      aria-label={
+                        attachment.sensitivity === "private"
+                          ? `Make file ${attachment.name} shareable`
+                          : `Mark file ${attachment.name} private`
+                      }
+                      title={
+                        attachment.sensitivity === "private"
+                          ? "Private: kept out of group conversations and exports. Click to make shareable."
+                          : "Shareable. Click to keep out of group conversations and exports."
+                      }
+                      onClick={() => toggleFileAttachmentPrivacy(attachment.id)}
+                      className={`flex flex-none items-center gap-1 rounded p-0.5 ${
+                        attachment.sensitivity === "private"
+                          ? "text-[var(--teal)]"
+                          : "text-[var(--ink-soft)] hover:bg-[var(--outline)] hover:text-[var(--foreground)]"
+                      }`}
+                    >
+                      {attachment.sensitivity === "private" ? <Lock size={12} /> : <LockOpen size={12} />}
+                      {attachment.sensitivity === "private" ? <span className="font-medium">Private</span> : null}
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Remove file ${attachment.name}`}
+                      title="Remove"
+                      onClick={() => removeFileAttachment(attachment.id)}
+                      className="flex-none rounded p-0.5 text-[var(--ink-soft)] hover:bg-[var(--outline)] hover:text-[var(--foreground)]"
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
             {attachments.length > 0 ? (
               <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
                 {attachments.map((attachment) => (
@@ -934,7 +1083,29 @@ export default function ChatPage() {
                 ))}
               </div>
             ) : null}
-            <div className="mx-auto flex max-w-3xl items-end gap-2 rounded-lg border border-[var(--outline)] bg-white p-2 focus-within:border-[var(--teal)] focus-within:ring-2 focus-within:ring-[var(--teal)]/10">
+            <div
+              className="mx-auto flex max-w-3xl items-end gap-2 rounded-lg border border-[var(--outline)] bg-white p-2 focus-within:border-[var(--teal)] focus-within:ring-2 focus-within:ring-[var(--teal)]/10"
+              onDrop={handleComposerDrop}
+              onDragOver={(event) => { if (event.dataTransfer?.types?.includes("Files")) event.preventDefault(); }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                aria-hidden="true"
+                tabIndex={-1}
+                onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }}
+              />
+              <button
+                type="button"
+                aria-label="Attach files"
+                title="Attach files (or drop them anywhere on the composer)"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex h-10 w-10 flex-none items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--outline)] hover:text-[var(--foreground)]"
+              >
+                <Paperclip size={17} />
+              </button>
               <textarea
                 ref={textareaRef}
                 aria-label={`Message ${agentStatus.agent_name || "Hexis"}`}
@@ -946,7 +1117,7 @@ export default function ChatPage() {
                 onPaste={handlePaste}
                 rows={1}
               />
-              <button type="button" aria-label="Send message" title="Send" onClick={handleSend} disabled={sending || (!input.trim() && attachments.length === 0)} className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-[var(--foreground)] text-white hover:bg-[var(--teal)] disabled:opacity-35">
+              <button type="button" aria-label="Send message" title="Send" onClick={handleSend} disabled={sending || (!input.trim() && attachments.length === 0 && fileAttachments.length === 0)} className="flex h-10 w-10 flex-none items-center justify-center rounded-md bg-[var(--foreground)] text-white hover:bg-[var(--teal)] disabled:opacity-35">
                 <Send size={17} />
               </button>
             </div>

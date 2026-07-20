@@ -103,6 +103,54 @@ Precomputed associative neighbors for hot-path recall.
 | `neighbors` | JSONB | Precomputed neighbor data |
 | `is_stale` | BOOLEAN | Needs recomputation |
 
+## Source Documents & Desk
+
+### source_documents
+
+The filing cabinet: every ingested file/email/page preserved as normalized
+text, keyed by content hash. Status `active` / `redacted` / `archived`;
+redacted documents are frozen and never rehydrate.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `content` | TEXT | Normalized extracted text |
+| `content_hash` | TEXT | Unique dedup/handle key (sha256 of text) |
+| `original_hash` | TEXT | sha256 of the original artifact bytes |
+| `source_attribution` | JSONB | Provenance incl. `sensitivity` and `acquisition` (`user`/`agent`/`connector`) |
+
+### source_document_chunks
+
+Durable, citable slices with locators and their own embeddings for hybrid
+retrieval. Keyed `UNIQUE(source_document_id, chunk_index)`; ids and
+embeddings survive re-ingestion of unchanged content.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `locator_kind` | TEXT | `char` / `page` / `section` / `sheet_row` / `slide` / `message` |
+| `char_start`..`column_end` | INT | Exact-substring offsets plus page/sheet/row/column ranges |
+| `heading_path` | TEXT[] | Markdown/DOCX heading trail |
+| `embedding` | vector | Populated by the background embed queue (`embedding_status` lifecycle) |
+| `chunker_version` | TEXT | Backfill marker (`hexis ingest backfill-chunks`) |
+
+### source_artifacts
+
+Original bytes (or a stable reference), captured before extraction and
+deduped by `sha256`. `storage_kind`: `database` (BYTEA in-row), `filesystem`
+(managed artifact dir), `connector`, `url`, `external`.
+
+### source_extraction_runs
+
+Which extractor produced a document's text: name/version, status, and
+structured `warnings` (`ocr_used`, `truncated_rows`, `image_only_page`, …).
+Failed runs may carry an artifact but no document — the source survives a
+broken parser.
+
+### RecMem desk
+
+Not a separate table: desk items are `subconscious_units` rows tagged
+`metadata.recmem.kind = 'source_document_desk'`, with `pinned_at`/`pinned_by`
+protecting them from idle GC (redacted sources are swept regardless).
+
 ## Operational State
 
 ### config

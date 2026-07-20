@@ -30,7 +30,7 @@ async def test_enqueue_caps_and_idempotency(db_pool):
                     await _enqueue(conn, content="x" * 51)
             job_a = await _enqueue(conn, chash="hash-idem")
             job_b = await _enqueue(conn, chash="hash-idem")
-            with pytest.raises(Exception, match="kind must be text or url"):
+            with pytest.raises(Exception, match="kind must be text, url, or artifact"):
                 async with conn.transaction():
                     await _enqueue(conn, kind="carrier_pigeon")
             with pytest.raises(Exception, match="require content"):

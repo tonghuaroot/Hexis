@@ -37,7 +37,25 @@ export async function GET(
     // Touch the memory to update access tracking
     await prisma.$queryRawUnsafe(`SELECT touch_memories(ARRAY[$1::uuid])`, id);
 
+    // Provenance handles: the exact source documents/chunks behind this
+    // memory (get_memory_story resolves ids, hashes, and references).
+    let sourceDocuments: unknown = null;
+    let sourceChunks: unknown = null;
+    try {
+      const storyRows = await prisma.$queryRawUnsafe<MemoryRow[]>(
+        `SELECT get_memory_story($1::uuid) AS story`,
+        id
+      );
+      const story = normalizeJsonValue(storyRows[0]?.story) as Record<string, unknown> | null;
+      sourceDocuments = story?.source_documents ?? null;
+      sourceChunks = story?.source_chunks ?? null;
+    } catch (storyError) {
+      console.error("Memory story lookup failed:", storyError);
+    }
+
     return NextResponse.json({
+      source_documents: sourceDocuments,
+      source_chunks: sourceChunks,
       id: m.id,
       type: m.type,
       content: m.content,

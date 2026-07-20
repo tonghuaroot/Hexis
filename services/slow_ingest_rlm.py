@@ -291,7 +291,7 @@ async def run_slow_ingest(
             continue  # resumed: this chunk already persisted
 
         chunk_result = await run_slow_ingest_chunk(
-            chunk_text=section.content,
+            chunk_text=section.extraction_view(),
             chunk_index=section.index,
             total_chunks=total_chunks,
             source_info=source_info,
@@ -318,6 +318,10 @@ async def run_slow_ingest(
         # Build enriched source payload
         chunk_source = dict(source_info)
         chunk_source["section_hash"] = chunk_hashes[section.index]
+        chunk_id = doc.chunk_ids.get(section.index)
+        if chunk_id:
+            chunk_source["chunk_id"] = chunk_id
+            chunk_source["chunk_index"] = section.index
         chunk_source["conscious_analysis"] = assessment.get("analysis", "")
         chunk_source["acceptance"] = acceptance
         if acceptance == "contest":
@@ -509,7 +513,7 @@ async def run_hybrid_ingest(
         if section.index in high_signal_indices:
             # Slow path: RLM loop
             chunk_result = await run_slow_ingest_chunk(
-                chunk_text=section.content,
+                chunk_text=section.extraction_view(),
                 chunk_index=section.index,
                 total_chunks=total_chunks,
                 source_info=source_info,
@@ -535,6 +539,10 @@ async def run_hybrid_ingest(
 
             chunk_source = dict(source_info)
             chunk_source["section_hash"] = chunk_hashes[section.index]
+            chunk_id = doc.chunk_ids.get(section.index)
+            if chunk_id:
+                chunk_source["chunk_id"] = chunk_id
+                chunk_source["chunk_index"] = section.index
             chunk_source["conscious_analysis"] = assessment.get("analysis", "")
             chunk_source["acceptance"] = acceptance
             if acceptance == "contest":
@@ -565,6 +573,7 @@ async def run_hybrid_ingest(
             created = await pipeline._create_semantic_memories(
                 doc, encounter_id, appraisal, extractions,
                 section_hash=chunk_hashes[section.index],
+                chunk_index=section.index,
             )
             memories_created.extend(created)
 

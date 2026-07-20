@@ -15,7 +15,8 @@ Complete catalog of Hexis tools organized by category.
 
 | Category | Factory Function | Tools |
 |----------|-----------------|-------|
-| Memory | `create_memory_tools()` | recall, search_history, remember, add_evidence, belief_history, open_memory, search_documents, open_document, open_documents, load_documents, sense_memory_availability, explore_concept, get_procedures, get_strategies, queue_user_message, + type-specific creators |
+| Memory | `create_memory_tools()` | recall, search_history, remember, add_evidence, belief_history, open_memory, search_documents, open_document, open_documents, load_documents, search_document_chunks, open_document_chunk, load_document_chunks, sense_memory_availability, explore_concept, get_procedures, get_strategies, queue_user_message, + type-specific creators |
+| Desk | `create_desk_tools()` | list_desk, open_desk_item, pin_desk_item, unpin_desk_item, clear_desk |
 | Self-Inspection | `create_self_inspection_tools()` | inspect_source, inspect_database_schema, inspect_config, review_recent_actions |
 | Web | `create_web_tools()` | web_search, web_fetch, web_summarize |
 | Filesystem | `create_filesystem_tools()` | read_file, write_file, edit_file, glob, grep, list_directory |
@@ -44,9 +45,9 @@ Complete catalog of Hexis tools organized by category.
 
 | Cost | Tools |
 |------|-------|
-| **0** | search_history, search_documents, sense_memory_availability, belief_history, inspect_config, review_recent_actions, queue_user_message, get_contact, list_council_personas, manage_sessions (list/get) |
-| **1** | recall, remember, add_evidence, open_memory, open_document, explore_concept, get_procedures, get_strategies, read_file, glob, grep, list_directory, manage_goals, manage_backlog, manage_schedule, search_contacts, query_usage, hubspot_*, youtube_*, humanize_text, backup_retention, config_export |
-| **2** | open_documents, load_documents, web_search, web_fetch, calendar_events, email_list, email_read, email_search, fast_ingest, write_file, edit_file, safe_shell, todoist_create, todoist_complete, asana_create, twitter_search, brave_search, fathom_transcripts, merge_contacts, workflow, post_process_output, config_import |
+| **0** | search_history, search_documents, search_document_chunks, list_desk, pin_desk_item, unpin_desk_item, clear_desk, sense_memory_availability, belief_history, inspect_config, review_recent_actions, queue_user_message, get_contact, list_council_personas, manage_sessions (list/get) |
+| **1** | recall, remember, add_evidence, open_memory, open_document, open_document_chunk, open_desk_item, explore_concept, get_procedures, get_strategies, read_file, glob, grep, list_directory, manage_goals, manage_backlog, manage_schedule, search_contacts, query_usage, hubspot_*, youtube_*, humanize_text, backup_retention, config_export |
+| **2** | open_documents, load_documents, load_document_chunks, web_search, web_fetch, calendar_events, email_list, email_read, email_search, fast_ingest, write_file, edit_file, safe_shell, todoist_create, todoist_complete, asana_create, twitter_search, brave_search, fathom_transcripts, merge_contacts, workflow, post_process_output, config_import |
 | **3** | shell, run_script, code_execution, calendar_create, calendar_update, calendar_delete, hybrid_ingest, url_ingest, generate_image, firecrawl_scrape, ingest_contacts_*, database_backup, aggregate_signals |
 | **4** | web_summarize, browser, email_send, email_send_sendgrid, git_ingest, meeting_prep, fathom_ingest |
 | **5** | discord_send, slack_send, telegram_send, slow_ingest, email_forward, run_council, create_tool |
@@ -68,6 +69,18 @@ Complete catalog of Hexis tools organized by category.
   and `open_documents` read exact files without writing memory. `load_documents`
   deliberately places source chunks on the RecMem desk so later
   `search_history` calls can search them with `sources=["desk"]`.
+- `search_document_chunks` is the passage-grain cabinet search: hybrid
+  full-text + vector over durable chunks, returning citable locators (page,
+  section, sheet row) and DB-generated `rank_components` (degrades to
+  lexical-only when the embedding service is down). `open_document_chunk`
+  opens exact passages with a ready-made `citation` string and
+  prev/next handles; `load_document_chunks` puts selected passages on the
+  desk (by ids, by document+query, or by page range; `pin` keeps them
+  through cleanup).
+- Desk tools: `list_desk` shows what is loaded (check before re-loading),
+  `open_desk_item` scrolls an item window by window, `pin_desk_item` /
+  `unpin_desk_item` control cleanup protection, and `clear_desk` archives
+  items (never deletes; the sources remain in the filing cabinet).
 - `list_skills` reports each skill's status (`usable` / `needs_setup` /
   `unavailable`) with the exact next step; `use_skill` activates a skill and,
   for MCP-bound skills, lazily connects the server and unlocks only

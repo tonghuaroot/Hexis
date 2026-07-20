@@ -68,6 +68,21 @@ def _sensitivity_override(arguments: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _acquisition_override(arguments: dict[str, Any], context: "ToolExecutionContext") -> dict[str, Any]:
+    """Acquisition provenance: heartbeat-initiated ingestion is the agent's
+    own choice ('agent'); chat/MCP ingestion acts on the user's behalf
+    ('user'). Drives retention policy — user sources never auto-fade."""
+    overrides: dict[str, Any] = {}
+    tool_context = getattr(context, "tool_context", None)
+    overrides["acquisition"] = (
+        "agent" if tool_context is ToolContext.HEARTBEAT else "user"
+    )
+    keep_reason = str(arguments.get("keep_reason") or "").strip()
+    if keep_reason:
+        overrides["acquired_reason"] = keep_reason
+    return overrides
+
+
 class FastIngestHandler(ToolHandler):
     """Fast (shallow) content ingestion.
 
@@ -128,7 +143,7 @@ class FastIngestHandler(ToolHandler):
             )
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.FAST, **_sensitivity_override(arguments))
+        config = await _build_ingest_config(pool, mode=IngestionMode.FAST, **_sensitivity_override(arguments), **_acquisition_override(arguments, context))
         pipeline = IngestionPipeline(config)
 
         try:
@@ -217,7 +232,7 @@ class SlowIngestHandler(ToolHandler):
             )
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.SLOW, **_sensitivity_override(arguments))
+        config = await _build_ingest_config(pool, mode=IngestionMode.SLOW, **_sensitivity_override(arguments), **_acquisition_override(arguments, context))
         pipeline = IngestionPipeline(config)
 
         try:
@@ -303,7 +318,7 @@ class HybridIngestHandler(ToolHandler):
             )
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.HYBRID, **_sensitivity_override(arguments))
+        config = await _build_ingest_config(pool, mode=IngestionMode.HYBRID, **_sensitivity_override(arguments), **_acquisition_override(arguments, context))
         pipeline = IngestionPipeline(config)
 
         try:
@@ -350,6 +365,13 @@ class GitIngestHandler(ToolHandler):
                         "type": "string",
                         "description": "Branch to clone (default: repo default branch).",
                     },
+                    "keep_reason": {
+                        "type": "string",
+                        "description": (
+                            "Why you decided to keep this source (recorded as "
+                            "acquisition provenance; helps future retention decisions)."
+                        ),
+                    },
                     "sensitivity": _SENSITIVITY_PROPERTY,
                 },
                 "required": ["url"],
@@ -384,7 +406,7 @@ class GitIngestHandler(ToolHandler):
         branch = arguments.get("branch")
 
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=IngestionMode.FAST, **_sensitivity_override(arguments))
+        config = await _build_ingest_config(pool, mode=IngestionMode.FAST, **_sensitivity_override(arguments), **_acquisition_override(arguments, context))
         pipeline = IngestionPipeline(config)
         tmpdir = tempfile.mkdtemp(prefix="hexis_git_")
 
@@ -532,6 +554,13 @@ class URLIngestHandler(ToolHandler):
                         "type": "string",
                         "description": "Optional title for the content (auto-detected if omitted).",
                     },
+                    "keep_reason": {
+                        "type": "string",
+                        "description": (
+                            "Why you decided to keep this web source (recorded as "
+                            "acquisition provenance; helps future retention decisions)."
+                        ),
+                    },
                     "sensitivity": _SENSITIVITY_PROPERTY,
                 },
                 "required": ["url"],
@@ -590,7 +619,7 @@ class URLIngestHandler(ToolHandler):
 
         # The pipeline ingests text directly now (#89) — no temp-file dance.
         pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=mode, **_sensitivity_override(arguments))
+        config = await _build_ingest_config(pool, mode=mode, **_sensitivity_override(arguments), **_acquisition_override(arguments, context))
         pipeline = IngestionPipeline(config)
         try:
             count = await pipeline.ingest_text(

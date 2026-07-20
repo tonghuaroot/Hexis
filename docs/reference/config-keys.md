@@ -122,6 +122,42 @@ SELECT set_config('agent.name', '"MyAgent"'::jsonb);
 | `memory.hydrate_memory_limit` | int | Default memory count for RAG hydration (default `10`) |
 | `memory.context_section_limits` | object | Per-section caps for subconscious/hydration context assembly |
 
+## Source Documents, Chunks, and Desk
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `memory.document_search_default_limit` / `_max_limit` | int | Row budgets for document search (defaults `10` / `50`) |
+| `memory.source_chunk_search_default_limit` / `_max_limit` | int | Row budgets for passage (chunk) search (defaults `10` / `50`) |
+| `retrieval.chunk_weight_lexical` / `_vector` / `_recency` / `_trust` / `_desk` | float | Hybrid chunk-search fusion weights (defaults `0.4` / `0.6` / `0.1` / `0.1` / `0.05`) |
+| `retrieval.chunk_recency_half_life_days` | float | Document-age half life for the recency component (default `30`) |
+| `memory.source_chunk_embed_batch_size` / `_claim_timeout_s` / `_max_attempts` | int | Background chunk-embedding queue tuning (defaults `32` / `120` / `3`) |
+| `memory.source_document_desk_chunk_chars` | int | Desk chunk size for whole-document loads (default `8000`) |
+| `memory.recmem_desk_list_default_limit` | int | Default rows for `list_desk` (default `20`) |
+| `memory.recmem_desk_open_default_chars` | int | Default window when opening a desk item (default `4000`) |
+| `memory.recmem_gc_*` | various | Desk GC: enabled, idle days, grace days, batch size (pinned items are skipped; redacted sources are swept regardless) |
+
+## Ingestion
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `ingest.max_section_chars` / `ingest.chunk_overlap` | int | Chunk size and extraction-context overlap (defaults `2000` / `200`) |
+| `ingest.artifact_max_db_bytes` | int | Originals up to this size are stored in-DB; larger go to `$HEXIS_ARTIFACT_DIR` (default `26214400`) |
+| `ingest.xlsx_max_rows_per_sheet` | int | Spreadsheet row cap per sheet — capping always emits a `truncated_rows` warning (default `5000`) |
+| `ingest.upload_max_bytes` | int | Upload API file-size cap; larger files use the CLI (default `104857600`) |
+| `ingest.job_*` | various | Durable ingestion-job queue: content cap, claim timeout, retry backoff, batch size |
+
+## Source Retention
+
+All gated on `retention.enabled` (ships dark). User-provided sources never
+auto-fade — they only leave via the fade-request → user-approval flow.
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `retention.doc_stale_days` / `doc_idle_days` / `doc_request_batch` | int | When user-provided documents trigger a fade *request* (defaults `180` / `90` / `2`) |
+| `retention.agent_source_idle_days` | int | Archive agent-acquired sources untouched this long (default `60`) |
+| `retention.agent_source_escalate_memories` | int | Agent-acquired sources cited by this many memories escalate to a user ask instead (default `5`) |
+| `retention.agent_source_batch` | int | Agent-acquired sources processed per daily pass (default `5`) |
+
 ## OAuth Credentials
 
 | Key | Type | Description |

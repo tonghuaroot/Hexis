@@ -188,7 +188,9 @@ CREATE TABLE IF NOT EXISTS ingestion_receipts (
 -- Durable ingestion jobs (#87): background ingestion survives restarts.
 CREATE TABLE IF NOT EXISTS ingestion_jobs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kind TEXT NOT NULL CHECK (kind IN ('text', 'url')),
+    -- 'artifact' jobs carry no inline content: payload.artifact_id points at
+    -- preserved original bytes in source_artifacts (uploads, binary files).
+    kind TEXT NOT NULL CHECK (kind IN ('text', 'url', 'artifact')),
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'in_progress', 'completed', 'failed', 'cancelled')),
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -246,6 +248,133 @@ CREATE INDEX IF NOT EXISTS idx_source_documents_content_fts
     WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_source_documents_source_attribution
     ON source_documents USING GIN (source_attribution);
+
+-- Durable source-document chunks: stable, citable slices of a source
+-- document with locators (page/section/sheet row/slide/message) and their
+-- own embeddings for hybrid retrieval. Keyed by (document, chunk_index);
+-- ids and embeddings survive re-ingestion when content is unchanged.
+-- Privacy/status stay single-source on source_documents — every read joins.
+CREATE TABLE IF NOT EXISTS source_document_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_document_id UUID NOT NULL REFERENCES source_documents(id) ON DELETE CASCADE,
+    chunk_index INT NOT NULL,
+    locator_kind TEXT NOT NULL DEFAULT 'char'
+        CHECK (locator_kind IN ('char', 'page', 'section', 'sheet_row', 'slide', 'message')),
+    locator JSONB NOT NULL DEFAULT '{}'::jsonb,
+    heading_path TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    token_count INT,
+    char_start INT NOT NULL DEFAULT 0,
+    char_end INT NOT NULL DEFAULT 0,
+    page_start INT,
+    page_end INT,
+    sheet_name TEXT,
+    row_start INT,
+    row_end INT,
+    column_start INT,
+    column_end INT,
+    embedding vector(768),
+    embedded_at TIMESTAMPTZ,
+    embedding_model TEXT,
+    embedding_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (embedding_status IN ('pending', 'in_progress', 'embedded', 'failed', 'skipped')),
+    embedding_claimed_at TIMESTAMPTZ,
+    embedding_attempts INT NOT NULL DEFAULT 0,
+    chunker_version TEXT NOT NULL DEFAULT 'v2',
+    access_count INT NOT NULL DEFAULT 0,
+    last_accessed TIMESTAMPTZ,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (source_document_id, chunk_index)
+);
+
+-- Keep the chunk embedding column in step with the configured dimension
+-- (mirrors the db/00 DO block; this file runs after embedding_dimension()
+-- and sync_embedding_dimension_config() exist).
+DO $$
+DECLARE
+    dim INT;
+BEGIN
+    dim := embedding_dimension();
+    IF dim IS NOT NULL AND dim <> 768 THEN
+        EXECUTE format(
+            'ALTER TABLE source_document_chunks ALTER COLUMN embedding TYPE vector(%s) USING embedding::vector(%s)',
+            dim,
+            dim
+        );
+    END IF;
+END;
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_source_chunks_document
+    ON source_document_chunks (source_document_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_source_chunks_fts
+    ON source_document_chunks USING GIN (to_tsvector('english', content));
+CREATE INDEX IF NOT EXISTS idx_source_chunks_embedding
+    ON source_document_chunks USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_source_chunks_hash
+    ON source_document_chunks (content_hash);
+CREATE INDEX IF NOT EXISTS idx_source_chunks_embed_queue
+    ON source_document_chunks (embedding_status, created_at)
+    WHERE embedding_status IN ('pending', 'in_progress');
+
+-- Original source artifacts: the exact bytes (or a stable reference) a
+-- source document was extracted from, preserved BEFORE extraction so a
+-- failed parse never loses the source and a better extractor can re-run
+-- later. Bytes live in-DB up to ingest.artifact_max_db_bytes (rides
+-- pg_dump backups); larger artifacts live in a content-addressed managed
+-- directory with the hash recorded here.
+CREATE TABLE IF NOT EXISTS source_artifacts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_document_id UUID REFERENCES source_documents(id) ON DELETE SET NULL,
+    storage_kind TEXT NOT NULL
+        CHECK (storage_kind IN ('database', 'filesystem', 'connector', 'url', 'external')),
+    storage_ref TEXT,
+    bytes BYTEA,
+    original_filename TEXT,
+    mime_type TEXT,
+    byte_size BIGINT NOT NULL DEFAULT 0,
+    sha256 TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'redacted', 'archived')),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_artifacts_doc
+    ON source_artifacts (source_document_id) WHERE source_document_id IS NOT NULL;
+
+-- The artifact hash a document's normalized content was extracted from.
+ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS original_hash TEXT;
+
+-- Extraction runs: which extractor produced a document's normalized text,
+-- with structured warnings (OCR used, rows truncated, unsupported features)
+-- and errors. Failed runs may carry an artifact but no document.
+CREATE TABLE IF NOT EXISTS source_extraction_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_document_id UUID REFERENCES source_documents(id) ON DELETE CASCADE,
+    artifact_id UUID REFERENCES source_artifacts(id) ON DELETE SET NULL,
+    extractor_name TEXT NOT NULL,
+    extractor_version TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL
+        CHECK (status IN ('completed', 'completed_with_warnings', 'failed')),
+    warnings JSONB NOT NULL DEFAULT '[]'::jsonb,
+    errors JSONB NOT NULL DEFAULT '[]'::jsonb,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_extraction_runs_doc
+    ON source_extraction_runs (source_document_id, created_at DESC)
+    WHERE source_document_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_source_extraction_runs_artifact
+    ON source_extraction_runs (artifact_id, created_at DESC)
+    WHERE artifact_id IS NOT NULL;
 
 -- Raw channel-message source artifacts. Channel adapters write
 -- channel_messages; Postgres owns the exact source document, ingestion job

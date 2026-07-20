@@ -24,6 +24,7 @@ classifiers = [
 ]
 dependencies = [
   "fastapi>=0.104.0",
+  "python-multipart>=0.0.9",
   "uvicorn>=0.24.0",
   "pydantic>=2.4.2",
   "jsonschema>=4.18.0",
@@ -84,6 +85,24 @@ readers = [
   "ebooklib>=0.18.0",
   "beautifulsoup4>=4.12.0",
   "feedparser>=6.0.0",
+]
+pdf = [
+  "pdfplumber>=0.11.0",
+  "pypdfium2>=4.30.0",
+  "pytesseract>=0.3.10",
+  "Pillow>=10.0.0",
+]
+ocr = [
+  "pytesseract>=0.3.10",
+  "Pillow>=10.0.0",
+]
+web = [
+  "trafilatura>=1.8.0",
+]
+media = [
+  "openai-whisper",
+  "moviepy",
+  "youtube-transcript-api>=0.6.0",
 ]
 
 [tool.setuptools]

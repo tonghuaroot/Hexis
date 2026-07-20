@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -143,6 +143,13 @@ class IngestTextRequest(BaseModel):
     mode: str = "fast"
     # Sensitivity marking (#92): "private" keeps the resulting memories out
     # of group-channel recall and default HMX export.
+    sensitivity: str | None = None
+
+
+class IngestUrlRequest(BaseModel):
+    url: str
+    title: str | None = None
+    mode: str = "fast"
     sensitivity: str | None = None
 
 
@@ -836,6 +843,7 @@ async def ingest_text(req: IngestTextRequest):
                 "mode": mode_value,
                 "source_type": "pasted_text",
                 "sensitivity": sensitivity,
+                "acquisition": "user",
             }),
             content,
             content_hash,
@@ -847,6 +855,168 @@ async def ingest_text(req: IngestTextRequest):
         "mode": mode_value,
         "word_count": len(content.split()),
     }
+
+
+@app.post("/api/ingest/url")
+async def ingest_url_enqueue(req: IngestUrlRequest):
+    """Enqueue a URL for background fetch + ingestion (the UI Ingest page).
+
+    The worker fetches the page, preserves the HTML artifact, and ingests
+    the extracted text through the standard pipeline.
+    """
+    import hashlib as _hashlib
+
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="database not ready")
+    target = (req.url or "").strip()
+    if not target.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=422, detail="url must start with http:// or https://")
+    mode_value = (req.mode or "fast").lower()
+    if mode_value not in ("fast", "slow", "hybrid"):
+        raise HTTPException(status_code=422, detail="mode must be fast, slow, or hybrid")
+    sensitivity = (req.sensitivity or "").strip().lower() or None
+    if sensitivity not in (None, "private"):
+        raise HTTPException(status_code=422, detail="sensitivity must be omitted or 'private'")
+
+    async with _pool.acquire() as conn:
+        job_id = await conn.fetchval(
+            "SELECT enqueue_ingestion_job('url', $1::jsonb, NULL, $2)",
+            json.dumps({
+                "url": target,
+                "title": (req.title or "").strip() or None,
+                "mode": mode_value,
+                "sensitivity": sensitivity,
+                "acquisition": "user",
+            }),
+            f"url:{_hashlib.sha256(target.encode('utf-8')).hexdigest()}",
+        )
+    return {"accepted": True, "job_id": str(job_id), "url": target, "mode": mode_value}
+
+
+@app.post("/api/ingest/file")
+async def ingest_file_upload(
+    file: UploadFile = File(...),
+    mode: str = Form("fast"),
+    sensitivity: str | None = Form(None),
+    title: str | None = Form(None),
+):
+    """Ingest an uploaded file (chat drops, the UI Ingest page).
+
+    The original bytes are preserved as a source artifact FIRST, then a
+    durable `artifact` job re-reads them through the standard pipeline —
+    upload once, survive restarts, inspect failures.
+    """
+    import hashlib as _hashlib
+
+    from services.ingest.artifacts import default_artifact_dir, prepare_artifact_info
+
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="database not ready")
+    mode_value = (mode or "fast").lower()
+    if mode_value not in ("fast", "slow", "hybrid"):
+        raise HTTPException(status_code=422, detail="mode must be fast, slow, or hybrid")
+    sensitivity_value = (sensitivity or "").strip().lower() or None
+    if sensitivity_value not in (None, "private"):
+        raise HTTPException(status_code=422, detail="sensitivity must be omitted or 'private'")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="uploaded file is empty")
+
+    async with _pool.acquire() as conn:
+        upload_cap = int(await conn.fetchval(
+            "SELECT COALESCE(get_config_int('ingest.upload_max_bytes'), 104857600)"
+        ))
+        if len(data) > upload_cap:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"file is {len(data)} bytes; the upload cap is {upload_cap}. "
+                    "Use the CLI for oversized files: hexis ingest --file <path>"
+                ),
+            )
+        max_db_bytes = int(await conn.fetchval(
+            "SELECT COALESCE(get_config_int('ingest.artifact_max_db_bytes'), 26214400)"
+        ))
+        info = prepare_artifact_info(
+            data,
+            original_filename=file.filename,
+            mime_type=file.content_type,
+            metadata={"uploaded_via": "api"},
+            max_db_bytes=max_db_bytes,
+            artifact_dir=default_artifact_dir(),
+        )
+        artifact_raw = await conn.fetchval(
+            """
+            SELECT upsert_source_artifact(
+                $1::text, $2::text, $3::bytea, $4::text, NULL,
+                $5::text, $6::text, $7::bigint, $8::jsonb
+            )
+            """,
+            info["sha256"],
+            info["storage_kind"],
+            info.get("bytes"),
+            info.get("storage_ref"),
+            info.get("original_filename"),
+            info.get("mime_type"),
+            info.get("byte_size"),
+            json.dumps(info.get("metadata") or {}),
+        )
+        artifact = json.loads(artifact_raw) if isinstance(artifact_raw, str) else artifact_raw
+        job_id = await conn.fetchval(
+            "SELECT enqueue_ingestion_job('artifact', $1::jsonb, NULL, $2)",
+            json.dumps({
+                "artifact_id": artifact["artifact_id"],
+                "filename": file.filename,
+                "title": (title or "").strip() or None,
+                "mode": mode_value,
+                "sensitivity": sensitivity_value,
+                "acquisition": "user",
+            }),
+            f"artifact:{info['sha256']}",
+        )
+    return {
+        "accepted": True,
+        "job_id": str(job_id),
+        "artifact_id": artifact["artifact_id"],
+        "sha256": info["sha256"],
+        "byte_size": info["byte_size"],
+        "filename": file.filename,
+        "mode": mode_value,
+    }
+
+
+@app.get("/api/ingest/jobs")
+async def ingest_jobs_recent(limit: int = 20):
+    """Recent ingestion jobs with receipts: what ran, what's pending, what
+    failed and why (the UI Ingest page poll target)."""
+    if _pool is None:
+        raise HTTPException(status_code=503, detail="database not ready")
+    lim = max(1, min(int(limit or 20), 100))
+    async with _pool.acquire() as conn:
+        raw = await conn.fetchval(
+            """
+            SELECT COALESCE(jsonb_agg(job_doc), '[]'::jsonb) FROM (
+                SELECT jsonb_build_object(
+                    'id', j.id,
+                    'kind', j.kind,
+                    'status', j.status,
+                    'title', COALESCE(j.payload->>'title', j.payload->>'filename', j.payload->>'url'),
+                    'attempts', j.attempts,
+                    'error', j.error,
+                    'result', j.result,
+                    'created_at', j.created_at,
+                    'completed_at', j.completed_at
+                ) AS job_doc
+                FROM ingestion_jobs j
+                ORDER BY j.created_at DESC
+                LIMIT $1
+            ) sub
+            """,
+            lim,
+        )
+    jobs = json.loads(raw) if isinstance(raw, str) else raw
+    return {"jobs": jobs or []}
 
 
 @app.get("/api/ingest/jobs/{job_id}")
