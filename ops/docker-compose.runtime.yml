@@ -252,6 +252,7 @@ services:
     ports:
       - "${HEXIS_BIND_ADDRESS:-127.0.0.1}:${HEXIS_UI_PORT:-3477}:3477"
     environment:
+      HEXIS_DATABASE_URL: postgresql://${POSTGRES_USER:-hexis_user}:${POSTGRES_PASSWORD:-hexis_password}@db:5432/${POSTGRES_DB:-hexis_memory}
       DATABASE_URL: postgresql://${POSTGRES_USER:-hexis_user}:${POSTGRES_PASSWORD:-hexis_password}@db:5432/${POSTGRES_DB:-hexis_memory}
       HEXIS_API_URL: http://api:43817
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

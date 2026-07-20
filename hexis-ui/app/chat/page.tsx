@@ -148,7 +148,11 @@ const promptAddendaOptions = [
   { id: "letter", label: "Letter From Claude" },
 ];
 
-const SESSION_KEY = "hexis-chat-messages";
+// Display cache only. The authoritative conversation context lives in
+// Postgres via chat_sessions/chat_messages; this just avoids a blank repaint
+// while the page hydrates the DB-owned session.
+const SESSION_KEY = "hexis-chat-display-messages";
+const LEGACY_SESSION_KEY = "hexis-chat-messages";
 const SESSION_ID_KEY = "hexis-chat-session-id";
 const MAX_ACTIVITY_EVENTS = 60;
 const ACTIVITY_TTL_MS = 30 * 60 * 1000;
@@ -174,7 +178,7 @@ function saveSessionId(id: string) {
 function loadSession(): ChatMessage[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
+    const raw = sessionStorage.getItem(SESSION_KEY) || sessionStorage.getItem(LEGACY_SESSION_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];
@@ -184,10 +188,35 @@ function loadSession(): ChatMessage[] {
 function saveSession(messages: ChatMessage[]) {
   if (typeof window === "undefined") return;
   try {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(messages));
+    if (messages.length > 0) {
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(messages));
+      sessionStorage.removeItem(LEGACY_SESSION_KEY);
+    } else {
+      sessionStorage.removeItem(SESSION_KEY);
+      sessionStorage.removeItem(LEGACY_SESSION_KEY);
+    }
   } catch {
     // ignore quota errors
   }
+}
+
+function dbMessagesToChatMessages(value: unknown): ChatMessage[] | null {
+  if (!Array.isArray(value)) return null;
+  const messages: ChatMessage[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const role = record.role;
+    const content = record.content;
+    if ((role === "user" || role === "assistant") && typeof content === "string") {
+      messages.push({
+        id: typeof record.message_id === "string" ? record.message_id : crypto.randomUUID(),
+        role,
+        content,
+      });
+    }
+  }
+  return messages;
 }
 
 export default function ChatPage() {
@@ -232,10 +261,34 @@ export default function ChatPage() {
     [messages]
   );
 
-  // Load session on mount
+  // Load the current DB-owned session on mount, using the browser cache only
+  // as a temporary display fallback.
   useEffect(() => {
-    const saved = loadSession();
-    if (saved.length > 0) setMessages(saved);
+    let cancelled = false;
+
+    const restore = async () => {
+      const saved = loadSession();
+      if (saved.length > 0 && !cancelled) setMessages(saved);
+
+      const sessionId = loadSessionId();
+      if (!sessionId) return;
+      try {
+        const response = await fetch(`/api/chat/session/${encodeURIComponent(sessionId)}`, {
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+        const payload = await response.json();
+        const dbMessages = dbMessagesToChatMessages(payload?.messages);
+        if (dbMessages && !cancelled) setMessages(dbMessages);
+      } catch {
+        // Keep the display cache; the next send still uses DB hydration.
+      }
+    };
+
+    void restore();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const loadInbox = useCallback(async () => {
@@ -313,9 +366,10 @@ export default function ChatPage() {
     }
   };
 
-  // Save session on message change
+  // Save display cache on message change. This is not sent as authoritative
+  // history once a DB chat session exists.
   useEffect(() => {
-    if (messages.length > 0) saveSession(messages);
+    saveSession(messages);
   }, [messages]);
 
   useEffect(() => {
@@ -625,15 +679,25 @@ export default function ChatPage() {
     setSearchConfigNotice(null);
 
     try {
+      const sessionId = loadSessionId();
+      const chatBody: {
+        message: string;
+        prompt_addenda: string[];
+        session_id?: string | null;
+        history?: { role: string; content: string }[];
+      } = {
+        message: userMessage.content,
+        prompt_addenda: [...promptAddenda, ...attachmentAddenda],
+        session_id: sessionId,
+      };
+      if (!sessionId && historyPayload.length > 0) {
+        chatBody.history = historyPayload;
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: userMessage.content,
-          history: historyPayload,
-          prompt_addenda: [...promptAddenda, ...attachmentAddenda],
-          session_id: loadSessionId(),
-        }),
+        body: JSON.stringify(chatBody),
       });
       if (!res.ok || !res.body) {
         appendLog({

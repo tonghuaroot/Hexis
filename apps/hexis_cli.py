@@ -3242,7 +3242,12 @@ def _wait_port_ready(port: int, host: str = "127.0.0.1", overall: float = 45.0) 
     return False
 
 
-def _handle_ui(stack_root: Path, port: int, no_open: bool) -> int:
+def _handle_ui(
+    stack_root: Path,
+    port: int,
+    no_open: bool,
+    instance: str | None = None,
+) -> int:
     """Start the Next.js web dashboard."""
     import threading
     import time
@@ -3275,13 +3280,8 @@ def _handle_ui(stack_root: Path, port: int, no_open: bool) -> int:
             _print_err(f"{pkg_cmd} install failed (exit {rc})")
             return 1
 
-    # Ensure .env.local has DATABASE_URL
-    env_local = ui_dir / ".env.local"
-    dsn = db_dsn_from_env()
-    existing_env = env_local.read_text() if env_local.exists() else ""
-    if "DATABASE_URL" not in existing_env:
-        with open(env_local, "a") as f:
-            f.write(f"\nDATABASE_URL={dsn}\n")
+    active_instance = instance or resolve_instance()
+    dsn = db_dsn_from_env(active_instance) if active_instance else db_dsn_from_env()
 
     try:
         if _uses_local_embedding_sidecar(resolve_env_file(stack_root)):
@@ -3322,12 +3322,15 @@ def _handle_ui(stack_root: Path, port: int, no_open: bool) -> int:
             str(api_port),
         ]
         try:
+            api_env = os.environ.copy()
+            if active_instance:
+                api_env["HEXIS_INSTANCE"] = active_instance
             api_proc = subprocess.Popen(
                 api_cmd,
                 cwd=stack_root,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                env=os.environ.copy(),
+                env=api_env,
             )
         except Exception as exc:
             _print_err(f"Failed to start Hexis API: {exc}")
@@ -3371,6 +3374,10 @@ def _handle_ui(stack_root: Path, port: int, no_open: bool) -> int:
 
     dev_env = os.environ.copy()
     dev_env["HEXIS_API_URL"] = api_url
+    dev_env["HEXIS_DATABASE_URL"] = dsn
+    dev_env["DATABASE_URL"] = dsn
+    if active_instance:
+        dev_env["HEXIS_INSTANCE"] = active_instance
 
     try:
         result = subprocess.run(dev_cmd, cwd=ui_dir, env=dev_env)
@@ -3862,7 +3869,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
         return _run_module("apps.hexis_api", api_argv)
     if func == "ui":
         if is_source:
-            return _handle_ui(stack_root, args.port, args.no_open)
+            return _handle_ui(stack_root, args.port, args.no_open, args.instance)
         # pip install path: run UI via container
         if compose_file is None:
             _print_err("No compose file found. Reinstall hexis or run from a source checkout.")

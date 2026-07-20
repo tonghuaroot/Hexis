@@ -1,15 +1,22 @@
 import { PrismaClient } from "@prisma/client";
 
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
-const databaseUrl = process.env.HEXIS_DATABASE_URL || process.env.DATABASE_URL;
+import { resolveHexisDatabaseUrl } from "./instance-registry";
+
+const globalForPrisma = globalThis as unknown as {
+  prisma?: PrismaClient;
+  prismaDatabaseUrl?: string;
+};
+const databaseUrl = resolveHexisDatabaseUrl();
 
 export const prisma =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    datasources: databaseUrl ? { db: { url: databaseUrl } } : undefined,
-    log: ["error"],
-  });
+  globalForPrisma.prisma && globalForPrisma.prismaDatabaseUrl === databaseUrl
+    ? globalForPrisma.prisma
+    : new PrismaClient({
+        datasources: databaseUrl ? { db: { url: databaseUrl } } : undefined,
+        log: ["error"],
+      });
 
 if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;
+  globalForPrisma.prismaDatabaseUrl = databaseUrl;
 }
