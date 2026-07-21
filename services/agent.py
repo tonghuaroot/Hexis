@@ -287,10 +287,23 @@ async def run_subconscious_appraisal(
         db_ctx = _coerce_json_value(db_ctx_raw, {})
     except Exception as e:
         logger.debug("Appraisal DB context unavailable: %s", e)
+    try:
+        depth_raw = await conn.fetchval(
+            "SELECT appraisal_depth_for_stimulus($1, $2::jsonb)",
+            user_message,
+            json.dumps({"task": "inline_appraisal"}, default=str),
+        )
+        depth_ctx = _coerce_json_value(depth_raw, {})
+        if isinstance(depth_ctx, dict) and isinstance(depth_ctx.get("limits"), dict):
+            db_ctx["appraisal_depth"] = depth_ctx
+            db_ctx["limits"] = depth_ctx["limits"]
+    except Exception:
+        logger.debug("Appraisal depth lookup failed; using default budgets", exc_info=True)
     limits = db_ctx.get("limits") or {}
     context_chars = int(limits.get("context_chars") or _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS)
     memory_chars = int(limits.get("memory_chars") or 1200)
     memory_limit = int(limits.get("memory_limit") or 10)
+    max_tokens = int(limits.get("max_tokens") or 1800)
 
     if hydrated_context is not None:
         remaining = context_chars
@@ -336,7 +349,7 @@ async def run_subconscious_appraisal(
         doc, raw = await chat_json(
             llm_config=llm_config,
             messages=request_messages,
-            max_tokens=1800,
+            max_tokens=max_tokens,
             response_format={"type": "json_object"},
             fallback={},
         )

@@ -30,10 +30,10 @@ describe("connection status helpers", () => {
           id: "twitter_x",
           display_name: "Twitter/X",
           category: "social",
-          auth_type: "oauth2",
-          status: "planned",
-          capability_manifest: {},
-          setup_manifest: {},
+          auth_type: "local_export",
+          status: "available",
+          capability_manifest: { ingest: { status: "available" } },
+          setup_manifest: { default_capabilities: ["ingest"] },
           docs_url: null,
         },
       ],
@@ -134,6 +134,6 @@ describe("connection status helpers", () => {
     expect(byId.gmail.sourceItemCount).toBe(12);
     expect(byId.telegram.state).toBe("pending");
     expect(byId.telegram.runtime?.status).toBe("running");
-    expect(byId.twitter_x.state).toBe("planned");
+    expect(byId.twitter_x.state).toBe("available");
   });
 });

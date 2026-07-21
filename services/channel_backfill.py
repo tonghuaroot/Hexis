@@ -11,6 +11,7 @@ import json
 import logging
 import csv
 import hashlib
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -80,12 +81,28 @@ def estimate_channel_backfill(connector_id: str, requested_range: dict[str, Any]
             ),
             "requires_export_path": not bool(export_path),
         }
+    if connector_id == "twitter_x":
+        return {
+            "connector_id": connector_id,
+            "provider_status": "local_archive_import" if export_path else "archive_required",
+            "estimated_items": max_messages,
+            "page_size": page_size,
+            "estimated_pages": pages,
+            "cost_class": "blocked_until_archive" if not export_path else (
+                "local_medium" if max_messages <= 1000 else "local_large"
+            ),
+            "requires_export_path": not bool(export_path),
+            "limitations": (
+                "Twitter/X API history access is not configured here; import a Twitter/X archive "
+                "zip extraction or archive JS/JSON file for historical posts and DMs."
+            ),
+        }
     return {
         "connector_id": connector_id,
-        "provider_status": "planned" if connector_id == "twitter_x" else "unknown",
-        "estimated_items": 0 if connector_id == "twitter_x" else max_messages,
-        "estimated_pages": 0 if connector_id == "twitter_x" else pages,
-        "cost_class": "unavailable" if connector_id == "twitter_x" else "unknown",
+        "provider_status": "unknown",
+        "estimated_items": max_messages,
+        "estimated_pages": pages,
+        "cost_class": "unknown",
     }
 
 
@@ -430,6 +447,216 @@ def signal_export_message_to_source_item(
     }
 
 
+def _archive_json_payload(path: Path) -> Any:
+    text = path.read_text(encoding="utf-8-sig")
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if stripped[0] in "[{":
+        return json.loads(stripped)
+    equals = stripped.find("=")
+    start_candidates = [i for i in (stripped.find("[", equals + 1), stripped.find("{", equals + 1)) if i >= 0]
+    if not start_candidates:
+        raise ChannelBackfillError(f"Twitter/X archive file has no JSON payload: {path}")
+    payload = stripped[min(start_candidates):].rstrip().rstrip(";")
+    return json.loads(payload)
+
+
+def _twitter_archive_files(path: Path) -> list[Path]:
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        raise ChannelBackfillError(f"Twitter/X archive path not found: {path}")
+    candidates: list[Path] = []
+    for pattern in (
+        "data/tweet*.js",
+        "data/tweets*.js",
+        "data/direct-message*.js",
+        "data/direct_messages*.js",
+        "data/dm*.js",
+        "tweet*.js",
+        "tweets*.js",
+        "direct-message*.js",
+        "direct_messages*.js",
+        "dm*.js",
+        "*.json",
+    ):
+        candidates.extend(path.glob(pattern))
+    unique = sorted({p.resolve(): p for p in candidates if p.is_file()}.values())
+    if not unique:
+        raise ChannelBackfillError(
+            "Twitter/X archive import could not find tweet*.js, direct-message*.js, or JSON files."
+        )
+    return unique
+
+
+def _parse_twitter_timestamp(value: Any) -> datetime | None:
+    parsed = _parse_export_timestamp(value)
+    if parsed is not None:
+        return parsed
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = parsedate_to_datetime(text)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def twitter_tweet_to_source_item(
+    tweet: dict[str, Any],
+    *,
+    account_key: str,
+    export_path: str,
+) -> dict[str, Any] | None:
+    tweet_id = str(tweet.get("id_str") or tweet.get("id") or "").strip()
+    text = str(tweet.get("full_text") or tweet.get("text") or "").strip()
+    if not tweet_id and not text:
+        return None
+    timestamp = _parse_twitter_timestamp(tweet.get("created_at"))
+    mentions: list[dict[str, Any]] = []
+    entities = tweet.get("entities")
+    if isinstance(entities, dict):
+        for mention in entities.get("user_mentions") or []:
+            if isinstance(mention, dict):
+                mentions.append({
+                    "role": "mention",
+                    "id": mention.get("id_str") or mention.get("screen_name") or "",
+                    "name": mention.get("screen_name") or mention.get("name") or "",
+                })
+    provider_id = f"tweet:{tweet_id or _stable_fragment_id(text)}"
+    content = "\n".join([
+        "Twitter/X post",
+        f"Tweet id: {tweet_id or '(archive fragment)'}",
+        f"Export: {export_path}",
+        "",
+        "Post:",
+        text or "(No text body)",
+    ])
+    return {
+        "provider_item_id": provider_id,
+        "title": f"Twitter/X post {tweet_id or _stable_fragment_id(text)}",
+        "content": content,
+        "item_kind": "post",
+        "provider_thread_id": str(tweet.get("conversation_id_str") or tweet.get("in_reply_to_status_id_str") or "") or None,
+        "item_timestamp": timestamp,
+        "labels": ["twitter_x", "tweet"],
+        "participants": [{"role": "author", "id": account_key}, *mentions],
+        "attachments": [],
+        "sensitivity": "shared",
+        "metadata": {
+            "twitter_x_tweet_id": tweet_id,
+            "twitter_x_raw_tweet": tweet,
+            "export_path": export_path,
+            "account_key": account_key,
+        },
+    }
+
+
+def twitter_dm_to_source_item(
+    message_create: dict[str, Any],
+    *,
+    conversation_id: str,
+    account_key: str,
+    export_path: str,
+) -> dict[str, Any] | None:
+    message_id = str(
+        message_create.get("id")
+        or message_create.get("messageId")
+        or message_create.get("message_id")
+        or ""
+    ).strip()
+    text = str(message_create.get("text") or message_create.get("message") or "").strip()
+    if not message_id and not text:
+        return None
+    sender = str(message_create.get("senderId") or message_create.get("sender_id") or "unknown")
+    recipient = str(message_create.get("recipientId") or message_create.get("recipient_id") or "")
+    timestamp = _parse_twitter_timestamp(
+        message_create.get("createdAt")
+        or message_create.get("created_at")
+        or message_create.get("timestamp")
+    )
+    provider_id = f"dm:{conversation_id}:{message_id or _stable_fragment_id(text)}"
+    content = "\n".join([
+        f"Twitter/X DM conversation: {conversation_id}",
+        f"Sender: {sender}",
+        f"Recipient: {recipient or '(unknown)'}",
+        f"Export: {export_path}",
+        "",
+        "Message:",
+        text or "(No text body)",
+    ])
+    participants = [{"role": "sender", "id": sender}]
+    if recipient:
+        participants.append({"role": "recipient", "id": recipient})
+    return {
+        "provider_item_id": provider_id,
+        "title": f"Twitter/X DM in {conversation_id}",
+        "content": content,
+        "item_kind": "message",
+        "provider_thread_id": conversation_id,
+        "item_timestamp": timestamp,
+        "labels": ["twitter_x", "dm"],
+        "participants": participants,
+        "attachments": [],
+        "sensitivity": "private",
+        "metadata": {
+            "twitter_x_conversation_id": conversation_id,
+            "twitter_x_message_id": message_id,
+            "twitter_x_raw_dm": message_create,
+            "export_path": export_path,
+            "account_key": account_key,
+        },
+    }
+
+
+def _iter_twitter_archive_sources(path: Path, *, account_key: str) -> Iterable[dict[str, Any]]:
+    for archive_file in _twitter_archive_files(path):
+        payload = _archive_json_payload(archive_file)
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            tweet = item.get("tweet")
+            if isinstance(tweet, dict):
+                source = twitter_tweet_to_source_item(
+                    tweet,
+                    account_key=account_key,
+                    export_path=str(path),
+                )
+                if source:
+                    yield source
+                continue
+            conversation = item.get("dmConversation") or item.get("dm_conversation")
+            if isinstance(conversation, dict):
+                conversation_id = str(
+                    conversation.get("conversationId")
+                    or conversation.get("conversation_id")
+                    or conversation.get("id")
+                    or archive_file.stem
+                )
+                messages = conversation.get("messages") or []
+                if not isinstance(messages, list):
+                    continue
+                for message in messages:
+                    if not isinstance(message, dict):
+                        continue
+                    message_create = message.get("messageCreate") or message.get("message_create") or message
+                    if isinstance(message_create, dict):
+                        source = twitter_dm_to_source_item(
+                            message_create,
+                            conversation_id=conversation_id,
+                            account_key=account_key,
+                            export_path=str(path),
+                        )
+                        if source:
+                            yield source
+
+
 async def _slack_get(token: str, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
     url = path if path.startswith("http") else f"{SLACK_API_BASE}{path}"
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -618,7 +845,7 @@ async def process_local_export_backfill_job(pool: Any, job: dict[str, Any], *, c
     path = _local_export_path(job)
     if path is None:
         return await _fail_job(pool, job_id, unsupported_backfill_message(connector_id))
-    if not path.exists() or not path.is_file():
+    if not path.exists() or (connector_id != "twitter_x" and not path.is_file()):
         return await _fail_job(pool, job_id, f"{connector_id} export file not found: {path}")
 
     requested = _requested_range(job)
@@ -629,7 +856,7 @@ async def process_local_export_backfill_job(pool: Any, job: dict[str, Any], *, c
     high_watermark: datetime | None = None
 
     try:
-        payload = _load_json_or_csv_payload(path)
+        payload = None if connector_id == "twitter_x" else _load_json_or_csv_payload(path)
         sources: list[dict[str, Any]] = []
         if connector_id == "telegram":
             for chat_label, chat in _iter_telegram_messages(payload):
@@ -656,6 +883,9 @@ async def process_local_export_backfill_job(pool: Any, job: dict[str, Any], *, c
                 )
                 if source:
                     sources.append(source)
+        elif connector_id == "twitter_x":
+            for source in _iter_twitter_archive_sources(path, account_key=account_key):
+                sources.append(source)
         else:
             return await _fail_job(pool, job_id, unsupported_backfill_message(connector_id))
 
@@ -721,7 +951,11 @@ def unsupported_backfill_message(connector_id: str) -> str:
             "pointing at a local Signal JSON/CSV export."
         )
     if connector_id == "twitter_x":
-        return "Twitter/X OAuth and historical ingestion are still planned; no provider adapter is available."
+        return (
+            "Twitter/X live OAuth history is not configured here. Use live ingestion later, "
+            "or start a backfill with requested_range.export_path pointing at an extracted "
+            "Twitter/X archive directory or tweet/direct-message JS/JSON archive file."
+        )
     return f"{connector_id} historical backfill is not implemented."
 
 
@@ -731,7 +965,7 @@ async def process_channel_backfill_job(pool: Any, job: dict[str, Any]) -> dict[s
     job_id = str(job.get("id") or "")
     if connector_id == "slack":
         return await process_slack_backfill_job(pool, job)
-    if connector_id in {"telegram", "signal"} and _local_export_path(job) is not None:
+    if connector_id in {"telegram", "signal", "twitter_x"} and _local_export_path(job) is not None:
         return await process_local_export_backfill_job(pool, job, connector_id=connector_id)
     if job_id:
         return await _fail_job(pool, job_id, unsupported_backfill_message(connector_id))

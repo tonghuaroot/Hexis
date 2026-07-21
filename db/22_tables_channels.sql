@@ -58,3 +58,24 @@ CREATE TABLE IF NOT EXISTS channel_deliveries (
 
 CREATE INDEX IF NOT EXISTS idx_channel_deliveries_created
     ON channel_deliveries(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS channel_presence_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    channel_type TEXT NOT NULL,
+    channel_id TEXT,
+    presence_kind TEXT NOT NULL
+        CHECK (presence_kind IN ('online', 'offline', 'typing', 'processing', 'idle')),
+    direction TEXT NOT NULL DEFAULT 'system'
+        CHECK (direction IN ('system', 'inbound', 'outbound')),
+    sender_id TEXT,
+    session_key TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_presence_events_recent
+    ON channel_presence_events (channel_type, channel_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_channel_presence_events_live
+    ON channel_presence_events (expires_at)
+    WHERE expires_at IS NOT NULL;

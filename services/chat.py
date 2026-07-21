@@ -199,6 +199,27 @@ async def _build_execution_context(
     return ctx
 
 
+async def _apply_chat_energy_effects(
+    pool: Any,
+    *,
+    tool_energy_spent: int = 0,
+    emotional_state: dict[str, Any] | None = None,
+    surface: str = "chat",
+) -> dict[str, Any]:
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT apply_chat_turn_energy_effects($1::int, $2::jsonb, $3::jsonb)",
+                int(tool_energy_spent or 0),
+                json.dumps(emotional_state or {}, default=str),
+                json.dumps({"surface": surface}, default=str),
+            )
+        return json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        logger.debug("Chat energy effects failed (non-fatal)", exc_info=True)
+        return {}
+
+
 async def chat_turn(
     *,
     user_message: str,
@@ -262,6 +283,7 @@ async def chat_turn(
                 background_dsn=dsn,
                 surface=surface,
             )
+            await _apply_chat_energy_effects(pool, surface=surface)
             new_history = await _hydrate_after_persist(mem_client, session_id, fallback_history)
             return {"assistant": assistant_text, "history": new_history}
 
@@ -295,6 +317,11 @@ async def chat_turn(
             session_id=session_id,
             user_label=user_label,
             background_dsn=dsn,
+            surface=surface,
+        )
+        await _apply_chat_energy_effects(
+            pool,
+            tool_energy_spent=getattr(loop_result, "energy_spent", 0),
             surface=surface,
         )
         new_history = await _hydrate_after_persist(mem_client, session_id, fallback_history)
@@ -468,6 +495,16 @@ async def stream_chat_events(
                             "result": persisted,
                         },
                     )
+                    energy_result = await _apply_chat_energy_effects(pool, surface=surface)
+                    if energy_result:
+                        yield AgentEventData(
+                            event=AgentEvent.PHASE_CHANGE,
+                            data={
+                                "phase": "chat_energy",
+                                "status": "end",
+                                "result": energy_result,
+                            },
+                        )
                 yield AgentEventData(
                     event=AgentEvent.LOOP_END,
                     data={"stopped_reason": "completed", "runtime": "rlm"},
@@ -489,6 +526,7 @@ async def stream_chat_events(
         collected: list[str] = []
         timed_out = False
         appraisal_affect: dict[str, Any] | None = None
+        tool_energy_spent = 0
 
         async for event in stream_agent(
             pool,
@@ -522,6 +560,11 @@ async def stream_chat_events(
                     emotion = signals.get("emotional_state") if isinstance(signals, dict) else None
                     if isinstance(emotion, dict):
                         appraisal_affect = emotion
+            elif event.event == AgentEvent.TOOL_RESULT:
+                try:
+                    tool_energy_spent += int(event.data.get("energy_spent") or 0)
+                except Exception:
+                    pass
             yield event
 
         full_text = "".join(collected)
@@ -545,6 +588,21 @@ async def stream_chat_events(
                     "result": persisted,
                 },
             )
+            energy_result = await _apply_chat_energy_effects(
+                pool,
+                tool_energy_spent=tool_energy_spent,
+                emotional_state=appraisal_affect,
+                surface=surface,
+            )
+            if energy_result:
+                yield AgentEventData(
+                    event=AgentEvent.PHASE_CHANGE,
+                    data={
+                        "phase": "chat_energy",
+                        "status": "end",
+                        "result": energy_result,
+                    },
+                )
     finally:
         if own_pool:
             await pool.close()

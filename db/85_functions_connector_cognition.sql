@@ -567,6 +567,33 @@ AS $$
         'offset', GREATEST(COALESCE(p_offset, 0), 0)
     )
     FROM page;
+	$$;
+
+CREATE OR REPLACE FUNCTION get_approved_user_model_context(
+    p_limit INT DEFAULT 12
+) RETURNS JSONB
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'id', c.id::text,
+        'claim_key', c.claim_key,
+        'category', c.category,
+        'claim', c.claim,
+        'confidence', c.confidence,
+        'importance', c.importance,
+        'evidence_count', c.evidence_count,
+        'evidence_refs', c.evidence_refs,
+        'last_evidence_at', c.last_evidence_at
+    ) ORDER BY c.importance DESC, c.last_evidence_at DESC NULLS LAST, c.updated_at DESC), '[]'::jsonb)
+    FROM (
+        SELECT *
+        FROM user_model_claims
+        WHERE status = 'active'
+          AND review_status = 'approved'
+        ORDER BY importance DESC, last_evidence_at DESC NULLS LAST, updated_at DESC
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 12), 1), 50)
+    ) c;
 $$;
 
 CREATE OR REPLACE FUNCTION review_user_model_claim(

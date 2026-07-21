@@ -162,11 +162,15 @@ BEGIN
     ELSIF connector = 'twitter_x' THEN
         RETURN jsonb_build_object(
             'connector_id', connector,
-            'provider_status', 'planned',
-            'estimated_items', 0,
-            'estimated_pages', 0,
-            'cost_class', 'unavailable',
-            'limitations', 'Twitter/X OAuth and historical ingestion are planned but no provider adapter is available yet.'
+            'provider_status', CASE WHEN export_path IS NULL THEN 'archive_required' ELSE 'local_archive_import' END,
+            'estimated_items', max_messages,
+            'page_size', page_size,
+            'estimated_pages', pages,
+            'cost_class', CASE WHEN export_path IS NULL THEN 'blocked_until_archive'
+                               WHEN max_messages <= 1000 THEN 'local_medium'
+                               ELSE 'local_large' END,
+            'requires_export_path', export_path IS NULL,
+            'limitations', 'Twitter/X live OAuth history is not configured here; import a Twitter/X archive export for historical posts and DMs.'
         );
     END IF;
 

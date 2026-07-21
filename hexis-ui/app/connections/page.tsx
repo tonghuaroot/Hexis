@@ -180,7 +180,7 @@ function ConnectorCard({
   const nextStep = asString(setupManifest.user_next_step);
   const capabilities = capabilityKeys(connector.capability_manifest);
   const canStartSetup =
-    ["slack", "telegram", "signal"].includes(connector.id) &&
+    ["slack", "telegram", "signal", "twitter_x"].includes(connector.id) &&
     summary.activeConnections.length === 0 &&
     summary.activeAttempts.length === 0 &&
     connector.status === "available";
@@ -321,6 +321,14 @@ function ConnectorCard({
         <ChannelControls
           summary={summary}
           canStartSetup={canStartSetup}
+          actionBusy={actionBusy}
+          onAction={onAction}
+        />
+      ) : null}
+
+      {connector.id === "twitter_x" ? (
+        <ArchiveImportControls
+          summary={summary}
           actionBusy={actionBusy}
           onAction={onAction}
         />
@@ -477,6 +485,62 @@ function GmailControls({
   );
 }
 
+function ArchiveImportControls({
+  summary,
+  actionBusy,
+  onAction,
+}: {
+  summary: ConnectorSummary;
+  actionBusy: string | null;
+  onAction: IntegrationActionHandler;
+}) {
+  const connectorId = summary.connector.id;
+  const connection = summary.activeConnections[0] || null;
+  const [archivePath, setArchivePath] = useState("");
+  const [historyMax, setHistoryMax] = useState("1000");
+  const busy = actionBusy === `${connectorId}:history`;
+
+  if (!connection) return null;
+
+  return (
+    <div className="space-y-3 rounded-md border border-[var(--outline)] px-3 py-3">
+      <div className="grid gap-2 md:grid-cols-[1fr_7rem_auto]">
+        <TextInput
+          value={archivePath}
+          onChange={(event) => setArchivePath(event.target.value)}
+          placeholder="Twitter/X archive directory or JS file"
+          className="py-2 text-xs"
+        />
+        <TextInput
+          type="number"
+          min={1}
+          max={5000}
+          value={historyMax}
+          onChange={(event) => setHistoryMax(event.target.value)}
+          aria-label="Max items"
+          className="py-2 text-xs"
+        />
+        <Button
+          type="button"
+          variant="secondary"
+          disabled={Boolean(actionBusy) || archivePath.trim().length === 0}
+          onClick={() =>
+            void onAction(`${connectorId}:history`, "start_connector_backfill", {
+              connector_id: connectorId,
+              account_key: connection.account_key,
+              max_messages: parseMaxMessages(historyMax, 5000),
+              export_path: archivePath.trim(),
+            })
+          }
+          className="px-3 py-2 text-xs"
+        >
+          {busy ? "Queuing..." : "Import archive"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ChannelControls({
   summary,
   canStartSetup,
@@ -580,7 +644,7 @@ function ChannelControls({
           <TextInput
             value={historyTarget}
             onChange={(event) => setHistoryTarget(event.target.value)}
-            placeholder={connectorId === "slack" ? "Slack channel ID" : "Local export path"}
+            placeholder={connectorId === "slack" ? "Slack channel ID" : "Local export/archive path"}
             className="py-2 text-xs"
           />
           <TextInput

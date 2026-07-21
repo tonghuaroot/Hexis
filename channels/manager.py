@@ -115,6 +115,7 @@ class ChannelManager:
         while self._running:
             try:
                 await self._record_runtime_status(ctype, "running", configured=True, running=True)
+                await self._record_presence(ctype, None, "online", metadata={"source": "channel_manager"})
                 await adapter.start(on_message)
             except asyncio.CancelledError:
                 break
@@ -129,6 +130,7 @@ class ChannelManager:
                 )
                 await asyncio.sleep(10)
         await self._record_runtime_status(ctype, "stopped", configured=True, running=False)
+        await self._record_presence(ctype, None, "offline", metadata={"source": "channel_manager"})
 
     async def _record_runtime_status(
         self,
@@ -153,6 +155,34 @@ class ChannelManager:
                 )
         except Exception:
             logger.debug("Failed to record channel adapter runtime for %s", channel_type, exc_info=True)
+
+    async def _record_presence(
+        self,
+        channel_type: str,
+        channel_id: str | None,
+        presence_kind: str,
+        *,
+        direction: str = "system",
+        sender_id: str | None = None,
+        session_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        ttl_seconds: int = 20,
+    ) -> None:
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT record_channel_presence($1, $2, $3, $4, $5, $6, $7::jsonb, $8)",
+                    channel_type,
+                    channel_id,
+                    presence_kind,
+                    direction,
+                    sender_id,
+                    session_key,
+                    json.dumps(metadata or {"source": "channel_manager"}),
+                    ttl_seconds,
+                )
+        except Exception:
+            logger.debug("Failed to record channel presence for %s", channel_type, exc_info=True)
 
     async def _handle_message(self, msg: ChannelMessage) -> None:
         """Handle an inbound message by routing to conversation handler."""
@@ -199,6 +229,20 @@ class ChannelManager:
         if adapter.capabilities.typing_indicator:
             try:
                 await adapter.send_typing(msg.channel_id)
+                await self._record_presence(
+                    msg.channel_type,
+                    msg.channel_id,
+                    "typing",
+                    direction="outbound",
+                    sender_id=msg.sender_id,
+                    session_key=f"{msg.channel_type}:{msg.channel_id}:{msg.sender_id}",
+                    metadata={
+                        "source": "channel_manager",
+                        "reply_to": msg.message_id,
+                        "thread_id": msg.thread_id,
+                    },
+                    ttl_seconds=15,
+                )
             except Exception:
                 pass  # Non-critical
 
@@ -267,6 +311,7 @@ class ChannelManager:
             try:
                 await adapter.stop()
                 await self._record_runtime_status(ctype, "stopped", configured=True, running=False)
+                await self._record_presence(ctype, None, "offline", metadata={"source": "channel_manager"})
                 logger.info("Stopped channel adapter: %s", ctype)
             except Exception:
                 logger.exception("Error stopping channel adapter: %s", ctype)

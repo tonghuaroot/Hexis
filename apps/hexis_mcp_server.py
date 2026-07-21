@@ -622,16 +622,15 @@ def _tools() -> list[Any]:
 
 
 async def _list_server_tools(registry) -> tuple[list[Any], set[str]]:
-    """Compose legacy and registry MCP tools from the live policy surface."""
+    """List MCP tools from the live registry, with opt-in legacy compatibility."""
 
-    tools = _tools()
-    legacy_names = {tool.name for tool in tools}
+    tools: list[Any] = []
     registry_names: set[str] = set()
     from core.tools import ToolContext
 
     for spec in await registry.get_mcp_tools(ToolContext.MCP):
         name = spec["name"]
-        if name in legacy_names:
+        if name in registry_names:
             continue
         tools.append(
             _tool(
@@ -641,7 +640,32 @@ async def _list_server_tools(registry) -> tuple[list[Any], set[str]]:
             )
         )
         registry_names.add(name)
+
+    if await _legacy_mcp_enabled(registry):
+        for tool in _tools():
+            if tool.name in registry_names:
+                continue
+            tools.append(tool)
     return tools, registry_names
+
+
+async def _legacy_mcp_enabled(registry) -> bool:
+    raw = os.getenv("HEXIS_MCP_LEGACY_COMPAT", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+
+    pool = getattr(registry, "pool", None)
+    if pool is None:
+        return False
+    try:
+        async with pool.acquire() as conn:
+            return bool(await conn.fetchval(
+                "SELECT COALESCE(get_config_bool('mcp.legacy_compat_enabled'), false)"
+            ))
+    except Exception:
+        return False
 
 
 async def _dispatch_server_tool(
@@ -656,8 +680,8 @@ async def _dispatch_server_tool(
     from mcp.types import CallToolResult, TextContent
 
     try:
-        legacy_names = {tool.name for tool in _tools()}
-        if name not in legacy_names and name not in registry_tool_names:
+        legacy_enabled = await _legacy_mcp_enabled(registry)
+        if name not in registry_tool_names:
             _, current_registry_names = await _list_server_tools(registry)
             registry_tool_names.clear()
             registry_tool_names.update(current_registry_names)
@@ -671,10 +695,12 @@ async def _dispatch_server_tool(
             result = await registry.execute(name, arguments or {}, context)
             text = result.to_model_output()
             is_error = not result.success
-        else:
+        elif legacy_enabled and name in {tool.name for tool in _tools()}:
             result = await _dispatch_tool(client, name, arguments or {})
             text = json.dumps(_jsonable(result), indent=2, sort_keys=True)
             is_error = False
+        else:
+            raise ValueError(f"Unknown tool '{name}'")
         return CallToolResult(
             content=[TextContent(type="text", text=text)],
             isError=is_error,

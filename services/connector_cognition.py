@@ -44,6 +44,13 @@ _JUDGMENT_PATTERNS = (
     re.compile(r"\bI\s+(?:decide|judge|evaluate|prioritize)\s+([^.!?\n]{2,140})", re.I),
     re.compile(r"\b(?:what matters to me is|the important thing is)\s+([^.!?\n]{2,140})", re.I),
 )
+_EPHEMERAL_USER_MODEL_PATTERNS = (
+    re.compile(r"\bthis is (?:just )?(?:a )?test\b", re.I),
+    re.compile(r"\bjust testing\b", re.I),
+    re.compile(r"\bignore this\b", re.I),
+    re.compile(r"\bpretend (?:that )?I\b", re.I),
+    re.compile(r"\bsample (?:message|data|conversation)\b", re.I),
+)
 
 _URGENT_TERMS = {
     "crash",
@@ -151,6 +158,13 @@ def _message_body(content: str) -> str:
     return content
 
 
+def _looks_ephemeral_user_model_text(text: str) -> bool:
+    lowered = text.lower()
+    if len(lowered.strip()) < 12:
+        return True
+    return any(pattern.search(text) for pattern in _EPHEMERAL_USER_MODEL_PATTERNS)
+
+
 def extract_user_model_claims(item: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract conservative user-model claims from one connector source item.
 
@@ -158,6 +172,8 @@ def extract_user_model_claims(item: dict[str, Any]) -> list[dict[str, Any]]:
     synthesis can replace this detector without changing storage.
     """
     text = _message_body(str(item.get("content") or ""))
+    if _looks_ephemeral_user_model_text(text):
+        return []
     claims: list[dict[str, Any]] = []
 
     for pattern in _PREFERENCE_PATTERNS:

@@ -572,10 +572,11 @@ def _integration_action_arguments(
         connector_id = (
             str(args.get("connector_id") or "").strip().lower().replace("-", "_")
         )
-        if connector_id not in {"slack", "telegram", "signal"}:
+        allowed = {"slack", "telegram", "signal", "twitter_x"} if action == "start_setup" else {"slack", "telegram", "signal"}
+        if connector_id not in allowed:
             raise HTTPException(
                 status_code=422,
-                detail=f"{action} supports Slack, Telegram, and Signal.",
+                detail=f"{action} supports {', '.join(sorted(allowed))}.",
             )
         args["connector_id"] = connector_id
     if action in {"start_setup", "connect_gmail", "start_gmail_backfill", "start_connector_backfill"}:

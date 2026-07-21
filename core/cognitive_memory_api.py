@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, AsyncIterator, Iterable
@@ -150,6 +150,7 @@ class HydratedContext:
     # Focused multi-hop causal/contradiction/support paths among the recalled
     # memories. The DB builds these; renderers only carry and display them.
     context_paths: dict[str, Any] | None = None
+    user_model: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _deduplicate_memories(memories: Iterable[Memory]) -> list[Memory]:
@@ -331,7 +332,9 @@ class CognitiveMemory:
 
         async def _fetch_context():
             async with self._pool.acquire() as conn:
-                return await conn.fetchval("SELECT gather_turn_context()")
+                return await conn.fetchval(
+                    "SELECT gather_turn_context() || jsonb_build_object('user_model', get_approved_user_model_context(12))"
+                )
 
         memories, partial, ctx_row = await _aio.gather(
             _fetch_memories(), _fetch_partial(), _fetch_context()
@@ -344,6 +347,7 @@ class CognitiveMemory:
         emotional_state = ctx.get("emotional_state") if include_emotional_state else None
         goals = ctx.get("goals") if include_goals else None
         urgent_drives = ctx.get("urgent_drives", []) if include_drives else []
+        user_model = ctx.get("user_model", [])
 
         # Seed the dynamic sub-knowledge-graph from the recalled memories. Runs
         # after recall (it depends on the recalled ids), as one small round-trip.
@@ -376,6 +380,7 @@ class CognitiveMemory:
             partial_activations=partial,
             identity=list(identity) if isinstance(identity, list) else [],
             worldview=list(worldview) if isinstance(worldview, list) else [],
+            user_model=list(user_model) if isinstance(user_model, list) else [],
             emotional_state=(dict(emotional_state) if isinstance(emotional_state, dict) else None),
             goals=dict(goals) if isinstance(goals, dict) else None,
             urgent_drives=(list(urgent_drives) if isinstance(urgent_drives, list) else []),
@@ -1827,6 +1832,7 @@ def hydrated_context_to_render_json(context: HydratedContext) -> dict[str, Any]:
         ],
         "identity": context.identity,
         "worldview": context.worldview,
+        "user_model": context.user_model,
         "emotional_state": context.emotional_state,
         "goals": context.goals,
         "urgent_drives": context.urgent_drives,
@@ -1849,13 +1855,23 @@ async def render_chat_memory_context_db(
     the knowledge-subgraph section. The former Python renderer was deleted;
     golden fixtures in tests/fixtures/prompt_render/ pin the output.
     """
+    render_payload = hydrated_context_to_render_json(context)
     raw = await conn.fetchval(
         "SELECT render_chat_memory_context($1::jsonb, $2::int, $3::int)",
-        json.dumps(hydrated_context_to_render_json(context), default=str),
+        json.dumps(render_payload, default=str),
         max_memories,
         max_partials,
     )
-    return str(raw or "")
+    text = str(raw or "")
+    if context.user_model and "## User Model" not in text:
+        user_model_raw = await conn.fetchval(
+            "SELECT render_user_model_context($1::jsonb)",
+            json.dumps(render_payload.get("user_model") or [], default=str),
+        )
+        user_model_text = str(user_model_raw or "").strip()
+        if user_model_text:
+            text = f"{text.rstrip()}\n{user_model_text}" if text.strip() else user_model_text
+    return text
 
 
 def _coerce_json(val: Any) -> Any:

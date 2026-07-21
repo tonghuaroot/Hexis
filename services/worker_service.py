@@ -25,6 +25,7 @@ from services.external_calls import ExternalCallProcessor
 from services.heartbeat_agentic import finalize_heartbeat, run_agentic_heartbeat
 from services.heartbeat_runner import execute_heartbeat_decision
 from services.hmx_reembedding import run_hmx_reembed_step
+from services.memory_embeddings import run_memory_embed_step
 from services.source_chunks import run_source_chunk_embed_step
 from services.recmem import (
     run_recmem_consolidation_step,
@@ -557,6 +558,18 @@ class MaintenanceWorker:
         except Exception:
             logger.exception("source chunk embed step failed")
 
+    async def _run_memory_embedding(self) -> None:
+        """Embed pending durable memories off the memory-creation path."""
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                result = await run_memory_embed_step(conn)
+            if not result.get("skipped"):
+                logger.info("Memory embed step: %s", result)
+        except Exception:
+            logger.exception("memory embed step failed")
+
     async def _run_memory_rest_if_enabled(self) -> None:
         """Drain the memory-consolidation summarization queue (LLM compaction +
         distill-upward). Consolidation/pruning themselves run in the DB maintenance
@@ -625,6 +638,7 @@ class MaintenanceWorker:
                     await self._run_maintenance_if_due()
                     await self._run_subconscious_if_due()
                     await self._run_reconsolidation_if_pending()
+                    await self._run_memory_embedding()
                     await self._run_recmem_if_enabled()
                     await self._run_source_chunk_embedding()
                     await self._run_memory_rest_if_enabled()

@@ -1,5 +1,9 @@
 -- Hexis schema: triggers.
 SET search_path = public, ag_catalog, "$user";
+CREATE TRIGGER trg_memory_embedding_lifecycle
+    BEFORE INSERT OR UPDATE OF embedding, embedding_status ON memories
+    FOR EACH ROW
+    EXECUTE FUNCTION normalize_memory_embedding_lifecycle();
 CREATE TRIGGER trg_memory_timestamp
     BEFORE UPDATE ON memories
     FOR EACH ROW
@@ -10,7 +14,7 @@ CREATE TRIGGER trg_importance_on_access
     WHEN (NEW.access_count != OLD.access_count)
     EXECUTE FUNCTION update_memory_importance();
 CREATE TRIGGER trg_neighborhood_staleness
-    AFTER UPDATE OF importance, status ON memories
+    AFTER UPDATE OF embedding, importance, status ON memories
     FOR EACH ROW
     EXECUTE FUNCTION mark_neighborhoods_stale();
 CREATE TRIGGER trg_auto_episode_assignment
@@ -20,6 +24,11 @@ CREATE TRIGGER trg_auto_episode_assignment
 CREATE TRIGGER trg_auto_worldview_alignment
     AFTER INSERT ON memories
     FOR EACH ROW
+    EXECUTE FUNCTION auto_check_worldview_alignment();
+CREATE TRIGGER trg_auto_worldview_alignment_embedding
+    AFTER UPDATE OF embedding ON memories
+    FOR EACH ROW
+    WHEN (NEW.embedding IS NOT NULL)
     EXECUTE FUNCTION auto_check_worldview_alignment();
 CREATE TRIGGER trg_heartbeat_state_update
 INSTEAD OF UPDATE ON heartbeat_state

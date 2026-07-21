@@ -5,6 +5,7 @@ import json
 import pytest
 
 from services.connector_cognition import (
+    extract_user_model_claims,
     run_connector_importance_step,
     run_user_model_synthesis_step,
 )
@@ -15,6 +16,13 @@ pytestmark = [pytest.mark.asyncio(loop_scope="session")]
 
 def _j(value):
     return json.loads(value) if isinstance(value, str) else value
+
+
+async def test_user_model_rules_ignore_explicit_test_filler():
+    claims = extract_user_model_claims({
+        "content": "Message:\nThis is just a test. I like green buttons in this sample conversation.",
+    })
+    assert claims == []
 
 
 async def _stub_get_embedding(conn):

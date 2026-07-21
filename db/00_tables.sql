@@ -198,7 +198,13 @@ CREATE TABLE memories (
     type memory_type NOT NULL,
     status memory_status DEFAULT 'active',
     content TEXT NOT NULL,
-    embedding vector(768) NOT NULL,
+    embedding vector(768),
+    embedded_at TIMESTAMPTZ,
+    embedding_model TEXT,
+    embedding_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (embedding_status IN ('pending', 'in_progress', 'embedded', 'failed', 'skipped')),
+    embedding_claimed_at TIMESTAMPTZ,
+    embedding_attempts INT NOT NULL DEFAULT 0,
     valid_from TIMESTAMPTZ,
     valid_until TIMESTAMPTZ,
     superseded_by UUID REFERENCES memories(id) ON DELETE SET NULL,
@@ -219,6 +225,16 @@ CREATE TABLE memories (
     fidelity FLOAT NOT NULL DEFAULT 1.0 CHECK (fidelity >= 0 AND fidelity <= 1),
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+
+CREATE TABLE memory_reinforcement_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL DEFAULT 'recall',
+    source TEXT NOT NULL DEFAULT 'system',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNLOGGED TABLE working_memory (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -613,6 +629,9 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('agent.tools', '["recall","sense_memory_availability","request_background_search","recall_recent","recall_episode","explore_concept","explore_cluster","get_procedures","get_strategies","list_recent_episodes","create_goal","schedule_task","list_scheduled_tasks","update_scheduled_task","delete_scheduled_task","queue_user_message"]'::jsonb, 'Allowed tool names for agent tool use')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config_defaults (key, value, description) VALUES
+    ('mcp.legacy_compat_enabled', 'false'::jsonb, 'Expose the old handwritten MCP compatibility tool surface in addition to registry-native tools')
+ON CONFLICT (key) DO NOTHING;
+INSERT INTO config_defaults (key, value, description) VALUES
     ('maintenance.maintenance_interval_seconds', '60'::jsonb, 'Seconds between subconscious maintenance ticks'),
     ('maintenance.subconscious_enabled', 'false'::jsonb, 'Enable subconscious decider (LLM-based pattern detection)'),
     ('maintenance.subconscious_interval_seconds', '300'::jsonb, 'Seconds between subconscious decider runs'),
@@ -662,7 +681,9 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.recmem_gc_idle_days', '30'::jsonb, 'Archive raw RecMem units not accessed within this many days once routing/extraction is settled'),
     ('memory.recmem_gc_consolidated_grace_days', '7'::jsonb, 'Keep raw units this many days after consolidation before archiving them from RecMem recall'),
     ('memory.recmem_gc_task_retention_days', '14'::jsonb, 'Delete completed/dropped RecMem task rows after this many days'),
-    ('memory.recmem_gc_batch_size', '200'::jsonb, 'Maximum raw units and completed task rows cleaned per RecMem GC pass')
+    ('memory.recmem_gc_batch_size', '200'::jsonb, 'Maximum raw units and completed task rows cleaned per RecMem GC pass'),
+    ('memory.spaced_reinforcement_interval_hours', '12'::jsonb, 'Minimum spacing between reinforcements before they count as distinct durable practice'),
+    ('memory.spaced_reinforcement_scale', '4'::jsonb, 'Effective spaced reinforcement count that approaches a full score')
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO config_defaults (key, value, description) VALUES
     ('llm.recmem', 'null'::jsonb, 'Optional LLM override for RecMem consolidation prompts'),

@@ -192,7 +192,8 @@ class StartIntegrationSetupHandler(ToolHandler):
             name="start_integration_setup",
             description=(
                 "Start a first-class connector setup attempt for manual/pairing/API-key channels "
-                "such as Slack, Telegram, or Signal. Gmail OAuth uses connect_gmail instead."
+                "such as Slack, Telegram, Signal, or Twitter/X archive import. Gmail OAuth uses "
+                "connect_gmail instead."
             ),
             parameters={
                 "type": "object",
@@ -213,6 +214,10 @@ class StartIntegrationSetupHandler(ToolHandler):
                     "source_session_id": {
                         "type": "string",
                         "description": "Optional conversation/session identifier for resuming setup.",
+                    },
+                    "account_key": {
+                        "type": "string",
+                        "description": "Optional local account key for local-export connectors. Defaults to archive:<connector_id>.",
                     },
                 },
                 "required": ["connector_id"],
@@ -271,6 +276,37 @@ class StartIntegrationSetupHandler(ToolHandler):
                     arguments.get("source_channel"),
                     arguments.get("source_session_id") or context.session_id,
                 )
+                attempt = _json(attempt_raw) or {}
+                if connector_id == "twitter_x" and plan.get("auth_type") == "local_export":
+                    account_key = str(arguments.get("account_key") or "").strip() or "archive:twitter_x"
+                    completed_raw = await conn.fetchval(
+                        """
+                        SELECT complete_connection_attempt(
+                            $1::uuid,
+                            $2,
+                            $3,
+                            $4,
+                            $5::text[],
+                            $6::jsonb,
+                            $7::jsonb
+                        )
+                        """,
+                        attempt["attempt_id"],
+                        account_key,
+                        plan.get("display_name") or connector_id,
+                        "local_export:twitter_x_archive",
+                        [str(item) for item in plan.get("requested_scopes", [])],
+                        json.dumps(plan.get("capabilities") or []),
+                        json.dumps({
+                            "verified_by": "start_integration_setup",
+                            "setup_kind": "local_archive_import",
+                            "secret_values_stored": False,
+                        }),
+                    )
+                    completed = _json(completed_raw) or {}
+                    completed["setup_plan"] = plan
+                    completed["next_step"] = next_step
+                    return ToolResult.success_result(completed, display_output=next_step)
         except Exception as exc:
             return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
 
@@ -1022,7 +1058,7 @@ class StartConnectorBackfillHandler(ToolHandler):
             description=(
                 "Queue historical import for connected communication connectors. Use when the user asks "
                 "to import Slack, Telegram, Signal, or Twitter/X history. Slack requires a channel_id. "
-                "Telegram and Signal currently report provider limitations and point to import/export paths."
+                "Telegram, Signal, and Twitter/X use local export/archive paths for retro-history."
             ),
             parameters={
                 "type": "object",
@@ -1041,11 +1077,11 @@ class StartConnectorBackfillHandler(ToolHandler):
                     },
                     "requested_range": {
                         "type": "object",
-                        "description": "Provider-specific range options. Slack: oldest, latest, inclusive, cursor. Telegram/Signal: export_path or import_path.",
+                        "description": "Provider-specific range options. Slack: oldest, latest, inclusive, cursor. Telegram/Signal/Twitter/X: export_path or import_path.",
                     },
                     "export_path": {
                         "type": "string",
-                        "description": "Local Telegram/Signal export file to import when provider APIs cannot expose retro-history.",
+                        "description": "Local Telegram/Signal export file or Twitter/X archive directory/JS file to import when provider APIs cannot expose retro-history.",
                     },
                     "import_path": {
                         "type": "string",
@@ -1059,7 +1095,7 @@ class StartConnectorBackfillHandler(ToolHandler):
                         "type": "integer",
                         "default": 100,
                         "minimum": 1,
-                        "maximum": 500,
+                        "maximum": 5000,
                     },
                     "page_size": {
                         "type": "integer",
@@ -1143,7 +1179,8 @@ class StartConnectorBackfillHandler(ToolHandler):
             "source_session_id": arguments.get("source_session_id") or context.session_id,
             "queued_by_tool": "start_connector_backfill",
         }
-        max_attempts = 3 if (connector_id == "slack" or requested_range.get("export_path")) else 1
+        has_local_export = bool(requested_range.get("export_path") or requested_range.get("import_path"))
+        max_attempts = 3 if (connector_id == "slack" or has_local_export) else 1
         async with context.registry.pool.acquire() as conn:
             raw = await conn.fetchval(
                 """

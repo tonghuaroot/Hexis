@@ -605,6 +605,28 @@ RETURNS text LANGUAGE sql IMMUTABLE AS $$
     SELECT string_agg('- ' || line, E'\n' ORDER BY doc_ord, path_ord)
     FROM lines
     WHERE NULLIF(line, '') IS NOT NULL;
+	$$;
+
+CREATE OR REPLACE FUNCTION render_user_model_context(p_claims jsonb)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE
+    claims jsonb := CASE WHEN jsonb_typeof(p_claims) = 'array' THEN p_claims ELSE '[]'::jsonb END;
+BEGIN
+    IF jsonb_array_length(claims) = 0 THEN
+        RETURN '';
+    END IF;
+
+    RETURN E'## User Model (approved, evidence-backed)\n' || (
+        SELECT string_agg(
+            '- ' || COALESCE(um->>'category', 'claim')
+            || ': ' || COALESCE(um->>'claim', '')
+            || CASE WHEN _pr_is_num(um->'confidence') THEN ' (confidence: ' || _pr_f((um->>'confidence')::numeric, 1) || ')' ELSE '' END
+            || CASE WHEN NULLIF(um->>'evidence_count', '') IS NOT NULL THEN ' [evidence: ' || (um->>'evidence_count') || ']' ELSE '' END,
+            E'\n' ORDER BY ord)
+        FROM (SELECT um, ord FROM jsonb_array_elements(claims) WITH ORDINALITY AS t(um, ord)
+              ORDER BY ord LIMIT 8) cu
+    );
+END;
 $$;
 
 -- The chat memory context renderer (the deleted Python
@@ -623,6 +645,7 @@ DECLARE
     es jsonb;
     goals jsonb;
     all_goals jsonb;
+    user_model jsonb;
     low_viv numeric := COALESCE(get_config_float('memory.recall_low_vividness_threshold'), 0.35);
     cue numeric := COALESCE(get_config_float('memory.recall_emotion_cue_threshold'), 0.4);
 BEGIN
@@ -705,6 +728,21 @@ BEGIN
                 E'\n' ORDER BY ord)
             FROM (SELECT pa, ord FROM jsonb_array_elements(p->'partial_activations') WITH ORDINALITY AS t(pa, ord)
                   ORDER BY ord LIMIT p_max_partials) cp);
+    END IF;
+
+    -- Approved user-model claims[:8]
+    user_model := CASE WHEN jsonb_typeof(p->'user_model') = 'array' THEN p->'user_model' ELSE '[]'::jsonb END;
+    IF jsonb_array_length(user_model) > 0 THEN
+        parts := parts || E'\n## User Model (approved, evidence-backed)'::text;
+        parts := parts || (
+            SELECT string_agg(
+                '- ' || COALESCE(um->>'category', 'claim')
+                || ': ' || COALESCE(um->>'claim', '')
+                || CASE WHEN _pr_is_num(um->'confidence') THEN ' (confidence: ' || _pr_f((um->>'confidence')::numeric, 1) || ')' ELSE '' END
+                || CASE WHEN NULLIF(um->>'evidence_count', '') IS NOT NULL THEN ' [evidence: ' || (um->>'evidence_count') || ']' ELSE '' END,
+                E'\n' ORDER BY ord)
+            FROM (SELECT um, ord FROM jsonb_array_elements(user_model) WITH ORDINALITY AS t(um, ord)
+                  ORDER BY ord LIMIT 8) cu);
     END IF;
 
     -- Identity[:3]

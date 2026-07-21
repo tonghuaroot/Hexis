@@ -249,6 +249,81 @@ BEGIN
     LIMIT p_limit;
 END;
 $$ LANGUAGE plpgsql STABLE;
+CREATE OR REPLACE FUNCTION record_memory_reinforcement(
+    p_memory_id UUID,
+    p_kind TEXT DEFAULT 'recall',
+    p_source TEXT DEFAULT 'system',
+    p_metadata JSONB DEFAULT '{}'::jsonb,
+    p_created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+) RETURNS UUID AS $$
+DECLARE
+    event_id UUID;
+BEGIN
+    IF p_memory_id IS NULL THEN
+        RAISE EXCEPTION 'memory_id is required';
+    END IF;
+
+    INSERT INTO memory_reinforcement_events (memory_id, kind, source, metadata, created_at)
+    VALUES (
+        p_memory_id,
+        COALESCE(NULLIF(trim(p_kind), ''), 'recall'),
+        COALESCE(NULLIF(trim(p_source), ''), 'system'),
+        COALESCE(p_metadata, '{}'::jsonb),
+        COALESCE(p_created_at, CURRENT_TIMESTAMP)
+    )
+    RETURNING id INTO event_id;
+
+    RETURN event_id;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION memory_spaced_reinforcement_score(
+    p_memory_id UUID,
+    p_window INTERVAL DEFAULT INTERVAL '180 days',
+    p_min_interval INTERVAL DEFAULT NULL
+) RETURNS FLOAT AS $$
+DECLARE
+    rec RECORD;
+    total_count INT := 0;
+    spaced_count INT := 0;
+    last_counted_at TIMESTAMPTZ := NULL;
+    effective_min_interval INTERVAL;
+    scale FLOAT;
+BEGIN
+    IF p_memory_id IS NULL THEN
+        RETURN 0.0;
+    END IF;
+
+    effective_min_interval := COALESCE(
+        p_min_interval,
+        (GREATEST(COALESCE(get_config_float('memory.spaced_reinforcement_interval_hours'), 12.0), 0.01) || ' hours')::interval
+    );
+    scale := GREATEST(COALESCE(get_config_float('memory.spaced_reinforcement_scale'), 4.0), 1.0);
+
+    FOR rec IN
+        SELECT created_at
+        FROM memory_reinforcement_events
+        WHERE memory_id = p_memory_id
+          AND created_at >= CURRENT_TIMESTAMP - COALESCE(p_window, INTERVAL '180 days')
+        ORDER BY created_at ASC
+    LOOP
+        total_count := total_count + 1;
+        IF last_counted_at IS NULL OR rec.created_at - last_counted_at >= effective_min_interval THEN
+            spaced_count := spaced_count + 1;
+            last_counted_at := rec.created_at;
+        END IF;
+    END LOOP;
+
+    IF total_count = 0 THEN
+        RETURN 0.0;
+    END IF;
+
+    -- Saturating score: repeated practice matters, but packed repetition
+    -- collapses into one effective reinforcement until enough time has passed.
+    RETURN LEAST(1.0, GREATEST(0.0, 1.0 - exp(-spaced_count::float / scale)));
+END;
+$$ LANGUAGE plpgsql STABLE;
+
 CREATE OR REPLACE FUNCTION touch_memories(p_ids UUID[])
 RETURNS INT AS $$
 DECLARE
@@ -259,14 +334,25 @@ BEGIN
     END IF;
     -- Access IS reinforcement: recalling a memory strengthens it (resets the
     -- decay clock via last_reinforced) -- the "up-ladder" of the compression-
-    -- native substrate (docs/memory_retention_design.md §2).
-    UPDATE memories
-    SET access_count = access_count + 1,
-        last_accessed = CURRENT_TIMESTAMP,
-        last_reinforced = CURRENT_TIMESTAMP,
-        reinforcement_count = reinforcement_count + 1
-    WHERE id = ANY(p_ids);
-    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    -- native substrate (docs/memory_retention_design.md §2). We also keep a
+    -- reinforcement event log so spaced practice remains observable.
+    WITH updated AS (
+        UPDATE memories
+        SET access_count = access_count + 1,
+            last_accessed = CURRENT_TIMESTAMP,
+            last_reinforced = CURRENT_TIMESTAMP,
+            reinforcement_count = reinforcement_count + 1
+        WHERE id = ANY(p_ids)
+        RETURNING id
+    ),
+    logged AS (
+        INSERT INTO memory_reinforcement_events (memory_id, kind, source, metadata)
+        SELECT id, 'recall', 'touch_memories', '{}'::jsonb
+        FROM updated
+        RETURNING 1
+    )
+    SELECT COUNT(*)::int INTO updated_count FROM logged;
+
     RETURN COALESCE(updated_count, 0);
 END;
 $$ LANGUAGE plpgsql;
@@ -962,7 +1048,6 @@ CREATE OR REPLACE FUNCTION create_memory(
 ) RETURNS UUID AS $$
 DECLARE
     new_memory_id UUID;
-    embedding_vec vector;
     normalized_source JSONB;
     effective_trust FLOAT;
 BEGIN
@@ -989,10 +1074,30 @@ BEGIN
         END;
     END IF;
     effective_trust := LEAST(1.0, GREATEST(0.0, effective_trust));
-    embedding_vec := (get_embedding(ARRAY[p_content]))[1];
-
-    INSERT INTO memories (type, content, embedding, importance, source_attribution, trust_level, trust_updated_at, metadata)
-    VALUES (p_type, p_content, embedding_vec, p_importance, normalized_source, effective_trust, CURRENT_TIMESTAMP, COALESCE(p_metadata, '{}'::jsonb))
+    INSERT INTO memories (
+        type,
+        content,
+        embedding,
+        embedding_status,
+        embedding_attempts,
+        importance,
+        source_attribution,
+        trust_level,
+        trust_updated_at,
+        metadata
+    )
+    VALUES (
+        p_type,
+        p_content,
+        NULL,
+        'pending',
+        0,
+        p_importance,
+        normalized_source,
+        effective_trust,
+        CURRENT_TIMESTAMP,
+        COALESCE(p_metadata, '{}'::jsonb)
+    )
     RETURNING id INTO new_memory_id;
     EXECUTE format(
         'SELECT * FROM ag_catalog.cypher(''memory_graph'', $q$
@@ -1456,8 +1561,34 @@ BEGIN
     END IF;
     effective_trust := LEAST(1.0, GREATEST(0.0, effective_trust));
 
-    INSERT INTO memories (type, content, embedding, importance, source_attribution, trust_level, trust_updated_at, metadata)
-    VALUES (p_type, p_content, p_embedding, p_importance, normalized_source, effective_trust, CURRENT_TIMESTAMP, COALESCE(p_metadata, '{}'::jsonb))
+    INSERT INTO memories (
+        type,
+        content,
+        embedding,
+        embedded_at,
+        embedding_model,
+        embedding_status,
+        embedding_attempts,
+        importance,
+        source_attribution,
+        trust_level,
+        trust_updated_at,
+        metadata
+    )
+    VALUES (
+        p_type,
+        p_content,
+        p_embedding,
+        CURRENT_TIMESTAMP,
+        get_config_text('embedding.model_id'),
+        'embedded',
+        1,
+        p_importance,
+        normalized_source,
+        effective_trust,
+        CURRENT_TIMESTAMP,
+        COALESCE(p_metadata, '{}'::jsonb)
+    )
     RETURNING id INTO new_memory_id;
 
     EXECUTE format(
@@ -2101,9 +2232,16 @@ BEGIN
             COALESCE(v.memory_id, f.memory_id) AS mem_id,
             COALESCE(v.content, f.content) AS mem_content,
             COALESCE(v.memory_type, f.memory_type) AS mem_type,
-            -- Normalize and combine scores
-            (COALESCE(v.vector_score, 0.0) * p_vector_weight +
-             COALESCE(f.fts_score, 0.0) * p_fts_weight) AS combined_score,
+            -- Normalize and combine scores. FTS-only hits keep newly written
+            -- async-embedding memories visible before the worker vectorizes
+            -- them; the match still has to satisfy Postgres' tsquery.
+            CASE
+                WHEN v.memory_id IS NULL AND f.memory_id IS NOT NULL THEN
+                    LEAST(1.0, GREATEST(0.35, COALESCE(f.fts_score, 0.0) + p_fts_weight))
+                ELSE
+                    COALESCE(v.vector_score, 0.0) * p_vector_weight
+                    + COALESCE(f.fts_score, 0.0) * p_fts_weight
+            END AS combined_score,
             CASE
                 WHEN v.memory_id IS NOT NULL AND f.memory_id IS NOT NULL THEN 'hybrid'
                 WHEN v.memory_id IS NOT NULL THEN v.source

@@ -29,12 +29,19 @@ async def _restore_config(db_pool, keys: list[str], snapshot: dict[str, str]) ->
                 await conn.execute("DELETE FROM config WHERE key = $1", key)
 
 
-async def _connected_channel(conn, connector_id: str, marker: str, account_key: str) -> None:
+async def _connected_channel(
+    conn,
+    connector_id: str,
+    marker: str,
+    account_key: str,
+    capabilities: list[str] | None = None,
+) -> None:
+    capability_json = json.dumps(capabilities or ["live_chat", "send", "ingest_live"])
     attempt = _j(await conn.fetchval(
         """
         SELECT start_connection_attempt(
             $1,
-            '["live_chat", "send", "ingest_live"]'::jsonb,
+            $3::jsonb,
             ARRAY[]::text[],
             '{}'::jsonb,
             NULL,
@@ -46,6 +53,7 @@ async def _connected_channel(conn, connector_id: str, marker: str, account_key: 
         """,
         connector_id,
         marker,
+        capability_json,
     ))
     await conn.fetchval(
         """
@@ -55,7 +63,7 @@ async def _connected_channel(conn, connector_id: str, marker: str, account_key: 
             $3,
             $4,
             ARRAY[]::text[],
-            '["live_chat", "send", "ingest_live"]'::jsonb,
+            $5::jsonb,
             '{"test": true}'::jsonb
         )
         """,
@@ -63,6 +71,7 @@ async def _connected_channel(conn, connector_id: str, marker: str, account_key: 
         account_key,
         connector_id,
         f"config:channel.{connector_id}",
+        capability_json,
     )
 
 
@@ -269,4 +278,114 @@ async def test_telegram_export_backfill_imports_local_history(db_pool, tmp_path)
             await conn.execute(
                 "DELETE FROM source_documents WHERE path LIKE $1",
                 f"telegram://{account}/message/%",
+            )
+
+
+async def test_twitter_archive_backfill_imports_tweets_and_dms(db_pool, tmp_path):
+    marker = get_test_identifier("twitter-archive")
+    account = f"archive:twitter_x:{marker}"
+    archive_dir = tmp_path / "twitter-archive"
+    data_dir = archive_dir / "data"
+    data_dir.mkdir(parents=True)
+    tweet_js = data_dir / "tweet.js"
+    dm_js = data_dir / "direct-message.js"
+    tweet_js.write_text(
+        "window.YTD.tweets.part0 = "
+        + json.dumps([
+            {
+                "tweet": {
+                    "id_str": f"tweet-{marker}",
+                    "created_at": "Mon Jul 20 10:00:00 +0000 2026",
+                    "full_text": f"I want Samantha to remember Twitter archive marker {marker}.",
+                    "entities": {"user_mentions": [{"screen_name": "QuixiAI"}]},
+                }
+            }
+        ])
+        + ";",
+        encoding="utf-8",
+    )
+    dm_js.write_text(
+        "window.YTD.direct_messages.part0 = "
+        + json.dumps([
+            {
+                "dmConversation": {
+                    "conversationId": f"dm-{marker}",
+                    "messages": [
+                        {
+                            "messageCreate": {
+                                "id": f"dm-message-{marker}",
+                                "senderId": "eric",
+                                "recipientId": "friend",
+                                "createdAt": "2026-07-20T11:00:00.000Z",
+                                "text": f"Private Twitter/X DM marker {marker}.",
+                            }
+                        }
+                    ],
+                }
+            }
+        ])
+        + ";",
+        encoding="utf-8",
+    )
+
+    try:
+        async with db_pool.acquire() as conn:
+            await _connected_channel(conn, "twitter_x", marker, account, capabilities=["ingest"])
+            queued = _j(await conn.fetchval(
+                """
+                SELECT enqueue_connector_backfill_job(
+                    'twitter_x',
+                    $1,
+                    'messages',
+                    $2::jsonb,
+                    '{"test": true}'::jsonb,
+                    3
+                )
+                """,
+                account,
+                json.dumps({"export_path": str(archive_dir), "max_messages": 10}),
+            ))
+            claimed = _j(await conn.fetchval(
+                "SELECT claim_connector_backfill_jobs_for('twitter_x', 1)"
+            ))
+            job = claimed[0]
+
+        result = await channel_backfill.process_channel_backfill_job(db_pool, job)
+
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT provider_item_id, item_kind, source_document_id, sensitivity
+                FROM connector_source_items
+                WHERE account_key = $1
+                ORDER BY provider_item_id
+                """,
+                account,
+            )
+            opened = [
+                _j(await conn.fetchval("SELECT open_source_document($1::uuid)", row["source_document_id"]))
+                for row in rows
+            ]
+
+        assert result["status"] == "completed"
+        assert result["result"]["items_stored"] == 2
+        assert queued["estimate"]["provider_status"] == "local_archive_import"
+        assert {row["provider_item_id"] for row in rows} == {
+            f"tweet:tweet-{marker}",
+            f"dm:dm-{marker}:dm-message-{marker}",
+        }
+        sensitivity_by_id = {row["provider_item_id"]: row["sensitivity"] for row in rows}
+        assert sensitivity_by_id[f"tweet:tweet-{marker}"] == "shared"
+        assert sensitivity_by_id[f"dm:dm-{marker}:dm-message-{marker}"] == "private"
+        assert any(f"Twitter archive marker {marker}" in doc["content"] for doc in opened)
+        assert any(f"Private Twitter/X DM marker {marker}" in doc["content"] for doc in opened)
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM connector_backfill_jobs WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connector_sync_cursors WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM integration_connections WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)
+            await conn.execute(
+                "DELETE FROM source_documents WHERE path LIKE $1",
+                f"twitter_x://{account}/%",
             )

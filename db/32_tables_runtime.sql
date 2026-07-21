@@ -440,7 +440,7 @@ CREATE TABLE IF NOT EXISTS integration_connectors (
     display_name TEXT NOT NULL,
     category TEXT NOT NULL,
     auth_type TEXT NOT NULL
-        CHECK (auth_type IN ('oauth2', 'api_key', 'device_code', 'pairing', 'manual')),
+        CHECK (auth_type IN ('oauth2', 'api_key', 'device_code', 'pairing', 'manual', 'local_export')),
     status TEXT NOT NULL DEFAULT 'available'
         CHECK (status IN ('available', 'planned', 'disabled')),
     capability_manifest JSONB NOT NULL DEFAULT '{}'::jsonb,

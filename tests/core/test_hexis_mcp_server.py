@@ -50,7 +50,22 @@ class _Registry:
         )
 
 
-async def test_mcp_listing_deduplicates_legacy_and_live_registry_tools():
+async def test_mcp_listing_uses_registry_native_tools_by_default(monkeypatch):
+    monkeypatch.delenv("HEXIS_MCP_LEGACY_COMPAT", raising=False)
+    registry = _Registry()
+
+    tools, registry_names = await _list_server_tools(registry)
+    names = [tool.name for tool in tools]
+
+    assert names.count("recall") == 1
+    assert "hydrate" not in names
+    assert "session_list" in names
+    assert registry_names == {"recall", "session_list"}
+    registry.get_mcp_tools.assert_awaited_once_with(ToolContext.MCP)
+
+
+async def test_mcp_listing_can_opt_into_legacy_compat(monkeypatch):
+    monkeypatch.setenv("HEXIS_MCP_LEGACY_COMPAT", "1")
     registry = _Registry()
 
     tools, registry_names = await _list_server_tools(registry)
@@ -59,11 +74,11 @@ async def test_mcp_listing_deduplicates_legacy_and_live_registry_tools():
     assert names.count("recall") == 1
     assert "hydrate" in names
     assert "session_list" in names
-    assert registry_names == {"session_list"}
-    registry.get_mcp_tools.assert_awaited_once_with(ToolContext.MCP)
+    assert registry_names == {"recall", "session_list"}
 
 
-async def test_mcp_legacy_dispatch_returns_structured_success():
+async def test_mcp_legacy_dispatch_requires_compat_flag(monkeypatch):
+    monkeypatch.setenv("HEXIS_MCP_LEGACY_COMPAT", "1")
     client = AsyncMock()
     client.get_health.return_value = {"status": "healthy", "score": 0.9}
 
@@ -84,7 +99,7 @@ async def test_mcp_registry_dispatch_refreshes_before_list_and_uses_mcp_context(
 
     assert result.isError is False
     assert result.content[0].text == '{"registry":true}'
-    assert known_names == {"session_list"}
+    assert known_names == {"recall", "session_list"}
     arguments = registry.execute.await_args.args
     assert arguments[0] == "session_list"
     assert arguments[1] == {"limit": 2}

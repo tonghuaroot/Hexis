@@ -4,7 +4,11 @@ CREATE INDEX IF NOT EXISTS idx_memories_source_content_hash
     WHERE source_attribution->>'content_hash' IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_episodes_ended_at ON episodes (ended_at);
 CREATE INDEX IF NOT EXISTS idx_config_key_pattern ON config (key text_pattern_ops);
-CREATE INDEX idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops)
+    WHERE embedding IS NOT NULL AND embedding_status = 'embedded';
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_queue
+    ON memories (embedding_status, created_at)
+    WHERE embedding_status IN ('pending', 'in_progress');
 CREATE INDEX idx_memories_status ON memories (status);
 CREATE INDEX idx_memories_type ON memories (type);
 CREATE INDEX IF NOT EXISTS idx_memories_validity
@@ -16,6 +20,8 @@ CREATE INDEX idx_memories_importance ON memories (importance DESC) WHERE status 
 CREATE INDEX idx_memories_created ON memories (created_at DESC);
 CREATE INDEX idx_memories_last_accessed ON memories (last_accessed DESC NULLS LAST);
 CREATE INDEX idx_memories_updated ON memories (updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_reinforcement_events_memory_created
+    ON memory_reinforcement_events (memory_id, created_at DESC);
 CREATE INDEX idx_memories_activation_boost ON memories (((metadata->>'activation_boost')::float))
     WHERE metadata ? 'activation_boost';
 CREATE INDEX idx_memories_metadata ON memories USING GIN (metadata);

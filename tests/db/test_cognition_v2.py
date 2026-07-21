@@ -83,6 +83,51 @@ async def test_user_model_claim_review_and_supersession(db_pool):
     assert old_status["superseded_by"] == second["claim_id"]
 
 
+async def test_approved_user_model_claims_render_into_prompt_context(db_pool):
+    marker = get_test_identifier("usermodelcontext")
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            approved = _j(await conn.fetchval(
+                """
+                SELECT upsert_user_model_claim(
+                    $1, $2, 'routine', 0.84, 0.75,
+                    NULL, NULL, '[{"ref": "test"}]'::jsonb, '{"test": true}'::jsonb,
+                    'pending_review'
+                )
+                """,
+                f"routine:{marker}:planning",
+                f"User does careful Monday planning {marker}.",
+            ))
+            pending = _j(await conn.fetchval(
+                """
+                SELECT upsert_user_model_claim(
+                    $1, $2, 'preference', 0.7, 0.5,
+                    NULL, NULL, '[{"ref": "test"}]'::jsonb, '{"test": true}'::jsonb,
+                    'pending_review'
+                )
+                """,
+                f"preference:{marker}:unapproved",
+                f"User supposedly likes unreviewed filler {marker}.",
+            ))
+            await conn.fetchval(
+                "SELECT review_user_model_claim($1::uuid, 'approve', 'context test', 'test')",
+                approved["claim_id"],
+            )
+            context = _j(await conn.fetchval("SELECT get_approved_user_model_context(10)"))
+            rendered = await conn.fetchval("SELECT render_user_model_context($1::jsonb)", json.dumps(context))
+        finally:
+            await tr.rollback()
+
+    assert any(item["id"] == approved["claim_id"] for item in context)
+    assert all(item["id"] != pending["claim_id"] for item in context)
+    assert "## User Model" in rendered
+    assert f"careful Monday planning {marker}" in rendered
+    assert "unreviewed filler" not in rendered
+
+
 async def test_graph_reconcile_paths_and_reward_rpe(db_pool):
     marker = get_test_identifier("graphreward")
     async with db_pool.acquire() as conn:

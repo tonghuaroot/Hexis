@@ -257,23 +257,23 @@ INSERT INTO integration_connectors (
     'twitter_x',
     'Twitter/X',
     'communication',
-    'oauth2',
-    'planned',
+    'local_export',
+    'available',
     '{
       "read": {"label": "Read timeline, mentions, and DMs", "status": "planned", "scopes": ["tweet.read", "users.read", "dm.read"]},
       "search": {"label": "Search posts", "status": "planned", "scopes": ["tweet.read", "users.read"]},
-      "ingest": {"label": "Import historical posts and DMs", "status": "planned", "scopes": ["tweet.read", "users.read", "dm.read"]},
+      "ingest": {"label": "Import historical posts and DMs from a Twitter/X archive", "status": "available", "scopes": []},
       "send": {"label": "Post or send DMs", "status": "planned", "scopes": ["tweet.write", "dm.write"]}
     }'::jsonb,
     '{
-      "flow": "oauth2_planned",
+      "flow": "local_archive_import",
       "supported_surfaces": ["chat", "cli", "web", "channels"],
-      "default_capabilities": ["read", "search", "ingest"],
+      "default_capabilities": ["ingest"],
       "capability_order": ["read", "search", "ingest", "send"],
       "required_scopes": [],
       "scope_order": ["tweet.read", "users.read", "dm.read", "tweet.write", "dm.write"],
       "capability_aliases": {"x": "read", "twitter": "read", "posts": "read", "dm": "send", "dms": "read"},
-      "user_next_step": "Twitter/X is listed in the connector catalog but the provider adapter is not implemented yet."
+      "user_next_step": "Download your Twitter/X archive, extract it locally, then start a history import with an export_path pointing at the archive directory or tweet/direct-message JS file. Live OAuth read/search/send remains planned."
     }'::jsonb,
     'https://developer.x.com/en/docs',
     '{"provider": "twitter_x", "seeded_by": "db/77_functions_integrations.sql"}'::jsonb

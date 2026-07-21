@@ -57,7 +57,8 @@ async def test_channel_connector_manifests_are_first_class_and_honest(db_pool):
         assert by_id["slack"]["status"] == "available"
         assert by_id["telegram"]["auth_type"] == "api_key"
         assert by_id["signal"]["auth_type"] == "pairing"
-        assert by_id["twitter_x"]["status"] == "planned"
+        assert by_id["twitter_x"]["status"] == "available"
+        assert by_id["twitter_x"]["auth_type"] == "local_export"
 
         slack_default = _j(await conn.fetchval(
             "SELECT prepare_connection_attempt('slack', NULL)"
@@ -82,8 +83,9 @@ async def test_channel_connector_manifests_are_first_class_and_honest(db_pool):
                 json.dumps(["backfill"]),
             )
 
-        with pytest.raises(Exception, match="not available"):
-            await conn.fetchval("SELECT prepare_connection_attempt('twitter_x', NULL)")
+        twitter_archive = _j(await conn.fetchval("SELECT prepare_connection_attempt('twitter_x', NULL)"))
+        assert twitter_archive["capabilities"] == ["ingest"]
+        assert twitter_archive["requested_scopes"] == []
 
 
 async def test_channel_adapter_runtime_status_is_db_owned(db_pool):
