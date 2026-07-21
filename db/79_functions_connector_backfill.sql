@@ -112,6 +112,7 @@ DECLARE
     page_size INT;
     pages INT;
     export_path TEXT;
+    twitter_stream TEXT;
 BEGIN
     BEGIN
         max_messages := NULLIF(requested->>'max_messages', '')::int;
@@ -127,6 +128,7 @@ BEGIN
     page_size := LEAST(GREATEST(COALESCE(page_size, 100), 1), 500);
     pages := CEIL(max_messages::numeric / page_size::numeric)::int;
     export_path := NULLIF(btrim(COALESCE(requested->>'export_path', requested->>'import_path', '')), '');
+    twitter_stream := lower(NULLIF(btrim(COALESCE(requested->>'stream', requested->>'source', '')), ''));
 
     IF connector IN ('gmail', 'slack') THEN
         RETURN jsonb_build_object(
@@ -160,17 +162,31 @@ BEGIN
             END
         );
     ELSIF connector = 'twitter_x' THEN
+        IF export_path IS NOT NULL THEN
+            RETURN jsonb_build_object(
+                'connector_id', connector,
+                'provider_status', 'local_archive_import',
+                'estimated_items', max_messages,
+                'page_size', page_size,
+                'estimated_pages', pages,
+                'cost_class', CASE WHEN max_messages <= 1000 THEN 'local_medium'
+                                   ELSE 'local_large' END,
+                'requires_export_path', FALSE,
+                'pricing_notes', 'Local archive import does not call the X API.'
+            );
+        END IF;
         RETURN jsonb_build_object(
             'connector_id', connector,
-            'provider_status', CASE WHEN export_path IS NULL THEN 'archive_required' ELSE 'local_archive_import' END,
+            'provider_status', 'api_backfill_available',
+            'stream', COALESCE(twitter_stream, 'timeline'),
             'estimated_items', max_messages,
             'page_size', page_size,
             'estimated_pages', pages,
-            'cost_class', CASE WHEN export_path IS NULL THEN 'blocked_until_archive'
-                               WHEN max_messages <= 1000 THEN 'local_medium'
-                               ELSE 'local_large' END,
-            'requires_export_path', export_path IS NULL,
-            'limitations', 'Twitter/X live OAuth history is not configured here; import a Twitter/X archive export for historical posts and DMs.'
+            'cost_class', CASE WHEN max_messages <= 100 THEN 'paid_small'
+                               WHEN max_messages <= 1000 THEN 'paid_medium'
+                               ELSE 'paid_large' END,
+            'pricing_notes', 'X API reads are pay-per-resource; check current X Developer Console pricing and spend limits before large imports.',
+            'rate_limit_notes', 'X API v2 uses per-endpoint 15-minute windows and returns x-rate-limit-* headers.'
         );
     END IF;
 

@@ -191,6 +191,9 @@ from .integrations import (
     ConnectGmailHandler,
     CompleteGmailConnectionHandler,
     RevokeGmailConnectionHandler,
+    ConnectTwitterXHandler,
+    CompleteTwitterXConnectionHandler,
+    RevokeTwitterXConnectionHandler,
     StartGmailBackfillHandler,
     GmailBackfillStatusHandler,
     ControlGmailBackfillHandler,
@@ -207,6 +210,12 @@ from .gmail_actions import (
     GmailReplyHandler,
     GmailLabelHandler,
     GmailSpamTriageHandler,
+)
+from .twitter_x_actions import (
+    create_twitter_x_action_tools,
+    TwitterXPostHandler,
+    TwitterXReplyHandler,
+    TwitterXDMSendHandler,
 )
 
 __all__ = [
@@ -342,6 +351,9 @@ __all__ = [
     "ConnectGmailHandler",
     "CompleteGmailConnectionHandler",
     "RevokeGmailConnectionHandler",
+    "ConnectTwitterXHandler",
+    "CompleteTwitterXConnectionHandler",
+    "RevokeTwitterXConnectionHandler",
     "StartGmailBackfillHandler",
     "GmailBackfillStatusHandler",
     "ControlGmailBackfillHandler",
@@ -352,6 +364,10 @@ __all__ = [
     "GrantConnectorActionPolicyHandler",
     "RevokeConnectorActionPolicyHandler",
     "create_gmail_action_tools",
+    "create_twitter_x_action_tools",
+    "TwitterXPostHandler",
+    "TwitterXReplyHandler",
+    "TwitterXDMSendHandler",
     "GmailSendHandler",
     "GmailReplyHandler",
     "GmailLabelHandler",

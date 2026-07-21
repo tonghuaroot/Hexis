@@ -238,9 +238,15 @@ function ConnectorCard({
                         `Disconnect ${connection.display_name || connection.account_key}?`
                       )
                     ) {
+                      const revokeAction =
+                        connector.id === "gmail"
+                          ? "revoke_gmail"
+                          : connector.id === "twitter_x"
+                            ? "revoke_twitter_x"
+                            : "revoke_connection";
                       void onAction(
                         `${connector.id}:revoke:${connection.id}`,
-                        connector.id === "gmail" ? "revoke_gmail" : "revoke_connection",
+                        revokeAction,
                         {
                           connector_id: connector.id,
                           account_key: connection.account_key,
@@ -327,6 +333,14 @@ function ConnectorCard({
       ) : null}
 
       {connector.id === "twitter_x" ? (
+        <TwitterXControls
+          summary={summary}
+          actionBusy={actionBusy}
+          onAction={onAction}
+        />
+      ) : null}
+
+      {connector.id === "twitter_x" ? (
         <ArchiveImportControls
           summary={summary}
           actionBusy={actionBusy}
@@ -345,6 +359,206 @@ function ConnectorCard({
         </a>
       ) : null}
     </Card>
+  );
+}
+
+function TwitterXControls({
+  summary,
+  actionBusy,
+  onAction,
+}: {
+  summary: ConnectorSummary;
+  actionBusy: string | null;
+  onAction: IntegrationActionHandler;
+}) {
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [useEnvClient, setUseEnvClient] = useState(false);
+  const [authorizationResponse, setAuthorizationResponse] = useState("");
+  const [includeDmRead, setIncludeDmRead] = useState(false);
+  const [includePost, setIncludePost] = useState(false);
+  const [includeDmSend, setIncludeDmSend] = useState(false);
+  const [stream, setStream] = useState("timeline");
+  const [query, setQuery] = useState("");
+  const [maxItems, setMaxItems] = useState("100");
+
+  const setupManifest = asRecord(summary.connector.setup_manifest);
+  const defaultCapabilities = stringArray(setupManifest.default_capabilities);
+  const capabilities = [
+    ...(defaultCapabilities.length ? defaultCapabilities : ["read", "search", "ingest"]),
+    ...(includeDmRead ? ["dm_read"] : []),
+    ...(includePost ? ["send"] : []),
+    ...(includeDmSend ? ["dm_send"] : []),
+  ];
+  const pendingAttempt =
+    summary.activeAttempts[0] ||
+    summary.recentAttempts.find((attempt) =>
+      ["pending_user", "awaiting_input", "in_progress"].includes(attempt.status)
+    );
+  const connection = summary.activeConnections.find((item) =>
+    item.credential_ref !== "local_export:twitter_x_archive"
+  ) || null;
+  const connectBusy = actionBusy === "twitter_x:connect";
+  const completeBusy = actionBusy === "twitter_x:complete";
+  const liveBusy = actionBusy === "twitter_x:live";
+
+  return (
+    <div className="space-y-3 rounded-md border border-[var(--outline)] px-3 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-xs font-semibold text-[var(--ink-soft)]">
+          Twitter/X actions
+        </h3>
+        <Badge variant="muted">{capabilities.map(humanize).join(", ")}</Badge>
+      </div>
+
+      {!connection ? (
+        <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+          <div className="space-y-2">
+            <TextInput
+              value={clientId}
+              onChange={(event) => setClientId(event.target.value)}
+              placeholder="OAuth client ID"
+              className="py-2 text-xs"
+            />
+            <TextInput
+              type="password"
+              value={clientSecret}
+              onChange={(event) => setClientSecret(event.target.value)}
+              placeholder="Optional client secret"
+              className="py-2 text-xs"
+            />
+            <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-[var(--ink-soft)]">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={includeDmRead}
+                  onChange={(event) => setIncludeDmRead(event.target.checked)}
+                  className="h-4 w-4 accent-[var(--teal)]"
+                />
+                DM read
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={includePost}
+                  onChange={(event) => setIncludePost(event.target.checked)}
+                  className="h-4 w-4 accent-[var(--teal)]"
+                />
+                Post/reply
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={includeDmSend}
+                  onChange={(event) => setIncludeDmSend(event.target.checked)}
+                  className="h-4 w-4 accent-[var(--teal)]"
+                />
+                DM send
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={useEnvClient}
+                  onChange={(event) => setUseEnvClient(event.target.checked)}
+                  className="h-4 w-4 accent-[var(--teal)]"
+                />
+                Use env client
+              </label>
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy)}
+            onClick={() =>
+              void onAction("twitter_x:connect", "connect_twitter_x", {
+                capabilities,
+                client_id: clientId.trim() || undefined,
+                client_secret: clientSecret.trim() || undefined,
+                use_env_client: useEnvClient,
+              })
+            }
+            className="self-start px-3 py-2 text-xs"
+          >
+            {connectBusy ? "Starting..." : "Connect"}
+          </Button>
+        </div>
+      ) : (
+        <div className="grid gap-2 md:grid-cols-[9rem_1fr_7rem_auto]">
+          <select
+            value={stream}
+            onChange={(event) => setStream(event.target.value)}
+            className="rounded-md border border-[var(--outline)] bg-white px-2 py-2 text-xs"
+            aria-label="Twitter/X import stream"
+          >
+            <option value="timeline">Timeline</option>
+            <option value="mentions">Mentions</option>
+            <option value="search">Search</option>
+            <option value="dms">DMs</option>
+          </select>
+          <TextInput
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search query"
+            disabled={stream !== "search"}
+            className="py-2 text-xs"
+          />
+          <TextInput
+            type="number"
+            min={1}
+            max={5000}
+            value={maxItems}
+            onChange={(event) => setMaxItems(event.target.value)}
+            aria-label="Max items"
+            className="py-2 text-xs"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy) || (stream === "search" && query.trim().length === 0)}
+            onClick={() =>
+              void onAction("twitter_x:live", "start_connector_backfill", {
+                connector_id: "twitter_x",
+                account_key: connection.account_key,
+                requested_range: {
+                  stream,
+                  query: stream === "search" ? query.trim() : undefined,
+                  max_messages: parseMaxMessages(maxItems, 5000),
+                },
+              })
+            }
+            className="px-3 py-2 text-xs"
+          >
+            {liveBusy ? "Queuing..." : "Import"}
+          </Button>
+        </div>
+      )}
+
+      {pendingAttempt ? (
+        <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+          <TextInput
+            value={authorizationResponse}
+            onChange={(event) => setAuthorizationResponse(event.target.value)}
+            placeholder="Paste redirected URL or authorization code"
+            className="py-2 text-xs"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy) || authorizationResponse.trim().length === 0}
+            onClick={() =>
+              void onAction("twitter_x:complete", "complete_twitter_x", {
+                attempt_id: pendingAttempt.attempt_id,
+                authorization_response: authorizationResponse.trim(),
+              })
+            }
+            className="px-3 py-2 text-xs"
+          >
+            {completeBusy ? "Completing..." : "Complete"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -500,8 +714,6 @@ function ArchiveImportControls({
   const [historyMax, setHistoryMax] = useState("1000");
   const busy = actionBusy === `${connectorId}:history`;
 
-  if (!connection) return null;
-
   return (
     <div className="space-y-3 rounded-md border border-[var(--outline)] px-3 py-3">
       <div className="grid gap-2 md:grid-cols-[1fr_7rem_auto]">
@@ -527,7 +739,7 @@ function ArchiveImportControls({
           onClick={() =>
             void onAction(`${connectorId}:history`, "start_connector_backfill", {
               connector_id: connectorId,
-              account_key: connection.account_key,
+              account_key: connection?.account_key,
               max_messages: parseMaxMessages(historyMax, 5000),
               export_path: archivePath.trim(),
             })

@@ -257,26 +257,58 @@ INSERT INTO integration_connectors (
     'twitter_x',
     'Twitter/X',
     'communication',
-    'local_export',
+    'oauth2',
     'available',
     '{
-      "read": {"label": "Read timeline, mentions, and DMs", "status": "planned", "scopes": ["tweet.read", "users.read", "dm.read"]},
-      "search": {"label": "Search posts", "status": "planned", "scopes": ["tweet.read", "users.read"]},
-      "ingest": {"label": "Import historical posts and DMs from a Twitter/X archive", "status": "available", "scopes": []},
-      "send": {"label": "Post or send DMs", "status": "planned", "scopes": ["tweet.write", "dm.write"]}
+      "read": {"label": "Read posts, mentions, and basic account identity", "scope_kind": "read", "status": "available", "scopes": ["tweet.read", "users.read", "offline.access"]},
+      "search": {"label": "Search recent posts", "scope_kind": "read", "status": "available", "scopes": ["tweet.read", "users.read", "offline.access"]},
+      "ingest": {"label": "Ingest live posts and mentions", "scope_kind": "read", "status": "available", "scopes": ["tweet.read", "users.read", "offline.access"]},
+      "dm_read": {"label": "Read Direct Messages", "scope_kind": "read_private", "status": "available", "scopes": ["dm.read", "tweet.read", "users.read", "offline.access"]},
+      "send": {"label": "Create posts and replies", "scope_kind": "send", "status": "available", "scopes": ["tweet.read", "tweet.write", "users.read", "offline.access"]},
+      "dm_send": {"label": "Send Direct Messages", "scope_kind": "send_private", "status": "available", "scopes": ["dm.write", "tweet.read", "users.read", "offline.access"]},
+      "archive_import": {"label": "Import historical posts and DMs from a Twitter/X archive", "scope_kind": "local_history", "status": "available", "scopes": []}
     }'::jsonb,
     '{
-      "flow": "local_archive_import",
+      "flow": "oauth2_authorization_code_pkce",
+      "redirect_uri": "http://localhost:1",
+      "requires_user_client": true,
+      "secret_storage": "~/.hexis/auth",
       "supported_surfaces": ["chat", "cli", "web", "channels"],
-      "default_capabilities": ["ingest"],
-      "capability_order": ["read", "search", "ingest", "send"],
+      "default_capabilities": ["read", "search", "ingest"],
+      "capability_order": ["read", "search", "ingest", "dm_read", "send", "dm_send", "archive_import"],
       "required_scopes": [],
-      "scope_order": ["tweet.read", "users.read", "dm.read", "tweet.write", "dm.write"],
-      "capability_aliases": {"x": "read", "twitter": "read", "posts": "read", "dm": "send", "dms": "read"},
-      "user_next_step": "Download your Twitter/X archive, extract it locally, then start a history import with an export_path pointing at the archive directory or tweet/direct-message JS file. Live OAuth read/search/send remains planned."
+      "scope_order": ["tweet.read", "users.read", "offline.access", "dm.read", "tweet.write", "dm.write"],
+      "history_import": {
+        "flow": "local_archive_import",
+        "capability": "archive_import",
+        "accepted_inputs": ["export_path", "import_path"],
+        "notes": ["Download your Twitter/X archive and point Hexis at the extracted archive directory or tweet/direct-message JS file."]
+      },
+      "capability_aliases": {
+        "x": "read",
+        "twitter": "read",
+        "tweets": "read",
+        "posts": "read",
+        "timeline": "read",
+        "mentions": "read",
+        "search_posts": "search",
+        "history": "archive_import",
+        "archive": "archive_import",
+        "import": "archive_import",
+        "ingest_history": "archive_import",
+        "dm": "dm_send",
+        "dms": "dm_read",
+        "direct_messages": "dm_read",
+        "message": "dm_send",
+        "write": "send",
+        "post": "send",
+        "reply": "send",
+        "respond": "send"
+      },
+      "user_next_step": "Create or choose an X Developer app with OAuth 2.0 enabled, register http://localhost:1 as a callback URI, then start Twitter/X connection setup. Request only the capabilities you want; archive import is still available through a local export path."
     }'::jsonb,
-    'https://developer.x.com/en/docs',
-    '{"provider": "twitter_x", "seeded_by": "db/77_functions_integrations.sql"}'::jsonb
+    'https://docs.x.com',
+    '{"provider": "twitter_x", "twitter_x_live_oauth": true, "twitter_x_archive_import": true, "seeded_by": "db/77_functions_integrations.sql"}'::jsonb
 )
 ON CONFLICT (id) DO UPDATE SET
     display_name = EXCLUDED.display_name,

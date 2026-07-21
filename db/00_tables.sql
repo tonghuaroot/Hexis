@@ -336,7 +336,7 @@ CREATE TABLE memory_source_units (
     memory_id UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     subconscious_unit_id UUID NOT NULL REFERENCES subconscious_units(id) ON DELETE CASCADE,
     role TEXT NOT NULL DEFAULT 'source'
-        CHECK (role IN ('source','direct_promotion','merge_addition','extraction','corroboration')),
+        CHECK (role IN ('source','direct_promotion','merge_addition','extraction','corroboration','relationship_injury')),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (memory_id, subconscious_unit_id)
 );

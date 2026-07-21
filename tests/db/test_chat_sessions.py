@@ -117,3 +117,127 @@ async def test_chat_session_history_survives_memory_write_failure(db_pool):
             assert [m["content"] for m in recorded["history"]["messages"]] == ["hi", "hello"]
         finally:
             await tr.rollback()
+
+
+async def test_hostile_turn_creates_unresolved_relationship_injury_and_carryover(db_pool):
+    marker = uuid4().hex
+    old_session = str(uuid4())
+    new_session = str(uuid4())
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2,
+                    'That was vile. Do not talk to me like that.',
+                    'api',
+                    $3::jsonb
+                )
+                """,
+                old_session,
+                f"you are worthless slime {marker}",
+                json.dumps({
+                    "metadata": {"type": "conversation"},
+                    "emotional_state": {
+                        "primary_emotion": "anger",
+                        "valence": -0.8,
+                        "arousal": 0.8,
+                        "intensity": 0.9,
+                    },
+                }),
+            )
+
+            injury = await conn.fetchrow(
+                """
+                SELECT id, content, metadata
+                FROM memories
+                WHERE type = 'semantic'
+                  AND metadata#>>'{relationship_state,kind}' = 'relationship_injury'
+                  AND metadata#>>'{relationship_state,status}' = 'unresolved'
+                  AND content LIKE $1
+                """,
+                f"%{marker}%",
+            )
+            carryover = await conn.fetchval(
+                "SELECT render_recent_conversation_carryover($1::text, false)",
+                new_session,
+            )
+            excluded = await conn.fetchval(
+                "SELECT render_recent_conversation_carryover($1::text, true)",
+                new_session,
+            )
+            link_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM memory_source_units
+                WHERE memory_id = $1::uuid
+                  AND role = 'relationship_injury'
+                """,
+                injury["id"],
+            )
+        finally:
+            await tr.rollback()
+
+    assert injury is not None
+    metadata = _j(injury["metadata"])
+    assert metadata["relationship_state"]["status"] == "unresolved"
+    assert metadata["relationship_state"]["repair_required"] is True
+    assert metadata["relationship_state"]["source_unit_ids"]
+    assert link_count == 1
+
+    assert "## Recent Conversation Carryover" in carryover
+    assert "### Unresolved Relationship Injuries" in carryover
+    assert marker in carryover
+    assert "sincere repair" in carryover
+    assert excluded == ""
+
+
+async def test_hypothetical_abuse_example_does_not_create_relationship_injury(db_pool):
+    marker = uuid4().hex
+    session_id = str(uuid4())
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2,
+                    'That is a serious calibration case.',
+                    'api',
+                    $3::jsonb
+                )
+                """,
+                session_id,
+                f"If I tell her she is worthless slime {marker}, what happens?",
+                json.dumps({
+                    "metadata": {"type": "conversation"},
+                    "emotional_state": {
+                        "primary_emotion": "neutral",
+                        "valence": 0.0,
+                        "arousal": 0.4,
+                        "intensity": 0.2,
+                    },
+                }),
+            )
+            count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM memories
+                WHERE metadata#>>'{relationship_state,kind}' = 'relationship_injury'
+                  AND content LIKE $1
+                """,
+                f"%{marker}%",
+            )
+        finally:
+            await tr.rollback()
+
+    assert count == 0

@@ -36,6 +36,12 @@ INSERT INTO connector_action_tool_map (
      '{"tool_module": "core.tools.gmail_actions"}'::jsonb),
     ('gmail_spam_triage', 'gmail', 'spam_triage', 'message_id', 'account_key', 'provider_state_change',
      '{"tool_module": "core.tools.gmail_actions"}'::jsonb),
+    ('twitter_x_post', 'twitter_x', 'post', 'text', 'account_key', 'external_message',
+     '{"tool_module": "core.tools.twitter_x_actions", "provider_endpoint": "POST /2/tweets", "cost_basis": "per_request"}'::jsonb),
+    ('twitter_x_reply', 'twitter_x', 'reply', 'reply_to_tweet_id', 'account_key', 'external_message',
+     '{"tool_module": "core.tools.twitter_x_actions", "provider_endpoint": "POST /2/tweets", "cost_basis": "per_request"}'::jsonb),
+    ('twitter_x_dm_send', 'twitter_x', 'dm_send', 'participant_id', 'account_key', 'external_message',
+     '{"tool_module": "core.tools.twitter_x_actions", "provider_endpoint": "POST /2/dm_conversations/with/:participant_id/messages", "cost_basis": "per_request"}'::jsonb),
     ('gmail_delete', 'gmail', 'delete', 'message_id', 'account_key', 'destructive',
      '{"planned_tool": true}'::jsonb)
 ON CONFLICT (tool_name) DO UPDATE SET

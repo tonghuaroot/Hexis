@@ -549,6 +549,9 @@ _INTEGRATION_ACTION_TO_TOOL = {
     "connect_gmail": "connect_gmail",
     "complete_gmail": "complete_gmail_connection",
     "revoke_gmail": "revoke_gmail_connection",
+    "connect_twitter_x": "connect_twitter_x",
+    "complete_twitter_x": "complete_twitter_x_connection",
+    "revoke_twitter_x": "revoke_twitter_x_connection",
     "start_gmail_backfill": "start_gmail_backfill",
     "control_gmail_backfill": "control_gmail_backfill",
     "start_connector_backfill": "start_connector_backfill",
@@ -572,17 +575,17 @@ def _integration_action_arguments(
         connector_id = (
             str(args.get("connector_id") or "").strip().lower().replace("-", "_")
         )
-        allowed = {"slack", "telegram", "signal", "twitter_x"} if action == "start_setup" else {"slack", "telegram", "signal"}
+        allowed = {"slack", "telegram", "signal"}
         if connector_id not in allowed:
             raise HTTPException(
                 status_code=422,
                 detail=f"{action} supports {', '.join(sorted(allowed))}.",
             )
         args["connector_id"] = connector_id
-    if action in {"start_setup", "connect_gmail", "start_gmail_backfill", "start_connector_backfill"}:
+    if action in {"start_setup", "connect_gmail", "connect_twitter_x", "start_gmail_backfill", "start_connector_backfill"}:
         args.setdefault("source_channel", "web")
     if (
-        action in {"start_setup", "connect_gmail", "start_gmail_backfill", "start_connector_backfill"}
+        action in {"start_setup", "connect_gmail", "connect_twitter_x", "start_gmail_backfill", "start_connector_backfill"}
         and source_session_id
     ):
         args.setdefault("source_session_id", source_session_id)

@@ -254,6 +254,25 @@ def _bounded_subconscious_json(payload: dict[str, Any], total_chars: int = _SUBC
     return encoded
 
 
+async def render_recent_conversation_carryover_db(
+    conn: "asyncpg.Connection",
+    session_id: str | None,
+    *,
+    exclude_sensitive: bool = False,
+) -> str:
+    """Render DB-owned short-term continuity from nearby prior chat sessions."""
+    try:
+        raw = await conn.fetchval(
+            "SELECT render_recent_conversation_carryover($1::text, $2::boolean)",
+            session_id,
+            bool(exclude_sensitive),
+        )
+    except Exception:
+        logger.debug("Recent conversation carryover unavailable", exc_info=True)
+        return ""
+    return str(raw or "").strip()
+
+
 async def run_subconscious_appraisal(
     conn: "asyncpg.Connection",
     user_message: str,
@@ -305,6 +324,12 @@ async def run_subconscious_appraisal(
     memory_limit = int(limits.get("memory_limit") or 10)
     max_tokens = int(limits.get("max_tokens") or 1800)
 
+    if memory_context:
+        clipped = memory_context[:context_chars]
+        if len(memory_context) > context_chars:
+            clipped += "\n[truncated for subconscious appraisal; full context is provided to the main turn]"
+        payload["additional_context"] = clipped
+
     if hydrated_context is not None:
         remaining = context_chars
         for memory in hydrated_context.memories[:memory_limit]:
@@ -317,11 +342,6 @@ async def run_subconscious_appraisal(
         payload["worldview"] = hydrated_context.worldview[:5]
         payload["goals"] = hydrated_context.goals or {}
         payload["urgent_drives"] = hydrated_context.urgent_drives[:5]
-    elif memory_context:
-        clipped = memory_context[:context_chars]
-        if len(memory_context) > context_chars:
-            clipped += "\n[truncated for subconscious appraisal; full context is provided to the main turn]"
-        payload["additional_context"] = clipped
 
     if not payload.get("identity"):
         payload["identity"] = db_ctx.get("identity") or []
@@ -618,6 +638,7 @@ async def run_agent(
 
         # 2. Hydrate memory context (chat mode - heartbeat builds its own context)
         memory_context = ""
+        recent_carryover_context = ""
         context = None
         if mode == "chat":
             try:
@@ -631,6 +652,7 @@ async def run_agent(
                     include_emotional_state=True,
                     include_goals=True,
                     include_drives=True,
+                    session_id=session_id,
                     # Sensitivity enforcement (#92): a group room never
                     # receives private-marked memories — the channel prompt's
                     # promise, made mechanical at the recall layer.
@@ -651,6 +673,11 @@ async def run_agent(
                     )
             except Exception as exc:
                 logger.warning("Memory hydration failed: %s", exc)
+            recent_carryover_context = await render_recent_conversation_carryover_db(
+                conn,
+                session_id,
+                exclude_sensitive=is_group,
+            )
 
         # 3. Run subconscious pre-phase
         subconscious_output = SubconsciousOutput()
@@ -668,8 +695,10 @@ async def run_agent(
                         )
                     )
 
-                # For heartbeat, use the heartbeat context as memory context
-                sub_memory_ctx = memory_context
+                # For chat, cross-session carryover is the appraisal context;
+                # semantically retrieved memories are supplied separately as
+                # hydrated_context. Heartbeat still renders its full snapshot.
+                sub_memory_ctx = recent_carryover_context if mode == "chat" else memory_context
                 if mode == "heartbeat" and heartbeat_context:
                     from services.heartbeat_prompt import (
                         render_heartbeat_decision_prompt_db,
@@ -745,6 +774,9 @@ async def run_agent(
     # Add subconscious signals (rendered by the DB inside the conn scope)
     if sub_signals:
         enriched_parts.append(sub_signals)
+
+    if recent_carryover_context:
+        enriched_parts.append(recent_carryover_context)
 
     # Add memory context (chat mode)
     if memory_context:
@@ -864,6 +896,7 @@ async def stream_agent(
 
         # Hydrate memory
         memory_context = ""
+        recent_carryover_context = ""
         context = None
         if mode == "chat":
             try:
@@ -881,6 +914,7 @@ async def stream_agent(
                     include_emotional_state=True,
                     include_goals=True,
                     include_drives=True,
+                    session_id=session_id,
                     # Sensitivity enforcement (#92): a group room never
                     # receives private-marked memories — the channel prompt's
                     # promise, made mechanical at the recall layer.
@@ -898,6 +932,11 @@ async def stream_agent(
                 )
             except Exception as exc:
                 logger.warning("Memory hydration failed: %s", exc)
+            recent_carryover_context = await render_recent_conversation_carryover_db(
+                conn,
+                session_id,
+                exclude_sensitive=is_group,
+            )
 
         # Run subconscious
         subconscious_output = SubconsciousOutput()
@@ -912,6 +951,7 @@ async def stream_agent(
                 subconscious_output = await run_subconscious_appraisal(
                     conn,
                     user_message,
+                    recent_carryover_context,
                     hydrated_context=context,
                 )
                 sub_signals = await render_subconscious_signals_db(conn, subconscious_output)
@@ -953,6 +993,8 @@ async def stream_agent(
     enriched_parts: list[str] = []
     if sub_signals:
         enriched_parts.append(sub_signals)
+    if recent_carryover_context:
+        enriched_parts.append(recent_carryover_context)
     if memory_context:
         enriched_parts.append(memory_context)
     enriched_parts.append(f"[USER MESSAGE]\n{user_message}")

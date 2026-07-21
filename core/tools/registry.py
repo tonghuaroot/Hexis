@@ -682,6 +682,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
     from .calendar import create_calendar_tools
     from .email import create_email_tools
     from .gmail_actions import create_gmail_action_tools
+    from .twitter_x_actions import create_twitter_x_action_tools
     from .messaging import create_messaging_tools
     from .ingest import create_ingest_tools
     from .workflow import create_workflow_tools
@@ -758,6 +759,7 @@ def create_default_registry(pool: "asyncpg.Pool") -> ToolRegistry:
         gmail_credentials_resolver=_gmail_credentials_resolver,
     ))
     builder.add_all(create_gmail_action_tools())
+    builder.add_all(create_twitter_x_action_tools())
     builder.add_all(create_integration_tools())
     builder.add_all(create_messaging_tools())
     builder.add_all(create_ingest_tools())

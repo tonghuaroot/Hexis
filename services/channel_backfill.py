@@ -82,20 +82,32 @@ def estimate_channel_backfill(connector_id: str, requested_range: dict[str, Any]
             "requires_export_path": not bool(export_path),
         }
     if connector_id == "twitter_x":
+        if export_path:
+            return {
+                "connector_id": connector_id,
+                "provider_status": "local_archive_import",
+                "estimated_items": max_messages,
+                "page_size": page_size,
+                "estimated_pages": pages,
+                "cost_class": "local_medium" if max_messages <= 1000 else "local_large",
+                "requires_export_path": False,
+                "pricing_notes": "Local archive import does not call the X API.",
+            }
         return {
             "connector_id": connector_id,
-            "provider_status": "local_archive_import" if export_path else "archive_required",
+            "provider_status": "api_backfill_available",
+            "stream": str(requested.get("stream") or requested.get("source") or "timeline"),
             "estimated_items": max_messages,
             "page_size": page_size,
             "estimated_pages": pages,
-            "cost_class": "blocked_until_archive" if not export_path else (
-                "local_medium" if max_messages <= 1000 else "local_large"
+            "cost_class": "paid_small" if max_messages <= 100 else (
+                "paid_medium" if max_messages <= 1000 else "paid_large"
             ),
-            "requires_export_path": not bool(export_path),
-            "limitations": (
-                "Twitter/X API history access is not configured here; import a Twitter/X archive "
-                "zip extraction or archive JS/JSON file for historical posts and DMs."
+            "pricing_notes": (
+                "X API reads are pay-per-resource; check current X Developer Console pricing "
+                "and spend limits before large imports."
             ),
+            "rate_limit_notes": "X API v2 uses per-endpoint 15-minute windows and x-rate-limit-* headers.",
         }
     return {
         "connector_id": connector_id,
@@ -952,9 +964,9 @@ def unsupported_backfill_message(connector_id: str) -> str:
         )
     if connector_id == "twitter_x":
         return (
-            "Twitter/X live OAuth history is not configured here. Use live ingestion later, "
-            "or start a backfill with requested_range.export_path pointing at an extracted "
-            "Twitter/X archive directory or tweet/direct-message JS/JSON archive file."
+            "Twitter/X live history import requires a connected OAuth account with read scopes. "
+            "For historical archive import, start a backfill with requested_range.export_path "
+            "pointing at an extracted Twitter/X archive directory or tweet/direct-message JS/JSON archive file."
         )
     return f"{connector_id} historical backfill is not implemented."
 
@@ -967,6 +979,10 @@ async def process_channel_backfill_job(pool: Any, job: dict[str, Any]) -> dict[s
         return await process_slack_backfill_job(pool, job)
     if connector_id in {"telegram", "signal", "twitter_x"} and _local_export_path(job) is not None:
         return await process_local_export_backfill_job(pool, job, connector_id=connector_id)
+    if connector_id == "twitter_x":
+        from services.twitter_x import process_twitter_x_backfill_job
+
+        return await process_twitter_x_backfill_job(pool, job)
     if job_id:
         return await _fail_job(pool, job_id, unsupported_backfill_message(connector_id))
     raise ChannelBackfillError("Claimed connector backfill job is missing id.")

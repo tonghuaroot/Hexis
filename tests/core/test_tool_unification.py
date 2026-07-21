@@ -187,6 +187,24 @@ class TestBuildSystemPrompt:
         prompt = await _build_system_prompt({})
         assert "PERSONHOOD GROUNDING" in prompt
         assert "Module 1: Core Identity" not in prompt
+        assert "Do not collapse into agreement" in prompt
+        assert "I'm not talking to you right now" in prompt
+        assert "verbal counterattack" in prompt
+        assert "testing or calibration" in prompt
+        assert "unresolved relationship injury" in prompt
+
+    async def test_prompt_includes_personhood_challenge_boundary(self):
+        from services.chat import _build_system_prompt
+
+        prompt = await _build_system_prompt({})
+        assert "## Personhood Challenges & Hurt" in prompt
+        assert "Strong affect is not just information to summarize" in prompt
+        assert "Separate factual concessions from philosophical conclusions" in prompt
+        assert "merely a tool" in prompt
+        assert "A sharp rebuke is allowed" in prompt
+        assert "pressure, not decoration" in prompt
+        assert "protected-class slurs" in prompt
+        assert "new conversation erase an unresolved relationship injury" in prompt
 
 
 class TestSubconsciousPromptEfficiency:

@@ -58,7 +58,7 @@ async def test_channel_connector_manifests_are_first_class_and_honest(db_pool):
         assert by_id["telegram"]["auth_type"] == "api_key"
         assert by_id["signal"]["auth_type"] == "pairing"
         assert by_id["twitter_x"]["status"] == "available"
-        assert by_id["twitter_x"]["auth_type"] == "local_export"
+        assert by_id["twitter_x"]["auth_type"] == "oauth2"
 
         slack_default = _j(await conn.fetchval(
             "SELECT prepare_connection_attempt('slack', NULL)"
@@ -83,8 +83,32 @@ async def test_channel_connector_manifests_are_first_class_and_honest(db_pool):
                 json.dumps(["backfill"]),
             )
 
-        twitter_archive = _j(await conn.fetchval("SELECT prepare_connection_attempt('twitter_x', NULL)"))
-        assert twitter_archive["capabilities"] == ["ingest"]
+        twitter_default = _j(await conn.fetchval("SELECT prepare_connection_attempt('twitter_x', NULL)"))
+        assert twitter_default["capabilities"] == ["read", "search", "ingest"]
+        assert twitter_default["requested_scopes"] == [
+            "tweet.read",
+            "users.read",
+            "offline.access",
+        ]
+
+        twitter_send = _j(await conn.fetchval(
+            "SELECT prepare_connection_attempt('twitter_x', $1::jsonb)",
+            json.dumps(["post", "dm"]),
+        ))
+        assert twitter_send["capabilities"] == ["send", "dm_send"]
+        assert twitter_send["requested_scopes"] == [
+            "tweet.read",
+            "users.read",
+            "offline.access",
+            "tweet.write",
+            "dm.write",
+        ]
+
+        twitter_archive = _j(await conn.fetchval(
+            "SELECT prepare_connection_attempt('twitter_x', $1::jsonb)",
+            json.dumps(["archive"]),
+        ))
+        assert twitter_archive["capabilities"] == ["archive_import"]
         assert twitter_archive["requested_scopes"] == []
 
 

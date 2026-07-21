@@ -155,6 +155,7 @@ const promptAddendaOptions = [
 const SESSION_KEY = "hexis-chat-display-messages";
 const LEGACY_SESSION_KEY = "hexis-chat-messages";
 const SESSION_ID_KEY = "hexis-chat-session-id";
+const ACTIVITY_KEY = "hexis-chat-activity-events";
 const MAX_ACTIVITY_EVENTS = 60;
 const ACTIVITY_TTL_MS = 30 * 60 * 1000;
 
@@ -210,6 +211,73 @@ function saveSession(messages: ChatMessage[]) {
   }
 }
 
+function pruneActivityEvents(events: LogEvent[]): LogEvent[] {
+  const cutoff = Date.now() - ACTIVITY_TTL_MS;
+  return events
+    .filter((event) => event.ts >= cutoff)
+    .slice(-MAX_ACTIVITY_EVENTS);
+}
+
+function parseActivityEvents(value: unknown): LogEvent[] {
+  if (!Array.isArray(value)) return [];
+  const events: LogEvent[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const category = record.category;
+    if (
+      category !== "phase" &&
+      category !== "subconscious" &&
+      category !== "model" &&
+      category !== "tool" &&
+      category !== "memory" &&
+      category !== "error"
+    ) {
+      continue;
+    }
+    if (
+      typeof record.id !== "string" ||
+      typeof record.title !== "string" ||
+      typeof record.detail !== "string" ||
+      typeof record.ts !== "number"
+    ) {
+      continue;
+    }
+    events.push({
+      id: record.id,
+      category,
+      title: record.title,
+      detail: record.detail,
+      raw: record.raw,
+      ts: record.ts,
+    });
+  }
+  return pruneActivityEvents(events);
+}
+
+function loadActivityEvents(): LogEvent[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = sessionStorage.getItem(ACTIVITY_KEY);
+    return raw ? parseActivityEvents(JSON.parse(raw)) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveActivityEvents(events: LogEvent[]) {
+  if (typeof window === "undefined") return;
+  try {
+    if (events.length > 0) {
+      sessionStorage.setItem(ACTIVITY_KEY, JSON.stringify(pruneActivityEvents(events)));
+    } else {
+      sessionStorage.removeItem(ACTIVITY_KEY);
+    }
+  } catch {
+    // ignore quota errors
+  }
+}
+
 function dbMessagesToChatMessages(value: unknown): ChatMessage[] | null {
   if (!Array.isArray(value)) return null;
   const messages: ChatMessage[] = [];
@@ -231,7 +299,7 @@ function dbMessagesToChatMessages(value: unknown): ChatMessage[] | null {
 
 export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [events, setEvents] = useState<LogEvent[]>([]);
+  const [events, setEvents] = useState<LogEvent[]>(() => loadActivityEvents());
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<PastedAttachment[]>([]);
@@ -385,6 +453,10 @@ export default function ChatPage() {
   useEffect(() => {
     saveSession(messages);
   }, [messages]);
+
+  useEffect(() => {
+    saveActivityEvents(events);
+  }, [events]);
 
   useEffect(() => {
     const desktop = window.matchMedia("(min-width: 1024px)");

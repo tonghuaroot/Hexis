@@ -37,7 +37,7 @@ CREATE INDEX IF NOT EXISTS idx_subconscious_units_extraction_pending
 -- Extraction links memories to their source units with two new roles.
 ALTER TABLE memory_source_units DROP CONSTRAINT IF EXISTS memory_source_units_role_check;
 ALTER TABLE memory_source_units ADD CONSTRAINT memory_source_units_role_check
-    CHECK (role IN ('source','direct_promotion','merge_addition','extraction','corroboration'));
+    CHECK (role IN ('source','direct_promotion','merge_addition','extraction','corroboration','relationship_injury'));
 
 -- Conscious-episode memory formation (#37, generalized): the subconscious
 -- observer. The conscious mind (AgentLoop — chat AND heartbeat) acts without

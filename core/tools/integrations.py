@@ -122,6 +122,56 @@ async def _resolve_connector_account(pool: Any, connector_id: str, requested: An
     raise ValueError(f"Multiple {connector_id} accounts are connected. Specify account_key. Connected: {choices}")
 
 
+async def _ensure_twitter_archive_connection(pool: Any, account_key: str, source_session_id: str | None) -> str:
+    account_key = account_key.strip() or "archive:twitter_x"
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            """
+            SELECT account_key
+            FROM integration_connections
+            WHERE connector_id = 'twitter_x'
+              AND account_key = $1
+              AND status = 'connected'
+            """,
+            account_key,
+        )
+        if existing:
+            return str(existing)
+        attempt_raw = await conn.fetchval(
+            """
+            SELECT start_connection_attempt(
+                'twitter_x',
+                '["archive_import"]'::jsonb,
+                ARRAY[]::text[],
+                '{"setup_kind": "local_archive_import", "auth_type": "local_export"}'::jsonb,
+                NULL,
+                'Archive connection will be created for local Twitter/X history import.',
+                'tool',
+                $1,
+                CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+            )
+            """,
+            source_session_id,
+        )
+        attempt = _json(attempt_raw) or {}
+        await conn.fetchval(
+            """
+            SELECT complete_connection_attempt(
+                $1::uuid,
+                $2,
+                'Twitter/X archive',
+                'local_export:twitter_x_archive',
+                ARRAY[]::text[],
+                '["archive_import"]'::jsonb,
+                '{"verified_by": "start_connector_backfill", "setup_kind": "local_archive_import", "secret_values_stored": false}'::jsonb
+            )
+            """,
+            attempt["attempt_id"],
+            account_key,
+        )
+    return account_key
+
+
 class IntegrationSetupStatusHandler(ToolHandler):
     """Inspect first-class connector setup state for any provider."""
 
@@ -192,8 +242,9 @@ class StartIntegrationSetupHandler(ToolHandler):
             name="start_integration_setup",
             description=(
                 "Start a first-class connector setup attempt for manual/pairing/API-key channels "
-                "such as Slack, Telegram, Signal, or Twitter/X archive import. Gmail OAuth uses "
-                "connect_gmail instead."
+                "such as Slack, Telegram, or Signal. Gmail OAuth uses connect_gmail; Twitter/X "
+                "OAuth uses connect_twitter_x. Twitter/X archive import uses start_connector_backfill "
+                "after the account/archive path is available."
             ),
             parameters={
                 "type": "object",
@@ -242,6 +293,11 @@ class StartIntegrationSetupHandler(ToolHandler):
                 "Use connect_gmail for Gmail OAuth setup.",
                 ToolErrorType.INVALID_PARAMS,
             )
+        if connector_id == "twitter_x":
+            return ToolResult.error_result(
+                "Use connect_twitter_x for Twitter/X OAuth setup. Use start_connector_backfill with export_path for archive import.",
+                ToolErrorType.INVALID_PARAMS,
+            )
         requested = arguments.get("capabilities")
         requested_json = json.dumps(requested) if requested is not None else None
 
@@ -277,36 +333,6 @@ class StartIntegrationSetupHandler(ToolHandler):
                     arguments.get("source_session_id") or context.session_id,
                 )
                 attempt = _json(attempt_raw) or {}
-                if connector_id == "twitter_x" and plan.get("auth_type") == "local_export":
-                    account_key = str(arguments.get("account_key") or "").strip() or "archive:twitter_x"
-                    completed_raw = await conn.fetchval(
-                        """
-                        SELECT complete_connection_attempt(
-                            $1::uuid,
-                            $2,
-                            $3,
-                            $4,
-                            $5::text[],
-                            $6::jsonb,
-                            $7::jsonb
-                        )
-                        """,
-                        attempt["attempt_id"],
-                        account_key,
-                        plan.get("display_name") or connector_id,
-                        "local_export:twitter_x_archive",
-                        [str(item) for item in plan.get("requested_scopes", [])],
-                        json.dumps(plan.get("capabilities") or []),
-                        json.dumps({
-                            "verified_by": "start_integration_setup",
-                            "setup_kind": "local_archive_import",
-                            "secret_values_stored": False,
-                        }),
-                    )
-                    completed = _json(completed_raw) or {}
-                    completed["setup_plan"] = plan
-                    completed["next_step"] = next_step
-                    return ToolResult.success_result(completed, display_output=next_step)
         except Exception as exc:
             return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
 
@@ -815,6 +841,227 @@ class RevokeGmailConnectionHandler(ToolHandler):
         )
 
 
+class ConnectTwitterXHandler(ToolHandler):
+    """Start a Twitter/X OAuth connection attempt."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="connect_twitter_x",
+            description=(
+                "Start the Twitter/X connector OAuth setup flow. Use when the user asks to connect "
+                "Twitter/X, read posts or mentions, search recent posts, import live X history, "
+                "read DMs, post, reply, or send DMs. Request only capabilities the user asked for."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Twitter/X grants to request. Default is read/search/ingest. Include dm_read, "
+                            "send, or dm_send only when the user asked for those powers. The database "
+                            "connector manifest validates names, aliases, and required scopes."
+                        ),
+                    },
+                    "client_id": {
+                        "type": "string",
+                        "description": "X OAuth 2.0 Client ID from the X Developer Console.",
+                    },
+                    "client_secret": {
+                        "type": "string",
+                        "description": "Optional X OAuth 2.0 Client Secret for confidential apps. Do not paste unless the user explicitly chooses to store it locally.",
+                    },
+                    "use_env_client": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "Use TWITTER_X_CLIENT_ID/X_CLIENT_ID and optional secret env vars. Only set true "
+                            "after the user explicitly asks to use environment-provided client credentials."
+                        ),
+                    },
+                    "source_channel": {
+                        "type": "string",
+                        "description": "Optional source surface, such as cli, web, slack, telegram, or signal.",
+                    },
+                    "source_session_id": {
+                        "type": "string",
+                        "description": "Optional conversation/session identifier for resuming setup.",
+                    },
+                },
+            },
+            category=ToolCategory.MESSAGING,
+            energy_cost=1,
+            is_read_only=False,
+            requires_approval=True,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.MCP},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result(
+                "connect_twitter_x requires an active tool registry.",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+        from core.auth.twitter_x import TwitterXOAuthError, TwitterXOAuthStart, start_twitter_x_oauth
+
+        try:
+            started = await start_twitter_x_oauth(
+                context.registry.pool,
+                capabilities=arguments.get("capabilities"),
+                client_id=arguments.get("client_id"),
+                client_secret=arguments.get("client_secret"),
+                use_env_client=bool(arguments.get("use_env_client", False)),
+                source_channel=arguments.get("source_channel"),
+                source_session_id=arguments.get("source_session_id") or context.session_id,
+            )
+        except TwitterXOAuthError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.MISSING_CONFIG)
+
+        if isinstance(started, dict):
+            return ToolResult.success_result(
+                started,
+                display_output=started.get("next_step"),
+            )
+
+        assert isinstance(started, TwitterXOAuthStart)
+        payload = started.attempt_payload
+        display = (
+            "Twitter/X authorization started.\n"
+            f"Attempt: {payload['attempt_id']}\n"
+            f"{payload['authorization_url']}\n\n"
+            "After approving, paste the full redirected localhost URL back here."
+        )
+        return ToolResult.success_result(payload, display_output=display)
+
+
+class CompleteTwitterXConnectionHandler(ToolHandler):
+    """Complete a pending Twitter/X OAuth attempt from the pasted redirect URL."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="complete_twitter_x_connection",
+            description=(
+                "Complete Twitter/X OAuth setup after the user pastes the full redirected localhost URL "
+                "or authorization code from X."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "authorization_response": {
+                        "type": "string",
+                        "description": "Full redirected URL or raw authorization code.",
+                    },
+                    "attempt_id": {
+                        "type": "string",
+                        "description": "Optional Twitter/X connection attempt ID. Defaults to latest pending Twitter/X attempt.",
+                    },
+                },
+                "required": ["authorization_response"],
+            },
+            category=ToolCategory.MESSAGING,
+            energy_cost=1,
+            is_read_only=False,
+            requires_approval=True,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.MCP},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result(
+                "complete_twitter_x_connection requires an active tool registry.",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+        from core.auth.twitter_x import TwitterXOAuthError, complete_twitter_x_oauth
+
+        try:
+            completed = await complete_twitter_x_oauth(
+                context.registry.pool,
+                authorization_response=str(arguments.get("authorization_response") or ""),
+                attempt_id=arguments.get("attempt_id"),
+            )
+        except TwitterXOAuthError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.AUTH_FAILED)
+
+        output = {
+            "connector_id": "twitter_x",
+            "status": "connected",
+            "account_key": completed.account_key,
+            "display_name": completed.display_name,
+            "credential_ref": completed.credential_ref,
+            "granted_scopes": completed.granted_scopes,
+            "capabilities": completed.capabilities,
+        }
+        return ToolResult.success_result(
+            output,
+            display_output=f"Twitter/X connected for {completed.display_name}.",
+        )
+
+
+class RevokeTwitterXConnectionHandler(ToolHandler):
+    """Disconnect Twitter/X locally and mark DB connection state revoked."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="revoke_twitter_x_connection",
+            description=(
+                "Disconnect Twitter/X from Hexis by deleting the local credential file and marking the "
+                "connection revoked. The user can also remove the X-side grant in X settings."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "account_key": {
+                        "type": "string",
+                        "description": "Optional Twitter/X account key. If omitted, revokes local default Twitter/X credentials.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional user-visible revocation reason.",
+                    },
+                },
+            },
+            category=ToolCategory.MESSAGING,
+            energy_cost=1,
+            is_read_only=False,
+            requires_approval=True,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.MCP},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result(
+                "revoke_twitter_x_connection requires an active tool registry.",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+        from core.auth.twitter_x import delete_default_credentials
+
+        delete_default_credentials()
+        async with context.registry.pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT revoke_integration_connection('twitter_x', $1, $2)",
+                arguments.get("account_key"),
+                arguments.get("reason") or "revoked by user request",
+            )
+        payload = _json(raw) or {}
+        payload["local_credentials_deleted"] = True
+        payload["remote_revocation"] = "not_attempted"
+        payload["next_step"] = (
+            "Local Twitter/X credentials are removed. To remove the X-side OAuth grant too, "
+            "open your X connected apps settings and revoke the app there."
+        )
+        return ToolResult.success_result(
+            payload,
+            display_output="Twitter/X disconnected locally.",
+        )
+
+
 class StartGmailBackfillHandler(ToolHandler):
     """Queue a DB-owned Gmail history backfill."""
 
@@ -1144,14 +1391,6 @@ class StartConnectorBackfillHandler(ToolHandler):
                 "start_connector_backfill supports slack, telegram, signal, and twitter_x.",
                 ToolErrorType.INVALID_PARAMS,
             )
-        try:
-            account_key = await _resolve_connector_account(
-                context.registry.pool,
-                connector_id,
-                arguments.get("account_key"),
-            )
-        except ValueError as exc:
-            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
 
         requested_range = arguments.get("requested_range")
         if requested_range is None:
@@ -1159,7 +1398,21 @@ class StartConnectorBackfillHandler(ToolHandler):
         if not isinstance(requested_range, dict):
             return ToolResult.error_result("requested_range must be an object.", ToolErrorType.INVALID_PARAMS)
         requested_range = dict(requested_range)
-        for key in ("channel_id", "oldest", "latest", "cursor", "export_path", "import_path", "export_format"):
+        for key in (
+            "channel_id",
+            "oldest",
+            "latest",
+            "cursor",
+            "export_path",
+            "import_path",
+            "export_format",
+            "stream",
+            "source",
+            "query",
+            "pagination_token",
+            "next_token",
+            "user_id",
+        ):
             value = arguments.get(key)
             if value not in (None, ""):
                 requested_range[key] = value
@@ -1174,13 +1427,29 @@ class StartConnectorBackfillHandler(ToolHandler):
                 ToolErrorType.INVALID_PARAMS,
             )
 
+        has_local_export = bool(requested_range.get("export_path") or requested_range.get("import_path"))
+        try:
+            if connector_id == "twitter_x" and has_local_export:
+                account_key = await _ensure_twitter_archive_connection(
+                    context.registry.pool,
+                    str(arguments.get("account_key") or "").strip() or "archive:twitter_x",
+                    arguments.get("source_session_id") or context.session_id,
+                )
+            else:
+                account_key = await _resolve_connector_account(
+                    context.registry.pool,
+                    connector_id,
+                    arguments.get("account_key"),
+                )
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
+
         metadata = {
             "source_channel": arguments.get("source_channel"),
             "source_session_id": arguments.get("source_session_id") or context.session_id,
             "queued_by_tool": "start_connector_backfill",
         }
-        has_local_export = bool(requested_range.get("export_path") or requested_range.get("import_path"))
-        max_attempts = 3 if (connector_id == "slack" or has_local_export) else 1
+        max_attempts = 3 if (connector_id in {"slack", "twitter_x"} or has_local_export) else 1
         async with context.registry.pool.acquire() as conn:
             raw = await conn.fetchval(
                 """
@@ -1571,6 +1840,9 @@ def create_integration_tools() -> list[ToolHandler]:
         ConnectGmailHandler(),
         CompleteGmailConnectionHandler(),
         RevokeGmailConnectionHandler(),
+        ConnectTwitterXHandler(),
+        CompleteTwitterXConnectionHandler(),
+        RevokeTwitterXConnectionHandler(),
         StartGmailBackfillHandler(),
         GmailBackfillStatusHandler(),
         ControlGmailBackfillHandler(),

@@ -389,3 +389,112 @@ async def test_twitter_archive_backfill_imports_tweets_and_dms(db_pool, tmp_path
                 "DELETE FROM source_documents WHERE path LIKE $1",
                 f"twitter_x://{account}/%",
             )
+
+
+async def test_twitter_live_backfill_stores_posts_as_connector_source_items(db_pool, monkeypatch, tmp_path):
+    import core.auth.store as auth_store
+    from core.auth.store import save_auth
+    from core.auth.twitter_x import TWITTER_X_DEFAULT_CREDENTIAL_REF
+    from core.auth.utils import now_ms
+    from services import twitter_x
+
+    marker = get_test_identifier("twitter-live")
+    account = f"x:{marker.replace('-', '')[:12]}"
+    user_id = account.removeprefix("x:")
+    monkeypatch.setattr(auth_store, "AUTH_DIR", tmp_path / "auth")
+    save_auth(
+        TWITTER_X_DEFAULT_CREDENTIAL_REF,
+        {
+            "type": "twitter_x_oauth2",
+            "token": "twitter-access-token",
+            "refresh_token": "twitter-refresh-token",
+            "client_id": "twitter-client",
+            "expires_ms": now_ms() + 3_600_000,
+            "account_key": account,
+            "user_id": user_id,
+            "username": "hexis_test",
+            "scopes": ["tweet.read", "users.read", "offline.access"],
+        },
+    )
+
+    try:
+        async with db_pool.acquire() as conn:
+            await _connected_channel(
+                conn,
+                "twitter_x",
+                marker,
+                account,
+                capabilities=["read", "search", "ingest"],
+            )
+            queued = _j(await conn.fetchval(
+                """
+                SELECT enqueue_connector_backfill_job(
+                    'twitter_x',
+                    $1,
+                    'messages',
+                    $2::jsonb,
+                    '{"test": true}'::jsonb,
+                    3
+                )
+                """,
+                account,
+                json.dumps({"stream": "timeline", "max_messages": 2, "page_size": 10}),
+            ))
+            claimed = _j(await conn.fetchval(
+                "SELECT claim_connector_backfill_jobs_for('twitter_x', 1)"
+            ))
+            job = claimed[0]
+
+        async def fake_twitter_request(credentials, method, path, *, params=None, json_body=None):
+            assert credentials["token"] == "twitter-access-token"
+            assert method == "GET"
+            assert path == f"/users/{user_id}/tweets"
+            assert params["max_results"] == 10
+            return {
+                "data": [
+                    {
+                        "id": f"tweet-{marker}",
+                        "text": f"Twitter live marker {marker}",
+                        "created_at": "2026-07-20T10:00:00.000Z",
+                        "author_id": user_id,
+                        "conversation_id": f"conv-{marker}",
+                    }
+                ],
+                "meta": {},
+                "_rate_limit": {"x-rate-limit-remaining": "14"},
+            }
+
+        monkeypatch.setattr(twitter_x, "twitter_x_request", fake_twitter_request)
+        result = await channel_backfill.process_channel_backfill_job(db_pool, job)
+
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT provider_item_id, item_kind, source_document_id, sensitivity
+                FROM connector_source_items
+                WHERE account_key = $1
+                ORDER BY provider_item_id
+                """,
+                account,
+            )
+            opened = _j(await conn.fetchval("SELECT open_source_document($1::uuid)", rows[0]["source_document_id"]))
+
+        assert result["status"] == "completed"
+        assert result["result"]["items_stored"] == 1
+        assert result["result"]["rate_limit"]["x-rate-limit-remaining"] == "14"
+        assert queued["estimate"]["provider_status"] == "api_backfill_available"
+        assert rows[0]["provider_item_id"] == f"tweet:tweet-{marker}"
+        assert rows[0]["item_kind"] == "post"
+        assert rows[0]["sensitivity"] == "shared"
+        assert f"Twitter live marker {marker}" in opened["content"]
+        assert opened["source_attribution"]["connector_id"] == "twitter_x"
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM connector_backfill_jobs WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connector_sync_cursors WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM integration_connections WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)
+            await conn.execute(
+                "DELETE FROM source_documents WHERE path LIKE $1",
+                f"twitter_x://{account}/%",
+            )

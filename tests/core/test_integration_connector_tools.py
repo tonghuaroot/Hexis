@@ -10,6 +10,7 @@ from core.tools.integrations import (
     ConfigureChannelIntegrationHandler,
     ConnectorBackfillStatusHandler,
     ControlConnectorBackfillHandler,
+    ConnectTwitterXHandler,
     IntegrationSetupStatusHandler,
     StartIntegrationSetupHandler,
     StartConnectorBackfillHandler,
@@ -224,6 +225,46 @@ async def test_verify_channel_integration_reports_exact_setup_step_when_missing_
     assert "SIGNAL_PHONE_NUMBER" in result.error
 
 
+async def test_connect_twitter_x_starts_oauth_attempt_without_ambient_credentials(db_pool, monkeypatch, tmp_path):
+    import core.auth.store as auth_store
+
+    marker = get_test_identifier("twitter-oauth")
+    monkeypatch.setattr(auth_store, "AUTH_DIR", tmp_path / "auth")
+
+    try:
+        missing = await ConnectTwitterXHandler().execute(
+            {"capabilities": ["read"]},
+            _ctx(db_pool, marker),
+        )
+        assert missing.success
+        assert missing.output["status"] == "needs_client"
+
+        started = await ConnectTwitterXHandler().execute(
+            {
+                "capabilities": ["read", "dm_read"],
+                "client_id": "twitter-client-id",
+                "source_channel": "cli",
+            },
+            _ctx(db_pool, marker),
+        )
+
+        assert started.success
+        assert started.output["connector_id"] == "twitter_x"
+        assert started.output["status"] == "pending_user"
+        assert started.output["requested_capabilities"] == ["read", "dm_read"]
+        assert started.output["requested_scopes"] == [
+            "tweet.read",
+            "users.read",
+            "offline.access",
+            "dm.read",
+        ]
+        assert "https://x.com/i/oauth2/authorize?" in started.output["authorization_url"]
+        assert "client_secret" not in json.dumps(started.output)
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)
+
+
 async def _connected_channel(conn, connector_id: str, marker: str, account_key: str) -> None:
     attempt = _j(await conn.fetchval(
         """
@@ -340,3 +381,46 @@ async def test_start_connector_backfill_requires_explicit_slack_channel(db_pool)
     assert not result.success
     assert result.error_type == ToolErrorType.INVALID_PARAMS
     assert "channel_id" in result.error
+
+
+async def test_start_connector_backfill_creates_twitter_archive_connection_from_path(db_pool, tmp_path):
+    marker = get_test_identifier("twitter-archive-tool")
+    account = f"archive:twitter_x:{marker}"
+    archive_dir = tmp_path / "twitter-archive"
+    archive_dir.mkdir()
+
+    try:
+        result = await StartConnectorBackfillHandler().execute(
+            {
+                "connector_id": "twitter_x",
+                "account_key": account,
+                "export_path": str(archive_dir),
+                "max_messages": 5,
+            },
+            _ctx(db_pool, marker),
+        )
+
+        assert result.success
+        assert result.output["connector_id"] == "twitter_x"
+        assert result.output["account_key"] == account
+        assert result.output["requested_range"]["export_path"] == str(archive_dir)
+        assert result.output["estimate"]["provider_status"] == "local_archive_import"
+
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT account_key, credential_ref, capabilities
+                FROM integration_connections
+                WHERE connector_id = 'twitter_x'
+                  AND account_key = $1
+                """,
+                account,
+            )
+        assert row["credential_ref"] == "local_export:twitter_x_archive"
+        assert _j(row["capabilities"]) == ["archive_import"]
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM connector_backfill_jobs WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connector_sync_cursors WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM integration_connections WHERE connector_id = 'twitter_x' AND account_key = $1", account)
+            await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)

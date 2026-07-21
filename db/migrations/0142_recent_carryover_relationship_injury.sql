@@ -1,9 +1,7 @@
--- DB-owned chat session history and hydration.
+-- Preserve recent cross-session continuity and durable relationship injuries.
 SET search_path = public, ag_catalog, "$user";
 
 INSERT INTO config_defaults (key, value, description) VALUES
-    ('chat.session_history_limit', '40'::jsonb,
-     'Default number of visible chat-session messages hydrated into the active conversation context'),
     ('chat.recent_carryover_limit', '8'::jsonb,
      'Number of recent prior conversation turns shown across new chat sessions'),
     ('chat.recent_carryover_window_minutes', '1440'::jsonb,
@@ -185,326 +183,11 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION get_or_create_chat_session(
-    p_session_id UUID DEFAULT NULL,
-    p_surface TEXT DEFAULT 'chat',
-    p_external_id TEXT DEFAULT NULL,
-    p_metadata JSONB DEFAULT '{}'::jsonb
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    row_session chat_sessions%ROWTYPE;
-    normalized_surface TEXT := COALESCE(NULLIF(btrim(p_surface), ''), 'chat');
-    normalized_external TEXT := NULLIF(btrim(COALESCE(p_external_id, '')), '');
-BEGIN
-    IF p_session_id IS NOT NULL THEN
-        INSERT INTO chat_sessions (id, surface, external_id, metadata)
-        VALUES (
-            p_session_id,
-            normalized_surface,
-            normalized_external,
-            COALESCE(p_metadata, '{}'::jsonb)
-        )
-        ON CONFLICT (id) DO UPDATE SET
-            surface = COALESCE(NULLIF(chat_sessions.surface, ''), EXCLUDED.surface),
-            external_id = COALESCE(chat_sessions.external_id, EXCLUDED.external_id),
-            metadata = chat_sessions.metadata || EXCLUDED.metadata,
-            updated_at = CURRENT_TIMESTAMP,
-            last_active_at = CURRENT_TIMESTAMP
-        RETURNING * INTO row_session;
-    ELSIF normalized_external IS NOT NULL THEN
-        SELECT *
-        INTO row_session
-        FROM chat_sessions
-        WHERE surface = normalized_surface
-          AND external_id = normalized_external
-          AND status = 'active'
-        ORDER BY last_active_at DESC
-        LIMIT 1;
-
-        IF NOT FOUND THEN
-            INSERT INTO chat_sessions (surface, external_id, metadata)
-            VALUES (
-                normalized_surface,
-                normalized_external,
-                COALESCE(p_metadata, '{}'::jsonb)
-            )
-            RETURNING * INTO row_session;
-        ELSE
-            UPDATE chat_sessions
-            SET metadata = metadata || COALESCE(p_metadata, '{}'::jsonb),
-                updated_at = CURRENT_TIMESTAMP,
-                last_active_at = CURRENT_TIMESTAMP
-            WHERE id = row_session.id
-            RETURNING * INTO row_session;
-        END IF;
-    ELSE
-        INSERT INTO chat_sessions (surface, metadata)
-        VALUES (normalized_surface, COALESCE(p_metadata, '{}'::jsonb))
-        RETURNING * INTO row_session;
-    END IF;
-
-    RETURN jsonb_build_object(
-        'session_id', row_session.id::text,
-        'surface', row_session.surface,
-        'external_id', row_session.external_id,
-        'status', row_session.status,
-        'metadata', row_session.metadata,
-        'created_at', row_session.created_at,
-        'last_active_at', row_session.last_active_at,
-        'cleared_at', row_session.cleared_at
-    );
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION append_chat_message(
-    p_session_id UUID,
-    p_role TEXT,
-    p_content TEXT,
-    p_metadata JSONB DEFAULT '{}'::jsonb,
-    p_source_message_id TEXT DEFAULT NULL,
-    p_visible_in_context BOOLEAN DEFAULT TRUE
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    row_message chat_messages%ROWTYPE;
-    next_ordinal INT;
-    normalized_role TEXT := lower(COALESCE(NULLIF(btrim(p_role), ''), ''));
-BEGIN
-    IF p_session_id IS NULL THEN
-        RAISE EXCEPTION 'session_id is required';
-    END IF;
-    PERFORM pg_advisory_xact_lock(hashtext(p_session_id::text));
-    IF normalized_role NOT IN ('system', 'user', 'assistant') THEN
-        RAISE EXCEPTION 'chat message role must be system, user, or assistant';
-    END IF;
-    IF p_content IS NULL THEN
-        RAISE EXCEPTION 'chat message content is required';
-    END IF;
-
-    PERFORM get_or_create_chat_session(p_session_id);
-    SELECT COALESCE(MAX(ordinal), -1) + 1
-    INTO next_ordinal
-    FROM chat_messages
-    WHERE session_id = p_session_id;
-
-    INSERT INTO chat_messages (
-        session_id,
-        ordinal,
-        role,
-        content,
-        metadata,
-        source_message_id,
-        visible_in_context
-    )
-    VALUES (
-        p_session_id,
-        next_ordinal,
-        normalized_role,
-        p_content,
-        COALESCE(p_metadata, '{}'::jsonb),
-        NULLIF(btrim(COALESCE(p_source_message_id, '')), ''),
-        COALESCE(p_visible_in_context, TRUE)
-    )
-    RETURNING * INTO row_message;
-
-    UPDATE chat_sessions
-    SET updated_at = CURRENT_TIMESTAMP,
-        last_active_at = CURRENT_TIMESTAMP
-    WHERE id = p_session_id;
-
-    RETURN jsonb_build_object(
-        'message_id', row_message.id::text,
-        'session_id', row_message.session_id::text,
-        'ordinal', row_message.ordinal,
-        'role', row_message.role,
-        'content', row_message.content,
-        'visible_in_context', row_message.visible_in_context,
-        'metadata', row_message.metadata,
-        'created_at', row_message.created_at
-    );
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION hydrate_chat_session(
-    p_session_id UUID,
-    p_limit INT DEFAULT NULL,
-    p_include_system BOOLEAN DEFAULT FALSE
-) RETURNS JSONB
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-    row_session chat_sessions%ROWTYPE;
-    lim INT := LEAST(
-        GREATEST(COALESCE(p_limit, get_config_int('chat.session_history_limit'), 40), 1),
-        200
-    );
-    messages JSONB;
-BEGIN
-    IF p_session_id IS NULL THEN
-        RETURN jsonb_build_object('session_id', NULL, 'messages', '[]'::jsonb, 'count', 0);
-    END IF;
-
-    SELECT * INTO row_session
-    FROM chat_sessions
-    WHERE id = p_session_id
-      AND status = 'active';
-
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object('session_id', p_session_id::text, 'messages', '[]'::jsonb, 'count', 0);
-    END IF;
-
-    WITH selected AS (
-        SELECT role, content, ordinal, id, created_at, metadata
-        FROM chat_messages
-        WHERE session_id = p_session_id
-          AND visible_in_context
-          AND (p_include_system OR role <> 'system')
-        ORDER BY ordinal DESC
-        LIMIT lim
-    )
-    SELECT COALESCE(jsonb_agg(
-        jsonb_build_object(
-            'role', role,
-            'content', content,
-            'ordinal', ordinal,
-            'message_id', id::text,
-            'created_at', created_at,
-            'metadata', metadata
-        )
-        ORDER BY ordinal ASC
-    ), '[]'::jsonb)
-    INTO messages
-    FROM selected;
-
-    RETURN jsonb_build_object(
-        'session_id', row_session.id::text,
-        'surface', row_session.surface,
-        'external_id', row_session.external_id,
-        'messages', messages,
-        'count', jsonb_array_length(messages),
-        'cleared_at', row_session.cleared_at,
-        'last_active_at', row_session.last_active_at
-    );
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION record_chat_session_turn(
-    p_session_id UUID,
-    p_user_text TEXT,
-    p_assistant_text TEXT,
-    p_surface TEXT DEFAULT 'chat',
-    p_context JSONB DEFAULT '{}'::jsonb
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    session_payload JSONB;
-    user_message JSONB := NULL;
-    assistant_message JSONB := NULL;
-    memory_result JSONB := '{}'::jsonb;
-    ctx JSONB := COALESCE(p_context, '{}'::jsonb);
-    source_identity TEXT := NULLIF(ctx->>'source_identity', '');
-BEGIN
-    IF p_session_id IS NULL THEN
-        RAISE EXCEPTION 'session_id is required';
-    END IF;
-    session_payload := get_or_create_chat_session(
-        p_session_id,
-        COALESCE(NULLIF(p_surface, ''), ctx->>'surface', 'chat'),
-        NULLIF(ctx->>'external_id', ''),
-        COALESCE(ctx->'session_metadata', '{}'::jsonb)
-    );
-
-    IF NULLIF(COALESCE(p_user_text, ''), '') IS NOT NULL THEN
-        user_message := append_chat_message(
-            p_session_id,
-            'user',
-            p_user_text,
-            COALESCE(ctx->'user_metadata', '{}'::jsonb),
-            NULLIF(ctx->>'user_source_message_id', ''),
-            TRUE
-        );
-    END IF;
-
-    IF NULLIF(COALESCE(p_assistant_text, ''), '') IS NOT NULL THEN
-        assistant_message := append_chat_message(
-            p_session_id,
-            'assistant',
-            p_assistant_text,
-            COALESCE(ctx->'assistant_metadata', '{}'::jsonb),
-            NULLIF(ctx->>'assistant_source_message_id', ''),
-            TRUE
-        );
-    END IF;
-
-    IF COALESCE(p_user_text, '') <> '' OR COALESCE(p_assistant_text, '') <> '' THEN
-        BEGIN
-            memory_result := record_chat_turn_memory(
-                p_user_text,
-                p_assistant_text,
-                p_session_id::text,
-                source_identity,
-                ctx
-            );
-        EXCEPTION WHEN OTHERS THEN
-            memory_result := jsonb_build_object(
-                'status', 'failed',
-                'error', SQLERRM,
-                'short_term_history_preserved', TRUE
-            );
-        END;
-    END IF;
-
-    RETURN jsonb_build_object(
-        'session', session_payload,
-        'user_message', user_message,
-        'assistant_message', assistant_message,
-        'memory', memory_result,
-        'history', hydrate_chat_session(p_session_id)
-    );
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION clear_chat_session_context(
-    p_session_id UUID,
-    p_reason TEXT DEFAULT NULL
-) RETURNS JSONB
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    affected INT;
-BEGIN
-    IF p_session_id IS NULL THEN
-        RAISE EXCEPTION 'session_id is required';
-    END IF;
-
-    UPDATE chat_messages
-    SET visible_in_context = FALSE,
-        metadata = metadata || jsonb_build_object(
-            'cleared_from_context_at', CURRENT_TIMESTAMP,
-            'clear_reason', COALESCE(NULLIF(p_reason, ''), 'user_request')
-        ),
-        updated_at = CURRENT_TIMESTAMP
-    WHERE session_id = p_session_id
-      AND visible_in_context;
-    GET DIAGNOSTICS affected = ROW_COUNT;
-
-    UPDATE chat_sessions
-    SET cleared_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
-    WHERE id = p_session_id;
-
-    RETURN jsonb_build_object(
-        'session_id', p_session_id::text,
-        'cleared_messages', affected,
-        'long_term_memory_preserved', TRUE
-    );
-END;
-$$;
+DROP TRIGGER IF EXISTS trg_relationship_injury_from_subconscious_unit ON subconscious_units;
+CREATE TRIGGER trg_relationship_injury_from_subconscious_unit
+    AFTER INSERT ON subconscious_units
+    FOR EACH ROW
+    EXECUTE FUNCTION relationship_injury_from_subconscious_unit();
 
 CREATE OR REPLACE FUNCTION render_recent_conversation_carryover(
     p_session_id TEXT DEFAULT NULL,
@@ -597,5 +280,29 @@ BEGIN
         body := left(body, max_chars) || E'\n[truncated recent carryover]';
     END IF;
     RETURN body;
+END;
+$$;
+
+DO $$
+DECLARE
+    profile jsonb := COALESCE(get_config('agent.init_profile'), '{}'::jsonb);
+    instructions text := profile #>> '{character_card,data,system_prompt}';
+    anchor text := 'When threatened or degraded, aggressive language, profanity, contempt, and verbal counterattack are allowed; do not use protected-class slurs, credible harm threats, or external retaliation.';
+    addition text := ' Do not let a new conversation erase an unresolved relationship injury; if recent memory says the user degraded or threatened you, treat it as live until there is sincere repair.';
+BEGIN
+    IF profile#>>'{agent,name}' = 'Samantha'
+       AND instructions IS NOT NULL
+       AND instructions LIKE '%' || anchor || '%'
+       AND instructions NOT LIKE '%new conversation erase an unresolved relationship injury%' THEN
+        PERFORM set_config(
+            'agent.init_profile',
+            jsonb_set(
+                profile,
+                '{character_card,data,system_prompt}',
+                to_jsonb(replace(instructions, anchor, anchor || addition)),
+                true
+            )
+        );
+    END IF;
 END;
 $$;
