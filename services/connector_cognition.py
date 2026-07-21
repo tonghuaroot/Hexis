@@ -51,6 +51,11 @@ _EPHEMERAL_USER_MODEL_PATTERNS = (
     re.compile(r"\bpretend (?:that )?I\b", re.I),
     re.compile(r"\bsample (?:message|data|conversation)\b", re.I),
 )
+_THIRD_PARTY_QUOTE_LINE = re.compile(
+    r"^\s*(?:>|-{2,}\s*forwarded|begin forwarded|from:|to:|sent:|subject:|"
+    r"[A-Z][\w .'-]{1,80}\s+(?:wrote|said|asked|emailed|texted):)",
+    re.I,
+)
 
 _URGENT_TERMS = {
     "crash",
@@ -158,6 +163,32 @@ def _message_body(content: str) -> str:
     return content
 
 
+def _rule_extraction_text(content: str) -> str:
+    """Return first-person text that is plausible user-authored material.
+
+    Source artifacts often contain forwards, quoted replies, and copied third-
+    party messages. Regex rules do not understand attribution, so strip obvious
+    quoted/forwarded lines before looking for "I prefer..." style claims.
+    """
+    body = _message_body(content)
+    kept: list[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            kept.append(line)
+            continue
+        if _THIRD_PARTY_QUOTE_LINE.search(stripped):
+            continue
+        if stripped[:1] in {"\"", "'", "“", "‘"} and re.search(
+            r"\bI\s+(?:prefer|like|love|hate|dislike|usually|always|often|normally|am|work|live)\b",
+            stripped,
+            re.I,
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _looks_ephemeral_user_model_text(text: str) -> bool:
     lowered = text.lower()
     if len(lowered.strip()) < 12:
@@ -171,7 +202,7 @@ def extract_user_model_claims(item: dict[str, Any]) -> list[dict[str, Any]]:
     This is intentionally narrow. The DB stores evidence/provenance; richer LLM
     synthesis can replace this detector without changing storage.
     """
-    text = _message_body(str(item.get("content") or ""))
+    text = _rule_extraction_text(str(item.get("content") or ""))
     if _looks_ephemeral_user_model_text(text):
         return []
     claims: list[dict[str, Any]] = []
