@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { GET } from "./route";
+import { GET, POST } from "./route";
 import { prisma } from "@/lib/prisma";
 
 vi.mock("@/lib/prisma", () => ({
@@ -51,6 +51,52 @@ describe("/api/chat/session/[id]", () => {
     });
 
     expect(response.status).toBe(422);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("clears visible context while preserving long-term memory", async () => {
+    query.mockResolvedValueOnce([
+      {
+        cleared: {
+          session_id: "11111111-1111-4111-8111-111111111111",
+          cleared_messages: 2,
+          long_term_memory_preserved: true,
+        },
+      },
+    ]);
+
+    const response = await POST(
+      new Request("http://localhost/api/chat/session/11111111-1111-4111-8111-111111111111", {
+        method: "POST",
+        body: JSON.stringify({ action: "clear_context", reason: "test_clear" }),
+      }),
+      { params: Promise.resolve({ id: "11111111-1111-4111-8111-111111111111" }) }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      session_id: "11111111-1111-4111-8111-111111111111",
+      cleared_messages: 2,
+      long_term_memory_preserved: true,
+    });
+    expect(query).toHaveBeenCalledWith(
+      "SELECT clear_chat_session_context($1::uuid, $2::text) AS cleared",
+      "11111111-1111-4111-8111-111111111111",
+      "test_clear"
+    );
+  });
+
+  it("rejects unsupported session actions", async () => {
+    const response = await POST(
+      new Request("http://localhost/api/chat/session/11111111-1111-4111-8111-111111111111", {
+        method: "POST",
+        body: JSON.stringify({ action: "archive" }),
+      }),
+      { params: Promise.resolve({ id: "11111111-1111-4111-8111-111111111111" }) }
+    );
+
+    expect(response.status).toBe(400);
     expect(query).not.toHaveBeenCalled();
   });
 });

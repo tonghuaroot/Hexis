@@ -12,6 +12,7 @@ import {
   Lock,
   LockOpen,
   Paperclip,
+  Plus,
   Send,
   Settings2,
   Trash2,
@@ -175,6 +176,15 @@ function saveSessionId(id: string) {
   }
 }
 
+function clearSessionId() {
+  if (typeof window === "undefined") return;
+  try {
+    sessionStorage.removeItem(SESSION_ID_KEY);
+  } catch {
+    // ignore quota errors
+  }
+}
+
 function loadSession(): ChatMessage[] {
   if (typeof window === "undefined") return [];
   try {
@@ -236,6 +246,9 @@ export default function ChatPage() {
   const [searchConfigSaving, setSearchConfigSaving] = useState(false);
   const [searchConfigError, setSearchConfigError] = useState<string | null>(null);
   const [searchConfigNotice, setSearchConfigNotice] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionActionBusy, setSessionActionBusy] = useState<"new" | "clear" | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
   const [historyDraft, setHistoryDraft] = useState("");
   const [showInspector, setShowInspector] = useState(false);
@@ -272,6 +285,7 @@ export default function ChatPage() {
 
       const sessionId = loadSessionId();
       if (!sessionId) return;
+      if (!cancelled) setSessionId(sessionId);
       try {
         const response = await fetch(`/api/chat/session/${encodeURIComponent(sessionId)}`, {
           cache: "no-store",
@@ -479,12 +493,109 @@ export default function ChatPage() {
       setShowSearchConfig(false);
       setSearchConfigValue("");
       setSearchConfigNotice("Search tool configured. Retry your question.");
+      setSessionNotice(null);
     } catch (err: unknown) {
       setSearchConfigError(
         err instanceof Error ? err.message : "Failed to configure search tool."
       );
     } finally {
       setSearchConfigSaving(false);
+    }
+  };
+
+  const handleStartNewChat = async () => {
+    if (sending || sessionActionBusy) return;
+    setSessionActionBusy("new");
+    setSessionNotice(null);
+    try {
+      const res = await fetch("/api/chat/session", { method: "POST" });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || typeof payload.session_id !== "string") {
+        throw new Error(payload?.error || `Failed with status ${res.status}`);
+      }
+      saveSessionId(payload.session_id);
+      setSessionId(payload.session_id);
+      setMessages([]);
+      setHistoryIndex(null);
+      setHistoryDraft("");
+      setSearchConfigNotice(null);
+      setSessionNotice("New conversation started.");
+      appendLog({
+        id: crypto.randomUUID(),
+        category: "memory",
+        title: "Chat session",
+        detail: `Started DB session ${payload.session_id.slice(0, 8)}.`,
+        ts: Date.now(),
+      });
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : "Failed to start a new conversation.";
+      setSessionNotice(detail);
+      appendLog({
+        id: crypto.randomUUID(),
+        category: "error",
+        title: "Chat session",
+        detail,
+        ts: Date.now(),
+      });
+    } finally {
+      setSessionActionBusy(null);
+    }
+  };
+
+  const handleClearChatContext = async () => {
+    if (sending || sessionActionBusy) return;
+    const currentSessionId = sessionId || loadSessionId();
+    if (!currentSessionId && messages.length === 0) return;
+    const confirmed = window.confirm(
+      "Clear this conversation from active context? Long-term memories and source records are preserved."
+    );
+    if (!confirmed) return;
+
+    setSessionActionBusy("clear");
+    setSessionNotice(null);
+    try {
+      if (!currentSessionId) {
+        setMessages([]);
+        clearSessionId();
+        setSessionId(null);
+        setSessionNotice("Conversation display cleared.");
+        return;
+      }
+
+      const res = await fetch(`/api/chat/session/${encodeURIComponent(currentSessionId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "clear_context", reason: "web_clear" }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || `Failed with status ${res.status}`);
+      }
+      setMessages([]);
+      setHistoryIndex(null);
+      setHistoryDraft("");
+      setSearchConfigNotice(null);
+      setSessionNotice("Conversation context cleared; long-term memory preserved.");
+      appendLog({
+        id: crypto.randomUUID(),
+        category: "memory",
+        title: "Chat context",
+        detail: `Cleared ${Number(payload?.cleared_messages || 0)} visible messages from active context.`,
+        raw: payload,
+        ts: Date.now(),
+      });
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : "Failed to clear conversation context.";
+      setSessionNotice(detail);
+      appendLog({
+        id: crypto.randomUUID(),
+        category: "error",
+        title: "Chat context",
+        detail,
+        ts: Date.now(),
+      });
+    } finally {
+      setSessionActionBusy(null);
     }
   };
 
@@ -677,9 +788,10 @@ export default function ChatPage() {
     setSending(true);
     setCurrentPhase(null);
     setSearchConfigNotice(null);
+    setSessionNotice(null);
 
     try {
-      const sessionId = loadSessionId();
+      const currentSessionId = sessionId || loadSessionId();
       const chatBody: {
         message: string;
         prompt_addenda: string[];
@@ -688,9 +800,9 @@ export default function ChatPage() {
       } = {
         message: userMessage.content,
         prompt_addenda: [...promptAddenda, ...attachmentAddenda],
-        session_id: sessionId,
+        session_id: currentSessionId,
       };
-      if (!sessionId && historyPayload.length > 0) {
+      if (!currentSessionId && historyPayload.length > 0) {
         chatBody.history = historyPayload;
       }
 
@@ -829,6 +941,7 @@ export default function ChatPage() {
             setAssistantPresentation(assistantMessage.id, payload.presentation);
             if (typeof payload.session_id === "string" && payload.session_id) {
               saveSessionId(payload.session_id);
+              setSessionId(payload.session_id);
             }
           }
         }
@@ -958,6 +1071,26 @@ export default function ChatPage() {
               </div>
             </div>
             <div className="flex items-center gap-1">
+              <button
+                type="button"
+                aria-label="Start new conversation"
+                title="Start new conversation"
+                disabled={sending || sessionActionBusy !== null}
+                onClick={handleStartNewChat}
+                className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] disabled:opacity-35"
+              >
+                <Plus size={17} />
+              </button>
+              <button
+                type="button"
+                aria-label="Clear active conversation context"
+                title="Clear active conversation context"
+                disabled={sending || sessionActionBusy !== null || (!sessionId && messages.length === 0)}
+                onClick={handleClearChatContext}
+                className="flex h-9 w-9 items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)] disabled:opacity-35"
+              >
+                <Trash2 size={16} />
+              </button>
               <details className="relative">
                 <summary className="flex h-9 cursor-pointer list-none items-center gap-2 rounded-md px-3 text-xs font-medium text-[var(--ink-soft)] hover:bg-[var(--surface-strong)]">
                   <Settings2 size={16} /> Options
@@ -1017,6 +1150,7 @@ export default function ChatPage() {
             </div>
           ) : null}
           {searchConfigNotice ? <div className="border-b border-emerald-200 bg-emerald-50 px-6 py-2 text-xs text-emerald-700">{searchConfigNotice}</div> : null}
+          {sessionNotice ? <div className="border-b border-[var(--outline)] bg-[#f5f7f5] px-6 py-2 text-xs text-[var(--ink-soft)]">{sessionNotice}</div> : null}
 
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 sm:px-8">
             <div className="mx-auto max-w-3xl space-y-6">

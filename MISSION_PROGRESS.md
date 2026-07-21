@@ -57,7 +57,7 @@ surface complete. (Person, Continuity; fixes a live Dignity hole.)
 |---|---|---|
 | Dead-code sweep: SSE stack (keep `gateway_events` table), `services/ingest_api.py`, db/09 `record_chat_turn`/`record_subconscious_exchange`, MCP hand-written duplicate schemas (registry canonical), orphan Next routes | Substrate | todo |
 | Portable-brain audit: classify remaining Python/TS-owned behavior into (a) cognitive state/policy/lifecycle/ranking that must move into DB functions/views/triggers, (b) external side effects that should remain adapter code, and (c) presentation/transport only; add tests that a DB restore preserves the cognitive path | Substrate + Continuity | in progress (initial audit doc + SQL-only portable contract test; DB-owned chat session hydration done in 0104; connector capability/scope derivation done in 0105; connector backfill/source-artifact substrate done in 0106; Gmail provider backfill adapter + provider-scoped claims done in 0107; connector action authorization policy/audit done in 0108; live channel source artifacts done in 0110; web connector status/action surface now delegates mutations to the Python tool/DB layer; web DSN/session-history audit tightened; next: other provider adapters + frontend route consolidation) |
-| Web-chat history becomes DB-owned (her memory of a conversation and the record of it = same substrate; no localStorage-only history) | Continuity | in progress (0104: `chat_sessions`/`chat_messages`, SQL hydrate/clear/record functions, API/CLI/TUI/channel active-context hydration; web chat now hydrates visible transcript from `hydrate_chat_session()` and stops sending browser cached transcript once a DB session exists; remaining: explicit web clear/new-session controls) |
+| Web-chat history becomes DB-owned (her memory of a conversation and the record of it = same substrate; no localStorage-only history) | Continuity | done (0104: `chat_sessions`/`chat_messages`, SQL hydrate/clear/record functions, API/CLI/TUI/channel active-context hydration; web chat hydrates visible transcript from `hydrate_chat_session()`, stops sending browser cached transcript once a DB session exists, and exposes explicit DB-backed new-session / clear-context controls) |
 | One DSN resolution shared by all clients (UI reads the same instance registry as Python — no split-brain on instance switch) | Continuity | done (UI Prisma resolver reads `~/.hexis/instances.json` with `HEXIS_INSTANCE`/current-instance precedence, `hexis ui` passes the selected DSN/instance to the Next and API processes, and runtime compose sets the same explicit UI DB URL as the API/db stack) |
 | Collapse chat orchestration onto `services/chat.py`; move the RLM gate where both web and channel paths pass through | Substrate | todo |
 | Wire `/api/ingest/jobs/{id}` polling into the web ingest flow | Experience Bar | done (f77c494) |
@@ -222,3 +222,8 @@ talking to the user.
   launches API and UI with the same selected instance/DSN, and web chat
   rehydrates its visible transcript from DB-owned `chat_sessions` instead of
   treating browser storage as conversation authority.
+- 2026-07-20 — Web chat session controls: `/api/chat/session` creates a
+  DB-owned web session on demand, `/api/chat/session/{id}` delegates context
+  clearing to `clear_chat_session_context()`, and the chat header exposes
+  explicit new-conversation / clear-context controls without deleting the
+  preserved conversation record.
