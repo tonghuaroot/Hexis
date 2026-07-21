@@ -418,7 +418,7 @@ CREATE TABLE IF NOT EXISTS config_defaults (
 );
 
 INSERT INTO config (key, value, description) VALUES
-    ('embedding.service_url', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_service_url', true), ''), 'http://host.docker.internal:11434/api/embed')), 'URL of the embedding service'),
+    ('embedding.service_url', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_service_url', true), ''), 'http://host.docker.internal:42666/api/embed')), 'URL of the embedding service'),
     ('embedding.model_id', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_model_id', true), ''), 'embeddinggemma:300m-qat-q4_0')), 'Embedding model id for local / custom embedding services'),
     ('embedding.dimension', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_dimension', true), ''), '768')::int), 'Embedding vector dimension'),
     ('embedding.retry_seconds', '30'::jsonb, 'Total seconds to retry embedding requests'),

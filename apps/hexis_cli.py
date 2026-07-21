@@ -3095,8 +3095,9 @@ def _port_ready(port: int, host: str = "127.0.0.1", timeout: float = 0.5) -> boo
         return False
 
 
-_LOCAL_EMBEDDING_BINARY = Path.home() / "embeddinggemma.c" / "build" / "embeddinggemma-metal"
-_LOCAL_EMBEDDING_PORT = 11434
+_LOCAL_EMBEDDING_COMMAND = "embeddinggemma"
+_LOCAL_EMBEDDING_INSTALLER = "curl -fsSL https://raw.githubusercontent.com/QuixiAI/embeddinggemma.c/main/install.sh | sh"
+_LOCAL_EMBEDDING_PORT = 42666
 _LOCAL_EMBEDDING_LOG = Path.home() / ".hexis" / "embeddinggemma.log"
 
 
@@ -3146,15 +3147,47 @@ def _configured_embedding_url(env_file: Path | None) -> str | None:
 
 
 def _uses_local_embedding_sidecar(env_file: Path | None) -> bool:
-    """True when the DB is configured for the default host-sidecar port."""
+    """True when the DB is configured for the published local sidecar."""
     url = (_configured_embedding_url(env_file) or "").lower()
     if not url:
         return True
-    return ":11434" in url
+    return ":42666" in url
+
+
+def _uses_legacy_embedding_sidecar_port(env_file: Path | None) -> bool:
+    """True when config is pinned to Hexis' retired local sidecar port."""
+    url = (_configured_embedding_url(env_file) or "").lower()
+    return ":11434" in url and (
+        "host.docker.internal" in url or "localhost" in url or "127.0.0.1" in url
+    )
+
+
+def _warn_legacy_embedding_sidecar_port(env_file: Path | None) -> None:
+    if not _uses_legacy_embedding_sidecar_port(env_file):
+        return
+    from apps.cli_theme import console
+
+    console.print(
+        "[warn]Embedding URL is pinned to the legacy local sidecar port 11434.[/warn]\n"
+        "  Hexis now uses the published [accent]embeddinggemma[/accent] binary on port 42666.\n"
+        "  Remove the old EMBEDDING_SERVICE_URL override, or set:\n"
+        "    [accent]EMBEDDING_SERVICE_URL=http://host.docker.internal:42666/api/embed[/accent]"
+    )
+
+
+def _local_embedding_binary() -> Path | None:
+    """Resolve the published embeddinggemma executable, not a source checkout."""
+    resolved = shutil.which(_LOCAL_EMBEDDING_COMMAND)
+    if resolved:
+        return Path(resolved)
+    installer_default = Path.home() / ".local" / "bin" / _LOCAL_EMBEDDING_COMMAND
+    if installer_default.exists():
+        return installer_default
+    return None
 
 
 def _start_local_embedding_service(wait_seconds: float = 90.0) -> bool:
-    """Start the standalone embeddinggemma.c sidecar if port 11434 is idle."""
+    """Start the published embeddinggemma sidecar if port 42666 is idle."""
     import time as _time
 
     from apps.cli_theme import console
@@ -3162,23 +3195,23 @@ def _start_local_embedding_service(wait_seconds: float = 90.0) -> bool:
     if _port_ready(_LOCAL_EMBEDDING_PORT):
         listener = _port_listener_summary(_LOCAL_EMBEDDING_PORT)
         if listener and "embeddinggemma" in listener.lower():
-            console.print("[ok]Embedding service is already listening on port 11434.[/ok]")
+            console.print(f"[ok]Embedding service is already listening on port {_LOCAL_EMBEDDING_PORT}.[/ok]")
             return True
         detail = f" Listener: {listener}." if listener else ""
         console.print(
-            f"[warn]Port 11434 is already in use, so Hexis did not start {_LOCAL_EMBEDDING_BINARY}.[/warn]"
+            f"[warn]Port {_LOCAL_EMBEDDING_PORT} is already in use, so Hexis did not start {_LOCAL_EMBEDDING_COMMAND}.[/warn]"
             f"{detail}\n"
-            "  If this is not the embeddinggemma.c sidecar, stop that process and run "
+            "  If this is not the embeddinggemma sidecar, stop that process and run "
             "[accent]hexis up[/accent] again."
         )
         return False
 
-    binary = _LOCAL_EMBEDDING_BINARY
-    if not binary.exists():
+    binary = _local_embedding_binary()
+    if binary is None:
         console.print(
-            f"[warn]Embedding service binary not found at {binary}.[/warn]\n"
-            "  Build the standalone project, then run [accent]hexis up[/accent] again:\n"
-            "    [accent]cd ~/embeddinggemma.c && make build/embeddinggemma-metal[/accent]"
+            f"[warn]Embedding service binary '{_LOCAL_EMBEDDING_COMMAND}' was not found on PATH.[/warn]\n"
+            "  Install the published binary, then run [accent]hexis up[/accent] again:\n"
+            f"    [accent]{_LOCAL_EMBEDDING_INSTALLER}[/accent]"
         )
         return False
     if not os.access(binary, os.X_OK):
@@ -3195,7 +3228,6 @@ def _start_local_embedding_service(wait_seconds: float = 90.0) -> bool:
         with _LOCAL_EMBEDDING_LOG.open("ab") as log_f:
             proc = subprocess.Popen(
                 [str(binary)],
-                cwd=str(binary.parent.parent),
                 stdin=subprocess.DEVNULL,
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
@@ -3283,9 +3315,12 @@ def _handle_ui(
     active_instance = instance or resolve_instance()
     dsn = db_dsn_from_env(active_instance) if active_instance else db_dsn_from_env()
 
+    env_file = resolve_env_file(stack_root)
     try:
-        if _uses_local_embedding_sidecar(resolve_env_file(stack_root)):
+        if _uses_local_embedding_sidecar(env_file):
             _start_local_embedding_service()
+        else:
+            _warn_legacy_embedding_sidecar_port(env_file)
     except Exception:
         pass  # advisory only; init write routes surface embedding failures
 
@@ -3457,6 +3492,8 @@ def _handle_ui_container(
     try:
         if _uses_local_embedding_sidecar(env_file):
             _start_local_embedding_service()
+        else:
+            _warn_legacy_embedding_sidecar_port(env_file)
     except Exception:
         pass  # advisory only; init write routes surface embedding failures
 
@@ -3759,6 +3796,8 @@ def _dispatch(argv: list[str] | None = None) -> int:
             try:
                 if _uses_local_embedding_sidecar(env_file):
                     embedding_probe_allowed = _start_local_embedding_service()
+                else:
+                    _warn_legacy_embedding_sidecar_port(env_file)
             except Exception:
                 embedding_probe_allowed = False
 

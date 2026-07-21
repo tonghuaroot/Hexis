@@ -15,7 +15,7 @@ Hexis needs an embedding service to generate vectors for memory storage and retr
 
 ```bash
 # Start the default local embedding sidecar
-~/embeddinggemma.c/build/embeddinggemma-metal
+embeddinggemma
 
 # Verify
 hexis doctor    # checks embedding service health
@@ -26,7 +26,7 @@ hexis doctor    # checks embedding service health
 Set in `.env`:
 
 ```bash
-EMBEDDING_SERVICE_URL=http://host.docker.internal:11434/api/embed
+EMBEDDING_SERVICE_URL=http://host.docker.internal:42666/api/embed
 EMBEDDING_MODEL_ID=embeddinggemma:300m-qat-q4_0
 EMBEDDING_DIMENSION=768
 ```
@@ -35,14 +35,14 @@ EMBEDDING_DIMENSION=768
 
 ### Local Sidecar (Default)
 
-The default uses the standalone `embeddinggemma.c` service running on the host. It downloads `embeddinggemma-300M-qat-Q4_0.gguf` into its own `model/` directory on first use.
+The default uses the published `embeddinggemma` service running on the host. It downloads `embeddinggemma-300M-qat-Q4_0.gguf` into `${XDG_CACHE_HOME:-$HOME/.cache}/embeddinggemma.c/` on first use.
 
 ```bash
-~/embeddinggemma.c/build/embeddinggemma-metal
+embeddinggemma
 ```
 
 ```bash
-EMBEDDING_SERVICE_URL=http://host.docker.internal:11434/api/embed
+EMBEDDING_SERVICE_URL=http://host.docker.internal:42666/api/embed
 EMBEDDING_MODEL_ID=embeddinggemma:300m-qat-q4_0
 EMBEDDING_DIMENSION=768
 ```
@@ -85,7 +85,7 @@ hexis doctor    # identifies the provider from URL and gives specific fix steps
 
 Common issues:
 
-- **Embedding service not running** -- start `~/embeddinggemma.c/build/embeddinggemma-metal`
+- **Embedding service not running** -- start `embeddinggemma`
 - **Model not found** -- restart the sidecar and let it download the configured model
 - **Wrong dimension** -- ensure `EMBEDDING_DIMENSION` matches the model's output dimension
 - **Docker networking** -- the DB container uses `host.docker.internal` to reach host services

@@ -4,7 +4,7 @@ export function initRouteError(error: unknown, fallback: string): Response {
     return Response.json(
       {
         error:
-          "The embedding service is not reachable. Start it with `~/embeddinggemma.c/build/embeddinggemma-metal`, or run `hexis up`, then retry this step.",
+          "The embedding service is not reachable. Start it with `embeddinggemma`, or run `hexis up`, then retry this step.",
         detail,
       },
       { status: 503 }
@@ -20,7 +20,7 @@ export function initRouteError(error: unknown, fallback: string): Response {
 }
 
 export function isEmbeddingUnavailable(message: string): boolean {
-  return /Embedding service not available|Failed to get embeddings|host\.docker\.internal.*11434|port 11434|ECONNREFUSED/i.test(
+  return /Embedding service not available|Failed to get embeddings|host\.docker\.internal.*(?:42666|11434)|port (?:42666|11434)|ECONNREFUSED/i.test(
     message
   );
 }

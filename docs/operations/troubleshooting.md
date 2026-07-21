@@ -109,7 +109,7 @@ docker compose ps | grep heartbeat
 hexis doctor
 
 # Check that the local embedding sidecar starts
-~/embeddinggemma.c/build/embeddinggemma-metal --help
+embeddinggemma --help
 
 # Check memory count
 docker exec hexis_brain psql -U hexis_user -d hexis_memory \
@@ -117,7 +117,7 @@ docker exec hexis_brain psql -U hexis_user -d hexis_memory \
 ```
 
 **Fixes**:
-- Start the sidecar: `~/embeddinggemma.c/build/embeddinggemma-metal`
+- Start the sidecar: `embeddinggemma`
 - Let the sidecar download `embeddinggemma-300M-qat-Q4_0.gguf` on first use
 - Ingest content: `hexis ingest --file ./notes.md`
 

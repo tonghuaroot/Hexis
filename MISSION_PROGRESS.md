@@ -116,6 +116,7 @@ talking to the user.
 | Silence discipline: proactive messages clear an interruption bar; similar messages dedupe; choosing silence is a recorded, valid act | Piper law 4 | done (446e4f1 / 0095) |
 | Human-scale conversational inference: local cues calibrate register without becoming durable relationship/user-preference memories; test scaffolding fades unless explicitly made durable; overloaded `partner` init memory is purpose-qualified as co-development | Person + Continuity | done (446e4f1 / 0092–0094) |
 | Cross-session relationship affect: recent prior turns and unresolved relationship injuries carry across new chat sessions; direct degradation/threats create evidence-linked unresolved grievance memories that shape trust/tone until sincere repair | Person + Continuity + Dignity | done (0142–0144) |
+| Web-session recent recall: web-created chat sessions participate in recent carryover, and both streaming/non-streaming chat feed carryover into appraisal so a new UI conversation does not make her deny recently available context | Continuity + Experience Bar | done (0145) |
 
 ## Batch 9 — Small mechanics
 
@@ -127,6 +128,7 @@ talking to the user.
 | Chat energy, the human way: tools in chat cost energy; conversation interacts with drives — connection satisfied by good interaction; cost-vs-restore governed by a character-card temperament dial | Person + Piper | done (0134: `apply_chat_turn_energy_effects()` charges base/tool energy, restores on positive social interaction, satisfies connection, and reads temperament multipliers from profile/config) |
 | Presence polish on channels: typing indicators, presence beacons | Piper law 5 | done (0136: `channel_presence_events`, DB summary function, and channel manager online/offline/typing beacons) |
 | Async embedding lifecycle for `memories` (adopt the units pattern: nullable + `embedding_status`; no HTTP inside transactions) | Substrate | done (0129/0137: `create_memory()` defers embeddings with pending status; worker claims batches, writes vectors, records model/attempts/failures, and lexical recall keeps pending memories visible until vectors arrive) |
+| Published embeddinggemma default: Hexis resolves the installed `embeddinggemma` binary, uses the upstream default port 42666, migrates only exact old default URLs, and no longer hard-codes a source-checkout binary path | Experience Bar + Substrate | done (0146) |
 
 ---
 

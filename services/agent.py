@@ -709,7 +709,7 @@ async def run_agent(
                 subconscious_output = await run_subconscious_appraisal(
                     conn,
                     user_message,
-                    sub_memory_ctx if mode == "heartbeat" else "",
+                    sub_memory_ctx,
                     hydrated_context=context,
                 )
                 sub_signals = await render_subconscious_signals_db(conn, subconscious_output)

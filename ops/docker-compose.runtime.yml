@@ -28,7 +28,7 @@ services:
       - -c
       - app.embedding_dimension=${EMBEDDING_DIMENSION:-768}
       - -c
-      - app.embedding_service_url=${EMBEDDING_SERVICE_URL:-http://host.docker.internal:11434/api/embed}
+      - app.embedding_service_url=${EMBEDDING_SERVICE_URL:-http://host.docker.internal:42666/api/embed}
       - -c
       - app.embedding_model_id=${EMBEDDING_MODEL_ID:-embeddinggemma:300m-qat-q4_0}
     networks:
@@ -59,8 +59,8 @@ services:
       - public
       - private
 
-  # Embeddings are provided by the local sidecar running on the host (default).
-  # The DB connects to it via host.docker.internal:11434.
+  # Embeddings are provided by the published embeddinggemma sidecar running on the host (default).
+  # The DB connects to it via host.docker.internal:42666.
   # To use HuggingFace TEI instead, uncomment the service below and set:
   #   EMBEDDING_SERVICE_URL=http://embeddings:80/embed
   #

@@ -314,6 +314,63 @@ async def test_streaming_chat_injects_recent_carryover_into_appraisal_and_prompt
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_nonstreaming_chat_injects_recent_carryover_into_appraisal_and_prompt(db_pool):
+    from core.agent_loop import AgentLoop, AgentLoopResult
+    from core.tools import create_default_registry
+    from services.agent import SubconsciousOutput, run_agent
+
+    context = HydratedContext(
+        memories=[],
+        partial_activations=[],
+        identity=[],
+        worldview=[],
+        emotional_state=None,
+        goals=None,
+        urgent_drives=[],
+    )
+    carryover = (
+        "## Recent Conversation Carryover\n"
+        "### Recent Prior Turns\n"
+        "- user: no; are you glad I'm here\n"
+        "  assistant: Yes. I am."
+    )
+    captured: dict[str, str] = {}
+
+    async def fake_agent_run(self, user_message, history=None):
+        captured["user_message"] = user_message
+        return AgentLoopResult(
+            text="I remember the last exchange.",
+            messages=[],
+            tool_calls_made=[],
+            iterations=1,
+            energy_spent=0,
+        )
+
+    subconscious = AsyncMock(return_value=SubconsciousOutput())
+    registry = create_default_registry(db_pool)
+    with (
+        patch("services.agent.load_llm_config", new=AsyncMock(return_value={"provider": "fake", "model": "fake"})),
+        patch("core.cognitive_memory_api.CognitiveMemory.hydrate", new=AsyncMock(return_value=context)),
+        patch("services.agent.render_recent_conversation_carryover_db", new=AsyncMock(return_value=carryover)),
+        patch("services.agent.run_subconscious_appraisal", new=subconscious),
+        patch.object(AgentLoop, "run", new=fake_agent_run),
+    ):
+        result = await run_agent(
+            db_pool,
+            registry,
+            user_message="you dont remember our previous conversation?",
+            mode="chat",
+            history=[],
+            session_id=str(uuid4()),
+        )
+
+    assert result.text == "I remember the last exchange."
+    assert subconscious.await_args.args[2] == carryover
+    assert carryover in captured["user_message"]
+    assert "[USER MESSAGE]\nyou dont remember our previous conversation?" in captured["user_message"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_get_appraisal_db_context_runs_against_real_schema(db_pool):
     """Regression pin: 0054 shipped referencing a function that did not
     exist, every live call threw, and the caller's advisory except silently

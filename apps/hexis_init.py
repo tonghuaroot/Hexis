@@ -261,7 +261,7 @@ def _ensure_stack_running(args: argparse.Namespace) -> Path:
 
 
 _DEFAULT_EMBEDDING_MODEL = "embeddinggemma:300m-qat-q4_0"
-_DEFAULT_EMBEDDING_URL = "http://host.docker.internal:11434/api/embed"
+_DEFAULT_EMBEDDING_URL = "http://host.docker.internal:42666/api/embed"
 
 # Substrings of the errors get_embedding() raises when its HTTP endpoint is
 # down (db/03_functions_helpers.sql) — the one init failure the user can fix
@@ -308,8 +308,8 @@ async def _run_embedding_step(conn: Any, step: Any, *, interactive: bool = True)
                 "[fail]The embedding service isn't reachable, so memories can't be "
                 "stored yet.[/fail]\n\n"
                 f"[key]Configured URL:[/key] {url}\n\n"
-                "By default Hexis uses the local [bold]embeddinggemma.c[/bold] sidecar. To fix:\n"
-                "  1. Start it: [bold]~/embeddinggemma.c/build/embeddinggemma-metal[/bold]\n"
+                "By default Hexis uses the published local [bold]embeddinggemma[/bold] sidecar. To fix:\n"
+                "  1. Start it: [bold]embeddinggemma[/bold]\n"
                 "  2. Or run [bold]hexis up[/bold] to start the stack and sidecar together.\n\n"
                 "Using a different embedding server? Set [bold]EMBEDDING_SERVICE_URL[/bold] "
                 "and restart the stack with `hexis up`.",
@@ -331,7 +331,7 @@ def _ensure_embedding_model() -> None:
     except Exception as exc:
         console.print(
             f"[warn]\u26a0[/warn] Couldn't start local embedding service: {exc}\n"
-            "  Try running: ~/embeddinggemma.c/build/embeddinggemma-metal"
+            "  Try running: embeddinggemma"
         )
 
 

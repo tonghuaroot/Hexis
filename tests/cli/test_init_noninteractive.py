@@ -191,14 +191,14 @@ async def test_embedding_step_noninteractive_fails_with_guidance(capsys):
     async def down_step():
         raise RuntimeError(
             "Failed to get embeddings: Embedding service not available after 30 seconds: "
-            "Failed to connect to host.docker.internal port 11434: Connection refused"
+            "Failed to connect to host.docker.internal port 42666: Connection refused"
         )
 
     with pytest.raises(RuntimeError, match="start the local embedding service"):
         await _run_embedding_step(_StubConn(), down_step, interactive=False)
     err = capsys.readouterr().err
-    assert "embeddinggemma.c" in err
-    assert "embeddinggemma-metal" in err
+    assert "embeddinggemma" in err
+    assert "embeddinggemma-metal" not in err
     assert "EMBEDDING_SERVICE_URL" in err
 
 

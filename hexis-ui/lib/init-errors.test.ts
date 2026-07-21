@@ -11,7 +11,7 @@ describe("init route errors", () => {
     ).toBe(true);
     expect(
       isEmbeddingUnavailable(
-        "Failed to connect to host.docker.internal port 11434: Connection refused"
+        "Failed to connect to host.docker.internal port 42666: Connection refused"
       )
     ).toBe(true);
   });

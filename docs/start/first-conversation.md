@@ -34,7 +34,7 @@ The chat loop automatically:
 hexis chat
 
 # Specify a different LLM endpoint
-hexis chat --endpoint http://localhost:11434/v1 --model llama3.2
+hexis chat --endpoint http://localhost:8000/v1 --model local-model
 
 # Memory tools only (no web/filesystem/shell)
 hexis chat --no-extended-tools

@@ -31,7 +31,7 @@ All environment variables used by Hexis, configured via `.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_SERVICE_URL` | `http://host.docker.internal:11434/api/embed` | HTTP endpoint for embeddings |
+| `EMBEDDING_SERVICE_URL` | `http://host.docker.internal:42666/api/embed` | HTTP endpoint for embeddings |
 | `EMBEDDING_MODEL_ID` | `embeddinggemma:300m-qat-q4_0` | Model identifier |
 | `EMBEDDING_DIMENSION` | `768` | Vector dimension |
 

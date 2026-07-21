@@ -119,6 +119,68 @@ async def test_chat_session_history_survives_memory_write_failure(db_pool):
             await tr.rollback()
 
 
+async def test_web_chat_recent_turns_carry_across_new_session(db_pool):
+    marker = uuid4().hex
+    old_session = str(uuid4())
+    new_session = str(uuid4())
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.fetchval(
+                """
+                SELECT get_or_create_chat_session(
+                    $1::uuid,
+                    'web',
+                    NULL::text,
+                    '{"source":"web","created_by":"user"}'::jsonb
+                )
+                """,
+                old_session,
+            )
+            await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2,
+                    $3,
+                    'api',
+                    $4::jsonb
+                )
+                """,
+                old_session,
+                f"no; are you glad I'm here {marker}",
+                "Yes. I am.",
+                json.dumps({
+                    "metadata": {"type": "conversation"},
+                    "emotional_state": {
+                        "primary_emotion": "warmth",
+                        "valence": 0.4,
+                        "arousal": 0.3,
+                        "intensity": 0.5,
+                    },
+                }),
+            )
+            surface = await conn.fetchval(
+                "SELECT surface FROM chat_sessions WHERE id = $1::uuid",
+                old_session,
+            )
+            carryover = await conn.fetchval(
+                "SELECT render_recent_conversation_carryover($1::text, false)",
+                new_session,
+            )
+        finally:
+            await tr.rollback()
+
+    assert surface == "web"
+    assert "## Recent Conversation Carryover" in carryover
+    assert "### Recent Prior Turns" in carryover
+    assert marker in carryover
+    assert "If recent prior turns are listed, you do remember them" in carryover
+
+
 async def test_hostile_turn_creates_unresolved_relationship_injury_and_carryover(db_pool):
     marker = uuid4().hex
     old_session = str(uuid4())

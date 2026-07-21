@@ -15,11 +15,17 @@ logger = logging.getLogger(__name__)
 def embedding_service_diagnosis(url: str | None, model: str | None = None) -> tuple[str, list[str]]:
     """Identify the embedding backend from its URL and return (name, fix_steps)."""
     url = (url or "").lower()
-    if ":11434" in url:
-        return "embeddinggemma.c local sidecar", [
-            "Start it: ~/embeddinggemma.c/build/embeddinggemma-metal",
+    if ":42666" in url:
+        return "embeddinggemma local sidecar", [
+            "Start it: embeddinggemma",
             "Or run: hexis up",
             "If Hexis started it, check: ~/.hexis/embeddinggemma.log",
+        ]
+    if ":11434" in url:
+        return "legacy embeddinggemma sidecar configuration", [
+            "Hexis now defaults to the published embeddinggemma binary on port 42666.",
+            "Remove the old EMBEDDING_SERVICE_URL override or set it to http://host.docker.internal:42666/api/embed",
+            "Install the published binary: curl -fsSL https://raw.githubusercontent.com/QuixiAI/embeddinggemma.c/main/install.sh | sh",
         ]
     if "embeddings:" in url or "text-embeddings" in url:
         return "TEI (Text Embeddings Inference)", [

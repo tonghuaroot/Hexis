@@ -1,13 +1,13 @@
 # Hexis Handoff
 
-Last updated: 2026-07-19 (standalone `~/embeddinggemma.c` chosen; Hexis now
-uses the local Metal sidecar binary until publishing)
+Last updated: 2026-07-21 (embeddinggemma.c is published; Hexis uses the
+installed `embeddinggemma` binary on port 42666)
 
 ## Standing orders from Eric (do not violate)
 
 1. **Do not touch the retired local-model app or any of its stores.** No
    commands, comparisons, blob reads, or symlinks into another app's model
-   directory. Hexis uses the standalone `~/embeddinggemma.c` engine. (Context:
+   directory. Hexis uses the published `embeddinggemma` engine. (Context:
    an earlier symlink + case-insensitive filename collision let a `curl -o`
    clobber another app's model blob through the symlink — repaired and
    verified, but the lesson stands: never symlink into another app's store;
@@ -15,13 +15,13 @@ uses the local Metal sidecar binary until publishing)
 2. **embeddinggemma.c is a true hand-port** — pure C, no C++, no dependencies
    except libcurl for the download path, no ggml, no llama.cpp linkage. Eric
    explicitly chose owning the full inference path. Do not relitigate.
-3. **Eric builds and publishes all binaries from this machine** into the Hexis
-   release (no CI build matrix). Targets: Metal, CUDA, ROCm, CPU x64, CPU arm64.
-   For now Hexis uses the local binary:
-   `~/embeddinggemma.c/build/embeddinggemma-metal`.
-4. The sidecar owns model placement and download: it always looks for
-   `model/embeddinggemma-300M-qat-Q4_0.gguf` relative to its executable and
-   downloads the hard-coded Hugging Face URL when absent. No overrides.
+3. **Use the published binary** installed by:
+   `curl -fsSL https://raw.githubusercontent.com/QuixiAI/embeddinggemma.c/main/install.sh | sh`.
+   Hexis resolves `embeddinggemma` from PATH or the installer default
+   `~/.local/bin/embeddinggemma`; do not hard-code `~/embeddinggemma.c/build`.
+4. The sidecar owns model placement and download: it uses its published cache
+   path `${XDG_CACHE_HOME:-$HOME/.cache}/embeddinggemma.c/` and downloads the
+   hard-coded Hugging Face URL when absent. No Hexis-side model override.
 5. Re-verify machine state before acting — earlier probes go stale, and a
    duplicate package install once followed a stale "not installed" check; Eric
    called it out.
@@ -49,15 +49,13 @@ uses the local Metal sidecar binary until publishing)
   `bun install` does not run `prisma generate` — if `/api/status` 500s with
   "Cannot find module '.prisma/client/default'", run
   `cd hexis-ui && bunx prisma generate` and restart the dev server.
-- **Embeddings**: Hexis now uses the standalone `~/embeddinggemma.c` project,
-  not an in-repo `embedding-inference/` tree. Local binary:
-  `~/embeddinggemma.c/build/embeddinggemma-metal` (verified Mach-O arm64).
-  `hexis up` starts it on port 11434 if that port is idle, then the DB reaches
-  it through the existing default
-  `EMBEDDING_SERVICE_URL=http://host.docker.internal:11434/api/embed`. Sidecar
-  logs go to `~/.hexis/embeddinggemma.log`. The binary itself hard-codes the
-  model path relative to its executable and downloads the GGUF with libcurl if
-  missing.
+- **Embeddings**: Hexis uses the published `embeddinggemma` binary, not an
+  in-repo `embedding-inference/` tree and not the local source-checkout build.
+  `hexis up` / `hexis ui` start it on port 42666 if that port is idle, then the
+  DB reaches it through
+  `EMBEDDING_SERVICE_URL=http://host.docker.internal:42666/api/embed`. Sidecar
+  logs go to `~/.hexis/embeddinggemma.log`. The binary downloads the GGUF into
+  its cache with libcurl if missing.
 - **Init UI**: migration 0086 tightens `get_init_status()` so model setup is
   complete only when both conscious and subconscious configs have provider +
   model. The web init page no longer skips the Models screen from ambient
@@ -90,12 +88,11 @@ uses the local Metal sidecar binary until publishing)
     kept); wraps express/character/custom write blocks, consent, and the
     non-interactive path. +3 regression tests in
     `tests/cli/test_init_noninteractive.py` (tests/cli: 50/50 green).
-    The guidance now points to the local `embeddinggemma.c` sidecar, not
+    The guidance now points to the published `embeddinggemma` sidecar, not
     the retired local-model app.
-  - `apps/hexis_cli.py`: `hexis up` starts
-    `~/embeddinggemma.c/build/embeddinggemma-metal` before the advisory
-    embedding health probe. The old in-repo `embedding-inference/` directory
-    was removed.
+  - `apps/hexis_cli.py`: `hexis up` starts the installed `embeddinggemma`
+    binary before the advisory embedding health probe. The old in-repo
+    `embedding-inference/` directory was removed.
 - **Remaining to close #99**: (1) live self-extension acceptance — blocked on
   Eric completing init + consent (needs an LLM API key; wizard at
   `hexis init` or `localhost:3477/init`): ask the agent to build a small tool
@@ -109,12 +106,12 @@ uses the local Metal sidecar binary until publishing)
 ## Workstream B — standalone embeddinggemma.c
 
 **Decision update**: `embedding-inference/` was removed from this repo. The
-embedding engine is now the standalone project `~/embeddinggemma.c`, pure C
-with no C++ and no runtime dependency other than libcurl for model download.
-It is not published yet; Hexis is temporarily hard-wired to the local binary
-`~/embeddinggemma.c/build/embeddinggemma-metal`.
+embedding engine is the published `embeddinggemma` binary from
+`QuixiAI/embeddinggemma.c`, pure C with no C++ and no runtime dependency other
+than libcurl for model download. Hexis must not be hard-wired to the source
+checkout path.
 
-**Serving contract**: the sidecar binds `0.0.0.0:11434` by default and serves
+**Serving contract**: the sidecar binds `0.0.0.0:42666` by default and serves
 the DB contract already used by `get_embedding()`:
 - `GET /api/tags` for health.
 - `POST /api/embed` with `{"model","input":[...]}` returning
@@ -127,20 +124,18 @@ the DB contract already used by `get_embedding()`:
   (note capital `Q4_0`; lowercase 404s).
 - sha256 `50d28e22432a148f6f8a86eab3700f92add5d1f54baf7790675a2a4dadbccf26`,
   277,852,192 bytes.
-- The binary checks `model/embeddinggemma-300M-qat-Q4_0.gguf` relative to its
-  own executable first and downloads this URL if absent. No override path.
+- The binary checks its published cache path and downloads this URL if absent.
+  No Hexis-side override path.
 
 **Project state in `~/embeddinggemma.c`**:
 - `PORT_SPEC.md`, `EXTRACTION.md`, tensor manifest, token goldens, and
   embedding goldens are persisted there.
-- CPU scalar engine, HTTP server, libcurl model download, and Metal backend
-  exist. Local binary `build/embeddinggemma-metal` is present and executable.
-- Hexis integration now starts that binary from `hexis up`; init failure
-  guidance points to the sidecar; `core.cli_api.embedding_service_diagnosis`
-  labels `:11434` as `embeddinggemma.c local sidecar`.
-- Still before publishing: build/package the five release binaries from this
-  machine, decide final artifact location, then replace the temporary local
-  path with the published Hexis-managed binary path.
+- CPU scalar engine, HTTP server, libcurl model download, accelerator backends,
+  and published release binaries exist.
+- Hexis integration now starts the installed binary from `hexis up` / `hexis ui`;
+  init failure guidance points to `embeddinggemma`;
+  `core.cli_api.embedding_service_diagnosis` labels `:42666` as the local
+  sidecar and flags `:11434` as legacy configuration.
 
 ## Verification quick-reference
 
@@ -148,8 +143,7 @@ the DB contract already used by `get_embedding()`:
 # suite (DB must be up)
 POSTGRES_HOST=127.0.0.1 .venv/bin/pytest tests -q          # 2457 pass / 1 skip
 # standalone embedding server
-cd ~/embeddinggemma.c && make build/embeddinggemma-metal
-~/embeddinggemma.c/build/embeddinggemma-metal
+embeddinggemma
 # Hexis integration checks
 .venv/bin/python -m py_compile apps/hexis_cli.py apps/hexis_init.py core/cli_api.py
 .venv/bin/pytest tests/cli/test_init_noninteractive.py -q

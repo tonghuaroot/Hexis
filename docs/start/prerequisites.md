@@ -27,7 +27,7 @@ Installed is not enough — Docker's daemon and the embedding sidecar must both 
 docker --version          # Docker version 20.10+
 docker info               # daemon is running (errors if not — start Docker Desktop)
 docker compose version    # Docker Compose v2+
-~/embeddinggemma.c/build/embeddinggemma-metal --help
+embeddinggemma --help
 python3 --version         # Python 3.10+
 ```
 

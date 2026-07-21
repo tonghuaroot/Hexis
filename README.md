@@ -76,7 +76,7 @@ Treat those statements as unverified.
 
 - [Docker Desktop](https://docs.docker.com/get-docker/) — installed **and running**
 - Python 3.10+
-- The local embedding sidecar; `hexis init` starts it and downloads the ~300M-parameter model on first use
+- The local embedding sidecar; `hexis init` starts the published `embeddinggemma` binary and downloads the ~300M-parameter model on first use
 - For the default path below: a **ChatGPT Plus/Pro subscription** (it authenticates via browser OAuth — no API key). No subscription? Use any provider under "Other providers."
 
 ```bash
@@ -94,7 +94,7 @@ hexis chat
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `hexis init` stalls starting services | Docker daemon isn't running | Start Docker Desktop, re-run `hexis init` |
-| Embedding model pull fails | Local embedding sidecar isn't running | Start `~/embeddinggemma.c/build/embeddinggemma-metal`, then re-run |
+| Embedding model pull fails | Local embedding sidecar isn't running | Start `embeddinggemma`, then re-run |
 | Browser login loops or model errors | No ChatGPT Plus/Pro on that account | Use another provider below, or `hexis auth` |
 | Anything else | — | `hexis doctor`, then [Troubleshooting](docs/operations/troubleshooting.md) |
 

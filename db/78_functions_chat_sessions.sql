@@ -561,7 +561,7 @@ BEGIN
           AND (current_session IS NULL OR s.session_id IS DISTINCT FROM current_session)
           AND s.turn_at >= CURRENT_TIMESTAMP - (window_minutes * INTERVAL '1 minute')
           AND COALESCE(s.source_attribution->>'sensitivity', '') <> 'private'
-          AND COALESCE(cs.surface, 'api') = ANY(ARRAY['api','chat','cli','tui','openai_compat'])
+          AND COALESCE(cs.surface, 'api') = ANY(ARRAY['api','web','chat','cli','tui','openai_compat'])
         ORDER BY s.turn_at DESC, s.id DESC
         LIMIT lim
     )
@@ -585,7 +585,7 @@ BEGIN
     END IF;
 
     body := '## Recent Conversation Carryover' || E'\n'
-        || 'This preserves short-term and unresolved relationship continuity across a new chat session. Do not reset warmth or trust merely because the session id changed; let sincere repair change the state when there is evidence.' || E'\n';
+        || 'This is recalled short-term conversation context from nearby prior sessions, plus unresolved relationship state. If recent prior turns are listed, you do remember them for this reply; do not claim the prior exchange is unavailable merely because the UI opened a new session. Do not reset warmth or trust merely because the session id changed; let sincere repair change the state when there is evidence.' || E'\n';
     IF injury_lines IS NOT NULL THEN
         body := body || E'\n' || '### Unresolved Relationship Injuries' || E'\n' || injury_lines || E'\n';
     END IF;
