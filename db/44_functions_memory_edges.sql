@@ -286,3 +286,192 @@ BEGIN
     RETURN COALESCE(result, jsonb_build_object('nodes', '[]'::jsonb, 'edges', '[]'::jsonb));
 END;
 $$;
+
+CREATE TABLE IF NOT EXISTS graph_reconciliation_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    repair BOOLEAN NOT NULL DEFAULT TRUE,
+    dangling_edges INT NOT NULL DEFAULT 0,
+    deleted_edges INT NOT NULL DEFAULT 0,
+    age_backfilled_edges INT,
+    result JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE OR REPLACE FUNCTION reconcile_graph(
+    p_repair BOOLEAN DEFAULT TRUE
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    dangling_count INT := 0;
+    deleted_count INT := 0;
+    backfilled_count INT := NULL;
+    result JSONB;
+BEGIN
+    SELECT count(*)::int
+    INTO dangling_count
+    FROM memory_edges e
+    WHERE (e.src_type = 'memory' AND NOT EXISTS (
+              SELECT 1 FROM memories m
+              WHERE m.id = _safe_uuid(e.src_id)
+                AND m.status = 'active'
+                AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
+          ))
+       OR (e.dst_type = 'memory' AND NOT EXISTS (
+              SELECT 1 FROM memories m
+              WHERE m.id = _safe_uuid(e.dst_id)
+                AND m.status = 'active'
+                AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
+          ));
+
+    IF COALESCE(p_repair, TRUE) AND dangling_count > 0 THEN
+        WITH deleted AS (
+            DELETE FROM memory_edges e
+            WHERE (e.src_type = 'memory' AND NOT EXISTS (
+                      SELECT 1 FROM memories m
+                      WHERE m.id = _safe_uuid(e.src_id)
+                        AND m.status = 'active'
+                        AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
+                  ))
+               OR (e.dst_type = 'memory' AND NOT EXISTS (
+                      SELECT 1 FROM memories m
+                      WHERE m.id = _safe_uuid(e.dst_id)
+                        AND m.status = 'active'
+                        AND (m.valid_until IS NULL OR m.valid_until > CURRENT_TIMESTAMP)
+                  ))
+            RETURNING 1
+        )
+        SELECT count(*)::int INTO deleted_count FROM deleted;
+    END IF;
+
+    BEGIN
+        IF COALESCE(p_repair, TRUE)
+           AND to_regproc('public.backfill_memory_edges') IS NOT NULL THEN
+            SELECT backfill_memory_edges() INTO backfilled_count;
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        backfilled_count := NULL;
+    END;
+
+    result := jsonb_build_object(
+        'repair', COALESCE(p_repair, TRUE),
+        'dangling_edges', dangling_count,
+        'deleted_edges', deleted_count,
+        'age_backfilled_edges', backfilled_count,
+        'status', CASE WHEN dangling_count = 0 OR COALESCE(p_repair, TRUE) THEN 'ok' ELSE 'needs_repair' END
+    );
+
+    INSERT INTO graph_reconciliation_runs (
+        repair, dangling_edges, deleted_edges, age_backfilled_edges, result
+    )
+    VALUES (
+        COALESCE(p_repair, TRUE), dangling_count, deleted_count, backfilled_count, result
+    );
+
+    RETURN result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION memory_graph_paths(
+    p_seed_id UUID,
+    p_rel_types TEXT[] DEFAULT ARRAY['CAUSES','CONTRADICTS','CONTESTED_BECAUSE','SUPPORTS','SUPERSEDES'],
+    p_depth INT DEFAULT 3,
+    p_limit INT DEFAULT 25
+) RETURNS JSONB
+LANGUAGE sql
+STABLE
+AS $$
+    WITH RECURSIVE walk AS (
+        SELECT
+            e.id AS edge_id,
+            e.src_type,
+            e.src_id,
+            e.rel_type,
+            e.dst_type,
+            e.dst_id,
+            e.weight,
+            1 AS depth,
+            ARRAY[e.src_type || ':' || e.src_id, e.dst_type || ':' || e.dst_id] AS visited,
+            jsonb_build_array(jsonb_build_object(
+                'src_type', e.src_type,
+                'src_id', e.src_id,
+                'rel', e.rel_type,
+                'dst_type', e.dst_type,
+                'dst_id', e.dst_id,
+                'weight', e.weight
+            )) AS edges
+        FROM memory_edges e
+        WHERE ((e.src_type = 'memory' AND e.src_id = p_seed_id::text)
+           OR (e.dst_type = 'memory' AND e.dst_id = p_seed_id::text))
+          AND (p_rel_types IS NULL OR e.rel_type = ANY(p_rel_types))
+        UNION ALL
+        SELECT
+            e.id,
+            e.src_type,
+            e.src_id,
+            e.rel_type,
+            e.dst_type,
+            e.dst_id,
+            e.weight,
+            w.depth + 1,
+            w.visited || CASE
+                WHEN e.src_type || ':' || e.src_id = w.visited[array_length(w.visited, 1)]
+                THEN e.dst_type || ':' || e.dst_id
+                ELSE e.src_type || ':' || e.src_id
+            END,
+            w.edges || jsonb_build_array(jsonb_build_object(
+                'src_type', e.src_type,
+                'src_id', e.src_id,
+                'rel', e.rel_type,
+                'dst_type', e.dst_type,
+                'dst_id', e.dst_id,
+                'weight', e.weight
+            ))
+        FROM walk w
+        JOIN memory_edges e
+          ON (e.src_type || ':' || e.src_id = w.visited[array_length(w.visited, 1)]
+              OR e.dst_type || ':' || e.dst_id = w.visited[array_length(w.visited, 1)])
+        WHERE w.depth < LEAST(GREATEST(COALESCE(p_depth, 3), 1), 6)
+          AND (p_rel_types IS NULL OR e.rel_type = ANY(p_rel_types))
+          AND NOT (
+              CASE
+                WHEN e.src_type || ':' || e.src_id = w.visited[array_length(w.visited, 1)]
+                THEN e.dst_type || ':' || e.dst_id
+                ELSE e.src_type || ':' || e.src_id
+              END = ANY(w.visited)
+          )
+    ),
+    ranked AS (
+        SELECT *
+        FROM walk
+        ORDER BY depth ASC, weight DESC
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 25), 1), 100)
+    )
+    SELECT jsonb_build_object(
+        'seed_id', p_seed_id::text,
+        'paths', COALESCE(jsonb_agg(jsonb_build_object(
+            'depth', depth,
+            'terminal', visited[array_length(visited, 1)],
+            'visited', to_jsonb(visited),
+            'edges', edges
+        ) ORDER BY depth), '[]'::jsonb)
+    )
+    FROM ranked;
+$$;
+
+CREATE OR REPLACE FUNCTION memory_context_paths(
+    p_seed_ids UUID[],
+    p_depth INT DEFAULT 2
+) RETURNS JSONB
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT jsonb_build_object(
+        'seeds', COALESCE((SELECT jsonb_agg(s::text) FROM unnest(COALESCE(p_seed_ids, ARRAY[]::uuid[])) s), '[]'::jsonb),
+        'paths', COALESCE(jsonb_agg(path_doc), '[]'::jsonb)
+    )
+    FROM (
+        SELECT memory_graph_paths(seed_id, ARRAY['CAUSES','CONTRADICTS','CONTESTED_BECAUSE','SUPPORTS','SUPERSEDES'], p_depth, 10) AS path_doc
+        FROM unnest(COALESCE(p_seed_ids, ARRAY[]::uuid[])) seed_id
+    ) q;
+$$;

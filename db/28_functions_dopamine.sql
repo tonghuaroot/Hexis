@@ -19,6 +19,13 @@
 
 SET check_function_bodies = off;
 
+INSERT INTO config_defaults (key, value, description) VALUES
+    ('reward.rpe_spike_threshold', '0.35'::jsonb,
+     'Absolute reward-prediction error required to fire a dopamine spike'),
+    ('reward.dopamine_spike_salience_threshold', '0.65'::jsonb,
+     'Reward salience required to fire a dopamine spike from a generic reward event')
+ON CONFLICT (key) DO NOTHING;
+
 -- ---------------------------------------------------------------------------
 -- Override normalize_affective_state to preserve dopamine fields
 -- ---------------------------------------------------------------------------
@@ -317,6 +324,18 @@ BEGIN
         'dopamine_spike_rpe', p_rpe,
         'dopamine_spike_trigger', LEFT(COALESCE(p_trigger, ''), 500)
     ));
+
+    BEGIN
+        PERFORM record_reward_event(
+            'dopamine_spike',
+            p_rpe,
+            abs_rpe,
+            'dopamine',
+            jsonb_build_object('trigger', LEFT(COALESCE(p_trigger, ''), 500))
+        );
+    EXCEPTION WHEN undefined_function THEN
+        NULL;
+    END;
 
     RETURN jsonb_build_object(
         'fired', true,
@@ -657,5 +676,230 @@ EXCEPTION
 END;
 $$ LANGUAGE plpgsql;
 
+
+CREATE TABLE IF NOT EXISTS reward_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kind TEXT NOT NULL,
+    valence FLOAT NOT NULL DEFAULT 0.0 CHECK (valence >= -1.0 AND valence <= 1.0),
+    salience FLOAT NOT NULL DEFAULT 0.5 CHECK (salience >= 0.0 AND salience <= 1.0),
+    source TEXT NOT NULL DEFAULT 'unknown',
+    expected FLOAT CHECK (expected IS NULL OR (expected >= -1.0 AND expected <= 1.0)),
+    actual FLOAT CHECK (actual IS NULL OR (actual >= -1.0 AND actual <= 1.0)),
+    rpe FLOAT CHECK (rpe IS NULL OR (rpe >= -1.0 AND rpe <= 1.0)),
+    memory_id UUID REFERENCES memories(id) ON DELETE SET NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_reward_events_kind_created
+    ON reward_events (kind, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reward_events_rpe_created
+    ON reward_events (rpe, created_at DESC)
+    WHERE rpe IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION record_reward_event(
+    p_kind TEXT,
+    p_valence FLOAT,
+    p_salience FLOAT DEFAULT 0.5,
+    p_source TEXT DEFAULT 'agent',
+    p_metadata JSONB DEFAULT '{}'::jsonb,
+    p_memory_id UUID DEFAULT NULL
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    row_event reward_events%ROWTYPE;
+    val FLOAT := LEAST(1.0, GREATEST(-1.0, COALESCE(p_valence, 0.0)));
+    sal FLOAT := LEAST(1.0, GREATEST(0.0, COALESCE(p_salience, ABS(COALESCE(p_valence, 0.0)), 0.5)));
+BEGIN
+    INSERT INTO reward_events (kind, valence, salience, source, memory_id, metadata)
+    VALUES (
+        COALESCE(NULLIF(btrim(p_kind), ''), 'reward'),
+        val,
+        sal,
+        COALESCE(NULLIF(btrim(p_source), ''), 'agent'),
+        p_memory_id,
+        COALESCE(p_metadata, '{}'::jsonb)
+    )
+    RETURNING * INTO row_event;
+
+    IF row_event.kind <> 'dopamine_spike'
+       AND sal >= COALESCE(get_config_float('reward.dopamine_spike_salience_threshold'), 0.65) THEN
+        PERFORM fire_dopamine_spike(
+            val * sal,
+            COALESCE(NULLIF(p_kind, ''), 'reward') || ': ' || COALESCE(p_metadata->>'summary', '')
+        );
+    END IF;
+
+    RETURN jsonb_build_object(
+        'event_id', row_event.id::text,
+        'kind', row_event.kind,
+        'valence', row_event.valence,
+        'salience', row_event.salience,
+        'source', row_event.source
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION record_prediction_error(
+    p_expected FLOAT,
+    p_actual FLOAT,
+    p_kind TEXT DEFAULT 'prediction_error',
+    p_source TEXT DEFAULT 'agent',
+    p_metadata JSONB DEFAULT '{}'::jsonb
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    row_event reward_events%ROWTYPE;
+    expected_value FLOAT := LEAST(1.0, GREATEST(-1.0, COALESCE(p_expected, 0.0)));
+    actual_value FLOAT := LEAST(1.0, GREATEST(-1.0, COALESCE(p_actual, 0.0)));
+    rpe_value FLOAT;
+BEGIN
+    rpe_value := LEAST(1.0, GREATEST(-1.0, actual_value - expected_value));
+
+    INSERT INTO reward_events (
+        kind, valence, salience, source, expected, actual, rpe, metadata
+    )
+    VALUES (
+        COALESCE(NULLIF(btrim(p_kind), ''), 'prediction_error'),
+        rpe_value,
+        ABS(rpe_value),
+        COALESCE(NULLIF(btrim(p_source), ''), 'agent'),
+        expected_value,
+        actual_value,
+        rpe_value,
+        COALESCE(p_metadata, '{}'::jsonb)
+    )
+    RETURNING * INTO row_event;
+
+    IF ABS(rpe_value) >= COALESCE(get_config_float('reward.rpe_spike_threshold'), 0.35) THEN
+        PERFORM fire_dopamine_spike(
+            rpe_value,
+            COALESCE(NULLIF(p_kind, ''), 'prediction_error') || ': ' || COALESCE(p_metadata->>'summary', '')
+        );
+    END IF;
+
+    RETURN jsonb_build_object(
+        'event_id', row_event.id::text,
+        'expected', expected_value,
+        'actual', actual_value,
+        'rpe', rpe_value,
+        'dopamine_triggered', ABS(rpe_value) >= COALESCE(get_config_float('reward.rpe_spike_threshold'), 0.35)
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION record_social_reward(
+    p_signal TEXT,
+    p_valence FLOAT DEFAULT 0.4,
+    p_salience FLOAT DEFAULT 0.5,
+    p_source TEXT DEFAULT 'conversation',
+    p_metadata JSONB DEFAULT '{}'::jsonb
+) RETURNS JSONB
+LANGUAGE sql
+AS $$
+    SELECT record_reward_event(
+        'social:' || COALESCE(NULLIF(btrim(p_signal), ''), 'interaction'),
+        p_valence,
+        p_salience,
+        p_source,
+        COALESCE(p_metadata, '{}'::jsonb)
+    );
+$$;
+
+CREATE OR REPLACE FUNCTION apply_appraisal_reward_effects(p_signals JSONB)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    signals JSONB := COALESCE(p_signals, '{}'::jsonb);
+    emo JSONB := CASE WHEN jsonb_typeof(signals->'emotional_state') = 'object'
+                      THEN signals->'emotional_state' ELSE '{}'::jsonb END;
+    primary_emotion TEXT := lower(COALESCE(emo->>'primary_emotion', ''));
+    valence FLOAT := COALESCE(NULLIF(emo->>'valence', '')::float, 0.0);
+    intensity FLOAT := COALESCE(NULLIF(emo->>'intensity', '')::float, 0.0);
+    confidence FLOAT := COALESCE(NULLIF(emo->>'confidence', '')::float, 0.0);
+    recorded JSONB := NULL;
+BEGIN
+    valence := LEAST(1.0, GREATEST(-1.0, valence));
+    intensity := LEAST(1.0, GREATEST(0.0, intensity));
+    confidence := LEAST(1.0, GREATEST(0.0, confidence));
+
+    IF valence >= 0.35
+       AND intensity >= 0.35
+       AND confidence >= COALESCE(get_config_float('subconscious.min_signal_confidence'), 0.6)
+       AND primary_emotion IN (
+           'affection', 'appreciation', 'gratitude', 'warmth', 'connection',
+           'joy', 'pride', 'relief', 'trust', 'fondness', 'love'
+       ) THEN
+        recorded := record_social_reward(
+            primary_emotion,
+            valence,
+            intensity,
+            'inline_appraisal',
+            jsonb_build_object(
+                'emotional_state', emo,
+                'subconscious_response', left(COALESCE(signals->>'subconscious_response', ''), 300)
+            )
+        );
+    END IF;
+
+    RETURN jsonb_build_object(
+        'recorded', recorded IS NOT NULL,
+        'event', COALESCE(recorded, '{}'::jsonb),
+        'primary_emotion', primary_emotion,
+        'valence', valence,
+        'intensity', intensity,
+        'confidence', confidence
+    );
+EXCEPTION WHEN OTHERS THEN
+    RAISE LOG 'apply_appraisal_reward_effects failed: %', SQLERRM;
+    RETURN jsonb_build_object('recorded', false, 'error', SQLERRM);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION reward_state_summary(
+    p_since INTERVAL DEFAULT INTERVAL '24 hours'
+) RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    since_ts TIMESTAMPTZ := CURRENT_TIMESTAMP - COALESCE(p_since, INTERVAL '24 hours');
+    event_count INT;
+    avg_val NUMERIC;
+    avg_sal NUMERIC;
+    avg_rpe NUMERIC;
+    by_kind JSONB;
+BEGIN
+    SELECT count(*)::int,
+           COALESCE(round(avg(valence)::numeric, 4), 0),
+           COALESCE(round(avg(salience)::numeric, 4), 0),
+           COALESCE(round(avg(rpe)::numeric, 4), 0)
+    INTO event_count, avg_val, avg_sal, avg_rpe
+    FROM reward_events
+    WHERE created_at >= since_ts;
+
+    SELECT COALESCE(jsonb_object_agg(kind, count), '{}'::jsonb)
+    INTO by_kind
+    FROM (
+        SELECT kind, count(*)::int AS count
+        FROM reward_events
+        WHERE created_at >= since_ts
+        GROUP BY kind
+    ) grouped;
+
+    RETURN jsonb_build_object(
+        'since', CURRENT_TIMESTAMP - COALESCE(p_since, INTERVAL '24 hours'),
+        'events', event_count,
+        'avg_valence', avg_val,
+        'avg_salience', avg_sal,
+        'avg_rpe', avg_rpe,
+        'by_kind', by_kind,
+        'dopamine', get_dopamine_state()
+    );
+END;
+$$;
 
 SET check_function_bodies = on;

@@ -62,6 +62,21 @@ BEGIN
         'path', NULLIF(btrim(COALESCE(p_path, '')), '')
     ));
     PERFORM satisfy_drive('continuity', 0.5);
+    BEGIN
+        PERFORM record_reward_event(
+            'backup_completed',
+            0.7,
+            0.75,
+            'backup',
+            jsonb_build_object(
+                'label', NULLIF(btrim(COALESCE(p_label, '')), ''),
+                'path', NULLIF(btrim(COALESCE(p_path, '')), ''),
+                'backup_age_days', backup_age_days()
+            )
+        );
+    EXCEPTION WHEN OTHERS THEN
+        RAISE LOG 'record_reward_event failed for backup completion: %', SQLERRM;
+    END;
     RETURN jsonb_build_object('recorded', true, 'backup_age_days', backup_age_days());
 END;
 $$ LANGUAGE plpgsql;

@@ -3,6 +3,9 @@
 INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.history_browse_max', '200'::jsonb,
      'Row ceiling for keyword-less time-window browsing in search_history (preview-grain rows)')
+    ,
+    ('memory.recall_graph_adjacency_weight', '0.12'::jsonb,
+     'How much typed memory_edges adjacency contributes to fused recall scoring')
 ON CONFLICT (key) DO NOTHING;
 
 -- Turns are labeled with the real names when configured (#56): "User:" as a
@@ -1168,6 +1171,7 @@ DECLARE
     recency_weight FLOAT;
     recency_halflife FLOAT;
     boost_weight FLOAT;
+    graph_weight FLOAT;
     min_trust FLOAT;
     current_valence FLOAT;
     current_arousal FLOAT;
@@ -1186,6 +1190,7 @@ BEGIN
     strength_weight := LEAST(1.0, GREATEST(0.0, COALESCE(get_config_float('memory.recall_strength_weight'), 0.5)));
     intensity_weight := LEAST(1.0, GREATEST(0.0, COALESCE(get_config_float('memory.recall_intensity_weight'), 0.5)));
     boost_weight := LEAST(1.0, GREATEST(0.0, COALESCE(get_config_float('memory.recall_activation_boost_weight'), 0.3)));
+    graph_weight := LEAST(1.0, GREATEST(0.0, COALESCE(get_config_float('memory.recall_graph_adjacency_weight'), 0.12)));
     min_trust := COALESCE(get_config_float('memory.recall_min_trust_level'), 0.0);
 
     -- Mood-congruent recall: the current affective state colors what
@@ -1317,19 +1322,49 @@ BEGIN
            OR e.ended_at > CURRENT_TIMESTAMP - INTERVAL '1 hour'
         LIMIT 20
     ),
+    graph_adj AS (
+        -- Typed graph adjacency: if vector recall catches one memory in a
+        -- causal/contradictory/supporting cluster, its immediate typed
+        -- neighbors receive a small candidate signal. This is distinct from
+        -- embedding neighborhoods and preserves deliberate graph structure.
+        SELECT neighbor_id::uuid AS mem_id, MAX(edge_signal) AS graph_score
+        FROM (
+            SELECT e.dst_id AS neighbor_id, COALESCE(e.weight, 1.0) * s.sim AS edge_signal
+            FROM mem_seeds s
+            JOIN memory_edges e
+              ON e.src_type = 'memory'
+             AND e.src_id = s.id::text
+             AND e.dst_type = 'memory'
+            WHERE e.rel_type IN ('SUPPORTS','CONTRADICTS','CAUSES','CONTESTED_BECAUSE','RELATED_TO','SUPERSEDES')
+              AND _safe_uuid(e.dst_id) IS NOT NULL
+            UNION ALL
+            SELECT e.src_id AS neighbor_id, COALESCE(e.weight, 1.0) * s.sim AS edge_signal
+            FROM mem_seeds s
+            JOIN memory_edges e
+              ON e.dst_type = 'memory'
+             AND e.dst_id = s.id::text
+             AND e.src_type = 'memory'
+            WHERE e.rel_type IN ('SUPPORTS','CONTRADICTS','CAUSES','CONTESTED_BECAUSE','RELATED_TO','SUPERSEDES')
+              AND _safe_uuid(e.src_id) IS NOT NULL
+        ) g
+        GROUP BY neighbor_id::uuid
+    ),
     candidate_ids AS (
-        SELECT s.id AS mem_id, s.sim AS vector_score, NULL::float AS assoc_score, NULL::float AS temp_score
+        SELECT s.id AS mem_id, s.sim AS vector_score, NULL::float AS assoc_score, NULL::float AS temp_score, NULL::float AS graph_score
         FROM mem_seeds s
         UNION
-        SELECT a.mem_id, NULL, a.assoc_score, NULL FROM associations a
+        SELECT a.mem_id, NULL, a.assoc_score, NULL, NULL FROM associations a
         UNION
-        SELECT tp.mem_id, NULL, NULL, tp.temp_score FROM temporal tp
+        SELECT tp.mem_id, NULL, NULL, tp.temp_score, NULL FROM temporal tp
+        UNION
+        SELECT ga.mem_id, NULL, NULL, NULL, ga.graph_score FROM graph_adj ga
     ),
     candidates AS (
         SELECT c.mem_id,
                MAX(c.vector_score) AS vector_score,
                MAX(c.assoc_score) AS assoc_score,
-               MAX(c.temp_score) AS temp_score
+               MAX(c.temp_score) AS temp_score,
+               MAX(c.graph_score) AS graph_score
         FROM candidate_ids c
         GROUP BY c.mem_id
     ),
@@ -1349,6 +1384,7 @@ BEGIN
                              (m.metadata->>'emotional_valence')::float, m.created_at, m.last_reinforced)))
                 + COALESCE(c.assoc_score, 0) * 0.2
                 + COALESCE(c.temp_score, 0)
+                + COALESCE(c.graph_score, 0) * graph_weight
                 + recency_weight * exp(-ln(2.0) * GREATEST(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - m.created_at)), 0)
                                        / (86400.0 * recency_halflife))
                 + COALESCE(m.trust_level, 0.5) * 0.1
@@ -1390,6 +1426,7 @@ BEGIN
                 WHEN c.vector_score IS NOT NULL THEN 'vector'
                 WHEN c.assoc_score IS NOT NULL THEN 'association'
                 WHEN c.temp_score IS NOT NULL THEN 'temporal'
+                WHEN c.graph_score IS NOT NULL THEN 'graph'
                 ELSE 'fallback'
             END AS retrieval_source
         FROM candidates c

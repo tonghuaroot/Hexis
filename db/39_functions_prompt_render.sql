@@ -542,6 +542,71 @@ RETURNS text LANGUAGE sql IMMUTABLE AS $$
     LEFT JOIN nodes nd ON nd.ntype = e.dt AND nd.nid = e.di;
 $$;
 
+-- Focused causal/contradiction/support paths: render memory_context_paths()
+-- output using build_context_subgraph labels when present. NULL when there are
+-- no path edges.
+CREATE OR REPLACE FUNCTION _pr_chat_context_paths(p_paths jsonb, p_subgraph jsonb)
+RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    WITH nodes AS (
+        SELECT (n->>'type') AS ntype, (n->>'id') AS nid,
+               left(btrim(COALESCE(NULLIF(n->>'label', ''), NULLIF(n->>'id', ''), '')), 72) AS label
+        FROM jsonb_array_elements(_pr_arr(p_subgraph->'nodes')) n
+        WHERE jsonb_typeof(n) = 'object'
+    ),
+    path_docs AS (
+        SELECT path_doc, doc_ord
+        FROM jsonb_array_elements(_pr_arr(p_paths->'paths')) WITH ORDINALITY AS d(path_doc, doc_ord)
+        WHERE jsonb_typeof(path_doc) = 'object'
+        ORDER BY doc_ord
+        LIMIT 8
+    ),
+    path_rows AS (
+        SELECT path_doc, doc_ord, path_obj, path_ord
+        FROM path_docs
+        CROSS JOIN LATERAL jsonb_array_elements(_pr_arr(path_doc->'paths')) WITH ORDINALITY AS p(path_obj, path_ord)
+        WHERE jsonb_typeof(path_obj) = 'object'
+          AND jsonb_array_length(_pr_arr(path_obj->'edges')) > 0
+        ORDER BY doc_ord, path_ord
+        LIMIT 12
+    ),
+    edge_rows AS (
+        SELECT pr.doc_ord, pr.path_ord, edge_obj, edge_ord,
+               edge_obj->>'src_type' AS src_type,
+               edge_obj->>'src_id' AS src_id,
+               edge_obj->>'dst_type' AS dst_type,
+               edge_obj->>'dst_id' AS dst_id,
+               CASE WHEN lower(COALESCE(edge_obj->>'rel', '')) = 'instance_of' THEN 'mentions'
+                    ELSE lower(COALESCE(NULLIF(edge_obj->>'rel', ''), 'related')) END AS rel
+        FROM path_rows pr
+        CROSS JOIN LATERAL jsonb_array_elements(_pr_arr(pr.path_obj->'edges')) WITH ORDINALITY AS e(edge_obj, edge_ord)
+        WHERE jsonb_typeof(edge_obj) = 'object'
+    ),
+    segments AS (
+        SELECT er.doc_ord, er.path_ord, er.edge_ord,
+               COALESCE(ns.label, left(NULLIF(er.src_id, ''), 8), 'unknown') AS src_label,
+               COALESCE(nd.label, left(NULLIF(er.dst_id, ''), 8), 'unknown') AS dst_label,
+               er.rel
+        FROM edge_rows er
+        LEFT JOIN nodes ns ON ns.ntype = er.src_type AND ns.nid = er.src_id
+        LEFT JOIN nodes nd ON nd.ntype = er.dst_type AND nd.nid = er.dst_id
+    ),
+    lines AS (
+        SELECT doc_ord, path_ord,
+               string_agg(
+                   CASE WHEN edge_ord = 1
+                        THEN src_label || '  —' || rel || '→  ' || dst_label
+                        ELSE '—' || rel || '→  ' || dst_label
+                   END,
+                   ' ' ORDER BY edge_ord
+               ) AS line
+        FROM segments
+        GROUP BY doc_ord, path_ord
+    )
+    SELECT string_agg('- ' || line, E'\n' ORDER BY doc_ord, path_ord)
+    FROM lines
+    WHERE NULLIF(line, '') IS NOT NULL;
+$$;
+
 -- The chat memory context renderer (the deleted Python
 -- format_context_for_prompt's output is pinned by golden fixtures).
 -- STABLE, not IMMUTABLE: hedge/emotion-cue thresholds come from config.
@@ -611,6 +676,16 @@ BEGIN
         IF grp IS NOT NULL THEN
             parts := parts || E'\n## Knowledge Subgraph'::text;
             parts := parts || 'How the recalled memories connect (typed links among + around them):'::text;
+            parts := parts || grp;
+        END IF;
+    END IF;
+
+    -- Directed reasoning paths (causal/contradiction/support/supersession)
+    IF jsonb_typeof(p->'context_paths') = 'object' THEN
+        grp := _pr_chat_context_paths(p->'context_paths', p->'subgraph');
+        IF grp IS NOT NULL THEN
+            parts := parts || E'\n## Causal/Contradiction Paths'::text;
+            parts := parts || 'Focused chains among recalled memories:'::text;
             parts := parts || grp;
         END IF;
     END IF;

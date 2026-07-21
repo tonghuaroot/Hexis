@@ -98,6 +98,88 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION estimate_connector_backfill(
+    p_connector_id TEXT,
+    p_requested_range JSONB DEFAULT '{}'::jsonb
+) RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    connector TEXT := lower(NULLIF(btrim(COALESCE(p_connector_id, '')), ''));
+    requested JSONB := COALESCE(p_requested_range, '{}'::jsonb);
+    max_messages INT;
+    page_size INT;
+    pages INT;
+    export_path TEXT;
+BEGIN
+    BEGIN
+        max_messages := NULLIF(requested->>'max_messages', '')::int;
+    EXCEPTION WHEN OTHERS THEN
+        max_messages := NULL;
+    END;
+    BEGIN
+        page_size := NULLIF(requested->>'page_size', '')::int;
+    EXCEPTION WHEN OTHERS THEN
+        page_size := NULL;
+    END;
+    max_messages := LEAST(GREATEST(COALESCE(max_messages, 100), 1), 5000);
+    page_size := LEAST(GREATEST(COALESCE(page_size, 100), 1), 500);
+    pages := CEIL(max_messages::numeric / page_size::numeric)::int;
+    export_path := NULLIF(btrim(COALESCE(requested->>'export_path', requested->>'import_path', '')), '');
+
+    IF connector IN ('gmail', 'slack') THEN
+        RETURN jsonb_build_object(
+            'connector_id', connector,
+            'provider_status', 'api_backfill_available',
+            'estimated_items', max_messages,
+            'page_size', page_size,
+            'estimated_pages', pages,
+            'cost_class', CASE WHEN max_messages <= 100 THEN 'small'
+                               WHEN max_messages <= 1000 THEN 'medium'
+                               ELSE 'large' END,
+            'rate_limit_notes', CASE connector
+                WHEN 'gmail' THEN 'Gmail API quota and query selectivity determine runtime.'
+                ELSE 'Slack conversations.history pagination and workspace rate limits determine runtime.'
+            END
+        );
+    ELSIF connector IN ('telegram', 'signal') THEN
+        RETURN jsonb_build_object(
+            'connector_id', connector,
+            'provider_status', CASE WHEN export_path IS NULL THEN 'export_required' ELSE 'local_export_import' END,
+            'estimated_items', max_messages,
+            'page_size', page_size,
+            'estimated_pages', pages,
+            'cost_class', CASE WHEN export_path IS NULL THEN 'blocked_until_export'
+                               WHEN max_messages <= 1000 THEN 'local_medium'
+                               ELSE 'local_large' END,
+            'requires_export_path', export_path IS NULL,
+            'limitations', CASE connector
+                WHEN 'telegram' THEN 'Telegram Bot API cannot retroactively read chat history; import a Telegram data export for history.'
+                ELSE 'Signal runtime APIs do not expose retro-history; import a local Signal export/source artifact for history.'
+            END
+        );
+    ELSIF connector = 'twitter_x' THEN
+        RETURN jsonb_build_object(
+            'connector_id', connector,
+            'provider_status', 'planned',
+            'estimated_items', 0,
+            'estimated_pages', 0,
+            'cost_class', 'unavailable',
+            'limitations', 'Twitter/X OAuth and historical ingestion are planned but no provider adapter is available yet.'
+        );
+    END IF;
+
+    RETURN jsonb_build_object(
+        'connector_id', connector,
+        'provider_status', 'unknown',
+        'estimated_items', max_messages,
+        'estimated_pages', pages,
+        'cost_class', 'unknown'
+    );
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION enqueue_connector_backfill_job(
     p_connector_id TEXT,
     p_account_key TEXT,
@@ -141,6 +223,7 @@ BEGIN
             'account_key', row_job.account_key,
             'cursor_key', row_job.cursor_key,
             'requested_range', row_job.requested_range,
+            'estimate', estimate_connector_backfill(row_job.connector_id, row_job.requested_range),
             'progress', row_job.progress
         );
     END IF;
@@ -173,6 +256,7 @@ BEGIN
         'account_key', row_job.account_key,
         'cursor_key', row_job.cursor_key,
         'requested_range', row_job.requested_range,
+        'estimate', estimate_connector_backfill(row_job.connector_id, row_job.requested_range),
         'progress', row_job.progress,
         'next_attempt_at', row_job.next_attempt_at
     );
@@ -945,6 +1029,7 @@ BEGIN
             'max_attempts', max_attempts,
             'progress', progress,
             'result', result,
+            'estimate', estimate_connector_backfill(connector_id, requested_range),
             'error', error,
             'cancel_requested', cancel_requested,
             'pause_requested', pause_requested,

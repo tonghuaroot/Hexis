@@ -11,6 +11,7 @@ import {
   Plug,
   Settings,
   Target,
+  UserRound,
   X,
 } from "lucide-react";
 import Link from "next/link";
@@ -35,6 +36,7 @@ const navItems = [
   { href: "/chat", label: "Conversation", icon: MessageCircle },
   { href: "/goals", label: "Goals", icon: Target },
   { href: "/memories", label: "Memory", icon: Brain },
+  { href: "/user-model", label: "User Model", icon: UserRound },
   { href: "/documents", label: "Documents", icon: FolderOpen },
   { href: "/desk", label: "Desk", icon: Layers },
   { href: "/ingest", label: "Ingest", icon: FilePlus2 },

@@ -134,6 +134,28 @@ BEGIN
         decided_at = CURRENT_TIMESTAMP
     WHERE id = p_request_id;
 
+    IF p_decision IN ('granted', 'modified') THEN
+        BEGIN
+            PERFORM record_reward_event(
+                'resource_request_' || p_decision || ':' || req.kind,
+                CASE WHEN req.kind = 'energy_boost' THEN 0.65 ELSE 0.45 END,
+                CASE WHEN req.kind = 'energy_boost' THEN 0.7 ELSE 0.55 END,
+                'resource_request',
+                jsonb_build_object(
+                    'request_id', p_request_id,
+                    'kind', req.kind,
+                    'target_key', req.target_key,
+                    'applied', applied,
+                    'requested_value', req.requested_value,
+                    'applied_value', effective,
+                    'decision_note', NULLIF(btrim(COALESCE(p_note, '')), '')
+                )
+            );
+        EXCEPTION WHEN OTHERS THEN
+            RAISE LOG 'record_reward_event failed for resource request %: %', p_request_id, SQLERRM;
+        END;
+    END IF;
+
     RETURN jsonb_build_object(
         'request_id', p_request_id,
         'status', p_decision,

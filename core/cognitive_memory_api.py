@@ -147,6 +147,9 @@ class HydratedContext:
     # {nodes, edges} structure (supports/contradicts/causes/...) among + around
     # them. None when disabled or nothing was recalled.
     subgraph: dict[str, Any] | None = None
+    # Focused multi-hop causal/contradiction/support paths among the recalled
+    # memories. The DB builds these; renderers only carry and display them.
+    context_paths: dict[str, Any] | None = None
 
 
 def _deduplicate_memories(memories: Iterable[Memory]) -> list[Memory]:
@@ -345,6 +348,7 @@ class CognitiveMemory:
         # Seed the dynamic sub-knowledge-graph from the recalled memories. Runs
         # after recall (it depends on the recalled ids), as one small round-trip.
         subgraph = None
+        context_paths = None
         if include_subgraph and memories:
             seed_ids = [m.id for m in memories]
             # Default to the semantic reasoning edges (curated); callers can pass
@@ -352,13 +356,20 @@ class CognitiveMemory:
             rel_types = subgraph_rel_types if subgraph_rel_types is not None else REASONING_EDGE_TYPES
             try:
                 async with self._pool.acquire() as conn:
-                    sg_row = await conn.fetchval(
-                        "SELECT build_context_subgraph($1::uuid[], $2, $3::text[], $4)",
+                    sg_row = await conn.fetchrow(
+                        """
+                        SELECT
+                            build_context_subgraph($1::uuid[], $2, $3::text[], $4) AS subgraph,
+                            memory_context_paths($1::uuid[], $2) AS context_paths
+                        """,
                         seed_ids, subgraph_depth, rel_types, subgraph_budget,
                     )
-                subgraph = _coerce_json(sg_row)
+                subgraph = _coerce_json(sg_row["subgraph"]) if sg_row else None
+                context_paths = _coerce_json(sg_row["context_paths"]) if sg_row else None
             except Exception:
-                subgraph = None  # advisory: never fail hydration on subgraph assembly
+                # advisory: never fail hydration on graph assembly
+                subgraph = None
+                context_paths = None
 
         return HydratedContext(
             memories=memories,
@@ -369,6 +380,7 @@ class CognitiveMemory:
             goals=dict(goals) if isinstance(goals, dict) else None,
             urgent_drives=(list(urgent_drives) if isinstance(urgent_drives, list) else []),
             subgraph=subgraph if isinstance(subgraph, dict) else None,
+            context_paths=context_paths if isinstance(context_paths, dict) else None,
         )
 
     async def hydrate_batch(
@@ -1819,6 +1831,7 @@ def hydrated_context_to_render_json(context: HydratedContext) -> dict[str, Any]:
         "goals": context.goals,
         "urgent_drives": context.urgent_drives,
         "subgraph": context.subgraph,
+        "context_paths": context.context_paths,
     }
 
 

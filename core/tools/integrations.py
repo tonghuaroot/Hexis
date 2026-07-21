@@ -1041,7 +1041,19 @@ class StartConnectorBackfillHandler(ToolHandler):
                     },
                     "requested_range": {
                         "type": "object",
-                        "description": "Provider-specific range options. For Slack: oldest, latest, inclusive, cursor.",
+                        "description": "Provider-specific range options. Slack: oldest, latest, inclusive, cursor. Telegram/Signal: export_path or import_path.",
+                    },
+                    "export_path": {
+                        "type": "string",
+                        "description": "Local Telegram/Signal export file to import when provider APIs cannot expose retro-history.",
+                    },
+                    "import_path": {
+                        "type": "string",
+                        "description": "Alias for export_path.",
+                    },
+                    "export_format": {
+                        "type": "string",
+                        "description": "Optional export format hint, such as telegram_json, signal_json, or signal_csv.",
                     },
                     "max_messages": {
                         "type": "integer",
@@ -1111,7 +1123,7 @@ class StartConnectorBackfillHandler(ToolHandler):
         if not isinstance(requested_range, dict):
             return ToolResult.error_result("requested_range must be an object.", ToolErrorType.INVALID_PARAMS)
         requested_range = dict(requested_range)
-        for key in ("channel_id", "oldest", "latest", "cursor"):
+        for key in ("channel_id", "oldest", "latest", "cursor", "export_path", "import_path", "export_format"):
             value = arguments.get(key)
             if value not in (None, ""):
                 requested_range[key] = value
@@ -1131,7 +1143,7 @@ class StartConnectorBackfillHandler(ToolHandler):
             "source_session_id": arguments.get("source_session_id") or context.session_id,
             "queued_by_tool": "start_connector_backfill",
         }
-        max_attempts = 3 if connector_id == "slack" else 1
+        max_attempts = 3 if (connector_id == "slack" or requested_range.get("export_path")) else 1
         async with context.registry.pool.acquire() as conn:
             raw = await conn.fetchval(
                 """
@@ -1152,11 +1164,15 @@ class StartConnectorBackfillHandler(ToolHandler):
             )
         payload = _json(raw) or {}
         verb = "already queued" if payload.get("existing") else "queued"
+        estimate = payload.get("estimate") if isinstance(payload.get("estimate"), dict) else {}
+        status = estimate.get("provider_status")
+        estimate_text = f" Estimate: {status}." if status else ""
         return ToolResult.success_result(
             payload,
             display_output=(
                 f"{connector_id} backfill {verb} for {account_key}. "
                 "The maintenance worker will fetch what the provider can expose and preserve raw source items."
+                f"{estimate_text}"
             ),
         )
 

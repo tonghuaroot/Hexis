@@ -122,11 +122,42 @@ END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION satisfy_drive(p_drive_name TEXT, p_amount FLOAT DEFAULT 0.3)
 RETURNS VOID AS $$
+DECLARE
+    before_level FLOAT;
+    after_level FLOAT;
+    satisfied_amount FLOAT;
 BEGIN
+    SELECT current_level INTO before_level
+    FROM drives
+    WHERE name = p_drive_name;
+
     UPDATE drives
     SET current_level = GREATEST(baseline, LEAST(1.0, current_level - GREATEST(0.0, COALESCE(p_amount, 0.3)))),
         last_satisfied = CURRENT_TIMESTAMP
-    WHERE name = p_drive_name;
+    WHERE name = p_drive_name
+    RETURNING current_level INTO after_level;
+
+    IF before_level IS NOT NULL AND after_level IS NOT NULL THEN
+        satisfied_amount := GREATEST(0.0, before_level - after_level);
+        IF satisfied_amount > 0 THEN
+            BEGIN
+                PERFORM record_reward_event(
+                    'drive_satisfied:' || p_drive_name,
+                    satisfied_amount,
+                    LEAST(1.0, GREATEST(satisfied_amount, COALESCE(p_amount, 0.3))),
+                    'drive',
+                    jsonb_build_object(
+                        'drive', p_drive_name,
+                        'before', before_level,
+                        'after', after_level,
+                        'requested_amount', p_amount
+                    )
+                );
+            EXCEPTION WHEN OTHERS THEN
+                RAISE LOG 'record_reward_event failed in satisfy_drive(%): %', p_drive_name, SQLERRM;
+            END;
+        END IF;
+    END IF;
 END;
 $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION set_config(p_key TEXT, p_value JSONB)

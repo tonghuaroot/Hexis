@@ -195,3 +195,78 @@ async def test_telegram_backfill_fails_loudly_with_provider_limitation(db_pool):
             await conn.execute("DELETE FROM connector_sync_cursors WHERE account_key = $1", account)
             await conn.execute("DELETE FROM integration_connections WHERE account_key = $1", account)
             await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)
+
+
+async def test_telegram_export_backfill_imports_local_history(db_pool, tmp_path):
+    marker = get_test_identifier("telegram-export")
+    account = f"channel:telegram:{marker}"
+    export_path = tmp_path / "telegram-result.json"
+    export_path.write_text(
+        json.dumps(
+            {
+                "name": f"Chat {marker}",
+                "messages": [
+                    {
+                        "id": 1,
+                        "type": "message",
+                        "date": "2026-07-20T10:00:00+00:00",
+                        "from": "Eric",
+                        "text": f"Please remember the project marker {marker}.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        async with db_pool.acquire() as conn:
+            await _connected_channel(conn, "telegram", marker, account)
+            queued = _j(await conn.fetchval(
+                """
+                SELECT enqueue_connector_backfill_job(
+                    'telegram',
+                    $1,
+                    'messages',
+                    $2::jsonb,
+                    '{"test": true}'::jsonb,
+                    3
+                )
+                """,
+                account,
+                json.dumps({"export_path": str(export_path), "max_messages": 10}),
+            ))
+            claimed = _j(await conn.fetchval(
+                "SELECT claim_connector_backfill_jobs_for('telegram', 1)"
+            ))
+            job = claimed[0]
+
+        result = await channel_backfill.process_channel_backfill_job(db_pool, job)
+
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT provider_item_id, source_document_id, sensitivity
+                FROM connector_source_items
+                WHERE account_key = $1
+                ORDER BY provider_item_id
+                """,
+                account,
+            )
+            opened = _j(await conn.fetchval("SELECT open_source_document($1::uuid)", rows[0]["source_document_id"]))
+
+        assert result["status"] == "completed"
+        assert result["result"]["items_stored"] == 1
+        assert rows[0]["sensitivity"] == "private"
+        assert marker in opened["content"]
+        assert queued["estimate"]["provider_status"] == "local_export_import"
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM connector_backfill_jobs WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connector_sync_cursors WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM integration_connections WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)
+            await conn.execute(
+                "DELETE FROM source_documents WHERE path LIKE $1",
+                f"telegram://{account}/message/%",
+            )

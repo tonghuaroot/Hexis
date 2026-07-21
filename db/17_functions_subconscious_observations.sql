@@ -676,6 +676,40 @@ BEGIN
 
         reason := COALESCE(change->>'reason', '');
         PERFORM change_goal_priority(goal_id, change_kind, reason);
+        IF change_kind = 'completed' THEN
+            BEGIN
+                PERFORM record_reward_event(
+                    'goal_completed',
+                    0.75,
+                    0.7,
+                    'goal',
+                    jsonb_build_object(
+                        'goal_id', goal_id,
+                        'reason', NULLIF(reason, ''),
+                        'change', change_kind::text
+                    ),
+                    goal_id
+                );
+            EXCEPTION WHEN OTHERS THEN
+                RAISE LOG 'record_reward_event failed for completed goal %: %', goal_id, SQLERRM;
+            END;
+        ELSIF change_kind = 'abandoned' THEN
+            BEGIN
+                PERFORM record_prediction_error(
+                    0.2,
+                    -0.3,
+                    'goal_abandoned',
+                    'goal',
+                    jsonb_build_object(
+                        'goal_id', goal_id,
+                        'reason', NULLIF(reason, ''),
+                        'change', change_kind::text
+                    )
+                );
+            EXCEPTION WHEN OTHERS THEN
+                RAISE LOG 'record_prediction_error failed for abandoned goal %: %', goal_id, SQLERRM;
+            END;
+        END IF;
         applied := applied + 1;
     END LOOP;
 

@@ -159,6 +159,13 @@ class IntegrationActionRequest(BaseModel):
     source_session_id: str | None = None
 
 
+class UserModelReviewRequest(BaseModel):
+    decision: Literal["approve", "reject", "supersede", "restore"]
+    note: str | None = None
+    actor: str | None = "operator"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class OpenAIChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -658,6 +665,106 @@ async def integration_action(req: IntegrationActionRequest):
     result = await registry.execute(tool_name, args, context)
     status_code = 200 if result.success else 400
     return JSONResponse(jsonable_encoder(_tool_result_payload(result)), status_code=status_code)
+
+
+@app.get("/api/user-model/claims")
+async def user_model_claims(
+    status: str | None = None,
+    review_status: str | None = None,
+    category: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    pool = _pool
+    if pool is None:
+        return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
+    async with pool.acquire() as conn:
+        raw = await conn.fetchval(
+            "SELECT list_user_model_claims($1, $2, $3, $4::int, $5::int)",
+            status,
+            review_status,
+            category,
+            limit,
+            offset,
+        )
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    return JSONResponse(jsonable_encoder(payload or {"claims": [], "total": 0}))
+
+
+@app.post("/api/user-model/claims/{claim_id}/review")
+async def user_model_claim_review(claim_id: str, req: UserModelReviewRequest):
+    pool = _pool
+    if pool is None:
+        return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
+    try:
+        parsed = uuid.UUID(claim_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="claim_id must be a valid UUID")
+    async with pool.acquire() as conn:
+        raw = await conn.fetchval(
+            "SELECT review_user_model_claim($1::uuid, $2, $3, $4, $5::jsonb)",
+            str(parsed),
+            req.decision,
+            req.note,
+            req.actor or "operator",
+            json.dumps(req.metadata or {}),
+        )
+    payload = json.loads(raw) if isinstance(raw, str) else raw
+    return JSONResponse(jsonable_encoder(payload or {}))
+
+
+@app.get("/api/connector-importance")
+async def connector_importance(
+    connector_id: str | None = None,
+    label: str | None = None,
+    status: str | None = "completed",
+    limit: int = 50,
+    offset: int = 0,
+):
+    pool = _pool
+    if pool is None:
+        return JSONResponse({"error": "Server not ready (no DB pool)"}, status_code=503)
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT i.source_item_id::text,
+                   i.connector_id,
+                   i.account_key,
+                   i.source_document_id::text,
+                   i.score,
+                   i.label,
+                   i.reasons,
+                   i.recommended_actions,
+                   i.detector_version,
+                   i.status,
+                   i.notification_queued_at,
+                   i.metadata,
+                   i.created_at,
+                   i.updated_at,
+                   d.title,
+                   left(d.content, 600) AS preview,
+                   count(*) OVER()::int AS total
+            FROM connector_item_importance i
+            LEFT JOIN source_documents d ON d.id = i.source_document_id
+            WHERE ($1::text IS NULL OR i.connector_id = $1)
+              AND ($2::text IS NULL OR i.label = $2)
+              AND ($3::text IS NULL OR i.status = $3)
+            ORDER BY i.score DESC, i.updated_at DESC
+            LIMIT $4 OFFSET $5
+            """,
+            connector_id,
+            label,
+            status,
+            limit,
+            offset,
+        )
+    items = [dict(row) for row in rows]
+    total = int(items[0].get("total") or 0) if items else 0
+    for item in items:
+        item.pop("total", None)
+    return JSONResponse(jsonable_encoder({"items": items, "total": total, "limit": limit, "offset": offset}))
 
 
 @app.post("/api/webhook/{source}")

@@ -1,4 +1,5 @@
 import json
+from uuid import uuid4
 
 import pytest
 
@@ -192,38 +193,79 @@ async def test_get_subconscious_and_chat_contexts(db_pool, ensure_embedding_serv
             await tr.rollback()
 
 
-async def test_record_subconscious_exchange_and_chat_turn(db_pool, ensure_embedding_service):
+async def test_subconscious_observations_and_chat_turn_memory(db_pool, ensure_embedding_service):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()
         await tr.start()
         try:
-            prompt = f"prompt {get_test_identifier('exchange')}"
-            response = {"emotional_state": {"valence": 0.2}, "summary": "ok"}
-            memory_id = await conn.fetchval(
-                "SELECT record_subconscious_exchange($1, $2::jsonb)",
-                prompt,
-                json.dumps(response),
+            observation = f"subconscious observation {get_test_identifier('exchange')}"
+            applied = _coerce_json(
+                await conn.fetchval(
+                    "SELECT apply_subconscious_observations($1::jsonb)",
+                    json.dumps(
+                        {
+                            "emotional_observations": [
+                                {
+                                    "pattern": observation,
+                                    "importance": 0.4,
+                                    "confidence": 0.7,
+                                }
+                            ]
+                        }
+                    ),
+                )
             )
-            row = await conn.fetchrow(
-                "SELECT content, type FROM memories WHERE id = $1",
-                memory_id,
+            assert applied["emotional"] >= 1
+            obs_row = await conn.fetchrow(
+                "SELECT content, type FROM memories WHERE content = $1",
+                f"Emotional pattern: {observation}",
             )
-            assert row is not None
-            assert row["type"] == "episodic"
-            assert prompt in row["content"]
+            assert obs_row is not None
+            assert obs_row["type"] == "strategic"
 
-            chat_id = await conn.fetchval(
-                "SELECT record_chat_turn($1, $2, '{}'::jsonb)",
-                "hello",
-                "hi there",
+            session_id = str(uuid4())
+            chat_result = _coerce_json(
+                await conn.fetchval(
+                    "SELECT record_chat_turn_memory($1, $2, $3, $4, $5::jsonb)",
+                    "hello",
+                    "hi there",
+                    session_id,
+                    None,
+                    json.dumps({"importance": 0.4, "metadata": {"type": "conversation"}}),
+                )
             )
+            raw_unit_id = chat_result["raw_unit_id"]
             chat_row = await conn.fetchrow(
-                "SELECT content FROM memories WHERE id = $1",
-                chat_id,
+                "SELECT content, source_attribution, metadata FROM subconscious_units WHERE id = $1::uuid",
+                raw_unit_id,
             )
             assert chat_row is not None
             assert "User: hello" in chat_row["content"]
             assert "Assistant: hi there" in chat_row["content"]
+            source_attribution = _coerce_json(chat_row["source_attribution"])
+            metadata = _coerce_json(chat_row["metadata"])
+            assert source_attribution["kind"] == "conversation"
+            assert metadata["type"] == "conversation"
+            assert chat_result["direct_promoted"] is False
+
+            promoted = _coerce_json(
+                await conn.fetchval(
+                    "SELECT record_chat_turn_memory($1, $2, $3, $4, $5::jsonb)",
+                    "my surgery is tomorrow",
+                    "I will remember that and check in carefully.",
+                    session_id,
+                    None,
+                    json.dumps({"importance": 0.99, "metadata": {"type": "conversation"}}),
+                )
+            )
+            memory_id = promoted["promoted_memory_id"]
+            promoted_row = await conn.fetchrow(
+                "SELECT content, type FROM memories WHERE id = $1::uuid",
+                memory_id,
+            )
+            assert promoted_row is not None
+            assert promoted_row["type"] == "episodic"
+            assert "my surgery is tomorrow" in promoted_row["content"]
         finally:
             await tr.rollback()
 

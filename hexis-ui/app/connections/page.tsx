@@ -490,6 +490,8 @@ function ChannelControls({
 }) {
   const connectorId = summary.connector.id;
   const [settings, setSettings] = useState<Record<string, string>>({});
+  const [historyTarget, setHistoryTarget] = useState("");
+  const [historyMax, setHistoryMax] = useState("100");
   const setupManifest = asRecord(summary.connector.setup_manifest);
   const settingKeys = channelSettingKeys(setupManifest, connectorId);
   const envVars = stringArray(setupManifest.env_vars);
@@ -497,6 +499,8 @@ function ChannelControls({
   const startBusy = actionBusy === `${connectorId}:start`;
   const configureBusy = actionBusy === `${connectorId}:configure`;
   const verifyBusy = actionBusy === `${connectorId}:verify`;
+  const historyBusy = actionBusy === `${connectorId}:history`;
+  const connection = summary.activeConnections[0] || null;
   const configuredSettings = Object.fromEntries(
     settingKeys
       .map((key) => [key, settings[key]?.trim() || ""] as const)
@@ -571,6 +575,43 @@ function ChannelControls({
           {verifyBusy ? "Checking..." : "Verify config"}
         </Button>
       </div>
+      {connection ? (
+        <div className="grid gap-2 border-t border-[var(--outline)] pt-3 md:grid-cols-[1fr_7rem_auto]">
+          <TextInput
+            value={historyTarget}
+            onChange={(event) => setHistoryTarget(event.target.value)}
+            placeholder={connectorId === "slack" ? "Slack channel ID" : "Local export path"}
+            className="py-2 text-xs"
+          />
+          <TextInput
+            type="number"
+            min={1}
+            max={5000}
+            value={historyMax}
+            onChange={(event) => setHistoryMax(event.target.value)}
+            aria-label="Max messages"
+            className="py-2 text-xs"
+          />
+          <Button
+            type="button"
+            variant="secondary"
+            disabled={Boolean(actionBusy) || historyTarget.trim().length === 0}
+            onClick={() =>
+              void onAction(`${connectorId}:history`, "start_connector_backfill", {
+                connector_id: connectorId,
+                account_key: connection.account_key,
+                max_messages: parseMaxMessages(historyMax, 5000),
+                ...(connectorId === "slack"
+                  ? { channel_id: historyTarget.trim() }
+                  : { export_path: historyTarget.trim() }),
+              })
+            }
+            className="px-3 py-2 text-xs"
+          >
+            {historyBusy ? "Queuing..." : "Import history"}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -597,8 +638,9 @@ function BackfillPanel({
           {jobs.slice(0, 8).map((job) => {
             const controlBusy = actionBusy?.startsWith(`backfill:${job.job_id}:`) ?? false;
             const canControl =
-              job.connector_id === "gmail" &&
               !["completed", "failed", "cancelled"].includes(job.status);
+            const controlAction =
+              job.connector_id === "gmail" ? "control_gmail_backfill" : "control_connector_backfill";
             const pauseOrResume =
               job.status === "paused" || job.pause_requested ? "resume" : "pause";
             return (
@@ -614,6 +656,15 @@ function BackfillPanel({
                     {job.cursor_key}
                     {job.updated_at ? ` · ${formatDate(job.updated_at)}` : ""}
                   </p>
+                  {job.estimate?.provider_status ? (
+                    <p className="mt-1 truncate text-xs text-[var(--ink-soft)]">
+                      {String(job.estimate.provider_status)}
+                      {job.estimate.estimated_items != null
+                        ? ` · ~${String(job.estimate.estimated_items)} items`
+                        : ""}
+                      {job.estimate.cost_class ? ` · ${String(job.estimate.cost_class)}` : ""}
+                    </p>
+                  ) : null}
                   {job.error ? <p className="mt-1 text-xs text-red-700">{job.error}</p> : null}
                 </div>
                 <div className="flex flex-wrap items-center gap-2 md:justify-end">
@@ -629,7 +680,7 @@ function BackfillPanel({
                         onClick={() =>
                           void onAction(
                             `backfill:${job.job_id}:${pauseOrResume}`,
-                            "control_gmail_backfill",
+                            controlAction,
                             {
                               job_id: job.job_id,
                               action: pauseOrResume,
@@ -646,10 +697,10 @@ function BackfillPanel({
                         variant="ghost"
                         disabled={Boolean(actionBusy)}
                         onClick={() => {
-                          if (window.confirm(`Cancel Gmail backfill job ${job.job_id}?`)) {
+                          if (window.confirm(`Cancel ${job.connector_id} backfill job ${job.job_id}?`)) {
                             void onAction(
                               `backfill:${job.job_id}:cancel`,
-                              "control_gmail_backfill",
+                              controlAction,
                               {
                                 job_id: job.job_id,
                                 action: "cancel",
@@ -792,10 +843,10 @@ function actionNotice(payload: IntegrationActionResult): string {
   );
 }
 
-function parseMaxMessages(value: string): number {
+function parseMaxMessages(value: string, max = 500): number {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed)) return 100;
-  return Math.min(500, Math.max(1, parsed));
+  return Math.min(max, Math.max(1, parsed));
 }
 
 function channelSettingKeys(

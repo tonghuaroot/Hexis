@@ -73,6 +73,7 @@ export type BackfillJob = {
   max_attempts: number;
   progress: JsonRecord;
   result: JsonRecord;
+  estimate?: JsonRecord;
   error: string | null;
   cancel_requested: boolean;
   pause_requested: boolean;

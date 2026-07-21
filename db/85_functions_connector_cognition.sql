@@ -19,12 +19,20 @@ WHERE id = 'slack';
 INSERT INTO config_defaults (key, value, description) VALUES
     ('connector.user_model_synthesis_enabled', 'true'::jsonb,
      'Distill connector source items into evidence-backed user-model claims'),
+    ('connector.user_model_synthesis_mode', '"hybrid"'::jsonb,
+     'User-model synthesis mode: rules, llm, or hybrid'),
+    ('connector.user_model_review_required', 'true'::jsonb,
+     'Derived user-model claims enter a review queue before being treated as operator-approved'),
+    ('connector.user_model_llm_enabled', 'true'::jsonb,
+     'Allow LLM-backed connector user-model synthesis when an LLM config is available'),
     ('connector.user_model_synthesis_batch_size', '10'::jsonb,
      'Connector source items claimed per user-model synthesis pass'),
     ('connector.user_model_synthesis_claim_timeout_s', '600'::jsonb,
      'Seconds before an in-progress user-model synthesis claim can be retried'),
     ('connector.importance_detection_enabled', 'true'::jsonb,
      'Score connector source items for user-visible importance'),
+    ('connector.importance_llm_enabled', 'true'::jsonb,
+     'Allow LLM-backed connector importance detection when an LLM config is available'),
     ('connector.importance_detection_batch_size', '20'::jsonb,
      'Connector source items claimed per importance detection pass'),
     ('connector.importance_detection_claim_timeout_s', '600'::jsonb,
@@ -62,6 +70,14 @@ CREATE TABLE IF NOT EXISTS user_model_claims (
     evidence_count INT NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'superseded', 'rejected')),
+    review_status TEXT NOT NULL DEFAULT 'pending_review'
+        CHECK (review_status IN ('pending_review', 'approved', 'rejected', 'superseded')),
+    superseded_by UUID REFERENCES user_model_claims(id) ON DELETE SET NULL,
+    supersedes_claim_id UUID REFERENCES user_model_claims(id) ON DELETE SET NULL,
+    contradiction_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+    reviewed_at TIMESTAMPTZ,
+    reviewed_by TEXT,
+    review_note TEXT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_evidence_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -74,6 +90,23 @@ CREATE INDEX IF NOT EXISTS idx_user_model_claims_category
     WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_user_model_claims_evidence
     ON user_model_claims USING GIN (evidence_refs);
+CREATE INDEX IF NOT EXISTS idx_user_model_claims_review
+    ON user_model_claims (review_status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS user_model_review_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    claim_id UUID NOT NULL REFERENCES user_model_claims(id) ON DELETE CASCADE,
+    prior_status TEXT,
+    prior_review_status TEXT,
+    decision TEXT NOT NULL CHECK (decision IN ('approve', 'reject', 'supersede', 'restore')),
+    note TEXT,
+    actor TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_model_review_events_claim
+    ON user_model_review_events (claim_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS connector_item_importance (
     source_item_id UUID PRIMARY KEY REFERENCES connector_source_items(id) ON DELETE CASCADE,
@@ -206,7 +239,10 @@ CREATE OR REPLACE FUNCTION upsert_user_model_claim(
     p_source_item_id UUID DEFAULT NULL,
     p_source_document_id UUID DEFAULT NULL,
     p_evidence JSONB DEFAULT '{}'::jsonb,
-    p_metadata JSONB DEFAULT '{}'::jsonb
+    p_metadata JSONB DEFAULT '{}'::jsonb,
+    p_review_status TEXT DEFAULT NULL,
+    p_supersedes_claim_key TEXT DEFAULT NULL,
+    p_contradicts_claim_keys JSONB DEFAULT '[]'::jsonb
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -219,6 +255,10 @@ DECLARE
     memory_id UUID;
     confidence_value FLOAT := LEAST(1.0, GREATEST(0.0, COALESCE(p_confidence, 0.5)));
     importance_value FLOAT := LEAST(1.0, GREATEST(0.0, COALESCE(p_importance, 0.5)));
+    review_value TEXT := COALESCE(NULLIF(btrim(COALESCE(p_review_status, '')), ''), 'pending_review');
+    supersedes_id UUID := NULL;
+    contradiction_ids JSONB := '[]'::jsonb;
+    key_text TEXT;
     inserted BOOLEAN := FALSE;
 BEGIN
     IF normalized_key IS NULL THEN
@@ -226,6 +266,31 @@ BEGIN
     END IF;
     IF normalized_claim IS NULL THEN
         RAISE EXCEPTION 'claim is required';
+    END IF;
+    IF review_value NOT IN ('pending_review', 'approved', 'rejected', 'superseded') THEN
+        review_value := 'pending_review';
+    END IF;
+
+    IF NULLIF(btrim(COALESCE(p_supersedes_claim_key, '')), '') IS NOT NULL THEN
+        SELECT id INTO supersedes_id
+        FROM user_model_claims
+        WHERE claim_key = lower(btrim(p_supersedes_claim_key));
+    END IF;
+
+    IF p_contradicts_claim_keys IS NOT NULL AND jsonb_typeof(p_contradicts_claim_keys) = 'array' THEN
+        FOR key_text IN SELECT lower(btrim(value)) FROM jsonb_array_elements_text(p_contradicts_claim_keys) value
+        LOOP
+            IF key_text <> '' THEN
+                contradiction_ids := contradiction_ids || COALESCE((
+                    SELECT jsonb_build_array(jsonb_build_object(
+                        'claim_id', id::text,
+                        'claim_key', claim_key
+                    ))
+                    FROM user_model_claims
+                    WHERE claim_key = key_text
+                ), '[]'::jsonb);
+            END IF;
+        END LOOP;
     END IF;
 
     source_ref := jsonb_strip_nulls(jsonb_build_object(
@@ -259,7 +324,8 @@ BEGIN
 
         INSERT INTO user_model_claims (
             claim_key, category, claim, memory_id, confidence, importance,
-            evidence_refs, evidence_count, metadata
+            evidence_refs, evidence_count, review_status, supersedes_claim_id,
+            contradiction_refs, metadata
         )
         VALUES (
             normalized_key,
@@ -270,6 +336,9 @@ BEGIN
             importance_value,
             refs,
             jsonb_array_length(refs),
+            review_value,
+            supersedes_id,
+            contradiction_ids,
             COALESCE(p_metadata, '{}'::jsonb)
         )
         RETURNING * INTO row_claim;
@@ -305,6 +374,18 @@ BEGIN
             importance = GREATEST(importance, importance_value),
             evidence_refs = refs,
             evidence_count = jsonb_array_length(refs),
+            review_status = CASE
+                WHEN review_status = 'approved' AND review_value = 'pending_review' THEN review_status
+                ELSE review_value
+            END,
+            supersedes_claim_id = COALESCE(supersedes_id, supersedes_claim_id),
+            contradiction_refs = (
+                SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+                FROM jsonb_array_elements(
+                    COALESCE(user_model_claims.contradiction_refs, '[]'::jsonb)
+                    || COALESCE(contradiction_ids, '[]'::jsonb)
+                ) elem
+            ),
             metadata = metadata || COALESCE(p_metadata, '{}'::jsonb),
             last_evidence_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
@@ -312,11 +393,34 @@ BEGIN
         RETURNING * INTO row_claim;
     END IF;
 
+    IF supersedes_id IS NOT NULL AND supersedes_id <> row_claim.id THEN
+        UPDATE user_model_claims
+        SET status = 'superseded',
+            review_status = 'superseded',
+            superseded_by = row_claim.id,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = supersedes_id;
+
+        UPDATE memories old_mem
+        SET status = 'archived',
+            superseded_by = row_claim.memory_id,
+            updated_at = CURRENT_TIMESTAMP,
+            metadata = old_mem.metadata || jsonb_build_object(
+                'superseded_by_user_model_claim_id', row_claim.id::text
+            )
+        FROM user_model_claims old_claim
+        WHERE old_claim.id = supersedes_id
+          AND old_claim.memory_id = old_mem.id
+          AND old_mem.status = 'active';
+    END IF;
+
     RETURN jsonb_build_object(
         'claim_id', row_claim.id::text,
         'claim_key', row_claim.claim_key,
         'memory_id', row_claim.memory_id::text,
         'created', inserted,
+        'review_status', row_claim.review_status,
+        'status', row_claim.status,
         'confidence', row_claim.confidence,
         'importance', row_claim.importance,
         'evidence_count', row_claim.evidence_count
@@ -371,7 +475,10 @@ BEGIN
                 'trust', COALESCE(NULLIF(claim_item->>'evidence_trust', '')::float, 0.75)
             ),
             COALESCE(claim_item->'metadata', '{}'::jsonb)
-                || jsonb_build_object('detector_version', p_detector_version)
+                || jsonb_build_object('detector_version', p_detector_version),
+            COALESCE(NULLIF(claim_item->>'review_status', ''), 'pending_review'),
+            claim_item->>'supersedes_claim_key',
+            COALESCE(claim_item->'contradicts_claim_keys', '[]'::jsonb)
         );
         results := results || jsonb_build_array(claim_result);
         claim_count := claim_count + 1;
@@ -398,6 +505,144 @@ BEGIN
         'source_item_id', p_source_item_id::text,
         'claim_count', claim_count,
         'claims', results
+    );
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION list_user_model_claims(
+    p_status TEXT DEFAULT NULL,
+    p_review_status TEXT DEFAULT NULL,
+    p_category TEXT DEFAULT NULL,
+    p_limit INT DEFAULT 50,
+    p_offset INT DEFAULT 0
+) RETURNS JSONB
+LANGUAGE sql
+STABLE
+AS $$
+    WITH filtered AS (
+        SELECT c.*
+        FROM user_model_claims c
+        WHERE (p_status IS NULL OR c.status = p_status)
+          AND (p_review_status IS NULL OR c.review_status = p_review_status)
+          AND (p_category IS NULL OR c.category = p_category)
+    ),
+    page AS (
+        SELECT c.*
+        FROM filtered c
+        ORDER BY
+            CASE c.review_status WHEN 'pending_review' THEN 0 ELSE 1 END,
+            c.importance DESC,
+            c.updated_at DESC
+        LIMIT LEAST(GREATEST(COALESCE(p_limit, 50), 1), 200)
+        OFFSET GREATEST(COALESCE(p_offset, 0), 0)
+    )
+    SELECT jsonb_build_object(
+        'claims', COALESCE(jsonb_agg(jsonb_build_object(
+            'id', page.id::text,
+            'claim_key', page.claim_key,
+            'category', page.category,
+            'claim', page.claim,
+            'memory_id', page.memory_id::text,
+            'confidence', page.confidence,
+            'importance', page.importance,
+            'evidence_count', page.evidence_count,
+            'evidence_refs', page.evidence_refs,
+            'status', page.status,
+            'review_status', page.review_status,
+            'superseded_by', page.superseded_by::text,
+            'supersedes_claim_id', page.supersedes_claim_id::text,
+            'contradiction_refs', page.contradiction_refs,
+            'metadata', page.metadata,
+            'first_seen_at', page.first_seen_at,
+            'last_evidence_at', page.last_evidence_at,
+            'reviewed_at', page.reviewed_at,
+            'reviewed_by', page.reviewed_by,
+            'review_note', page.review_note
+        ) ORDER BY
+            CASE page.review_status WHEN 'pending_review' THEN 0 ELSE 1 END,
+            page.importance DESC,
+            page.updated_at DESC), '[]'::jsonb),
+        'total', (SELECT count(*)::int FROM filtered),
+        'limit', LEAST(GREATEST(COALESCE(p_limit, 50), 1), 200),
+        'offset', GREATEST(COALESCE(p_offset, 0), 0)
+    )
+    FROM page;
+$$;
+
+CREATE OR REPLACE FUNCTION review_user_model_claim(
+    p_claim_id UUID,
+    p_decision TEXT,
+    p_note TEXT DEFAULT NULL,
+    p_actor TEXT DEFAULT 'operator',
+    p_metadata JSONB DEFAULT '{}'::jsonb
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    row_claim user_model_claims%ROWTYPE;
+    prior_status TEXT;
+    prior_review_status TEXT;
+    decision_value TEXT := lower(NULLIF(btrim(COALESCE(p_decision, '')), ''));
+BEGIN
+    SELECT * INTO row_claim FROM user_model_claims WHERE id = p_claim_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'user-model claim not found: %', p_claim_id;
+    END IF;
+    IF decision_value NOT IN ('approve', 'reject', 'supersede', 'restore') THEN
+        RAISE EXCEPTION 'decision must be approve, reject, supersede, or restore';
+    END IF;
+
+    prior_status := row_claim.status;
+    prior_review_status := row_claim.review_status;
+
+    UPDATE user_model_claims
+    SET status = CASE
+            WHEN decision_value IN ('approve', 'restore') THEN 'active'
+            WHEN decision_value = 'reject' THEN 'rejected'
+            WHEN decision_value = 'supersede' THEN 'superseded'
+            ELSE status
+        END,
+        review_status = CASE
+            WHEN decision_value IN ('approve', 'restore') THEN 'approved'
+            WHEN decision_value = 'reject' THEN 'rejected'
+            WHEN decision_value = 'supersede' THEN 'superseded'
+            ELSE review_status
+        END,
+        reviewed_at = CURRENT_TIMESTAMP,
+        reviewed_by = COALESCE(NULLIF(p_actor, ''), 'operator'),
+        review_note = NULLIF(p_note, ''),
+        metadata = metadata || COALESCE(p_metadata, '{}'::jsonb),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = p_claim_id
+    RETURNING * INTO row_claim;
+
+    IF row_claim.memory_id IS NOT NULL THEN
+        UPDATE memories
+        SET status = CASE WHEN row_claim.status = 'active' THEN 'active'::memory_status ELSE 'archived'::memory_status END,
+            updated_at = CURRENT_TIMESTAMP,
+            metadata = metadata || jsonb_build_object(
+                'user_model_review_status', row_claim.review_status,
+                'user_model_reviewed_at', row_claim.reviewed_at
+            )
+        WHERE id = row_claim.memory_id;
+    END IF;
+
+    INSERT INTO user_model_review_events (
+        claim_id, prior_status, prior_review_status, decision, note, actor, metadata
+    )
+    VALUES (
+        p_claim_id, prior_status, prior_review_status, decision_value,
+        NULLIF(p_note, ''), COALESCE(NULLIF(p_actor, ''), 'operator'),
+        COALESCE(p_metadata, '{}'::jsonb)
+    );
+
+    RETURN jsonb_build_object(
+        'claim_id', row_claim.id::text,
+        'claim_key', row_claim.claim_key,
+        'status', row_claim.status,
+        'review_status', row_claim.review_status,
+        'reviewed_at', row_claim.reviewed_at,
+        'reviewed_by', row_claim.reviewed_by
     );
 END;
 $$;
@@ -650,6 +895,18 @@ AS $$
             FROM user_model_claims
             WHERE status = 'active'
         ),
+        'user_model_review', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'review_status', review_status,
+                'status', status,
+                'count', count
+            ) ORDER BY review_status, status)
+            FROM (
+                SELECT review_status, status, count(*)::int
+                FROM user_model_claims
+                GROUP BY review_status, status
+            ) t
+        ), '[]'::jsonb),
         'importance', COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
                 'connector_id', t.connector_id,
