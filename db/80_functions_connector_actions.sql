@@ -26,6 +26,8 @@ INSERT INTO connector_action_tool_map (
      '{}'::jsonb),
     ('telegram_send', 'telegram', 'send', 'chat_id', NULL, 'external_message',
      '{}'::jsonb),
+    ('signal_send', 'signal', 'send', 'recipient', NULL, 'external_message',
+     '{"tool_module": "core.tools.messaging"}'::jsonb),
     ('gmail_send', 'gmail', 'send', 'to', 'account_key', 'external_message',
      '{"tool_module": "core.tools.gmail_actions"}'::jsonb),
     ('gmail_reply', 'gmail', 'reply', 'thread_id', 'account_key', 'external_message',

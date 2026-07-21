@@ -2,11 +2,16 @@ import { NextResponse } from "next/server";
 
 import { normalizeJsonValue } from "@/lib/db";
 import { prisma } from "@/lib/prisma";
+import {
+  errorMessage as formatErrorMessage,
+  hexisApiHeaders,
+  jsonProxyResponse,
+  resolveHexisApiUrl,
+} from "@/lib/python-api";
 
 export const runtime = "nodejs";
 
 type Row = Record<string, unknown>;
-const DEFAULT_UPSTREAM = "http://127.0.0.1:43817";
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -19,17 +24,7 @@ function asArray(value: unknown): unknown[] {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Failed to fetch integration status";
-}
-
-function resolveUpstreamUrl(pathname: string): string {
-  const base =
-    process.env.HEXIS_API_URL ||
-    process.env.HEXIS_API_BASE_URL ||
-    DEFAULT_UPSTREAM;
-  const normalizedBase = base.endsWith("/") ? base : `${base}/`;
-  const normalizedPath = pathname.replace(/^\//, "");
-  return new URL(normalizedPath, normalizedBase).toString();
+  return formatErrorMessage(error, "Failed to fetch integration status");
 }
 
 export async function GET(): Promise<Response> {
@@ -74,19 +69,13 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   try {
-    const headers: HeadersInit = { "Content-Type": "application/json" };
-    const apiKey = process.env.HEXIS_API_KEY;
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-    const upstream = await fetch(resolveUpstreamUrl("/api/integrations/action"), {
+    const upstream = await fetch(resolveHexisApiUrl("/api/integrations/action"), {
       method: "POST",
-      headers,
+      headers: hexisApiHeaders({ "Content-Type": "application/json" }),
       body: bodyText,
     });
     const payload = await upstream.text();
-    return new Response(payload, {
-      status: upstream.status,
-      headers: { "Content-Type": "application/json" },
-    });
+    return jsonProxyResponse(upstream, payload);
   } catch (error: unknown) {
     console.error("Integration setup API error:", error);
     return NextResponse.json(

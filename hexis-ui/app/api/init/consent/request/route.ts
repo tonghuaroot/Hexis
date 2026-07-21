@@ -1,20 +1,14 @@
 import { NextResponse } from "next/server";
 
-export const runtime = "nodejs";
+import { errorMessage, jsonProxyResponse, resolveHexisApiUrl } from "@/lib/python-api";
 
-function upstreamBaseUrl(): string {
-  return (
-    process.env.HEXIS_API_URL ||
-    process.env.HEXIS_API_BASE_URL ||
-    "http://127.0.0.1:43817"
-  );
-}
+export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
 
   try {
-    const res = await fetch(`${upstreamBaseUrl()}/api/init/consent/request`, {
+    const res = await fetch(resolveHexisApiUrl("/api/init/consent/request"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body ?? {}),
@@ -22,19 +16,11 @@ export async function POST(request: Request) {
     });
 
     const text = await res.text();
-    return new NextResponse(text, {
-      status: res.status,
-      headers: {
-        "content-type": res.headers.get("content-type") || "application/json",
-      },
-    });
+    return jsonProxyResponse(res, text);
   } catch (err: unknown) {
     console.error("Consent proxy failed:", err);
     return NextResponse.json(
-      {
-        error:
-          err instanceof Error ? err.message : "Consent request failed",
-      },
+      { error: errorMessage(err, "Consent request failed") },
       { status: 500 }
     );
   }

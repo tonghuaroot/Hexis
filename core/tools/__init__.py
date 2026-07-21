@@ -134,6 +134,7 @@ from .messaging import (
     DiscordSendHandler,
     SlackSendHandler,
     TelegramSendHandler,
+    SignalSendHandler,
 )
 from .code_execution import (
     create_code_execution_tools,
@@ -193,6 +194,9 @@ from .integrations import (
     StartGmailBackfillHandler,
     GmailBackfillStatusHandler,
     ControlGmailBackfillHandler,
+    StartConnectorBackfillHandler,
+    ConnectorBackfillStatusHandler,
+    ControlConnectorBackfillHandler,
     ConnectorActionPolicyStatusHandler,
     GrantConnectorActionPolicyHandler,
     RevokeConnectorActionPolicyHandler,
@@ -292,6 +296,7 @@ __all__ = [
     "DiscordSendHandler",
     "SlackSendHandler",
     "TelegramSendHandler",
+    "SignalSendHandler",
     # Code execution tools
     "create_code_execution_tools",
     "CodeExecutionHandler",
@@ -340,6 +345,9 @@ __all__ = [
     "StartGmailBackfillHandler",
     "GmailBackfillStatusHandler",
     "ControlGmailBackfillHandler",
+    "StartConnectorBackfillHandler",
+    "ConnectorBackfillStatusHandler",
+    "ControlConnectorBackfillHandler",
     "ConnectorActionPolicyStatusHandler",
     "GrantConnectorActionPolicyHandler",
     "RevokeConnectorActionPolicyHandler",

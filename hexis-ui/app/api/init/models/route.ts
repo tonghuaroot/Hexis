@@ -7,20 +7,13 @@
 //   * on any failure -> a short curated fallback; the model field stays free-text
 
 import { catalogDeclaredDefault } from "@/lib/init-llm";
+import { hexisApiBaseUrl } from "@/lib/python-api";
 
 export const runtime = "nodejs";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const CACHE_TTL_MS = 24 * 3600 * 1000;
 const TIMEOUT_MS = 12000;
-
-function hexisApiBaseUrl(): string {
-  return (
-    process.env.HEXIS_API_URL ||
-    process.env.HEXIS_API_BASE_URL ||
-    "http://127.0.0.1:43817"
-  );
-}
 
 // Hexis provider id -> models.dev slug.
 const PROVIDER_SLUG: Record<string, string> = {

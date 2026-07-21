@@ -34,15 +34,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from channels.presentation import presentation_from_text
-from core.agent_api import db_dsn_from_env, get_agent_profile_context, pool_sizes_from_env
+from core.agent_api import db_dsn_from_env, pool_sizes_from_env
 from core.agent_loop import AgentEvent, AgentEventData
 from core.auth.ui_flow import AuthFlowError, auth_flow_coordinator
 from core.cli_api import status_payload_rich
-from core.cognitive_memory_api import CognitiveMemory
 from core.gateway import EventSource, Gateway
 from core.tools import create_default_registry
-from services.agent import stream_agent
-from services.chat import _hydrate_chat_history, _remember_conversation
+from services.chat import resolve_prompt_addenda, stream_chat_events
 
 logger = logging.getLogger(__name__)
 
@@ -421,53 +419,19 @@ async def _openai_agent_events(
     pool = _pool
     if pool is None:
         raise RuntimeError("Server not ready (no DB pool)")
-    history = await _hydrate_chat_history(pool, session_id, history)
-
-    try:
-        await Gateway(pool).record(
-            EventSource.CHAT,
-            f"chat:openai:{session_id}",
-            {"message": user_message[:500], "client_user": client_user},
-        )
-    except Exception:
-        logger.debug("Gateway record failed (non-fatal)", exc_info=True)
-
-    registry = create_default_registry(pool)
-    agent_profile = await get_agent_profile_context(pool=pool)
-    async for event in stream_agent(
-        pool,
-        registry,
+    async for event in stream_chat_events(
         user_message=user_message,
-        mode="chat",
         history=history,
         session_id=session_id,
-        agent_profile=agent_profile,
+        pool=pool,
         dsn=_dsn(),
         max_tokens=max_tokens,
         temperature=temperature,
+        surface="openai_compat",
+        gateway_source_id=f"chat:openai:{session_id}",
+        gateway_payload={"message": user_message[:500], "client_user": client_user},
     ):
         yield event
-
-
-async def _remember_openai_chat(
-    user_message: str,
-    assistant_message: str,
-    session_id: str | None = None,
-    history: list[dict[str, Any]] | None = None,
-) -> None:
-    pool = _pool
-    if pool is None or not assistant_message:
-        return
-    try:
-        await _remember_conversation(
-            CognitiveMemory(pool),
-            user_message=user_message,
-            assistant_message=assistant_message,
-            session_id=session_id,
-            surface="openai_compat",
-        )
-    except Exception:
-        logger.exception("OpenAI-compatible chat memory formation failed")
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +544,8 @@ _INTEGRATION_ACTION_TO_TOOL = {
     "revoke_gmail": "revoke_gmail_connection",
     "start_gmail_backfill": "start_gmail_backfill",
     "control_gmail_backfill": "control_gmail_backfill",
+    "start_connector_backfill": "start_connector_backfill",
+    "control_connector_backfill": "control_connector_backfill",
     "verify_channel": "verify_channel_integration",
 }
 
@@ -605,10 +571,10 @@ def _integration_action_arguments(
                 detail=f"{action} supports Slack, Telegram, and Signal.",
             )
         args["connector_id"] = connector_id
-    if action in {"start_setup", "connect_gmail", "start_gmail_backfill"}:
+    if action in {"start_setup", "connect_gmail", "start_gmail_backfill", "start_connector_backfill"}:
         args.setdefault("source_channel", "web")
     if (
-        action in {"start_setup", "connect_gmail", "start_gmail_backfill"}
+        action in {"start_setup", "connect_gmail", "start_gmail_backfill", "start_connector_backfill"}
         and source_session_id
     ):
         args.setdefault("source_session_id", source_session_id)
@@ -1303,8 +1269,6 @@ async def _collect_openai_chat_completion(
         error = str(exc)
 
     full_text = "".join(parts)
-    if not error:
-        await _remember_openai_chat(user_message, full_text, session_id=session_id, history=history)
     return full_text, error, finish_reason
 
 
@@ -1370,36 +1334,8 @@ async def _stream_openai_chat_completion(
             }
         )
     else:
-        await _remember_openai_chat(user_message, "".join(parts), session_id=session_id, history=history)
         yield _openai_sse_data(_chunk({}, finish_reason))
     yield _openai_sse_data("[DONE]")
-
-
-# Checkbox ids the UI settings panel may send as prompt addenda; they render
-# the corresponding DB prompt module. Anything else is literal addendum text
-# (the attached-document path).
-_ADDENDA_MODULES = {"philosophy": "philosophy", "letter": "LetterFromClaude"}
-
-
-async def _resolve_prompt_addenda(pool: asyncpg.Pool, addenda: list[str] | None) -> list[str]:
-    resolved: list[str] = []
-    for entry in addenda or []:
-        text = str(entry or "").strip()
-        if not text:
-            continue
-        module_key = _ADDENDA_MODULES.get(text)
-        if module_key:
-            try:
-                async with pool.acquire() as conn:
-                    rendered = await conn.fetchval("SELECT render_prompt($1)", module_key)
-                if rendered:
-                    resolved.append(str(rendered).strip())
-                continue
-            except Exception:
-                logger.warning("Prompt addendum module %r failed to render", module_key, exc_info=True)
-                continue
-        resolved.append(text)
-    return resolved
 
 
 async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
@@ -1437,37 +1373,21 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
     if session_id is None:
         session_id = str(uuid.uuid4())
 
-    # Record chat event for audit trail (record-and-dispatch mode)
     try:
-        gateway = Gateway(pool)
-        await gateway.record(
-            EventSource.CHAT,
-            f"chat:api:{session_id}",
-            {"message": user_message[:500]},
-        )
-    except Exception:
-        logger.debug("Gateway record failed (non-fatal)", exc_info=True)
-
-    try:
-        registry = create_default_registry(pool)
-        agent_profile = await get_agent_profile_context(pool=pool)
-        addenda = await _resolve_prompt_addenda(pool, req.prompt_addenda)
-        history = await _hydrate_chat_history(pool, session_id, history)
-
+        addenda = await resolve_prompt_addenda(pool, req.prompt_addenda)
         full_text = ""
         conscious_started = False
-        appraisal_affect: dict[str, Any] | None = None
 
-        async for event in stream_agent(
-            pool,
-            registry,
+        async for event in stream_chat_events(
             user_message=user_message,
-            mode="chat",
             history=history,
             session_id=session_id,
-            agent_profile=agent_profile,
             dsn=dsn,
+            pool=pool,
             prompt_addenda=addenda,
+            surface="api",
+            gateway_source_id=f"chat:api:{session_id}",
+            gateway_payload={"message": user_message[:500]},
         ):
             if event.event == AgentEvent.PHASE_CHANGE:
                 phase = event.data.get("phase", "")
@@ -1487,12 +1407,17 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                         output = event.data.get("output")
                         # This turn's appraisal affect rides into memory
                         # formation (#81).
-                        if isinstance(output, dict) and output.get("signals", {}).get("emotional_state"):
-                            appraisal_affect = output["signals"]["emotional_state"]
                         yield _sse_event("phase_end", {
                             "phase": "subconscious",
                             "output": output,
                         })
+                elif phase == "memory_write" and status == "end":
+                    yield _sse_event("log", {
+                        "id": str(uuid.uuid4()),
+                        "kind": "memory_write",
+                        "title": "Memory Formation",
+                        "detail": str(event.data.get("detail") or "Conversation stored as episodic memory"),
+                    })
 
             elif event.event == AgentEvent.LOOP_START:
                 if not conscious_started:
@@ -1563,27 +1488,6 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         # Signal phase end and completion
         if conscious_started:
             yield _sse_event("phase_end", {"phase": "conscious_final"})
-
-        # Memory formation
-        if full_text:
-            try:
-                mem_client = CognitiveMemory(pool)
-                await _remember_conversation(
-                    mem_client,
-                    user_message=user_message,
-                    assistant_message=full_text,
-                    session_id=session_id,
-                    emotional_state=appraisal_affect,
-                    surface="api",
-                )
-                yield _sse_event("log", {
-                    "id": str(uuid.uuid4()),
-                    "kind": "memory_write",
-                    "title": "Memory Formation",
-                    "detail": "Conversation stored as episodic memory",
-                })
-            except Exception as e:
-                logger.error("Memory formation failed: %s", e)
 
         done_payload: dict[str, Any] = {"assistant": full_text, "session_id": session_id}
         if full_text:

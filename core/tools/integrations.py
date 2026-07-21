@@ -83,6 +83,45 @@ async def _resolve_gmail_account(pool: Any, requested: Any = None) -> str:
     raise ValueError(f"Multiple Gmail accounts are connected. Specify account_key. Connected: {choices}")
 
 
+async def _connected_accounts(pool: Any, connector_id: str) -> list[dict[str, Any]]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT account_key, display_name, capabilities, granted_scopes, updated_at
+            FROM integration_connections
+            WHERE connector_id = $1
+              AND status = 'connected'
+            ORDER BY updated_at DESC, account_key
+            """,
+            connector_id,
+        )
+    return [
+        {
+            "account_key": row["account_key"],
+            "display_name": row["display_name"],
+            "capabilities": _json(row["capabilities"]) or [],
+            "granted_scopes": list(row["granted_scopes"] or []),
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+
+
+async def _resolve_connector_account(pool: Any, connector_id: str, requested: Any = None) -> str:
+    account_key = str(requested or "").strip()
+    accounts = await _connected_accounts(pool, connector_id)
+    if account_key:
+        if any(str(item.get("account_key") or "") == account_key for item in accounts):
+            return account_key
+        raise ValueError(f"{connector_id} account is not connected: {account_key}")
+    if not accounts:
+        raise ValueError(f"{connector_id} is not connected. Start and verify the connector setup first.")
+    if len(accounts) == 1:
+        return str(accounts[0]["account_key"])
+    choices = ", ".join(str(item["account_key"]) for item in accounts)
+    raise ValueError(f"Multiple {connector_id} accounts are connected. Specify account_key. Connected: {choices}")
+
+
 class IntegrationSetupStatusHandler(ToolHandler):
     """Inspect first-class connector setup state for any provider."""
 
@@ -973,6 +1012,273 @@ class ControlGmailBackfillHandler(ToolHandler):
         )
 
 
+class StartConnectorBackfillHandler(ToolHandler):
+    """Queue DB-owned history backfill for a connected non-Gmail connector."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="start_connector_backfill",
+            description=(
+                "Queue historical import for connected communication connectors. Use when the user asks "
+                "to import Slack, Telegram, Signal, or Twitter/X history. Slack requires a channel_id. "
+                "Telegram and Signal currently report provider limitations and point to import/export paths."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "connector_id": {
+                        "type": "string",
+                        "description": "Connector id: slack, telegram, signal, or twitter_x.",
+                    },
+                    "account_key": {
+                        "type": "string",
+                        "description": "Connected account key. Required only when multiple accounts exist.",
+                    },
+                    "channel_id": {
+                        "type": "string",
+                        "description": "Slack channel/conversation ID to import, such as C123, G123, or D123.",
+                    },
+                    "requested_range": {
+                        "type": "object",
+                        "description": "Provider-specific range options. For Slack: oldest, latest, inclusive, cursor.",
+                    },
+                    "max_messages": {
+                        "type": "integer",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
+                    },
+                    "page_size": {
+                        "type": "integer",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 200,
+                    },
+                    "inclusive": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Slack range option: include messages exactly at oldest/latest.",
+                    },
+                    "source_channel": {
+                        "type": "string",
+                        "description": "Optional source surface, such as cli, web, slack, telegram, or signal.",
+                    },
+                    "source_session_id": {
+                        "type": "string",
+                        "description": "Optional conversation/session identifier.",
+                    },
+                },
+                "required": ["connector_id"],
+            },
+            category=ToolCategory.EXTERNAL,
+            energy_cost=2,
+            is_read_only=False,
+            requires_approval=True,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.MCP},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result(
+                "start_connector_backfill requires an active tool registry.",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+        connector_id = _connector_id(arguments.get("connector_id"))
+        if connector_id == "gmail":
+            return ToolResult.error_result(
+                "Use start_gmail_backfill for Gmail because Gmail uses a dedicated OAuth credential path.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+        if connector_id not in {"slack", "telegram", "signal", "twitter_x"}:
+            return ToolResult.error_result(
+                "start_connector_backfill supports slack, telegram, signal, and twitter_x.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+        try:
+            account_key = await _resolve_connector_account(
+                context.registry.pool,
+                connector_id,
+                arguments.get("account_key"),
+            )
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
+
+        requested_range = arguments.get("requested_range")
+        if requested_range is None:
+            requested_range = {}
+        if not isinstance(requested_range, dict):
+            return ToolResult.error_result("requested_range must be an object.", ToolErrorType.INVALID_PARAMS)
+        requested_range = dict(requested_range)
+        for key in ("channel_id", "oldest", "latest", "cursor"):
+            value = arguments.get(key)
+            if value not in (None, ""):
+                requested_range[key] = value
+        for key in ("max_messages", "page_size"):
+            if arguments.get(key) is not None:
+                requested_range[key] = arguments.get(key)
+        if arguments.get("inclusive") is not None:
+            requested_range["inclusive"] = bool(arguments.get("inclusive"))
+        if connector_id == "slack" and not str(requested_range.get("channel_id") or "").strip():
+            return ToolResult.error_result(
+                "Slack history backfill requires channel_id because broad workspace import is too surprising.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        metadata = {
+            "source_channel": arguments.get("source_channel"),
+            "source_session_id": arguments.get("source_session_id") or context.session_id,
+            "queued_by_tool": "start_connector_backfill",
+        }
+        max_attempts = 3 if connector_id == "slack" else 1
+        async with context.registry.pool.acquire() as conn:
+            raw = await conn.fetchval(
+                """
+                SELECT enqueue_connector_backfill_job(
+                    $1,
+                    $2,
+                    'messages',
+                    $3::jsonb,
+                    $4::jsonb,
+                    $5::int
+                )
+                """,
+                connector_id,
+                account_key,
+                json.dumps({k: v for k, v in requested_range.items() if v not in (None, [], "")}),
+                json.dumps({k: v for k, v in metadata.items() if v not in (None, "")}),
+                max_attempts,
+            )
+        payload = _json(raw) or {}
+        verb = "already queued" if payload.get("existing") else "queued"
+        return ToolResult.success_result(
+            payload,
+            display_output=(
+                f"{connector_id} backfill {verb} for {account_key}. "
+                "The maintenance worker will fetch what the provider can expose and preserve raw source items."
+            ),
+        )
+
+
+class ConnectorBackfillStatusHandler(ToolHandler):
+    """Inspect DB-owned connector backfill status for any provider."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="connector_backfill_status",
+            description="Show connector backfill jobs, cursors, and raw source-item counts for any provider.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "connector_id": {
+                        "type": "string",
+                        "description": "Optional connector filter, such as gmail, slack, telegram, signal, or twitter_x.",
+                    },
+                    "account_key": {
+                        "type": "string",
+                        "description": "Optional provider account filter.",
+                    },
+                },
+            },
+            category=ToolCategory.EXTERNAL,
+            energy_cost=1,
+            is_read_only=True,
+            supports_parallel=True,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT, ToolContext.MCP},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result(
+                "connector_backfill_status requires an active tool registry.",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+        connector_id = _connector_id(arguments.get("connector_id")) or None
+        async with context.registry.pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT get_connector_backfill_status($1, $2)",
+                connector_id,
+                arguments.get("account_key"),
+            )
+        payload = _json(raw) or {}
+        jobs = payload.get("jobs") if isinstance(payload.get("jobs"), list) else []
+        item_counts = payload.get("item_counts") if isinstance(payload.get("item_counts"), list) else []
+        active = [
+            job for job in jobs
+            if isinstance(job, dict) and job.get("status") in {"pending", "in_progress", "paused"}
+        ]
+        total_items = sum(int(item.get("count") or 0) for item in item_counts if isinstance(item, dict))
+        label = connector_id or "connectors"
+        return ToolResult.success_result(
+            payload,
+            display_output=f"{label} backfill: {len(active)} active jobs, {total_items} source items.",
+        )
+
+
+class ControlConnectorBackfillHandler(ToolHandler):
+    """Pause, resume, or cancel any connector backfill job."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="control_connector_backfill",
+            description="Pause, resume, or cancel a connector backfill job by job_id.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "job_id": {
+                        "type": "string",
+                        "description": "Connector backfill job ID from connector_backfill_status.",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "resume", "cancel"],
+                        "description": "Control action to apply.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional human-readable reason for pause/cancel.",
+                    },
+                },
+                "required": ["job_id", "action"],
+            },
+            category=ToolCategory.EXTERNAL,
+            energy_cost=1,
+            is_read_only=False,
+            requires_approval=True,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.MCP},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result(
+                "control_connector_backfill requires an active tool registry.",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+        action = str(arguments.get("action") or "").strip().lower()
+        job_id = str(arguments.get("job_id") or "").strip()
+        if action not in {"pause", "resume", "cancel"}:
+            return ToolResult.error_result("action must be pause, resume, or cancel.", ToolErrorType.INVALID_PARAMS)
+        statement = {
+            "pause": "SELECT pause_connector_backfill_job($1::uuid, $2)",
+            "resume": "SELECT resume_connector_backfill_job($1::uuid)",
+            "cancel": "SELECT cancel_connector_backfill_job($1::uuid, $2)",
+        }[action]
+        async with context.registry.pool.acquire() as conn:
+            if action == "resume":
+                raw = await conn.fetchval(statement, job_id)
+            else:
+                raw = await conn.fetchval(statement, job_id, arguments.get("reason"))
+        payload = _json(raw) or {}
+        return ToolResult.success_result(
+            payload,
+            display_output=f"Connector backfill {action}: {payload.get('status', 'unknown')}.",
+        )
+
+
 class ConnectorActionPolicyStatusHandler(ToolHandler):
     """List DB-owned connector action policies."""
 
@@ -1215,6 +1521,9 @@ def create_integration_tools() -> list[ToolHandler]:
         StartGmailBackfillHandler(),
         GmailBackfillStatusHandler(),
         ControlGmailBackfillHandler(),
+        StartConnectorBackfillHandler(),
+        ConnectorBackfillStatusHandler(),
+        ControlConnectorBackfillHandler(),
         ConnectorActionPolicyStatusHandler(),
         GrantConnectorActionPolicyHandler(),
         RevokeConnectorActionPolicyHandler(),

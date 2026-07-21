@@ -188,3 +188,39 @@ async def test_connector_action_policy_can_be_revoked(db_pool):
     assert listed[0]["policy_id"] == policy["policy_id"]
     assert revoked["status"] == "revoked"
     assert active_after == []
+
+
+async def test_signal_send_is_connector_policy_managed(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _sync_tool(conn, "signal_send")
+            await conn.execute("SELECT grant_tool_approval('signal_send')")
+            denied = _j(await conn.fetchval(
+                "SELECT evaluate_tool_call('signal_send', $1::jsonb, $2::jsonb)",
+                json.dumps({"recipient": "+15551234567", "message": "Emergency update"}),
+                json.dumps({"tool_context": "heartbeat", "energy_available": 20}),
+            ))
+            policy = _j(await conn.fetchval(
+                """
+                SELECT grant_connector_action_policy(
+                    'signal', 'send', NULL, '{"allowed_targets": ["+15551234567"]}'::jsonb,
+                    TRUE, FALSE, ARRAY['heartbeat']::text[],
+                    NULL, 'test-session', 'Allow emergency Signal alerts', 'user'
+                )
+                """
+            ))
+            allowed = _j(await conn.fetchval(
+                "SELECT evaluate_tool_call('signal_send', $1::jsonb, $2::jsonb)",
+                json.dumps({"recipient": "+15551234567", "message": "Emergency update"}),
+                json.dumps({"tool_context": "heartbeat", "energy_available": 20}),
+            ))
+        finally:
+            await tr.rollback()
+
+    assert denied["allowed"] is False
+    assert denied["connector_action"]["connector_id"] == "signal"
+    assert denied["connector_action"]["action_kind"] == "send"
+    assert allowed["allowed"] is True
+    assert allowed["connector_action"]["policy_id"] == policy["policy_id"]

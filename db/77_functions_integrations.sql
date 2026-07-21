@@ -137,7 +137,7 @@ INSERT INTO integration_connectors (
       "send": {"label": "Send Slack messages", "status": "available", "scopes": ["chat:write"]},
       "ingest_live": {"label": "Preserve and ingest live Slack messages", "status": "available", "scopes": ["app_mentions:read", "channels:history"]},
       "media": {"label": "Read Slack file metadata from live events", "status": "available", "scopes": ["files:read"]},
-      "backfill": {"label": "Import historical Slack messages", "status": "planned", "scopes": ["channels:history", "groups:history", "im:history", "mpim:history"]},
+      "backfill": {"label": "Import historical Slack messages", "status": "available", "scopes": ["channels:history", "groups:history", "im:history", "mpim:history"]},
       "admin": {"label": "Administer Slack workspace settings", "status": "planned", "scopes": []}
     }'::jsonb,
     '{

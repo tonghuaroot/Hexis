@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -82,12 +82,8 @@ async def test_openai_client_buffered_completion_preserves_history_and_controls(
 ):
     model_id = await _active_model_id(http_client)
     captured: dict = {}
-    remember = AsyncMock()
 
-    with (
-        patch.object(web_module, "stream_agent", _agent_stream(captured)),
-        patch.object(web_module, "_remember_openai_chat", remember),
-    ):
+    with patch.object(web_module, "stream_chat_events", _agent_stream(captured)):
         sdk = AsyncOpenAI(
             api_key="test-key",
             base_url="http://testserver/v1",
@@ -118,22 +114,15 @@ async def test_openai_client_buffered_completion_preserves_history_and_controls(
     ]
     assert captured["max_tokens"] == 123
     assert captured["temperature"] == 0.2
-    remember.assert_awaited_once()
-    call = remember.await_args
-    assert call.args == ("Introduce yourself.", "Hello from Hexis.")
-    # Session threading (#71): the minted session id reaches memory formation.
-    assert call.kwargs["session_id"] == captured["session_id"]
-    assert call.kwargs["history"] == captured["history"]
+    assert captured["surface"] == "openai_compat"
+    assert captured["gateway_source_id"] == f"chat:openai:{captured['session_id']}"
 
 
 async def test_openai_client_streams_role_text_finish_and_done(http_client):
     model_id = await _active_model_id(http_client)
     captured: dict = {}
 
-    with (
-        patch.object(web_module, "stream_agent", _agent_stream(captured)),
-        patch.object(web_module, "_remember_openai_chat", AsyncMock()),
-    ):
+    with patch.object(web_module, "stream_chat_events", _agent_stream(captured)):
         sdk = AsyncOpenAI(
             api_key="test-key",
             base_url="http://testserver/v1",

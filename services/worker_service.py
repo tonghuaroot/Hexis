@@ -33,6 +33,11 @@ from services.recmem import (
     run_recmem_sweep_step,
 )
 from services.extraction import run_conscious_extraction_step
+from services.channel_backfill import run_channel_backfill_step
+from services.connector_cognition import (
+    run_connector_importance_step,
+    run_user_model_synthesis_step,
+)
 from services.gmail_backfill import run_gmail_backfill_step
 from services.summarization import run_memory_summarization_step
 from services.skill_improvement import run_skill_improvement_review_step
@@ -481,6 +486,30 @@ class MaintenanceWorker:
         except Exception:
             logger.exception("Gmail connector backfill step failed")
 
+    async def _run_channel_backfill_jobs(self) -> None:
+        if not self.pool:
+            return
+        try:
+            handled = await run_channel_backfill_step(self.pool)
+            if handled:
+                logger.info("Channel connector backfill jobs handled: %s", handled)
+        except Exception:
+            logger.exception("Channel connector backfill step failed")
+
+    async def _run_connector_cognition(self) -> None:
+        if not self.pool:
+            return
+        try:
+            async with self.pool.acquire() as conn:
+                user_model = await run_user_model_synthesis_step(conn)
+                if not user_model.get("skipped"):
+                    logger.info("Connector user-model synthesis: %s", user_model)
+                importance = await run_connector_importance_step(conn)
+                if not importance.get("skipped"):
+                    logger.info("Connector importance detection: %s", importance)
+        except Exception:
+            logger.exception("Connector cognition step failed")
+
     async def _run_recmem_if_enabled(self) -> None:
         if not self.pool:
             return
@@ -603,6 +632,8 @@ class MaintenanceWorker:
                     await self._run_origin_seed_if_enabled()
                     await self._run_skill_improvement_if_due()
                     await self._run_gmail_backfill_jobs()
+                    await self._run_channel_backfill_jobs()
+                    await self._run_connector_cognition()
                     await self._run_ingestion_jobs()
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")

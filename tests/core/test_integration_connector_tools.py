@@ -5,11 +5,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from core.tools.base import ToolContext, ToolExecutionContext
+from core.tools.base import ToolContext, ToolErrorType, ToolExecutionContext
 from core.tools.integrations import (
     ConfigureChannelIntegrationHandler,
+    ConnectorBackfillStatusHandler,
+    ControlConnectorBackfillHandler,
     IntegrationSetupStatusHandler,
     StartIntegrationSetupHandler,
+    StartConnectorBackfillHandler,
     VerifyChannelIntegrationHandler,
 )
 from core.tools.registry import create_default_registry
@@ -219,3 +222,121 @@ async def test_verify_channel_integration_reports_exact_setup_step_when_missing_
     assert not result.success
     assert result.error_type.value == "missing_config"
     assert "SIGNAL_PHONE_NUMBER" in result.error
+
+
+async def _connected_channel(conn, connector_id: str, marker: str, account_key: str) -> None:
+    attempt = _j(await conn.fetchval(
+        """
+        SELECT start_connection_attempt(
+            $1,
+            '["live_chat", "send", "ingest_live"]'::jsonb,
+            ARRAY[]::text[],
+            '{}'::jsonb,
+            NULL,
+            NULL,
+            'test',
+            $2,
+            CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+        )
+        """,
+        connector_id,
+        marker,
+    ))
+    await conn.fetchval(
+        """
+        SELECT complete_connection_attempt(
+            $1::uuid,
+            $2,
+            $3,
+            $4,
+            ARRAY[]::text[],
+            '["live_chat", "send", "ingest_live"]'::jsonb,
+            '{"test": true}'::jsonb
+        )
+        """,
+        attempt["attempt_id"],
+        account_key,
+        connector_id,
+        f"config:channel.{connector_id}",
+    )
+
+
+async def test_start_connector_backfill_tool_queues_and_controls_slack_job(db_pool):
+    marker = get_test_identifier("slack-tool-backfill")
+    account = f"channel:slack:{marker}"
+
+    try:
+        async with db_pool.acquire() as conn:
+            await _connected_channel(conn, "slack", marker, account)
+
+        started = await StartConnectorBackfillHandler().execute(
+            {
+                "connector_id": "slack",
+                "account_key": account,
+                "channel_id": "C123",
+                "max_messages": 5,
+                "page_size": 2,
+                "source_channel": "cli",
+            },
+            _ctx(db_pool, marker),
+        )
+        assert started.success
+        assert started.output["connector_id"] == "slack"
+        assert started.output["status"] == "pending"
+        assert started.output["requested_range"]["channel_id"] == "C123"
+        assert started.output["requested_range"]["max_messages"] == 5
+
+        status = await ConnectorBackfillStatusHandler().execute(
+            {"connector_id": "slack", "account_key": account},
+            _ctx(db_pool, marker),
+        )
+        assert status.success
+        assert status.output["jobs"][0]["job_id"] == started.output["job_id"]
+
+        paused = await ControlConnectorBackfillHandler().execute(
+            {"job_id": started.output["job_id"], "action": "pause", "reason": "test pause"},
+            _ctx(db_pool, marker),
+        )
+        resumed = await ControlConnectorBackfillHandler().execute(
+            {"job_id": started.output["job_id"], "action": "resume"},
+            _ctx(db_pool, marker),
+        )
+        cancelled = await ControlConnectorBackfillHandler().execute(
+            {"job_id": started.output["job_id"], "action": "cancel", "reason": "test cancel"},
+            _ctx(db_pool, marker),
+        )
+
+        assert paused.success
+        assert paused.output["status"] == "paused"
+        assert resumed.success
+        assert resumed.output["status"] == "pending"
+        assert cancelled.success
+        assert cancelled.output["status"] == "cancelled"
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM connector_backfill_jobs WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connector_sync_cursors WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM integration_connections WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)
+
+
+async def test_start_connector_backfill_requires_explicit_slack_channel(db_pool):
+    marker = get_test_identifier("slack-tool-channel")
+    account = f"channel:slack:{marker}"
+
+    try:
+        async with db_pool.acquire() as conn:
+            await _connected_channel(conn, "slack", marker, account)
+
+        result = await StartConnectorBackfillHandler().execute(
+            {"connector_id": "slack", "account_key": account},
+            _ctx(db_pool, marker),
+        )
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM integration_connections WHERE account_key = $1", account)
+            await conn.execute("DELETE FROM connection_attempts WHERE source_session_id = $1", marker)
+
+    assert not result.success
+    assert result.error_type == ToolErrorType.INVALID_PARAMS
+    assert "channel_id" in result.error

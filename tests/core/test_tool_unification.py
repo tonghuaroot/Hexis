@@ -512,6 +512,9 @@ class TestChatTurnWithRegistry:
             mock_mem_instance = AsyncMock()
             mock_mem_instance.hydrate = AsyncMock(return_value=MagicMock(memories=[]))
             mock_mem_instance.remember = AsyncMock()
+            mock_mem_instance.record_chat_turn_memory = AsyncMock(return_value={})
+            mock_mem_instance.record_chat_session_turn = AsyncMock(return_value={})
+            MockMem.return_value = mock_mem_instance
             MockMem.connect.return_value.__aenter__ = AsyncMock(return_value=mock_mem_instance)
             MockMem.connect.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -561,6 +564,9 @@ class TestChatTurnWithRegistry:
             mock_mem_instance.hydrate = AsyncMock(return_value=MagicMock(memories=[]))
             mock_mem_instance.remember = AsyncMock()
             mock_mem_instance.touch_memories = AsyncMock()
+            mock_mem_instance.record_chat_turn_memory = AsyncMock(return_value={})
+            mock_mem_instance.record_chat_session_turn = AsyncMock(return_value={})
+            MockMem.return_value = mock_mem_instance
             MockMem.connect.return_value.__aenter__ = AsyncMock(return_value=mock_mem_instance)
             MockMem.connect.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -600,6 +606,9 @@ class TestChatTurnWithRegistry:
             mock_mem_instance.hydrate = AsyncMock(return_value=MagicMock(memories=[]))
             mock_mem_instance.remember = AsyncMock()
             mock_mem_instance.touch_memories = AsyncMock()
+            mock_mem_instance.record_chat_turn_memory = AsyncMock(return_value={})
+            mock_mem_instance.record_chat_session_turn = AsyncMock(return_value={})
+            MockMem.return_value = mock_mem_instance
             MockMem.connect.return_value.__aenter__ = AsyncMock(return_value=mock_mem_instance)
             MockMem.connect.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -630,6 +639,9 @@ class TestChatTurnWithRegistry:
             mock_mem_instance = AsyncMock()
             mock_mem_instance.hydrate = AsyncMock(return_value=MagicMock(memories=[]))
             mock_mem_instance.remember = AsyncMock()
+            mock_mem_instance.record_chat_turn_memory = AsyncMock(return_value={})
+            mock_mem_instance.record_chat_session_turn = AsyncMock(return_value={})
+            MockMem.return_value = mock_mem_instance
             MockMem.connect.return_value.__aenter__ = AsyncMock(return_value=mock_mem_instance)
             MockMem.connect.return_value.__aexit__ = AsyncMock(return_value=False)
 

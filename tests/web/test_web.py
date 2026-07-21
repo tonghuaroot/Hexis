@@ -13,6 +13,7 @@ import pytest
 
 import apps.hexis_api as web_module
 from apps.hexis_api import app
+from core.agent_loop import AgentEvent, AgentEventData
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session")]
 
@@ -57,52 +58,26 @@ async def test_chat_returns_sse_stream(client):
     We mock the LLM call and memory hydration to avoid needing a real
     API key or embedding service.
     """
-    from contextlib import asynccontextmanager
-    from core.cognitive_memory_api import HydratedContext
-
-    mock_response = {
-        "content": "Hello! I'm Hexis.",
-        "tool_calls": [],
-        "raw": {},
-    }
-
-    # Mock CognitiveMemory.connect() to return a mock client that avoids embeddings
-    mock_mem = AsyncMock()
-    mock_mem.hydrate = AsyncMock(
-        return_value=HydratedContext(
-            memories=[],
-            partial_activations=[],
-            identity=[],
-            worldview=[],
-            emotional_state=None,
-            goals=None,
-            urgent_drives=[],
+    async def fake_stream(*args, **kwargs):
+        yield AgentEventData(
+            event=AgentEvent.PHASE_CHANGE,
+            data={"phase": "subconscious", "status": "start"},
         )
-    )
-    mock_mem.touch_memories = AsyncMock()
-    mock_mem.remember = AsyncMock()
+        yield AgentEventData(event=AgentEvent.LOOP_START)
+        yield AgentEventData(
+            event=AgentEvent.TEXT_DELTA,
+            data={"text": "Hello! I'm Hexis."},
+        )
+        yield AgentEventData(
+            event=AgentEvent.LOOP_END,
+            data={"stopped_reason": "completed"},
+        )
 
-    @asynccontextmanager
-    async def mock_connect(*args, **kwargs):
-        yield mock_mem
-
-    async def mock_stream_completion(**kwargs):
-        await kwargs["on_text_delta"](mock_response["content"])
-        return mock_response
-
-    with patch("apps.hexis_api.CognitiveMemory.connect", side_effect=mock_connect):
-        with patch(
-            "core.agent_loop.stream_chat_completion",
-            side_effect=mock_stream_completion,
-        ):
-            with patch(
-                "core.agent_loop.chat_completion", new_callable=AsyncMock
-            ) as mock_chat:
-                mock_chat.return_value = mock_response
-                resp = await client.post(
-                    "/api/chat",
-                    json={"message": "Hello, who are you?"},
-                )
+    with patch.object(web_module, "stream_chat_events", fake_stream):
+        resp = await client.post(
+            "/api/chat",
+            json={"message": "Hello, who are you?"},
+        )
 
     assert resp.status_code == 200
     assert "text/event-stream" in resp.headers.get("content-type", "")

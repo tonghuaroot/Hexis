@@ -6,13 +6,19 @@ from typing import Any, AsyncIterator
 from uuid import UUID
 
 from core.agent_api import db_dsn_from_env, get_agent_profile_context, pool_sizes_from_env
-from core.agent_loop import AgentEvent
+from core.agent_loop import AgentEvent, AgentEventData
 from core.cognitive_memory_api import CognitiveMemory, MemoryType
 from core.llm import normalize_llm_config
+from core.llm_config import load_llm_config
 from core.tools import create_default_registry, ToolContext, ToolExecutionContext, ToolRegistry
 from services.agent import run_agent, stream_agent
 
 logger = logging.getLogger(__name__)
+
+# Checkbox ids the UI settings panel may send as prompt addenda; they render
+# the corresponding DB prompt module. Anything else is literal addendum text
+# (the attached-document path).
+_ADDENDA_MODULES = {"philosophy": "philosophy", "letter": "LetterFromClaude"}
 
 
 async def _build_system_prompt(
@@ -84,6 +90,27 @@ async def _hydrate_chat_history(
     except Exception:
         logger.debug("DB chat-session hydration failed; falling back to caller history", exc_info=True)
     return _message_history_only(fallback_history or [])
+
+
+async def resolve_prompt_addenda(pool: Any, addenda: list[str] | None) -> list[str]:
+    resolved: list[str] = []
+    for entry in addenda or []:
+        text = str(entry or "").strip()
+        if not text:
+            continue
+        module_key = _ADDENDA_MODULES.get(text)
+        if module_key:
+            try:
+                async with pool.acquire() as conn:
+                    rendered = await conn.fetchval("SELECT render_prompt($1)", module_key)
+                if rendered:
+                    resolved.append(str(rendered).strip())
+                continue
+            except Exception:
+                logger.warning("Prompt addendum module %r failed to render", module_key, exc_info=True)
+                continue
+        resolved.append(text)
+    return resolved
 
 
 async def _remember_conversation(
@@ -298,6 +325,73 @@ async def stream_chat_turn(
     caller receives the same enriched conversation flow (hydrate +
     subconscious + tools + memory formation) — just delivered as a stream.
     """
+    collected: list[str] = []
+    timed_out = False
+    error_message: str | None = None
+
+    async for event in stream_chat_events(
+        user_message=user_message,
+        history=history,
+        llm_config=llm_config,
+        dsn=dsn,
+        memory_limit=memory_limit,
+        max_tool_iterations=max_tool_iterations,
+        session_id=session_id,
+        pool=pool,
+        user_label=user_label,
+        is_group=is_group,
+        surface=surface,
+    ):
+        if event.event == AgentEvent.TEXT_DELTA:
+            text = event.data.get("text", "")
+            if text:
+                collected.append(text)
+                yield text
+        elif event.event == AgentEvent.LOOP_END:
+            stopped = str(event.data.get("stopped_reason") or "")
+            timed_out = stopped == "timeout" or bool(event.data.get("timed_out"))
+        elif event.event == AgentEvent.ERROR:
+            error_message = str(event.data.get("error") or "Unknown agent error")
+
+    full_text = "".join(collected)
+    if timed_out:
+        if full_text:
+            yield "\n\n[Response timed out before completion.]"
+        else:
+            yield (
+                "Request timed out before a response arrived. Try again, "
+                "or run `hexis doctor --llm` if it keeps happening."
+            )
+        return
+    if not full_text and error_message:
+        yield f"Request failed: {error_message}"
+
+
+async def stream_chat_events(
+    *,
+    user_message: str,
+    history: list[dict[str, Any]] | None = None,
+    llm_config: dict[str, Any] | None = None,
+    dsn: str | None = None,
+    memory_limit: int = 10,
+    max_tool_iterations: int | None = None,
+    session_id: str | None = None,
+    pool: Any | None = None,
+    user_label: str | None = None,
+    is_group: bool = False,
+    surface: str = "chat",
+    prompt_addenda: list[str] | None = None,
+    max_tokens: int | None = None,
+    temperature: float | None = None,
+    gateway_source_id: str | None = None,
+    gateway_payload: dict[str, Any] | None = None,
+) -> AsyncIterator[AgentEventData]:
+    """Canonical streaming chat orchestration.
+
+    Transport layers consume these structured events and render them as CLI
+    output, channel typing/streaming, SSE, or OpenAI-compatible chunks. Session
+    hydration, RLM selection, prompt addenda, and memory persistence live here.
+    """
     dsn = dsn or db_dsn_from_env()
     history = history or []
 
@@ -309,13 +403,93 @@ async def stream_chat_turn(
         pool = await asyncpg.create_pool(dsn, min_size=_min, max_size=_max)
 
     try:
+        if gateway_source_id:
+            try:
+                from core.gateway import EventSource, Gateway
+
+                await Gateway(pool).record(
+                    EventSource.CHAT,
+                    gateway_source_id,
+                    gateway_payload or {"message": user_message[:500]},
+                )
+            except Exception:
+                logger.debug("Gateway record failed (non-fatal)", exc_info=True)
+
         history = await _hydrate_chat_history(pool, session_id, history)
+
+        use_rlm = False
+        try:
+            async with pool.acquire() as conn:
+                use_rlm_raw = await conn.fetchval("SELECT get_config_bool('chat.use_rlm')")
+                use_rlm = bool(use_rlm_raw)
+                if use_rlm and llm_config is None:
+                    llm_config = await load_llm_config(conn, "llm.chat", fallback_key="llm")
+        except Exception:
+            use_rlm = False
+
+        if use_rlm:
+            normalized = normalize_llm_config(llm_config or {})
+            yield AgentEventData(
+                event=AgentEvent.LOOP_START,
+                data={"phase": "conscious_final", "runtime": "rlm"},
+            )
+            try:
+                from services.hexis_rlm import run_chat_turn
+
+                result = await run_chat_turn(
+                    user_message=user_message,
+                    history=history,
+                    llm_config=normalized,
+                    dsn=dsn,
+                    session_id=session_id,
+                )
+                assistant_text = str(result.get("response") or "")
+                if assistant_text:
+                    yield AgentEventData(
+                        event=AgentEvent.TEXT_DELTA,
+                        data={"text": assistant_text, "runtime": "rlm"},
+                    )
+                if assistant_text:
+                    persisted = await _remember_conversation(
+                        CognitiveMemory(pool),
+                        user_message=user_message,
+                        assistant_message=assistant_text,
+                        session_id=session_id,
+                        user_label=user_label,
+                        background_dsn=dsn,
+                        surface=surface,
+                    )
+                    yield AgentEventData(
+                        event=AgentEvent.PHASE_CHANGE,
+                        data={
+                            "phase": "memory_write",
+                            "status": "end",
+                            "detail": "Conversation stored as episodic memory",
+                            "result": persisted,
+                        },
+                    )
+                yield AgentEventData(
+                    event=AgentEvent.LOOP_END,
+                    data={"stopped_reason": "completed", "runtime": "rlm"},
+                )
+            except Exception as exc:
+                logger.exception("RLM chat stream failed")
+                yield AgentEventData(
+                    event=AgentEvent.ERROR,
+                    data={"error": str(exc), "runtime": "rlm"},
+                )
+                yield AgentEventData(
+                    event=AgentEvent.LOOP_END,
+                    data={"stopped_reason": "error", "runtime": "rlm"},
+                )
+            return
+
         registry = create_default_registry(pool)
         agent_profile = await get_agent_profile_context(pool=pool)
-
         collected: list[str] = []
         timed_out = False
-        error_message: str | None = None
+        appraisal_affect: dict[str, Any] | None = None
+
         async for event in stream_agent(
             pool,
             registry,
@@ -326,40 +500,50 @@ async def stream_chat_turn(
             agent_profile=agent_profile,
             is_group=is_group,
             dsn=dsn,
+            prompt_addenda=prompt_addenda,
+            max_tokens=max_tokens,
+            temperature=temperature,
         ):
             if event.event == AgentEvent.TEXT_DELTA:
                 text = event.data.get("text", "")
                 if text:
-                    collected.append(text)
-                    yield text
+                    collected.append(str(text))
             elif event.event == AgentEvent.LOOP_END:
                 stopped = str(event.data.get("stopped_reason") or "")
                 timed_out = stopped == "timeout" or bool(event.data.get("timed_out"))
-            elif event.event == AgentEvent.ERROR:
-                error_message = str(event.data.get("error") or "Unknown agent error")
+            elif event.event == AgentEvent.PHASE_CHANGE:
+                if (
+                    event.data.get("phase") == "subconscious"
+                    and event.data.get("status") == "end"
+                    and isinstance(event.data.get("output"), dict)
+                ):
+                    output = event.data["output"]
+                    signals = output.get("signals") if isinstance(output, dict) else None
+                    emotion = signals.get("emotional_state") if isinstance(signals, dict) else None
+                    if isinstance(emotion, dict):
+                        appraisal_affect = emotion
+            yield event
 
         full_text = "".join(collected)
-        if timed_out:
-            if full_text:
-                yield "\n\n[Response timed out before completion.]"
-            else:
-                yield (
-                    "Request timed out before a response arrived. Try again, "
-                    "or run `hexis doctor --llm` if it keeps happening."
-                )
-            return
-        if not full_text and error_message:
-            yield f"Request failed: {error_message}"
-            return
-        if full_text:
-            await _remember_conversation(
+        if full_text and not timed_out:
+            persisted = await _remember_conversation(
                 CognitiveMemory(pool),
                 user_message=user_message,
                 assistant_message=full_text,
                 session_id=session_id,
                 user_label=user_label,
+                emotional_state=appraisal_affect,
                 background_dsn=dsn,
                 surface=surface,
+            )
+            yield AgentEventData(
+                event=AgentEvent.PHASE_CHANGE,
+                data={
+                    "phase": "memory_write",
+                    "status": "end",
+                    "detail": "Conversation stored as episodic memory",
+                    "result": persisted,
+                },
             )
     finally:
         if own_pool:

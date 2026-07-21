@@ -7,6 +7,7 @@ Provides messaging tools for Discord, Slack, and Telegram.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable
 
 from .base import (
@@ -20,6 +21,37 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _load_db_channel_config(
+    context: ToolExecutionContext,
+    channel_type: str,
+) -> dict[str, Any]:
+    registry = context.registry
+    pool = getattr(registry, "pool", None) if registry else None
+    if pool is None:
+        return {}
+    try:
+        from services.channel_worker import _load_channel_config
+
+        async with pool.acquire() as conn:
+            loaded = await _load_channel_config(conn, channel_type)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        logger.debug("Failed to load %s channel config from DB", channel_type, exc_info=True)
+        return {}
+
+
+def _target_allowed(config: dict[str, Any], key: str, target: Any) -> bool:
+    try:
+        from channels.base import parse_allowlist
+
+        allowed = parse_allowlist(config.get(key))
+    except Exception:
+        return True
+    if allowed is None:
+        return True
+    return str(target) in allowed
 
 
 class DiscordSendHandler(ToolHandler):
@@ -276,9 +308,10 @@ class SlackSendHandler(ToolHandler):
                 error_type=ToolErrorType.MISSING_DEPENDENCY,
             )
 
-        config = {}
-        if self._config_resolver:
-            config = self._config_resolver() or {}
+        config = self._config_resolver() if self._config_resolver else None
+        if not config:
+            config = await _load_db_channel_config(context, "slack")
+        config = config or {}
 
         message = arguments["message"]
         channel = arguments.get("channel")
@@ -286,11 +319,24 @@ class SlackSendHandler(ToolHandler):
         blocks = arguments.get("blocks")
         thread_ts = arguments.get("thread_ts")
         bot_token = config.get("bot_token")
+        try:
+            from channels.slack_adapter import _resolve_token as _resolve_slack_token
+
+            bot_token = _resolve_slack_token(config, "bot_token", "SLACK_BOT_TOKEN") or bot_token
+        except Exception:
+            logger.debug("Slack token resolution via channel adapter failed", exc_info=True)
 
         # Prefer webhook if available
         if webhook_url:
             return await self._send_webhook(webhook_url, message, blocks)
         elif bot_token and channel:
+            if not _target_allowed(config, "allowed_channels", channel):
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=f"Slack channel {channel} is not in channel.slack.allowed_channels.",
+                    error_type=ToolErrorType.INVALID_PARAMS,
+                )
             return await self._send_api(bot_token, channel, message, blocks, thread_ts)
         else:
             return ToolResult(
@@ -468,11 +514,18 @@ class TelegramSendHandler(ToolHandler):
                 error_type=ToolErrorType.MISSING_DEPENDENCY,
             )
 
-        config = {}
-        if self._config_resolver:
-            config = self._config_resolver() or {}
+        config = self._config_resolver() if self._config_resolver else None
+        if not config:
+            config = await _load_db_channel_config(context, "telegram")
+        config = config or {}
 
         bot_token = config.get("bot_token")
+        try:
+            from channels.telegram_adapter import _resolve_token as _resolve_telegram_token
+
+            bot_token = _resolve_telegram_token(config) or bot_token
+        except Exception:
+            logger.debug("Telegram token resolution via channel adapter failed", exc_info=True)
         if not bot_token:
             return ToolResult(
                 success=False,
@@ -488,6 +541,13 @@ class TelegramSendHandler(ToolHandler):
                 success=False,
                 output=None,
                 error="No chat_id provided and no default configured",
+                error_type=ToolErrorType.INVALID_PARAMS,
+            )
+        if not _target_allowed(config, "allowed_chat_ids", chat_id):
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"Telegram chat {chat_id} is not in channel.telegram.allowed_chat_ids.",
                 error_type=ToolErrorType.INVALID_PARAMS,
             )
 
@@ -540,10 +600,138 @@ class TelegramSendHandler(ToolHandler):
             )
 
 
+class SignalSendHandler(ToolHandler):
+    """Send messages via signal-cli-rest-api."""
+
+    def __init__(
+        self,
+        config_resolver: Callable[[], dict[str, Any] | None] | None = None,
+    ):
+        self._config_resolver = config_resolver
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="signal_send",
+            description="Send a Signal message through the configured signal-cli-rest-api sidecar.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "recipient": {
+                        "type": "string",
+                        "description": "Signal recipient phone number or group identifier.",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Message text.",
+                    },
+                    "api_url": {
+                        "type": "string",
+                        "description": "Optional signal-cli-rest-api URL override.",
+                    },
+                    "phone_number": {
+                        "type": "string",
+                        "description": "Optional sender phone-number override; normally read from channel.signal.phone_number.",
+                    },
+                },
+                "required": ["recipient", "message"],
+            },
+            category=ToolCategory.MESSAGING,
+            energy_cost=5,
+            is_read_only=False,
+            requires_approval=True,
+            optional=True,
+            allowed_contexts={ToolContext.HEARTBEAT, ToolContext.CHAT},
+        )
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
+        try:
+            import aiohttp
+        except ImportError:
+            return ToolResult(
+                success=False,
+                output=None,
+                error="aiohttp not installed",
+                error_type=ToolErrorType.MISSING_DEPENDENCY,
+            )
+
+        config = self._config_resolver() if self._config_resolver else None
+        if not config:
+            config = await _load_db_channel_config(context, "signal")
+        config = config or {}
+
+        recipient = str(arguments.get("recipient") or "").strip()
+        message = str(arguments.get("message") or "")
+        if not recipient:
+            return ToolResult.error_result("recipient is required.", ToolErrorType.INVALID_PARAMS)
+        if not message.strip():
+            return ToolResult.error_result("message is required.", ToolErrorType.INVALID_PARAMS)
+        if not _target_allowed(config, "allowed_numbers", recipient):
+            return ToolResult.error_result(
+                f"Signal recipient {recipient} is not in channel.signal.allowed_numbers.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        try:
+            from channels.signal_adapter import DEFAULT_API_URL, _resolve_token as _resolve_signal_phone
+
+            sender_number = str(arguments.get("phone_number") or "").strip() or _resolve_signal_phone(config)
+            api_url = str(arguments.get("api_url") or config.get("api_url") or os.getenv("SIGNAL_API_URL") or DEFAULT_API_URL).rstrip("/")
+        except Exception:
+            logger.debug("Signal config resolution via channel adapter failed", exc_info=True)
+            sender_number = str(arguments.get("phone_number") or config.get("phone_number") or "").strip()
+            api_url = str(arguments.get("api_url") or config.get("api_url") or os.getenv("SIGNAL_API_URL") or "http://localhost:8080").rstrip("/")
+
+        if not sender_number:
+            return ToolResult.error_result(
+                "Signal phone number not configured. Set SIGNAL_PHONE_NUMBER or channel.signal.phone_number.",
+                ToolErrorType.AUTH_FAILED,
+            )
+
+        payload = {
+            "message": message,
+            "number": sender_number,
+            "recipients": [recipient],
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{api_url}/api/v2/send", json=payload, timeout=30) as resp:
+                    body_text = await resp.text()
+                    if resp.status not in (200, 201):
+                        return ToolResult.error_result(
+                            f"Signal send failed: HTTP {resp.status}: {body_text[:200]}",
+                            ToolErrorType.EXECUTION_FAILED,
+                        )
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        data = {"raw": body_text}
+            return ToolResult.success_result(
+                {
+                    "sent": True,
+                    "recipient": recipient,
+                    "timestamp": data.get("timestamp") if isinstance(data, dict) else None,
+                    "response": data,
+                },
+                display_output=f"Signal message sent to {recipient}",
+            )
+        except Exception as exc:
+            logger.exception("Signal API error")
+            return ToolResult.error_result(
+                f"Signal API failed: {exc}",
+                ToolErrorType.EXECUTION_FAILED,
+            )
+
+
 def create_messaging_tools(
     discord_config_resolver: Callable[[], dict[str, Any] | None] | None = None,
     slack_config_resolver: Callable[[], dict[str, Any] | None] | None = None,
     telegram_config_resolver: Callable[[], dict[str, Any] | None] | None = None,
+    signal_config_resolver: Callable[[], dict[str, Any] | None] | None = None,
 ) -> list[ToolHandler]:
     """
     Create messaging tool handlers.
@@ -552,6 +740,7 @@ def create_messaging_tools(
         discord_config_resolver: Callable that returns Discord configuration dict.
         slack_config_resolver: Callable that returns Slack configuration dict.
         telegram_config_resolver: Callable that returns Telegram configuration dict.
+        signal_config_resolver: Callable that returns Signal configuration dict.
 
     Returns:
         List of messaging tool handlers.
@@ -560,4 +749,5 @@ def create_messaging_tools(
         DiscordSendHandler(discord_config_resolver),
         SlackSendHandler(slack_config_resolver),
         TelegramSendHandler(telegram_config_resolver),
+        SignalSendHandler(signal_config_resolver),
     ]
