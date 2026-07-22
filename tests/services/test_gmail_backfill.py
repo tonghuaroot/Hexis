@@ -56,7 +56,7 @@ async def _connected_gmail(pool, marker: str, account: str) -> None:
             """
             SELECT start_connection_attempt(
                 'gmail',
-                '["read", "search", "ingest"]'::jsonb,
+                '["read", "search"]'::jsonb,
                 ARRAY[]::text[],
                 '{}'::jsonb,
                 NULL,
@@ -76,7 +76,7 @@ async def _connected_gmail(pool, marker: str, account: str) -> None:
                 $2,
                 'integration.gmail.default',
                 $3::text[],
-                '["read", "search", "ingest"]'::jsonb,
+                '["read", "search"]'::jsonb,
                 '{"test": true}'::jsonb
             )
             """,

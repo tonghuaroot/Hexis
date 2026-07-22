@@ -7,10 +7,12 @@ import {
   Eye,
   EyeOff,
   Check,
+  ExternalLink,
   FileText,
   Inbox,
   Lock,
   LockOpen,
+  Mail,
   Paperclip,
   Plus,
   Send,
@@ -35,6 +37,58 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   presentation?: MessagePresentation;
+  ui?: ChatUiArtifact[];
+};
+
+type ConnectorSetupCapabilityOption = {
+  id: string;
+  label: string;
+  description?: string;
+  capabilities: string[];
+  risk?: string;
+};
+
+type ConnectorSetupMemoryOption = {
+  id: "remember" | "forget" | string;
+  label: string;
+  description?: string;
+  memory_policy?: string;
+};
+
+type ConnectorSetupUi = {
+  kind: "connector_setup";
+  version?: number;
+  id?: string;
+  connector_id: string;
+  display_name?: string;
+  title?: string;
+  status?: string;
+  summary?: string;
+  question?: string;
+  capabilities?: string[];
+  capability_options?: ConnectorSetupCapabilityOption[];
+  memory_options?: ConnectorSetupMemoryOption[];
+  memory_policy?: string;
+  memory_config_key?: string;
+  client_secret_saved?: boolean;
+  credentials_saved?: boolean;
+  accepted_inputs?: string[];
+  docs_url?: string;
+  authorization_url?: string;
+  attempt_id?: string;
+  connected_accounts?: Record<string, unknown>[];
+  next_step?: string;
+  safety_note?: string;
+};
+
+type ChatUiArtifact = ConnectorSetupUi;
+
+type IntegrationActionResult = {
+  success?: boolean;
+  output?: unknown;
+  display_output?: string | null;
+  error?: string | null;
+  detail?: string | null;
 };
 
 // A large paste captured as an attachment instead of composer text; on send
@@ -278,6 +332,100 @@ function saveActivityEvents(events: LogEvent[]) {
   }
 }
 
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function connectorCapabilityOptions(value: unknown): ConnectorSetupCapabilityOption[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ConnectorSetupCapabilityOption[] => {
+    const record = asRecord(item);
+    const id = asString(record.id);
+    const label = asString(record.label);
+    const capabilities = stringArray(record.capabilities);
+    if (!id || !label || !capabilities.length) return [];
+    return [
+      {
+        id,
+        label,
+        capabilities,
+        description: asString(record.description) || undefined,
+        risk: asString(record.risk) || undefined,
+      },
+    ];
+  });
+}
+
+function connectorMemoryOptions(value: unknown): ConnectorSetupMemoryOption[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item): ConnectorSetupMemoryOption[] => {
+    const record = asRecord(item);
+    const id = asString(record.id);
+    const label = asString(record.label);
+    if (!id || !label) return [];
+    return [
+      {
+        id,
+        label,
+        description: asString(record.description) || undefined,
+        memory_policy: asString(record.memory_policy) || id,
+      },
+    ];
+  });
+}
+
+function normalizeConnectorSetupUi(value: unknown): ConnectorSetupUi | null {
+  const record = asRecord(value);
+  if (record.kind !== "connector_setup") return null;
+  const connectorId = asString(record.connector_id);
+  if (!connectorId) return null;
+  return {
+    kind: "connector_setup",
+    version: typeof record.version === "number" ? record.version : undefined,
+    id: asString(record.id) || undefined,
+    connector_id: connectorId,
+    display_name: asString(record.display_name) || undefined,
+    title: asString(record.title) || undefined,
+    status: asString(record.status) || undefined,
+    summary: asString(record.summary) || undefined,
+    question: asString(record.question) || undefined,
+    capabilities: stringArray(record.capabilities),
+    capability_options: connectorCapabilityOptions(record.capability_options),
+    memory_options: connectorMemoryOptions(record.memory_options),
+    memory_policy: asString(record.memory_policy) || undefined,
+    memory_config_key: asString(record.memory_config_key) || undefined,
+    client_secret_saved:
+      typeof record.client_secret_saved === "boolean" ? record.client_secret_saved : undefined,
+    credentials_saved:
+      typeof record.credentials_saved === "boolean" ? record.credentials_saved : undefined,
+    accepted_inputs: stringArray(record.accepted_inputs),
+    docs_url: asString(record.docs_url) || undefined,
+    authorization_url: asString(record.authorization_url) || undefined,
+    attempt_id: asString(record.attempt_id) || undefined,
+    connected_accounts: Array.isArray(record.connected_accounts)
+      ? record.connected_accounts.filter(
+          (item): item is Record<string, unknown> =>
+            item !== null && typeof item === "object" && !Array.isArray(item)
+        )
+      : [],
+    next_step: asString(record.next_step) || undefined,
+    safety_note: asString(record.safety_note) || undefined,
+  };
+}
+
+function connectorSetupUiFromPayload(payload: unknown): ConnectorSetupUi | null {
+  const direct = normalizeConnectorSetupUi(asRecord(payload).ui);
+  if (direct) return direct;
+  return normalizeConnectorSetupUi(asRecord(asRecord(payload).output).ui);
+}
+
+function uiArtifactKey(ui: ChatUiArtifact): string {
+  if (ui.id) return ui.id;
+  return `${ui.kind}:${ui.connector_id}:${ui.attempt_id || ui.status || "setup"}`;
+}
+
 function dbMessagesToChatMessages(value: unknown): ChatMessage[] | null {
   if (!Array.isArray(value)) return null;
   const messages: ChatMessage[] = [];
@@ -325,6 +473,11 @@ export default function ChatPage() {
   const [decideBusy, setDecideBusy] = useState<string | null>(null);
   const [decideNotes, setDecideNotes] = useState<Record<string, string>>({});
   const [decideNotice, setDecideNotice] = useState<string | null>(null);
+  const [connectorActionBusy, setConnectorActionBusy] = useState<string | null>(null);
+  const [activeConnectorSetup, setActiveConnectorSetup] = useState<{
+    assistantId: string;
+    ui: ConnectorSetupUi;
+  } | null>(null);
   const [activityFilters, setActivityFilters] = useState<Set<LogEvent["category"]>>(
     new Set(["subconscious", "model", "tool", "memory", "error"]),
   );
@@ -532,6 +685,94 @@ export default function ChatPage() {
     );
   };
 
+  const upsertAssistantUi = (assistantId: string, ui: ChatUiArtifact) => {
+    setMessages((prev) =>
+      prev.map((msg) => {
+        if (msg.id !== assistantId) return msg;
+        const existing = msg.ui || [];
+        return {
+          ...msg,
+          ui: [
+            ...existing.filter(
+              (item) => item.kind !== ui.kind || item.connector_id !== ui.connector_id
+            ),
+            ui,
+          ],
+        };
+      })
+    );
+  };
+
+  const replaceAssistantUi = (
+    assistantId: string,
+    previous: ChatUiArtifact,
+    next: ChatUiArtifact
+  ) => {
+    setMessages((prev) =>
+      prev.map((msg) => {
+        if (msg.id !== assistantId) return msg;
+        const existing = msg.ui || [];
+        const kept = existing.filter(
+          (item) =>
+            (item.kind !== previous.kind || item.connector_id !== previous.connector_id) &&
+            (item.kind !== next.kind || item.connector_id !== next.connector_id)
+        );
+        return { ...msg, ui: [...kept, next] };
+      })
+    );
+  };
+
+  const runConnectorSetupAction = async (
+    assistantId: string,
+    currentUi: ConnectorSetupUi,
+    action: string,
+    argumentsPayload: Record<string, unknown>
+  ): Promise<IntegrationActionResult> => {
+    const busyKey = `${assistantId}:${currentUi.connector_id}:${action}`;
+    if (connectorActionBusy) return { error: "Another connector action is already running." };
+    setConnectorActionBusy(busyKey);
+    try {
+      const currentSessionId = sessionId || loadSessionId() || "web-chat";
+      const response = await fetch("/api/integrations/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          arguments: argumentsPayload,
+          source_session_id: currentSessionId,
+        }),
+      });
+      const payload = await readIntegrationActionPayload(response);
+      const detail = integrationActionNotice(payload, response.status);
+      appendLog({
+        id: crypto.randomUUID(),
+        category: payload.success === false || !response.ok ? "error" : "tool",
+        title: currentUi.display_name || currentUi.connector_id,
+        detail,
+        raw: payload,
+        ts: Date.now(),
+      });
+      const nextUi = connectorSetupUiFromPayload(payload);
+      if (nextUi) {
+        replaceAssistantUi(assistantId, currentUi, nextUi);
+        setActiveConnectorSetup({ assistantId, ui: nextUi });
+      }
+      return payload;
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : "Connector action failed.";
+      appendLog({
+        id: crypto.randomUUID(),
+        category: "error",
+        title: currentUi.display_name || currentUi.connector_id,
+        detail,
+        ts: Date.now(),
+      });
+      return { error: detail };
+    } finally {
+      setConnectorActionBusy(null);
+    }
+  };
+
   const handleConfigureSearchTool = async () => {
     const value = searchConfigValue.trim();
     if (!value) {
@@ -588,6 +829,7 @@ export default function ChatPage() {
       saveSessionId(payload.session_id);
       setSessionId(payload.session_id);
       setMessages([]);
+      setActiveConnectorSetup(null);
       setHistoryIndex(null);
       setHistoryDraft("");
       setSearchConfigNotice(null);
@@ -644,6 +886,7 @@ export default function ChatPage() {
         throw new Error(payload?.error || `Failed with status ${res.status}`);
       }
       setMessages([]);
+      setActiveConnectorSetup(null);
       setHistoryIndex(null);
       setHistoryDraft("");
       setSearchConfigNotice(null);
@@ -933,7 +1176,7 @@ export default function ChatPage() {
             const phase = asString(payload.phase);
             const text = asString(payload.text);
             setCurrentPhase(phase);
-            if (phase === "conscious_final" && text) {
+            if ((phase === "conscious_final" || phase === "connector_setup") && text) {
               updateAssistantMessage(assistantMessage.id, text);
               if (isSearchToolMisconfigured(text)) {
                 setShowSearchConfig(true);
@@ -991,8 +1234,36 @@ export default function ChatPage() {
               raw: payload,
               ts: Date.now(),
             });
+            const connectorUi = connectorSetupUiFromPayload(payload);
+            if (connectorUi) {
+              upsertAssistantUi(assistantMessage.id, connectorUi);
+              setActiveConnectorSetup({ assistantId: assistantMessage.id, ui: connectorUi });
+            }
             if (isSearchToolMisconfigured(detail)) {
               setShowSearchConfig(true);
+            }
+          }
+
+          if (eventType === "ui") {
+            const connectorUi = connectorSetupUiFromPayload(payload);
+            const title =
+              asString(payload.tool_name) ||
+              connectorUi?.display_name ||
+              connectorUi?.connector_id ||
+              "Setup";
+            appendLog({
+              id: crypto.randomUUID(),
+              category: "tool",
+              title,
+              detail: connectorUi
+                ? `${connectorUi.display_name || connectorUi.connector_id} setup opened`
+                : "Setup UI opened",
+              raw: payload,
+              ts: Date.now(),
+            });
+            if (connectorUi) {
+              upsertAssistantUi(assistantMessage.id, connectorUi);
+              setActiveConnectorSetup({ assistantId: assistantMessage.id, ui: connectorUi });
             }
           }
 
@@ -1123,6 +1394,14 @@ export default function ChatPage() {
 
   return (
     <div className="app-shell h-[calc(100vh-3.5rem)] overflow-hidden lg:h-screen">
+      {activeConnectorSetup ? (
+        <ConnectorSetupModal
+          setup={activeConnectorSetup}
+          busy={connectorActionBusy}
+          onAction={runConnectorSetupAction}
+          onClose={() => setActiveConnectorSetup(null)}
+        />
+      ) : null}
       <div className="mx-auto flex h-full max-w-[1600px]">
         <section className="flex min-w-0 flex-1 flex-col bg-white">
           <header className="flex h-16 items-center justify-between gap-4 border-b border-[var(--outline)] px-4 sm:px-6">
@@ -1240,7 +1519,24 @@ export default function ChatPage() {
                   ) : null}
                   <div className={`max-w-[85%] text-sm leading-6 ${message.role === "user" ? "rounded-lg bg-[var(--foreground)] px-4 py-3 text-white" : "min-w-0 flex-1 py-1 text-[var(--foreground)]"}`}>
                     {message.role === "assistant" ? (
-                      message.presentation ? <MessagePresentationView presentation={message.presentation} /> : message.content ? <MessagePresentationView presentation={{ tone: "neutral", blocks: [{ type: "text", text: message.content }] }} /> : <Spinner label="Thinking..." />
+                      <div className="space-y-3">
+                        {message.presentation ? (
+                          <MessagePresentationView presentation={message.presentation} />
+                        ) : message.content ? (
+                          <MessagePresentationView presentation={{ tone: "neutral", blocks: [{ type: "text", text: message.content }] }} />
+                        ) : message.ui?.length ? null : (
+                          <Spinner label="Thinking..." />
+                        )}
+                        {message.ui?.map((ui) => (
+                          <ConnectorSetupCard
+                            key={uiArtifactKey(ui)}
+                            ui={ui}
+                            assistantId={message.id}
+                            busy={connectorActionBusy}
+                            onAction={runConnectorSetupAction}
+                          />
+                        ))}
+                      </div>
                     ) : <p className="whitespace-pre-wrap">{message.content}</p>}
                   </div>
                 </div>
@@ -1527,6 +1823,383 @@ export default function ChatPage() {
   );
 }
 
+function ConnectorSetupModal({
+  setup,
+  busy,
+  onAction,
+  onClose,
+}: {
+  setup: { assistantId: string; ui: ConnectorSetupUi };
+  busy: string | null;
+  onAction: (
+    assistantId: string,
+    currentUi: ConnectorSetupUi,
+    action: string,
+    argumentsPayload: Record<string, unknown>
+  ) => Promise<IntegrationActionResult>;
+  onClose: () => void;
+}) {
+  const connectorName = setup.ui.display_name || setup.ui.connector_id;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 py-6"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="connector-setup-title"
+    >
+      <div className="w-full max-w-2xl border border-[var(--outline)] bg-white shadow-2xl">
+        <div className="flex items-center justify-between gap-3 border-b border-[var(--outline)] px-4 py-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-8 w-8 flex-none items-center justify-center rounded-md bg-[var(--teal)]/10 text-[var(--teal)]">
+              <Mail size={17} />
+            </span>
+            <div className="min-w-0">
+              <h2 id="connector-setup-title" className="truncate text-sm font-semibold">
+                Connect {connectorName}
+              </h2>
+              <p className="truncate text-xs text-[var(--ink-soft)]">
+                Complete setup without leaving this conversation.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            aria-label="Close connector setup"
+            title="Close"
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--ink-soft)] hover:bg-[var(--surface-strong)] hover:text-[var(--foreground)]"
+          >
+            <X size={16} />
+          </button>
+        </div>
+        <div className="max-h-[min(720px,calc(100vh-8rem))] overflow-y-auto p-4">
+          <ConnectorSetupCard
+            ui={setup.ui}
+            assistantId={setup.assistantId}
+            busy={busy}
+            onAction={onAction}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConnectorSetupCard({
+  ui,
+  assistantId,
+  busy,
+  onAction,
+}: {
+  ui: ConnectorSetupUi;
+  assistantId: string;
+  busy: string | null;
+  onAction: (
+    assistantId: string,
+    currentUi: ConnectorSetupUi,
+    action: string,
+    argumentsPayload: Record<string, unknown>
+  ) => Promise<IntegrationActionResult>;
+}) {
+  const [clientSecretPath, setClientSecretPath] = useState("");
+  const [useEnvSecret, setUseEnvSecret] = useState(false);
+  const [authorizationResponse, setAuthorizationResponse] = useState("");
+  const [selectedCapabilityOption, setSelectedCapabilityOption] =
+    useState<ConnectorSetupCapabilityOption | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedCapabilityOption(null);
+    setNotice(null);
+    setError(null);
+  }, [ui.id, ui.status]);
+
+  const connectorName = ui.display_name || ui.connector_id;
+  const capabilityOptions = ui.capability_options || [];
+  const memoryOptions = ui.memory_options || [];
+  const connectedAccounts = ui.connected_accounts || [];
+  const connected = ui.status === "connected" || connectedAccounts.length > 0 || ui.credentials_saved;
+  const startBusy = busy === `${assistantId}:${ui.connector_id}:connect_gmail`;
+  const completeBusy = busy === `${assistantId}:${ui.connector_id}:complete_gmail`;
+  const needsCapabilityChoice =
+    ui.status === "needs_capability_choice" && capabilityOptions.length > 0;
+  const capabilities =
+    selectedCapabilityOption?.capabilities ||
+    (ui.capabilities?.length ? ui.capabilities : needsCapabilityChoice ? [] : ["read", "search"]);
+  const memoryPolicy = ui.memory_policy;
+  const needsMemoryChoice =
+    ui.status === "needs_memory_choice" || Boolean(selectedCapabilityOption);
+  const canStartOAuth =
+    ui.connector_id === "gmail" && !connected && !ui.authorization_url && !needsCapabilityChoice && !needsMemoryChoice;
+  const canCompleteOAuth = ui.connector_id === "gmail" && !connected && Boolean(ui.authorization_url || ui.attempt_id);
+  const requiresClientSecret = canStartOAuth && !ui.client_secret_saved;
+
+  const runStart = async (
+    selectedCapabilities = capabilities,
+    selectedMemoryPolicy = memoryPolicy,
+    options: { allowMissingClientSecret?: boolean } = {}
+  ) => {
+    setNotice(null);
+    setError(null);
+    const path = clientSecretPath.trim();
+    if (!options.allowMissingClientSecret && requiresClientSecret && !path && !useEnvSecret) {
+      setError("Enter the Google OAuth Desktop client JSON path, or choose the configured environment secret.");
+      return;
+    }
+    const payload = await onAction(assistantId, ui, "connect_gmail", {
+      capabilities: selectedCapabilities,
+      memory_policy: selectedMemoryPolicy || undefined,
+      client_secret_path: path || undefined,
+      use_env_client_secret: useEnvSecret,
+    });
+    if (payload.error || payload.detail || payload.success === false) {
+      setError(integrationActionError(payload, 400));
+    } else {
+      setNotice(integrationActionNotice(payload, 200));
+    }
+  };
+
+  const runComplete = async () => {
+    setNotice(null);
+    setError(null);
+    const response = authorizationResponse.trim();
+    if (!response) {
+      setError("Paste the redirected localhost URL or authorization code from Google.");
+      return;
+    }
+    const payload = await onAction(assistantId, ui, "complete_gmail", {
+      attempt_id: ui.attempt_id || undefined,
+      authorization_response: response,
+    });
+    if (payload.error || payload.detail || payload.success === false) {
+      setError(integrationActionError(payload, 400));
+    } else {
+      setNotice(integrationActionNotice(payload, 200));
+    }
+  };
+
+  return (
+    <div className="max-w-2xl rounded-lg border border-[var(--teal)]/35 bg-[#f8fbfa] p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="mt-0.5 flex h-8 w-8 flex-none items-center justify-center rounded-md bg-[var(--teal)]/10 text-[var(--teal)]">
+            <Mail size={17} />
+          </span>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold">{ui.title || `Connect ${connectorName}`}</h3>
+            <p className="mt-1 text-xs leading-5 text-[var(--ink-soft)]">
+              {ui.summary || `Set up ${connectorName} access.`}
+            </p>
+          </div>
+        </div>
+        <Badge variant={connected ? "success" : ui.status === "needs_client_secret" ? "warning" : "muted"}>
+          {(ui.status || "setup").replace(/_/g, " ")}
+        </Badge>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {capabilities.map((capability) => (
+          <Badge key={capability} variant="muted">
+            {humanizeCapability(capability)}
+          </Badge>
+        ))}
+        {memoryPolicy ? (
+          <Badge variant="muted">
+            memory: {humanizeCapability(memoryPolicy)}
+          </Badge>
+        ) : null}
+      </div>
+
+      {needsCapabilityChoice ? (
+        <div className="mt-4 space-y-3">
+          <p className="text-sm font-medium">{ui.question || "Choose Gmail access."}</p>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {capabilityOptions.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => {
+                  setSelectedCapabilityOption(option);
+                  setNotice(null);
+                  setError(null);
+                }}
+                className={`rounded-md border px-3 py-2 text-left text-xs transition ${
+                  selectedCapabilityOption?.id === option.id
+                    ? "border-[var(--teal)] bg-white shadow-sm"
+                    : "border-[var(--outline)] bg-white/70 hover:border-[var(--teal)]"
+                }`}
+              >
+                <span className="block font-semibold">{option.label}</span>
+                {option.description ? (
+                  <span className="mt-1 block leading-5 text-[var(--ink-soft)]">
+                    {option.description}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {needsMemoryChoice ? (
+        <div className="mt-4 space-y-3">
+          <p className="text-sm font-medium">
+            {selectedCapabilityOption
+              ? "Do you want me to remember what I read in your emails so I can learn about you, or should I forget what they say after the task?"
+              : ui.question || "Choose Gmail memory behavior."}
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {(memoryOptions.length
+              ? memoryOptions
+              : [
+                  {
+                    id: "remember",
+                    label: "Remember and learn",
+                    description: "Allow email contents to feed Hexis ingestion and memory.",
+                    memory_policy: "remember",
+                  },
+                  {
+                    id: "forget",
+                    label: "Forget after reading",
+                    description: "Keep email reads task-scoped by default.",
+                    memory_policy: "forget",
+                  },
+                ]
+            ).map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() =>
+                  void runStart(
+                    capabilities,
+                    option.memory_policy || option.id,
+                    { allowMissingClientSecret: true }
+                  )
+                }
+                disabled={Boolean(busy)}
+                className="rounded-md border border-[var(--outline)] bg-white px-3 py-2 text-left text-xs hover:border-[var(--teal)] disabled:opacity-40"
+              >
+                <span className="block font-semibold">{option.label}</span>
+                {option.description ? (
+                  <span className="mt-1 block leading-5 text-[var(--ink-soft)]">
+                    {option.description}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {connected ? (
+        <div className="mt-3 space-y-2">
+          {connectedAccounts.length ? (
+            connectedAccounts.map((account, index) => (
+              <div key={`${asString(account.account_key, String(index))}-${index}`} className="rounded-md border border-[var(--outline)] bg-white px-3 py-2 text-xs">
+                <span className="font-medium">
+                  {asString(account.display_name) || asString(account.account_key) || "Gmail account"}
+                </span>
+                <span className="ml-2 text-[var(--ink-soft)]">connected</span>
+              </div>
+            ))
+          ) : (
+            <p className="rounded-md border border-[var(--outline)] bg-white px-3 py-2 text-xs">
+              Gmail credentials are saved.
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {canStartOAuth ? (
+        <div className="mt-4 grid gap-2 sm:grid-cols-[1fr_auto]">
+          <div className="space-y-2">
+            <input
+              type="text"
+              value={clientSecretPath}
+              onChange={(event) => setClientSecretPath(event.target.value)}
+              placeholder="Google OAuth Desktop client JSON path"
+              className="w-full rounded-md border border-[var(--outline)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/10"
+            />
+            <label className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
+              <input
+                type="checkbox"
+                checked={useEnvSecret}
+                onChange={(event) => setUseEnvSecret(event.target.checked)}
+                className="h-4 w-4 accent-[var(--teal)]"
+              />
+              Use explicitly configured environment client secret
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={() => void runStart()}
+            disabled={Boolean(busy)}
+            className="self-start rounded-md bg-[var(--foreground)] px-3 py-2 text-xs font-semibold text-white hover:bg-[var(--teal)] disabled:opacity-40"
+          >
+            {startBusy ? "Starting..." : "Start authorization"}
+          </button>
+        </div>
+      ) : null}
+
+      {ui.authorization_url ? (
+        <div className="mt-4 rounded-md border border-[var(--outline)] bg-white p-3">
+          <a
+            href={ui.authorization_url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--teal)] underline"
+          >
+            Open Google authorization <ExternalLink size={12} />
+          </a>
+          <p className="mt-1 break-all font-mono text-[11px] leading-5 text-[var(--ink-soft)]">
+            {ui.authorization_url}
+          </p>
+        </div>
+      ) : null}
+
+      {canCompleteOAuth ? (
+        <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
+          <input
+            type="text"
+            value={authorizationResponse}
+            onChange={(event) => setAuthorizationResponse(event.target.value)}
+            placeholder="Paste redirected localhost URL or authorization code"
+            className="w-full rounded-md border border-[var(--outline)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--teal)] focus:ring-2 focus:ring-[var(--teal)]/10"
+          />
+          <button
+            type="button"
+            onClick={() => void runComplete()}
+            disabled={Boolean(busy) || !authorizationResponse.trim()}
+            className="rounded-md bg-[var(--foreground)] px-3 py-2 text-xs font-semibold text-white hover:bg-[var(--teal)] disabled:opacity-40"
+          >
+            {completeBusy ? "Completing..." : "Complete"}
+          </button>
+        </div>
+      ) : null}
+
+      {ui.safety_note ? (
+        <p className="mt-3 text-xs leading-5 text-[var(--ink-soft)]">{ui.safety_note}</p>
+      ) : null}
+      {ui.docs_url ? (
+        <a
+          href={ui.docs_url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-[var(--teal)] underline"
+        >
+          Google OAuth client setup <ExternalLink size={12} />
+        </a>
+      ) : null}
+      <a href="/connections" className="ml-3 inline-flex items-center gap-1 text-xs font-semibold text-[var(--ink-soft)] underline">
+        Open Connections
+      </a>
+      {notice ? <p className="mt-3 rounded-md border border-[var(--teal)]/35 bg-white px-3 py-2 text-xs">{notice}</p> : null}
+      {error ? <p className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p> : null}
+    </div>
+  );
+}
+
 function FilterButton({ icon: Icon, label, active, onClick }: { icon: LucideIcon; label: string; active: boolean; onClick: () => void }) {
   return (
     <button
@@ -1580,6 +2253,43 @@ function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+async function readIntegrationActionPayload(response: Response): Promise<IntegrationActionResult> {
+  const text = await response.text();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text) as IntegrationActionResult;
+  } catch {
+    return { error: text };
+  }
+}
+
+function integrationActionError(payload: IntegrationActionResult, status: number): string {
+  if (payload.error) return payload.error;
+  if (payload.detail) return payload.detail;
+  const output = asRecord(payload.output);
+  const outputError = asString(output.error);
+  if (outputError) return outputError;
+  return `Action failed (${status})`;
+}
+
+function integrationActionNotice(payload: IntegrationActionResult, status: number): string {
+  if (payload.error || payload.detail || payload.success === false) {
+    return integrationActionError(payload, status);
+  }
+  if (payload.display_output) return payload.display_output;
+  const output = asRecord(payload.output);
+  return (
+    asString(output.next_step) ||
+    asString(output.user_next_step) ||
+    asString(output.status) ||
+    "Action complete."
+  );
+}
+
+function humanizeCapability(value: string): string {
+  return value.replace(/_/g, " ");
+}
+
 function phaseDescription(phase: string) {
   switch (phase) {
     case "subconscious":
@@ -1588,6 +2298,8 @@ function phaseDescription(phase: string) {
       return "Planning response...";
     case "conscious_final":
       return "Generating response...";
+    case "connector_setup":
+      return "Opening setup...";
     default:
       return "Thinking...";
   }

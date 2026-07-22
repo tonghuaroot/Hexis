@@ -1588,6 +1588,7 @@ BEGIN
                 ) AS source_attribution,
             s.created_at,
             s.trust_level,
+            s.metadata,
             'chunk_vector'::text AS retrieval_source
         FROM subconscious_unit_embedding_chunks c
         JOIN subconscious_units s ON s.id = c.unit_id
@@ -1614,6 +1615,7 @@ BEGIN
             s.source_attribution,
             s.created_at,
             s.trust_level,
+            s.metadata,
             'vector'::text AS retrieval_source
         FROM subconscious_units s
         WHERE s.status = 'active'
@@ -1632,6 +1634,7 @@ BEGIN
             candidate_rows.source_attribution,
             candidate_rows.created_at,
             candidate_rows.trust_level,
+            candidate_rows.metadata,
             candidate_rows.retrieval_source
         FROM (
             SELECT * FROM chunk_best
@@ -1643,9 +1646,21 @@ BEGIN
     SELECT
         'subconscious'::text AS tier,
         b.item_id,
-        b.content,
+        CASE
+            WHEN b.metadata->>'invalid_precedent' = 'true' THEN
+                '[INVALID PRECEDENT - do not imitate'
+                || CASE WHEN NULLIF(b.metadata#>>'{latest_correction,correction}', '') IS NOT NULL
+                        THEN '; correction: ' || (b.metadata#>>'{latest_correction,correction}')
+                        ELSE '' END
+                || '] '
+                || b.content
+            ELSE b.content
+        END AS content,
         NULL::text AS memory_type,
-        b.score,
+        GREATEST(
+            0.001,
+            b.score - CASE WHEN b.metadata->>'invalid_precedent' = 'true' THEN 0.35 ELSE 0.0 END
+        )::float AS score,
         b.source_unit_ids,
         b.source_attribution,
         b.created_at,
@@ -1881,7 +1896,16 @@ BEGIN
     scored AS (
         SELECT
             m.id AS item_id,
-            m.content,
+            CASE
+                WHEN m.metadata->>'invalid_precedent' = 'true' THEN
+                    '[INVALID PRECEDENT - do not imitate'
+                    || CASE WHEN NULLIF(m.metadata#>>'{latest_correction,correction}', '') IS NOT NULL
+                            THEN '; correction: ' || (m.metadata#>>'{latest_correction,correction}')
+                            ELSE '' END
+                    || '] '
+                    || m.content
+                ELSE m.content
+            END AS content,
             m.type::text AS memory_type,
             m.type AS mtype,
             GREATEST(
@@ -1901,6 +1925,9 @@ BEGIN
                 -- Reward/incubation salience: boosted memories genuinely come
                 -- to mind more easily until the boost decays.
                 + LEAST(1.0, GREATEST(0.0, COALESCE((m.metadata->>'activation_boost')::float, 0.0))) * boost_weight
+                -- Corrected memories remain auditable but should not act as
+                -- behavioral precedents when a similar situation recurs.
+                - CASE WHEN m.metadata->>'invalid_precedent' = 'true' THEN 0.35 ELSE 0.0 END
                 -- Mood congruence (transplanted from fast_recall, weight 0.05).
                 + (CASE
                        WHEN m.metadata ? 'emotional_context' THEN

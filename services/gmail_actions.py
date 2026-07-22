@@ -14,7 +14,6 @@ from typing import Any
 import httpx
 
 from core.auth.google_gmail import (
-    GmailOAuthError,
     refresh_default_credentials_if_needed,
 )
 
@@ -254,3 +253,38 @@ async def triage_gmail_spam(
             remove_label_ids=["INBOX"],
         )
     raise GmailActionError("spam triage action must be mark_spam, mark_not_spam, or archive.")
+
+
+async def delete_gmail_message(
+    *,
+    account_key: str | None,
+    message_id: str,
+    permanent: bool = False,
+) -> dict[str, Any]:
+    """Trash a Gmail message by default, or permanently delete it when explicitly requested."""
+    if not message_id.strip():
+        raise GmailActionError("message_id is required.")
+    credentials = await refresh_default_credentials_if_needed()
+    _require_scope(credentials, SCOPE_MODIFY, "delete")
+    account = _check_account(credentials, account_key)
+    normalized_id = message_id.strip()
+    if permanent:
+        await _gmail_request(credentials, "DELETE", f"/users/me/messages/{normalized_id}")
+        return {
+            "deleted": True,
+            "permanent": True,
+            "connector_id": "gmail",
+            "account_key": account,
+            "message_id": normalized_id,
+        }
+
+    trashed = await _gmail_request(credentials, "POST", f"/users/me/messages/{normalized_id}/trash")
+    return {
+        "deleted": True,
+        "permanent": False,
+        "connector_id": "gmail",
+        "account_key": account,
+        "message_id": trashed.get("id") or normalized_id,
+        "thread_id": trashed.get("threadId"),
+        "labels": trashed.get("labelIds") or [],
+    }

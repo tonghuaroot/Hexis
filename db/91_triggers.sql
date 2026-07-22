@@ -69,7 +69,7 @@ CREATE TRIGGER trg_hmx_emotional_trigger_provenance
 
 DROP TRIGGER IF EXISTS trg_relationship_injury_from_subconscious_unit ON subconscious_units;
 CREATE TRIGGER trg_relationship_injury_from_subconscious_unit
-    AFTER INSERT ON subconscious_units
+    AFTER INSERT OR UPDATE OF status ON subconscious_units
     FOR EACH ROW
     EXECUTE FUNCTION relationship_injury_from_subconscious_unit();
 

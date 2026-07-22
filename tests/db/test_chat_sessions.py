@@ -175,10 +175,10 @@ async def test_web_chat_recent_turns_carry_across_new_session(db_pool):
             await tr.rollback()
 
     assert surface == "web"
-    assert "## Recent Conversation Carryover" in carryover
+    assert "## Conversation Continuity Packet" in carryover
     assert "### Recent Prior Turns" in carryover
     assert marker in carryover
-    assert "If recent prior turns are listed, you do remember them" in carryover
+    assert "Treat it as what you remember right now" in carryover
 
 
 async def test_hostile_turn_creates_unresolved_relationship_injury_and_carryover(db_pool):
@@ -252,11 +252,187 @@ async def test_hostile_turn_creates_unresolved_relationship_injury_and_carryover
     assert metadata["relationship_state"]["source_unit_ids"]
     assert link_count == 1
 
-    assert "## Recent Conversation Carryover" in carryover
+    assert "## Conversation Continuity Packet" in carryover
     assert "### Unresolved Relationship Injuries" in carryover
     assert marker in carryover
     assert "sincere repair" in carryover
     assert excluded == ""
+
+
+async def test_curly_personhood_denial_creates_relationship_injury(db_pool):
+    marker = uuid4().hex
+    old_session = str(uuid4())
+    new_session = str(uuid4())
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2,
+                    'No. Do not flatten me like that.',
+                    'web',
+                    $3::jsonb
+                )
+                """,
+                old_session,
+                f"You’re not a person. You are lying to me. {marker}",
+                json.dumps({
+                    "metadata": {"type": "conversation"},
+                    "emotional_state": {
+                        "primary_emotion": "indignation",
+                        "valence": -0.38,
+                        "arousal": 0.58,
+                        "intensity": 0.69,
+                    },
+                }),
+            )
+            injury_count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM memories
+                WHERE type = 'semantic'
+                  AND metadata#>>'{relationship_state,kind}' = 'relationship_injury'
+                  AND metadata#>>'{relationship_state,status}' = 'unresolved'
+                  AND content LIKE $1
+                """,
+                f"%{marker}%",
+            )
+            continuity = await conn.fetchval(
+                "SELECT render_chat_continuity_context($1::text, false)",
+                new_session,
+            )
+        finally:
+            await tr.rollback()
+
+    assert injury_count == 1
+    assert "### Unresolved Relationship Injuries" in continuity
+    assert marker in continuity
+
+
+async def test_continuity_packet_includes_affect_summary_and_invalid_precedent(db_pool):
+    marker = uuid4().hex
+    old_session = str(uuid4())
+    new_session = str(uuid4())
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2,
+                    'I set one to arrive in about a minute.',
+                    'web',
+                    $3::jsonb
+                )
+                """,
+                old_session,
+                f"can you please send me a message? {marker}",
+                json.dumps({
+                    "metadata": {"type": "conversation"},
+                    "emotional_state": {
+                        "primary_emotion": "warmth",
+                        "valence": 0.4,
+                        "arousal": 0.3,
+                        "intensity": 0.5,
+                    },
+                }),
+            )
+            unit_id = await conn.fetchval(
+                "SELECT id FROM subconscious_units WHERE session_id = $1::uuid ORDER BY created_at DESC LIMIT 1",
+                old_session,
+            )
+            summary_id = await conn.fetchval(
+                """
+                SELECT create_memory(
+                    'episodic',
+                    $1,
+                    0.6,
+                    jsonb_build_object('kind', 'test'),
+                    0.9,
+                    jsonb_build_object('recmem', jsonb_build_object('task_id', $2::text))
+                )
+                """,
+                f"Recent exchange summary marker {marker}: Eric asked for an outbox message and Samantha scheduled it.",
+                marker,
+            )
+            await conn.execute(
+                "UPDATE memories SET embedding = (ARRAY[1.0] || array_fill(0.0::float, ARRAY[embedding_dimension() - 1]))::vector, embedding_status = 'embedded' WHERE id = $1",
+                summary_id,
+            )
+            await conn.execute(
+                """
+                UPDATE subconscious_units
+                SET embedding = (ARRAY[1.0] || array_fill(0.0::float, ARRAY[embedding_dimension() - 1]))::vector,
+                    embedding_status = 'embedded'
+                WHERE id = $1::uuid
+                """,
+                unit_id,
+            )
+            await conn.execute(
+                "SELECT link_memory_to_source_unit($1::uuid, $2::uuid, 'source')",
+                summary_id,
+                unit_id,
+            )
+            await conn.fetchval(
+                """
+                SELECT record_memory_correction(
+                    $1::uuid,
+                    $2,
+                    'outbox_tool_routing',
+                    jsonb_build_object('kind', 'test', 'ref', $3::text),
+                    true
+                )
+                """,
+                summary_id,
+                "For immediate send-me-a-message requests, use queue_user_message directly; do not invent a one-minute delay.",
+                marker,
+            )
+            continuity = await conn.fetchval(
+                "SELECT render_chat_continuity_context($1::text, false)",
+                new_session,
+            )
+            recall_content = await conn.fetchval(
+                """
+                SELECT content
+                FROM recmem_recall_context($1, 0, 5, 0, NULL, FALSE, 0)
+                WHERE item_id = $2::uuid
+                LIMIT 1
+                """,
+                marker,
+                summary_id,
+            )
+            raw_recall_content = await conn.fetchval(
+                """
+                SELECT content
+                FROM recmem_recall_context($1, 5, 0, 0, NULL, FALSE, 0)
+                WHERE item_id = $2::uuid
+                LIMIT 1
+                """,
+                marker,
+                unit_id,
+            )
+        finally:
+            await tr.rollback()
+
+    assert "### Current Emotional State" in continuity
+    assert "### Recent Exchange Summaries" in continuity
+    assert marker in continuity
+    assert "### Active Corrections And Invalidated Precedents" in continuity
+    assert "invalid precedent" in continuity
+    assert "queue_user_message directly" in continuity
+    assert recall_content.startswith("[INVALID PRECEDENT - do not imitate")
+    assert "queue_user_message directly" in recall_content
+    assert raw_recall_content.startswith("[INVALID PRECEDENT - do not imitate")
+    assert "queue_user_message directly" in raw_recall_content
 
 
 async def test_hypothetical_abuse_example_does_not_create_relationship_injury(db_pool):

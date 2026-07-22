@@ -55,6 +55,7 @@ class AgentEvent(str, Enum):
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
     CLAIM_FLAGGED = "claim_flagged"
+    UI_ARTIFACT = "ui_artifact"
 
 
 @dataclass

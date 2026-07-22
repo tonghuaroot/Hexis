@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import logging
 import json
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 from uuid import UUID
 
 from core.agent_api import db_dsn_from_env, get_agent_profile_context, pool_sizes_from_env
 from core.agent_loop import AgentEvent, AgentEventData
-from core.cognitive_memory_api import CognitiveMemory, MemoryType
+from core.cognitive_memory_api import CognitiveMemory
 from core.llm import normalize_llm_config
 from core.llm_config import load_llm_config
 from core.tools import create_default_registry, ToolContext, ToolExecutionContext, ToolRegistry
 from services.agent import run_agent, stream_agent
+from services.connector_setup import detect_connector_setup_intent, run_connector_setup_intent
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +413,7 @@ async def stream_chat_events(
     temperature: float | None = None,
     gateway_source_id: str | None = None,
     gateway_payload: dict[str, Any] | None = None,
+    on_approval: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[AgentEventData]:
     """Canonical streaming chat orchestration.
 
@@ -443,6 +445,63 @@ async def stream_chat_events(
                 logger.debug("Gateway record failed (non-fatal)", exc_info=True)
 
         history = await _hydrate_chat_history(pool, session_id, history)
+
+        setup_intent = await detect_connector_setup_intent(pool, user_message, session_id=session_id)
+        if setup_intent:
+            registry = create_default_registry(pool)
+            source_channel = "web" if surface == "api" else surface
+            run = await run_connector_setup_intent(
+                pool,
+                registry,
+                setup_intent,
+                session_id=session_id,
+                source_channel=source_channel,
+            )
+            assistant_text = run.assistant_message
+            yield AgentEventData(
+                event=AgentEvent.LOOP_START,
+                data={"phase": "connector_setup", "runtime": "connector_setup"},
+            )
+            if assistant_text:
+                yield AgentEventData(
+                    event=AgentEvent.TEXT_DELTA,
+                    data={"text": assistant_text, "runtime": "connector_setup"},
+                )
+            yield AgentEventData(
+                event=AgentEvent.UI_ARTIFACT,
+                data={
+                    "kind": "connector_setup",
+                    "connector_id": run.connector_id,
+                    "action": run.action,
+                    "tool_name": run.tool_name,
+                    "tool_result": run.tool_result,
+                    "ui": run.ui,
+                },
+            )
+            if assistant_text:
+                persisted = await _remember_conversation(
+                    CognitiveMemory(pool),
+                    user_message=user_message,
+                    assistant_message=assistant_text,
+                    session_id=session_id,
+                    user_label=user_label,
+                    background_dsn=dsn,
+                    surface=surface,
+                )
+                yield AgentEventData(
+                    event=AgentEvent.PHASE_CHANGE,
+                    data={
+                        "phase": "memory_write",
+                        "status": "end",
+                        "detail": "Conversation stored as episodic memory",
+                        "result": persisted,
+                    },
+                )
+            yield AgentEventData(
+                event=AgentEvent.LOOP_END,
+                data={"stopped_reason": "completed", "runtime": "connector_setup"},
+            )
+            return
 
         use_rlm = False
         rlm_streaming_enabled = False
@@ -550,6 +609,7 @@ async def stream_chat_events(
             prompt_addenda=prompt_addenda,
             max_tokens=max_tokens,
             temperature=temperature,
+            on_approval=on_approval,
         ):
             if event.event == AgentEvent.TEXT_DELTA:
                 text = event.data.get("text", "")

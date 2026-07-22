@@ -210,6 +210,7 @@ from .gmail_actions import (
     GmailReplyHandler,
     GmailLabelHandler,
     GmailSpamTriageHandler,
+    GmailDeleteHandler,
 )
 from .twitter_x_actions import (
     create_twitter_x_action_tools,
@@ -372,4 +373,5 @@ __all__ = [
     "GmailReplyHandler",
     "GmailLabelHandler",
     "GmailSpamTriageHandler",
+    "GmailDeleteHandler",
 ]

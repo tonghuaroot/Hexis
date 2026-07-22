@@ -15,12 +15,6 @@ SET capability_manifest = '{
         "status": "available",
         "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
       },
-      "ingest": {
-        "label": "Ingest message history",
-        "scope_kind": "read",
-        "status": "available",
-        "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
-      },
       "label": {
         "label": "Apply/remove labels",
         "scope_kind": "modify",
@@ -48,13 +42,13 @@ SET capability_manifest = '{
       "delete": {
         "label": "Delete messages",
         "scope_kind": "destructive",
-        "status": "planned",
+        "status": "available",
         "scopes": ["https://www.googleapis.com/auth/gmail.modify"]
       }
     }'::jsonb,
     setup_manifest = setup_manifest || '{
-      "default_capabilities": ["read", "search", "ingest"],
-      "capability_order": ["read", "search", "ingest", "label", "spam_triage", "send", "reply", "delete"],
+      "default_capabilities": ["read", "search"],
+      "capability_order": ["read", "search", "label", "spam_triage", "send", "reply", "delete"],
       "required_scopes": ["https://www.googleapis.com/auth/userinfo.email"],
       "scope_order": [
         "https://www.googleapis.com/auth/userinfo.email",

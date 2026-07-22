@@ -24,6 +24,9 @@ def _json(value: Any) -> Any:
 _CHANNEL_CONNECTORS = {"slack", "telegram", "signal"}
 _ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _SECRET_CHANNEL_KEYS = {"bot_token", "app_token", "access_token", "password"}
+_GMAIL_DEFAULT_CAPABILITIES = ["read", "search"]
+_GMAIL_MEMORY_POLICY_CONFIG_KEY = "integrations.gmail.memory_policy"
+_GMAIL_MEMORY_POLICIES = {"remember", "forget"}
 
 
 def _connector_id(value: Any) -> str:
@@ -41,6 +44,166 @@ def _setup_next_step(plan: dict[str, Any]) -> str:
     if isinstance(notes, list) and notes:
         return " ".join(str(item) for item in notes if item)
     return "Follow the connector setup manifest, then verify the connection."
+
+
+def _gmail_capabilities_from_status(payload: dict[str, Any], fallback: Any = None) -> list[str]:
+    if isinstance(fallback, list) and fallback:
+        return [str(item) for item in fallback if str(item or "").strip()]
+    for connector in payload.get("connectors", []):
+        if not isinstance(connector, dict) or connector.get("id") != "gmail":
+            continue
+        manifest = _json(connector.get("setup_manifest")) or {}
+        caps = manifest.get("default_capabilities")
+        if isinstance(caps, list) and caps:
+            return [str(item) for item in caps if str(item or "").strip()]
+    return list(_GMAIL_DEFAULT_CAPABILITIES)
+
+
+def _normalize_gmail_memory_policy(value: Any) -> str | None:
+    if value is None:
+        return None
+    policy = str(value or "").strip().lower().replace("-", "_")
+    if policy in {"remember", "learn", "ingest", "retain", "store"}:
+        return "remember"
+    if policy in {"forget", "ephemeral", "temporary", "task_scoped", "task_scoped_only"}:
+        return "forget"
+    return None
+
+
+def _gmail_memory_policy_from_payload(payload: dict[str, Any], fallback: Any = None) -> str | None:
+    return _normalize_gmail_memory_policy(
+        fallback
+        or payload.get("memory_policy")
+        or payload.get("gmail_memory_policy")
+        or payload.get("integrations.gmail.memory_policy")
+    )
+
+
+async def _persist_gmail_memory_policy(pool: Any, policy: str) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO config (key, value, description, updated_at)
+            VALUES (
+                $1,
+                to_jsonb($2::text),
+                'Controls whether Gmail reads may feed Hexis ingestion and memory by default.',
+                CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (key) DO UPDATE SET
+                value = EXCLUDED.value,
+                description = COALESCE(config.description, EXCLUDED.description),
+                updated_at = EXCLUDED.updated_at
+            """,
+            _GMAIL_MEMORY_POLICY_CONFIG_KEY,
+            policy,
+        )
+
+
+def _gmail_connector_setup_ui(
+    payload: dict[str, Any],
+    *,
+    status: str | None = None,
+    capabilities: Any = None,
+    memory_policy: Any = None,
+    pending_attempt: dict[str, Any] | None = None,
+    connected_accounts: list[dict[str, Any]] | None = None,
+    client_secret_saved: bool | None = None,
+    credentials_saved: bool | None = None,
+    next_step: str | None = None,
+) -> dict[str, Any]:
+    """Build a transport-neutral setup card for chat/CLI surfaces."""
+    connected = connected_accounts
+    if connected is None:
+        connected = [
+            item
+            for item in payload.get("connections", [])
+            if isinstance(item, dict) and item.get("connector_id") == "gmail" and item.get("status") == "connected"
+        ]
+    pending = pending_attempt
+    if pending is None:
+        for item in payload.get("recent_attempts", []):
+            if not isinstance(item, dict) or item.get("connector_id") != "gmail":
+                continue
+            if item.get("status") in {"pending_user", "awaiting_input", "pending", "in_progress", "error"}:
+                pending = item
+                break
+
+    resolved_status = status
+    if not resolved_status:
+        has_client_secret = (
+            bool(client_secret_saved)
+            if client_secret_saved is not None
+            else bool(payload.get("client_secret_saved"))
+        )
+        if connected:
+            resolved_status = "connected"
+        elif pending:
+            resolved_status = "pending_authorization"
+        elif has_client_secret:
+            resolved_status = "client_secret_saved"
+        else:
+            resolved_status = "needs_client_secret"
+
+    caps = _gmail_capabilities_from_status(payload, capabilities)
+    resolved_memory_policy = _gmail_memory_policy_from_payload(payload, memory_policy)
+    docs_url = "https://console.cloud.google.com/apis/credentials"
+    authorization_url = None
+    attempt_id = None
+    pending_next_step = None
+    if pending:
+        authorization_url = pending.get("authorization_url")
+        attempt_id = pending.get("attempt_id") or pending.get("id")
+        pending_next_step = pending.get("user_next_step") or pending.get("next_step")
+    authorization_url = authorization_url or payload.get("authorization_url")
+    attempt_id = attempt_id or payload.get("attempt_id")
+
+    return {
+        "kind": "connector_setup",
+        "version": 1,
+        "id": f"connector_setup:gmail:{attempt_id or resolved_status}",
+        "connector_id": "gmail",
+        "display_name": "Gmail",
+        "title": "Connect Gmail",
+        "status": resolved_status,
+        "summary": (
+            "Authorize Gmail through Google OAuth so Samantha can use only the provider "
+            "permissions you approve."
+        ),
+        "capabilities": caps,
+        "memory_policy": resolved_memory_policy,
+        "memory_config_key": _GMAIL_MEMORY_POLICY_CONFIG_KEY,
+        "client_secret_saved": (
+            bool(client_secret_saved) if client_secret_saved is not None else bool(payload.get("client_secret_saved"))
+        ),
+        "credentials_saved": (
+            bool(credentials_saved) if credentials_saved is not None else bool(payload.get("credentials_saved"))
+        ),
+        "accepted_inputs": ["client_secret_path", "use_env_client_secret"],
+        "docs_url": docs_url,
+        "authorization_url": authorization_url,
+        "attempt_id": attempt_id,
+        "connected_accounts": connected,
+        "next_step": next_step or pending_next_step or payload.get("next_step") or payload.get("user_next_step"),
+        "primary_action": {
+            "action": "connect_gmail",
+            "label": "Start Gmail authorization",
+            "arguments": {
+                "capabilities": caps,
+                **({"memory_policy": resolved_memory_policy} if resolved_memory_policy else {}),
+            },
+        },
+        "completion_action": {
+            "action": "complete_gmail",
+            "label": "Complete connection",
+            "arguments": {"attempt_id": attempt_id} if attempt_id else {},
+        },
+        "safety_note": (
+            "Gmail OAuth controls provider permissions. Email remembering is a Hexis memory "
+            "configuration setting, not a Google scope. Sending, replying, labeling, spam triage, "
+            "and delete actions require explicit later authorization."
+        ),
+    }
 
 
 async def _connected_gmail_accounts(pool: Any) -> list[dict[str, Any]]:
@@ -332,7 +495,6 @@ class StartIntegrationSetupHandler(ToolHandler):
                     arguments.get("source_channel"),
                     arguments.get("source_session_id") or context.session_id,
                 )
-                attempt = _json(attempt_raw) or {}
         except Exception as exc:
             return ToolResult.error_result(str(exc), ToolErrorType.INVALID_PARAMS)
 
@@ -595,9 +757,14 @@ class GmailSetupStatusHandler(ToolHandler):
 
         async with context.registry.pool.acquire() as conn:
             raw = await conn.fetchval("SELECT integration_status('gmail')")
+            memory_policy = await conn.fetchval(
+                "SELECT COALESCE(get_config_text($1), 'ask')",
+                _GMAIL_MEMORY_POLICY_CONFIG_KEY,
+            )
         payload = _json(raw) or {}
         payload["client_secret_saved"] = has_saved_gmail_client_secret()
         payload["credentials_saved"] = load_default_credentials() is not None
+        payload["memory_policy"] = memory_policy
 
         connected = [
             item
@@ -620,6 +787,12 @@ class GmailSetupStatusHandler(ToolHandler):
         else:
             display += "not connected"
 
+        payload["ui"] = _gmail_connector_setup_ui(
+            payload,
+            memory_policy=memory_policy,
+            client_secret_saved=payload["client_secret_saved"],
+            credentials_saved=payload["credentials_saved"],
+        )
         return ToolResult.success_result(payload, display_output=display)
 
 
@@ -632,7 +805,9 @@ class ConnectGmailHandler(ToolHandler):
             name="connect_gmail",
             description=(
                 "Start the Gmail connector OAuth setup flow. Use when the user asks to connect Gmail, "
-                "authorize email reading/search/ingestion, label or spam triage, or sending/replying. "
+                "authorize email reading/search, label or spam triage, sending/replying, or delete powers. "
+                "Ask separately whether Gmail reads should be remembered; memory_policy is a Hexis config "
+                "choice, not a Google OAuth scope. "
                 "Prefer client_secret_path over pasted client JSON because tool arguments are audited."
             ),
             parameters={
@@ -644,9 +819,17 @@ class ConnectGmailHandler(ToolHandler):
                             "type": "string",
                         },
                         "description": (
-                            "Gmail grants to request. Default is read/search/ingest. "
-                            "Only include label/spam_triage/send/reply when the user asked for those powers. "
+                            "Gmail provider capabilities to request. Default is read/search. "
+                            "Only include label/spam_triage/send/reply/delete when the user asked for those powers. "
                             "The database connector manifest validates names, aliases, and required scopes."
+                        ),
+                    },
+                    "memory_policy": {
+                        "type": "string",
+                        "enum": ["remember", "forget"],
+                        "description": (
+                            "Hexis-side policy for whether email contents may feed ingestion/memory by default. "
+                            "This is stored in config and is not sent to Google as an OAuth capability."
                         ),
                     },
                     "client_secret_path": {
@@ -687,6 +870,22 @@ class ConnectGmailHandler(ToolHandler):
             )
         from core.auth.google_gmail import GmailOAuthError, GmailOAuthStart, start_gmail_oauth
 
+        memory_policy_raw = arguments.get("memory_policy")
+        memory_policy = _normalize_gmail_memory_policy(memory_policy_raw)
+        if memory_policy_raw is not None and memory_policy not in _GMAIL_MEMORY_POLICIES:
+            return ToolResult.error_result(
+                "memory_policy must be remember or forget.",
+                ToolErrorType.INVALID_PARAMS,
+            )
+        if memory_policy:
+            try:
+                await _persist_gmail_memory_policy(context.registry.pool, memory_policy)
+            except Exception as exc:
+                return ToolResult.error_result(
+                    f"Could not save Gmail memory policy: {exc}",
+                    ToolErrorType.EXECUTION_FAILED,
+                )
+
         try:
             started = await start_gmail_oauth(
                 context.registry.pool,
@@ -700,6 +899,16 @@ class ConnectGmailHandler(ToolHandler):
             return ToolResult.error_result(str(exc), ToolErrorType.MISSING_CONFIG)
 
         if isinstance(started, dict):
+            started["memory_policy"] = memory_policy
+            started["ui"] = _gmail_connector_setup_ui(
+                started,
+                status=str(started.get("status") or "needs_client_secret"),
+                capabilities=arguments.get("capabilities"),
+                memory_policy=memory_policy,
+                client_secret_saved=bool(started.get("client_secret_saved")),
+                credentials_saved=False,
+                next_step=started.get("next_step"),
+            )
             return ToolResult.success_result(
                 started,
                 display_output=started.get("next_step"),
@@ -707,6 +916,17 @@ class ConnectGmailHandler(ToolHandler):
 
         assert isinstance(started, GmailOAuthStart)
         payload = started.attempt_payload
+        payload["memory_policy"] = memory_policy
+        payload["ui"] = _gmail_connector_setup_ui(
+            payload,
+            status="pending_authorization",
+            capabilities=payload.get("requested_capabilities") or arguments.get("capabilities"),
+            memory_policy=memory_policy,
+            pending_attempt=payload,
+            client_secret_saved=True,
+            credentials_saved=False,
+            next_step=payload.get("user_next_step") or payload.get("next_step"),
+        )
         display = (
             "Gmail authorization started.\n"
             f"Attempt: {payload['attempt_id']}\n"
@@ -775,6 +995,32 @@ class CompleteGmailConnectionHandler(ToolHandler):
             "granted_scopes": completed.granted_scopes,
             "capabilities": completed.capabilities,
         }
+        try:
+            async with context.registry.pool.acquire() as conn:
+                memory_policy = await conn.fetchval(
+                    "SELECT COALESCE(get_config_text($1), 'ask')",
+                    _GMAIL_MEMORY_POLICY_CONFIG_KEY,
+                )
+        except Exception:
+            memory_policy = None
+        output["memory_policy"] = memory_policy
+        output["ui"] = _gmail_connector_setup_ui(
+            output,
+            status="connected",
+            capabilities=completed.capabilities,
+            memory_policy=memory_policy,
+            connected_accounts=[
+                {
+                    "account_key": completed.account_key,
+                    "display_name": completed.display_name,
+                    "capabilities": completed.capabilities,
+                    "granted_scopes": completed.granted_scopes,
+                    "status": "connected",
+                }
+            ],
+            client_secret_saved=True,
+            credentials_saved=True,
+        )
         return ToolResult.success_result(
             output,
             display_output=f"Gmail connected for {completed.display_name}.",

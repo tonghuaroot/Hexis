@@ -18,7 +18,7 @@ async def test_prepare_connection_attempt_derives_gmail_capabilities_and_scopes(
         default_plan = _j(await conn.fetchval(
             "SELECT prepare_connection_attempt('gmail', NULL)"
         ))
-        assert default_plan["capabilities"] == ["read", "search", "ingest"]
+        assert default_plan["capabilities"] == ["read", "search"]
         assert default_plan["requested_scopes"] == [
             "https://www.googleapis.com/auth/userinfo.email",
             "https://www.googleapis.com/auth/gmail.readonly",
@@ -35,11 +35,15 @@ async def test_prepare_connection_attempt_derives_gmail_capabilities_and_scopes(
             "https://www.googleapis.com/auth/gmail.send",
         ]
 
-        with pytest.raises(Exception, match="planned"):
-            await conn.fetchval(
-                "SELECT prepare_connection_attempt('gmail', $1::jsonb)",
-                json.dumps(["delete"]),
-            )
+        delete_plan = _j(await conn.fetchval(
+            "SELECT prepare_connection_attempt('gmail', $1::jsonb)",
+            json.dumps(["delete"]),
+        ))
+        assert delete_plan["capabilities"] == ["delete"]
+        assert delete_plan["requested_scopes"] == [
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/gmail.modify",
+        ]
 
         with pytest.raises(Exception, match="unsupported gmail capability"):
             await conn.fetchval(

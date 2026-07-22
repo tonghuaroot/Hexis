@@ -30,12 +30,6 @@ INSERT INTO integration_connectors (
         "status": "available",
         "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
       },
-      "ingest": {
-        "label": "Ingest message history",
-        "scope_kind": "read",
-        "status": "available",
-        "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
-      },
       "label": {
         "label": "Apply/remove labels",
         "scope_kind": "modify",
@@ -63,7 +57,7 @@ INSERT INTO integration_connectors (
       "delete": {
         "label": "Delete messages",
         "scope_kind": "destructive",
-        "status": "planned",
+        "status": "available",
         "scopes": ["https://www.googleapis.com/auth/gmail.modify"]
       }
     }'::jsonb,
@@ -73,8 +67,8 @@ INSERT INTO integration_connectors (
       "requires_user_client_secret": true,
       "secret_storage": "~/.hexis/auth",
       "supported_surfaces": ["chat", "cli", "web", "channels"],
-      "default_capabilities": ["read", "search", "ingest"],
-      "capability_order": ["read", "search", "ingest", "label", "spam_triage", "send", "reply", "delete"],
+      "default_capabilities": ["read", "search"],
+      "capability_order": ["read", "search", "label", "spam_triage", "send", "reply", "delete"],
       "required_scopes": ["https://www.googleapis.com/auth/userinfo.email"],
       "scope_order": [
         "https://www.googleapis.com/auth/userinfo.email",
@@ -113,6 +107,17 @@ ON CONFLICT (id) DO UPDATE SET
     setup_manifest = EXCLUDED.setup_manifest,
     docs_url = EXCLUDED.docs_url,
     metadata = integration_connectors.metadata || EXCLUDED.metadata,
+    updated_at = CURRENT_TIMESTAMP;
+
+INSERT INTO config_defaults (key, value, description) VALUES
+    (
+        'integrations.gmail.memory_policy',
+        '"ask"'::jsonb,
+        'Controls whether Gmail reads may feed Hexis ingestion and memory by default; ask until the user chooses remember or forget.'
+    )
+ON CONFLICT (key) DO UPDATE SET
+    value = EXCLUDED.value,
+    description = EXCLUDED.description,
     updated_at = CURRENT_TIMESTAMP;
 
 INSERT INTO integration_connectors (

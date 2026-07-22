@@ -955,6 +955,98 @@ BEGIN
     PERFORM sync_memory_trust(p_memory_id);
 END;
 $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION record_memory_correction(
+    p_memory_id UUID,
+    p_correction TEXT,
+    p_scope TEXT DEFAULT 'behavior',
+    p_source JSONB DEFAULT '{}'::jsonb,
+    p_invalid_precedent BOOLEAN DEFAULT FALSE
+)
+RETURNS JSONB AS $$
+DECLARE
+    normalized_source JSONB := normalize_source_reference(COALESCE(p_source, '{}'::jsonb));
+    correction_text TEXT := NULLIF(btrim(COALESCE(p_correction, '')), '');
+    scope_text TEXT := COALESCE(NULLIF(btrim(COALESCE(p_scope, '')), ''), 'behavior');
+    correction JSONB;
+    updated memories%ROWTYPE;
+BEGIN
+    IF p_memory_id IS NULL THEN
+        RAISE EXCEPTION 'memory_id is required';
+    END IF;
+    IF correction_text IS NULL THEN
+        RAISE EXCEPTION 'correction is required';
+    END IF;
+
+    correction := jsonb_build_object(
+        'correction', correction_text,
+        'scope', scope_text,
+        'invalid_precedent', COALESCE(p_invalid_precedent, FALSE),
+        'recorded_at', CURRENT_TIMESTAMP,
+        'source', normalized_source
+    );
+
+    UPDATE memories
+    SET metadata = jsonb_set(
+            jsonb_set(
+                jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{corrections}',
+                    COALESCE(metadata->'corrections', '[]'::jsonb) || jsonb_build_array(correction),
+                    true
+                ),
+                '{latest_correction}',
+                correction,
+                true
+            ),
+            '{invalid_precedent}',
+            to_jsonb(COALESCE((metadata->>'invalid_precedent')::boolean, FALSE) OR COALESCE(p_invalid_precedent, FALSE)),
+            true
+        ),
+        updated_at = CURRENT_TIMESTAMP,
+        last_reinforced = CURRENT_TIMESTAMP,
+        reinforcement_count = COALESCE(reinforcement_count, 0) + 1
+    WHERE id = p_memory_id
+      AND status = 'active'
+    RETURNING * INTO updated;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'memory % not found', p_memory_id;
+    END IF;
+
+    IF COALESCE(p_invalid_precedent, FALSE) THEN
+        UPDATE subconscious_units s
+        SET metadata = jsonb_set(
+                jsonb_set(
+                    COALESCE(s.metadata, '{}'::jsonb),
+                    '{latest_correction}',
+                    correction,
+                    true
+                ),
+                '{invalid_precedent}',
+                'true'::jsonb,
+                true
+            ),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE EXISTS (
+            SELECT 1
+            FROM memory_source_units msu
+            WHERE msu.memory_id = p_memory_id
+              AND msu.subconscious_unit_id = s.id
+        );
+    END IF;
+
+    PERFORM sync_memory_trust(p_memory_id);
+
+    RETURN jsonb_build_object(
+        'memory_id', updated.id::text,
+        'status', 'corrected',
+        'invalid_precedent', COALESCE((updated.metadata->>'invalid_precedent')::boolean, FALSE),
+        'latest_correction', updated.metadata->'latest_correction'
+    );
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION get_memory_truth_profile(p_memory_id UUID)
 RETURNS JSONB AS $$
 DECLARE

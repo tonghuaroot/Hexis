@@ -16,7 +16,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 import uuid
 from typing import Any
@@ -88,6 +87,73 @@ def _truncate(text: str, max_len: int = 200) -> str:
     return text[:max_len] + "…"
 
 
+def _as_record(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item or "").strip()]
+
+
+def _connector_setup_ui(output: Any) -> dict[str, Any] | None:
+    ui = _as_record(_as_record(output).get("ui"))
+    if ui.get("kind") != "connector_setup":
+        return None
+    return ui
+
+
+def _print_connector_setup_ui(ui: dict[str, Any]) -> None:
+    from rich.panel import Panel
+
+    connector = str(ui.get("display_name") or ui.get("connector_id") or "Connector")
+    status = str(ui.get("status") or "setup")
+    caps = _string_list(ui.get("capabilities"))
+    memory_policy = str(ui.get("memory_policy") or "")
+    memory_config_key = str(ui.get("memory_config_key") or "")
+    docs_url = str(ui.get("docs_url") or "")
+    next_step = str(ui.get("next_step") or "")
+    authorization_url = str(ui.get("authorization_url") or "")
+    attempt_id = str(ui.get("attempt_id") or "")
+    client_secret_saved = bool(ui.get("client_secret_saved"))
+
+    lines = [
+        f"[bold]{connector} setup[/bold]",
+        f"[muted]Status:[/muted] {status.replace('_', ' ')}",
+    ]
+    if caps:
+        lines.append(f"[muted]Capabilities:[/muted] {', '.join(caps)}")
+    if memory_policy:
+        lines.append(f"[muted]Memory policy:[/muted] {memory_policy}")
+    if memory_config_key:
+        lines.append(f"[muted]Memory config:[/muted] {memory_config_key}")
+    if not client_secret_saved and status in {"needs_client_secret", "setup"}:
+        lines.extend([
+            "",
+            "Paste the local Google OAuth Desktop client JSON path in this chat, for example:",
+            "[accent]My Google OAuth client JSON is /Users/eric/Downloads/client_secret.json[/accent]",
+        ])
+    if authorization_url:
+        lines.extend([
+            "",
+            "[muted]Open this authorization URL:[/muted]",
+            authorization_url,
+        ])
+    if attempt_id:
+        lines.extend([
+            "",
+            "After Google redirects to localhost, paste the full redirected URL here to complete setup.",
+        ])
+    if next_step and next_step not in lines:
+        lines.extend(["", next_step])
+    if docs_url:
+        lines.extend(["", f"[muted]Google OAuth clients:[/muted] {docs_url}"])
+
+    console.print()
+    console.print(Panel("\n".join(lines), border_style="teal", title="Connector setup"))
+
+
 def _append_visible_turn(
     history: list[dict[str, Any]],
     *,
@@ -137,9 +203,7 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
     from core.cognitive_memory_api import CognitiveMemory
     from core.llm_config import load_llm_config
     from core.tools import ToolContext, create_default_registry
-    from services.agent import stream_agent
-    from services.chat import _build_system_prompt, _hydrate_chat_history, _remember_conversation
-    from rich.panel import Panel
+    from services.chat import _build_system_prompt, _hydrate_chat_history, stream_chat_events
     from rich.table import Table
 
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=5)
@@ -336,15 +400,12 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                     )
 
                 console.print(f"[teal]{agent_name}:[/teal] ", end="")
-                async for event in stream_agent(
-                    pool,
-                    registry,
+                async for event in stream_chat_events(
                     user_message=user_input,
-                    mode="chat",
                     history=history,
                     session_id=session_id,
-                    agent_profile=agent_profile,
                     dsn=dsn,
+                    pool=pool,
                     on_approval=_approve_tool,
                 ):
                     if event.event == AgentEvent.PHASE_CHANGE:
@@ -357,9 +418,9 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                         elif phase == "subconscious":
                             if verbose:
                                 if status == "start":
-                                    console.print(f"\n  [muted]Subconscious appraisal...[/muted]", end="")
+                                    console.print("\n  [muted]Subconscious appraisal...[/muted]", end="")
                                 elif status == "end":
-                                    console.print(f" [ok]done[/ok]", end="")
+                                    console.print(" [ok]done[/ok]", end="")
 
                     elif event.event == AgentEvent.TEXT_DELTA:
                         text = event.data.get("text", "")
@@ -394,6 +455,9 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                         dur_str = f" [{duration:.1f}s]" if isinstance(duration, (int, float)) else ""
                         if success:
                             console.print(f" [ok]done[/ok][dim]{dur_str}[/dim]")
+                            ui = _connector_setup_ui(event.data.get("output"))
+                            if ui:
+                                _print_connector_setup_ui(ui)
                             if verbose:
                                 display = event.data.get("display_output") or event.data.get("output")
                                 if display:
@@ -401,6 +465,11 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                         else:
                             error_msg = event.data.get("error", "")
                             console.print(f" [fail]failed[/fail][dim]{dur_str}[/dim] [muted]{error_msg[:120]}[/muted]")
+
+                    elif event.event == AgentEvent.UI_ARTIFACT:
+                        ui = _connector_setup_ui(event.data)
+                        if ui:
+                            _print_connector_setup_ui(ui)
 
                     elif event.event == AgentEvent.LOOP_START:
                         if debug:
@@ -457,28 +526,7 @@ async def _run_chat(dsn: str, *, verbose: bool = False, debug: bool = False,
                     {"role": "user", "content": user_input},
                     {"role": "assistant", "content": clean_text},
                 ]
-
-                # DB turn recording writes active transcript + long-term turn
-                # memory from one call; local history remains only a fallback.
-                try:
-                    await _remember_conversation(
-                        CognitiveMemory(pool),
-                        user_message=user_input,
-                        assistant_message=clean_text,
-                        session_id=chat_session_id,
-                        surface="cli",
-                    )
-                    history = await _hydrate_chat_history(pool, chat_session_id, fallback_history)
-                except Exception:
-                    logger.warning("memory formation failed", exc_info=True)
-                    _append_visible_turn(
-                        history,
-                        user_input=user_input,
-                        assistant_text=clean_text,
-                        was_greet=False,
-                    )
-                    if debug:
-                        err_console.print("[muted](memory not stored this turn — see logs)[/muted]")
+                history = await _hydrate_chat_history(pool, chat_session_id, fallback_history)
 
             except KeyboardInterrupt:
                 sys.stdout.write("\n")

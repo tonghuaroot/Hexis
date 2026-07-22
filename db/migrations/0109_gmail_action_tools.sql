@@ -17,6 +17,8 @@ INSERT INTO connector_action_tool_map (
     ('gmail_label', 'gmail', 'label', 'message_id', 'account_key', 'provider_state_change',
      '{"tool_module": "core.tools.gmail_actions"}'::jsonb),
     ('gmail_spam_triage', 'gmail', 'spam_triage', 'message_id', 'account_key', 'provider_state_change',
+     '{"tool_module": "core.tools.gmail_actions"}'::jsonb),
+    ('gmail_delete', 'gmail', 'delete', 'message_id', 'account_key', 'destructive',
      '{"tool_module": "core.tools.gmail_actions"}'::jsonb)
 ON CONFLICT (tool_name) DO UPDATE SET
     connector_id = EXCLUDED.connector_id,

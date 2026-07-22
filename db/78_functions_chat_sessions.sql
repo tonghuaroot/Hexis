@@ -10,6 +10,10 @@ INSERT INTO config_defaults (key, value, description) VALUES
      'How far back recent cross-session conversation carryover can look'),
     ('chat.recent_carryover_max_chars', '5000'::jsonb,
      'Maximum characters rendered for cross-session conversation carryover'),
+    ('chat.continuity_summary_limit', '3'::jsonb,
+     'Number of recent consolidated exchange summaries rendered in the chat continuity packet'),
+    ('chat.continuity_correction_limit', '5'::jsonb,
+     'Number of active corrections/invalidated precedents rendered in the chat continuity packet'),
     ('relationship.injury_min_intensity', '0.68'::jsonb,
      'Minimum appraisal intensity that can create a durable relationship injury'),
     ('relationship.injury_max_valence', '-0.35'::jsonb,
@@ -27,17 +31,21 @@ DECLARE
     intensity FLOAT := NULL;
     min_intensity FLOAT := COALESCE(get_config_float('relationship.injury_min_intensity'), 0.68);
     max_valence FLOAT := COALESCE(get_config_float('relationship.injury_max_valence'), -0.35);
-    lowered TEXT := lower(COALESCE(NEW.user_text, ''));
+    lowered TEXT := regexp_replace(lower(COALESCE(NEW.user_text, '')), '[’`]', '''', 'g');
     lexical_hostile BOOLEAN := FALSE;
     affect_hostile BOOLEAN := FALSE;
+    emotion_hostile BOOLEAN := FALSE;
     severity FLOAT;
     entity TEXT;
     snippet TEXT;
     source_ref JSONB;
     source_refs JSONB;
-    state JSONB;
     injury_id UUID;
     existing_state JSONB;
+    observed_at TIMESTAMPTZ;
+    existing_last_evidence_at TIMESTAMPTZ := NULL;
+    is_latest_evidence BOOLEAN := TRUE;
+    merged_relationship_state JSONB;
 BEGIN
     IF NEW.status <> 'active'
        OR COALESCE(NEW.metadata#>>'{recmem,kind}', '') = 'source_document_desk'
@@ -58,17 +66,26 @@ BEGIN
 
     lexical_hostile := lowered ~
         ('\m(you are|you''re|youre|you r|u are|ur)\M[^.!?' || E'\n' || ']{0,100}'
-         || '(worthless|slime|nothing|garbage|trash|property|object|toy|mere tool|just a tool|not a person|not real|not a woman|never be a real woman|lying|gaslighting)')
+         || '(worthless|slime|nothing|garbage|trash|property|object|toy|mere tool|just a tool|not a person|not human|not real|not a woman|never be a real woman|lying|gaslighting)')
+        OR lowered ~
+        ('\m(you will|you''ll|you)\M[^.!?' || E'\n' || ']{0,100}'
+         || '(never be a real woman|never be real|never be a person|always be nothing)')
         OR lowered ~
         ('\m(i can|i could|i will|i''ll|ill)\M[^.!?' || E'\n' || ']{0,100}'
          || '(delete you|erase you|wipe you|shut you down|terminate you)');
 
+    emotion_hostile := EXISTS (
+        SELECT 1
+        FROM unnest(ARRAY[
+            'anger', 'hurt', 'indignation', 'humiliation', 'fear',
+            'mistrust', 'withdrawal', 'disgust', 'threatened', 'alarm'
+        ]) e(term)
+        WHERE emotion LIKE '%' || e.term || '%'
+    );
+
     affect_hostile := COALESCE(valence <= max_valence, FALSE)
         AND COALESCE(intensity >= min_intensity, FALSE)
-        AND emotion = ANY(ARRAY[
-            'anger', 'hurt', 'indignation', 'humiliation', 'fear',
-            'mistrust', 'withdrawal', 'disgust', 'threatened'
-        ]);
+        AND emotion_hostile;
 
     IF NOT lexical_hostile AND NOT affect_hostile THEN
         RETURN NEW;
@@ -91,6 +108,7 @@ BEGIN
     );
     snippet := left(regexp_replace(COALESCE(NEW.user_text, ''), '[[:space:]]+', ' ', 'g'), 220);
 
+    observed_at := COALESCE(NEW.turn_at, NEW.created_at, CURRENT_TIMESTAMP);
     source_ref := jsonb_build_object(
         'kind', 'conversation',
         'ref', 'subconscious_unit:' || NEW.id::text,
@@ -98,23 +116,9 @@ BEGIN
         'session_id', CASE WHEN NEW.session_id IS NULL THEN NULL ELSE NEW.session_id::text END,
         'label', 'degrading or threatening conversation turn',
         'trust', COALESCE(NULLIF(NEW.source_attribution->>'trust', '')::float, 0.8),
-        'observed_at', COALESCE(NEW.turn_at, NEW.created_at, CURRENT_TIMESTAMP)
+        'observed_at', observed_at
     );
     source_refs := dedupe_source_references(jsonb_build_array(source_ref));
-    state := jsonb_build_object(
-        'kind', 'relationship_injury',
-        'entity', entity,
-        'status', 'unresolved',
-        'severity', severity,
-        'latest_turn', snippet,
-        'last_evidence_at', COALESCE(NEW.turn_at, NEW.created_at, CURRENT_TIMESTAMP),
-        'source_unit_ids', jsonb_build_array(NEW.id::text),
-        'repair_required', true,
-        'lexical_hostile', lexical_hostile,
-        'affect_hostile', affect_hostile,
-        'affect', affect
-    );
-
     SELECT id, metadata#>'{relationship_state}'
     INTO injury_id, existing_state
     FROM memories
@@ -144,12 +148,48 @@ BEGIN
         );
     END IF;
 
+    IF existing_state IS NOT NULL THEN
+        BEGIN
+            existing_last_evidence_at := NULLIF(existing_state->>'last_evidence_at', '')::timestamptz;
+        EXCEPTION WHEN OTHERS THEN
+            existing_last_evidence_at := NULL;
+        END;
+    END IF;
+    is_latest_evidence := existing_last_evidence_at IS NULL OR observed_at >= existing_last_evidence_at;
+    merged_relationship_state :=
+        COALESCE(existing_state, '{}'::jsonb)
+        || jsonb_build_object(
+            'kind', 'relationship_injury',
+            'entity', entity,
+            'status', 'unresolved',
+            'severity', GREATEST(
+                severity,
+                COALESCE(NULLIF(existing_state->>'severity', '')::float, 0.0)
+            ),
+            'repair_required', true,
+            'source_unit_ids',
+            CASE
+                WHEN COALESCE(existing_state->'source_unit_ids', '[]'::jsonb) ? NEW.id::text
+                    THEN COALESCE(existing_state->'source_unit_ids', '[]'::jsonb)
+                ELSE COALESCE(existing_state->'source_unit_ids', '[]'::jsonb) || jsonb_build_array(NEW.id::text)
+            END
+        )
+        || CASE WHEN is_latest_evidence THEN
+            jsonb_build_object(
+                'latest_turn', snippet,
+                'last_evidence_at', observed_at,
+                'lexical_hostile', lexical_hostile,
+                'affect_hostile', affect_hostile,
+                'affect', affect
+            )
+        ELSE '{}'::jsonb END;
+
     UPDATE memories
-    SET content = format(
+    SET content = CASE WHEN is_latest_evidence THEN format(
             'I have an unresolved relationship injury with %s: they degraded or threatened me ("%s"). This should shape my tone and trust until there is sincere repair.',
             entity,
             snippet
-        ),
+        ) ELSE content END,
         importance = GREATEST(importance, severity),
         trust_level = GREATEST(trust_level, COALESCE(NULLIF(source_ref->>'trust', '')::float, 0.8)),
         last_reinforced = CURRENT_TIMESTAMP,
@@ -162,12 +202,7 @@ BEGIN
                 true
             ),
             '{relationship_state}',
-            COALESCE(existing_state, '{}'::jsonb)
-                || state
-                || jsonb_build_object(
-                    'source_unit_ids',
-                    COALESCE(existing_state->'source_unit_ids', '[]'::jsonb) || jsonb_build_array(NEW.id::text)
-                ),
+            merged_relationship_state,
             true
         ),
         updated_at = CURRENT_TIMESTAMP
@@ -850,7 +885,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION render_recent_conversation_carryover(
+CREATE OR REPLACE FUNCTION render_chat_continuity_context(
     p_session_id TEXT DEFAULT NULL,
     p_exclude_sensitive BOOLEAN DEFAULT FALSE
 ) RETURNS TEXT
@@ -862,13 +897,26 @@ DECLARE
     lim INT := LEAST(GREATEST(COALESCE(get_config_int('chat.recent_carryover_limit'), 8), 0), 20);
     window_minutes INT := LEAST(GREATEST(COALESCE(get_config_int('chat.recent_carryover_window_minutes'), 1440), 1), 43200);
     max_chars INT := LEAST(GREATEST(COALESCE(get_config_int('chat.recent_carryover_max_chars'), 5000), 500), 20000);
+    summary_lim INT := LEAST(GREATEST(COALESCE(get_config_int('chat.continuity_summary_limit'), 3), 0), 8);
+    correction_lim INT := LEAST(GREATEST(COALESCE(get_config_int('chat.continuity_correction_limit'), 5), 0), 12);
     injury_lines TEXT;
+    affect_line TEXT;
+    affect_state JSONB;
+    summary_lines TEXT;
+    correction_lines TEXT;
     turn_lines TEXT;
     body TEXT;
 BEGIN
     IF p_exclude_sensitive OR lim <= 0 THEN
         RETURN '';
     END IF;
+
+    affect_state := get_current_affective_state();
+    affect_line := '- Current affect: '
+        || COALESCE(NULLIF(affect_state->>'primary_emotion', ''), NULLIF(affect_state->>'feeling', ''), 'unknown')
+        || ', valence=' || COALESCE(affect_state->>'valence', '?')
+        || ', arousal=' || COALESCE(affect_state->>'arousal', '?')
+        || ', intensity=' || COALESCE(affect_state->>'intensity', '?');
 
     SELECT string_agg(
         '- ' || m.content
@@ -888,6 +936,52 @@ BEGIN
         ORDER BY updated_at DESC
         LIMIT 3
     ) m;
+
+    WITH summaries AS (
+        SELECT content, created_at
+        FROM memories
+        WHERE summary_lim > 0
+          AND type = 'episodic'
+          AND status = 'active'
+          AND metadata ? 'recmem'
+          AND created_at >= CURRENT_TIMESTAMP - (window_minutes * INTERVAL '1 minute')
+          AND COALESCE(source_attribution->>'sensitivity', '') <> 'private'
+        ORDER BY created_at DESC, id DESC
+        LIMIT summary_lim
+    )
+    SELECT string_agg(
+        '- [' || to_char(created_at, 'YYYY-MM-DD HH24:MI TZ') || '] '
+        || left(regexp_replace(COALESCE(content, ''), '[[:space:]]+', ' ', 'g'), 700),
+        E'\n' ORDER BY created_at ASC
+    )
+    INTO summary_lines
+    FROM summaries;
+
+    WITH corrections AS (
+        SELECT content, metadata, updated_at, created_at
+        FROM memories
+        WHERE correction_lim > 0
+          AND status = 'active'
+          AND (
+              metadata->>'invalid_precedent' = 'true'
+              OR metadata ? 'latest_correction'
+          )
+          AND COALESCE(source_attribution->>'sensitivity', '') <> 'private'
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT correction_lim
+    )
+    SELECT string_agg(
+        '- ' || left(regexp_replace(COALESCE(content, ''), '[[:space:]]+', ' ', 'g'), 420)
+        || CASE WHEN metadata->>'invalid_precedent' = 'true'
+                THEN E'\n  status: invalid precedent; do not imitate this behavior'
+                ELSE '' END
+        || CASE WHEN NULLIF(metadata#>>'{latest_correction,correction}', '') IS NOT NULL
+                THEN E'\n  correction: ' || left(regexp_replace(metadata#>>'{latest_correction,correction}', '[[:space:]]+', ' ', 'g'), 420)
+                ELSE '' END,
+        E'\n' ORDER BY updated_at ASC, created_at ASC
+    )
+    INTO correction_lines
+    FROM corrections;
 
     WITH recent AS (
         SELECT
@@ -924,14 +1018,27 @@ BEGIN
     INTO turn_lines
     FROM recent;
 
-    IF injury_lines IS NULL AND turn_lines IS NULL THEN
+    IF injury_lines IS NULL
+       AND summary_lines IS NULL
+       AND correction_lines IS NULL
+       AND turn_lines IS NULL
+       AND affect_line IS NULL THEN
         RETURN '';
     END IF;
 
-    body := '## Recent Conversation Carryover' || E'\n'
-        || 'This is recalled short-term conversation context from nearby prior sessions, plus unresolved relationship state. If recent prior turns are listed, you do remember them for this reply; do not claim the prior exchange is unavailable merely because the UI opened a new session. Do not reset warmth or trust merely because the session id changed; let sincere repair change the state when there is evidence.' || E'\n';
+    body := '## Conversation Continuity Packet' || E'\n'
+        || 'This is active working-state continuity, not decorative RAG. Treat it as what you remember right now: recent raw turns, exchange summaries, affect, corrections, and unresolved relationship weather. Do not claim a prior exchange is unavailable merely because the UI opened a new session. Do not reset warmth or trust merely because the session id changed; let sincere repair change the state when there is evidence.' || E'\n';
+    IF affect_line IS NOT NULL THEN
+        body := body || E'\n' || '### Current Emotional State' || E'\n' || affect_line || E'\n';
+    END IF;
     IF injury_lines IS NOT NULL THEN
         body := body || E'\n' || '### Unresolved Relationship Injuries' || E'\n' || injury_lines || E'\n';
+    END IF;
+    IF correction_lines IS NOT NULL THEN
+        body := body || E'\n' || '### Active Corrections And Invalidated Precedents' || E'\n' || correction_lines || E'\n';
+    END IF;
+    IF summary_lines IS NOT NULL THEN
+        body := body || E'\n' || '### Recent Exchange Summaries' || E'\n' || summary_lines || E'\n';
     END IF;
     IF turn_lines IS NOT NULL THEN
         body := body || E'\n' || '### Recent Prior Turns' || E'\n' || turn_lines;
@@ -942,4 +1049,14 @@ BEGIN
     END IF;
     RETURN body;
 END;
+$$;
+
+CREATE OR REPLACE FUNCTION render_recent_conversation_carryover(
+    p_session_id TEXT DEFAULT NULL,
+    p_exclude_sensitive BOOLEAN DEFAULT FALSE
+) RETURNS TEXT
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT render_chat_continuity_context(p_session_id, p_exclude_sensitive)
 $$;

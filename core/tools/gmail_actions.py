@@ -219,10 +219,59 @@ class GmailSpamTriageHandler(ToolHandler):
         )
 
 
+class GmailDeleteHandler(ToolHandler):
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="gmail_delete",
+            description=(
+                "Trash or permanently delete a Gmail message using the connected Gmail account. "
+                "Trash by default; set permanent only after the user explicitly requests irreversible deletion."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "account_key": {"type": "string", "description": "Optional connected Gmail account/email."},
+                    "message_id": {"type": "string", "description": "Gmail message ID."},
+                    "permanent": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Permanently delete instead of moving to trash. Requires explicit user authorization.",
+                    },
+                },
+                "required": ["message_id"],
+            },
+            category=ToolCategory.EMAIL,
+            energy_cost=3,
+            is_read_only=False,
+            requires_approval=True,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT, ToolContext.MCP},
+        )
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        from services.gmail_actions import GmailActionError, delete_gmail_message
+
+        try:
+            result = await delete_gmail_message(
+                account_key=arguments.get("account_key"),
+                message_id=str(arguments.get("message_id") or ""),
+                permanent=bool(arguments.get("permanent", False)),
+            )
+        except GmailActionError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.EXECUTION_FAILED)
+        verb = "permanently deleted" if result.get("permanent") else "moved to trash"
+        return ToolResult.success_result(
+            result,
+            display_output=f"Gmail message {result.get('message_id')} {verb}.",
+        )
+
+
 def create_gmail_action_tools() -> list[ToolHandler]:
     return [
         GmailSendHandler(),
         GmailReplyHandler(),
         GmailLabelHandler(),
         GmailSpamTriageHandler(),
+        GmailDeleteHandler(),
     ]

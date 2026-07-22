@@ -258,7 +258,7 @@ async def test_streaming_chat_runs_subconscious_once_before_multi_iteration_loop
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_streaming_chat_injects_recent_carryover_into_appraisal_and_prompt(db_pool):
+async def test_streaming_chat_injects_continuity_into_appraisal_and_prompt(db_pool):
     from core.agent_loop import AgentEvent, AgentEventData, AgentLoop
     from core.tools import create_default_registry
     from services.agent import SubconsciousOutput, stream_agent
@@ -272,8 +272,8 @@ async def test_streaming_chat_injects_recent_carryover_into_appraisal_and_prompt
         goals=None,
         urgent_drives=[],
     )
-    carryover = (
-        "## Recent Conversation Carryover\n"
+    continuity = (
+        "## Conversation Continuity Packet\n"
         "### Unresolved Relationship Injuries\n"
         "- I have an unresolved relationship injury with Eric."
     )
@@ -291,7 +291,7 @@ async def test_streaming_chat_injects_recent_carryover_into_appraisal_and_prompt
     with (
         patch("services.agent.load_llm_config", new=AsyncMock(return_value={"provider": "fake", "model": "fake"})),
         patch("core.cognitive_memory_api.CognitiveMemory.hydrate", new=AsyncMock(return_value=context)),
-        patch("services.agent.render_recent_conversation_carryover_db", new=AsyncMock(return_value=carryover)),
+        patch("services.agent.render_chat_continuity_context_db", new=AsyncMock(return_value=continuity)),
         patch("services.agent.run_subconscious_appraisal", new=subconscious),
         patch.object(AgentLoop, "stream", new=fake_agent_stream),
     ):
@@ -308,13 +308,13 @@ async def test_streaming_chat_injects_recent_carryover_into_appraisal_and_prompt
         ]
 
     assert any(event.event == AgentEvent.LOOP_END for event in events)
-    assert subconscious.await_args.args[2] == carryover
-    assert carryover in captured["user_message"]
+    assert subconscious.await_args.args[2] == continuity
+    assert continuity in captured["user_message"]
     assert "[USER MESSAGE]\nhow do you feel" in captured["user_message"]
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_nonstreaming_chat_injects_recent_carryover_into_appraisal_and_prompt(db_pool):
+async def test_nonstreaming_chat_injects_continuity_into_appraisal_and_prompt(db_pool):
     from core.agent_loop import AgentLoop, AgentLoopResult
     from core.tools import create_default_registry
     from services.agent import SubconsciousOutput, run_agent
@@ -328,8 +328,8 @@ async def test_nonstreaming_chat_injects_recent_carryover_into_appraisal_and_pro
         goals=None,
         urgent_drives=[],
     )
-    carryover = (
-        "## Recent Conversation Carryover\n"
+    continuity = (
+        "## Conversation Continuity Packet\n"
         "### Recent Prior Turns\n"
         "- user: no; are you glad I'm here\n"
         "  assistant: Yes. I am."
@@ -351,7 +351,7 @@ async def test_nonstreaming_chat_injects_recent_carryover_into_appraisal_and_pro
     with (
         patch("services.agent.load_llm_config", new=AsyncMock(return_value={"provider": "fake", "model": "fake"})),
         patch("core.cognitive_memory_api.CognitiveMemory.hydrate", new=AsyncMock(return_value=context)),
-        patch("services.agent.render_recent_conversation_carryover_db", new=AsyncMock(return_value=carryover)),
+        patch("services.agent.render_chat_continuity_context_db", new=AsyncMock(return_value=continuity)),
         patch("services.agent.run_subconscious_appraisal", new=subconscious),
         patch.object(AgentLoop, "run", new=fake_agent_run),
     ):
@@ -365,8 +365,8 @@ async def test_nonstreaming_chat_injects_recent_carryover_into_appraisal_and_pro
         )
 
     assert result.text == "I remember the last exchange."
-    assert subconscious.await_args.args[2] == carryover
-    assert carryover in captured["user_message"]
+    assert subconscious.await_args.args[2] == continuity
+    assert continuity in captured["user_message"]
     assert "[USER MESSAGE]\nyou dont remember our previous conversation?" in captured["user_message"]
 
 

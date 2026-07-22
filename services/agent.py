@@ -254,23 +254,42 @@ def _bounded_subconscious_json(payload: dict[str, Any], total_chars: int = _SUBC
     return encoded
 
 
+async def render_chat_continuity_context_db(
+    conn: "asyncpg.Connection",
+    session_id: str | None,
+    *,
+    exclude_sensitive: bool = False,
+) -> str:
+    """Render DB-owned active continuity for chat.
+
+    This is deterministic working state: recent turns, exchange summaries,
+    current affect, corrections, and unresolved relationship weather. It is not
+    optional semantic RAG.
+    """
+    try:
+        raw = await conn.fetchval(
+            "SELECT render_chat_continuity_context($1::text, $2::boolean)",
+            session_id,
+            bool(exclude_sensitive),
+        )
+    except Exception:
+        logger.debug("Chat continuity context unavailable", exc_info=True)
+        return ""
+    return str(raw or "").strip()
+
+
 async def render_recent_conversation_carryover_db(
     conn: "asyncpg.Connection",
     session_id: str | None,
     *,
     exclude_sensitive: bool = False,
 ) -> str:
-    """Render DB-owned short-term continuity from nearby prior chat sessions."""
-    try:
-        raw = await conn.fetchval(
-            "SELECT render_recent_conversation_carryover($1::text, $2::boolean)",
-            session_id,
-            bool(exclude_sensitive),
-        )
-    except Exception:
-        logger.debug("Recent conversation carryover unavailable", exc_info=True)
-        return ""
-    return str(raw or "").strip()
+    """Compatibility wrapper for older tests/callers."""
+    return await render_chat_continuity_context_db(
+        conn,
+        session_id,
+        exclude_sensitive=exclude_sensitive,
+    )
 
 
 async def run_subconscious_appraisal(
@@ -638,7 +657,7 @@ async def run_agent(
 
         # 2. Hydrate memory context (chat mode - heartbeat builds its own context)
         memory_context = ""
-        recent_carryover_context = ""
+        continuity_context = ""
         context = None
         if mode == "chat":
             try:
@@ -673,7 +692,7 @@ async def run_agent(
                     )
             except Exception as exc:
                 logger.warning("Memory hydration failed: %s", exc)
-            recent_carryover_context = await render_recent_conversation_carryover_db(
+            continuity_context = await render_chat_continuity_context_db(
                 conn,
                 session_id,
                 exclude_sensitive=is_group,
@@ -695,10 +714,10 @@ async def run_agent(
                         )
                     )
 
-                # For chat, cross-session carryover is the appraisal context;
+                # For chat, deterministic continuity is the appraisal context;
                 # semantically retrieved memories are supplied separately as
                 # hydrated_context. Heartbeat still renders its full snapshot.
-                sub_memory_ctx = recent_carryover_context if mode == "chat" else memory_context
+                sub_memory_ctx = continuity_context if mode == "chat" else memory_context
                 if mode == "heartbeat" and heartbeat_context:
                     from services.heartbeat_prompt import (
                         render_heartbeat_decision_prompt_db,
@@ -775,8 +794,8 @@ async def run_agent(
     if sub_signals:
         enriched_parts.append(sub_signals)
 
-    if recent_carryover_context:
-        enriched_parts.append(recent_carryover_context)
+    if continuity_context:
+        enriched_parts.append(continuity_context)
 
     # Add memory context (chat mode)
     if memory_context:
@@ -896,7 +915,7 @@ async def stream_agent(
 
         # Hydrate memory
         memory_context = ""
-        recent_carryover_context = ""
+        continuity_context = ""
         context = None
         if mode == "chat":
             try:
@@ -932,7 +951,7 @@ async def stream_agent(
                 )
             except Exception as exc:
                 logger.warning("Memory hydration failed: %s", exc)
-            recent_carryover_context = await render_recent_conversation_carryover_db(
+            continuity_context = await render_chat_continuity_context_db(
                 conn,
                 session_id,
                 exclude_sensitive=is_group,
@@ -951,7 +970,7 @@ async def stream_agent(
                 subconscious_output = await run_subconscious_appraisal(
                     conn,
                     user_message,
-                    recent_carryover_context,
+                    continuity_context,
                     hydrated_context=context,
                 )
                 sub_signals = await render_subconscious_signals_db(conn, subconscious_output)
@@ -993,8 +1012,8 @@ async def stream_agent(
     enriched_parts: list[str] = []
     if sub_signals:
         enriched_parts.append(sub_signals)
-    if recent_carryover_context:
-        enriched_parts.append(recent_carryover_context)
+    if continuity_context:
+        enriched_parts.append(continuity_context)
     if memory_context:
         enriched_parts.append(memory_context)
     enriched_parts.append(f"[USER MESSAGE]\n{user_message}")

@@ -22,7 +22,6 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any, AsyncIterator, Literal
 
 import asyncpg
@@ -1113,8 +1112,6 @@ async def ingest_file_upload(
     durable `artifact` job re-reads them through the standard pipeline —
     upload once, survive restarts, inspect failures.
     """
-    import hashlib as _hashlib
-
     from services.ingest.artifacts import default_artifact_dir, prepare_artifact_info
 
     if _pool is None:
@@ -1462,6 +1459,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         AgentEvent.TOOL_RESULT   → log          {id, kind: "tool_result", title, detail}
         AgentEvent.LLM_REQUEST   → trace        {kind: "llm_request", ...}
         AgentEvent.LLM_RESPONSE  → trace        {kind: "llm_response", ...}
+        AgentEvent.UI_ARTIFACT   → ui           {kind, ui, ...}
         AgentEvent.LOOP_END      → done         {assistant, presentation}
         AgentEvent.ERROR         → error        {message}
     """
@@ -1488,6 +1486,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         addenda = await resolve_prompt_addenda(pool, req.prompt_addenda)
         full_text = ""
         conscious_started = False
+        active_stream_phase = "conscious_final"
 
         async for event in stream_chat_events(
             user_message=user_message,
@@ -1532,18 +1531,20 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
 
             elif event.event == AgentEvent.LOOP_START:
                 if not conscious_started:
-                    yield _sse_event("phase_start", {"phase": "conscious_final"})
+                    active_stream_phase = str(event.data.get("phase") or "conscious_final")
+                    yield _sse_event("phase_start", {"phase": active_stream_phase})
                     conscious_started = True
 
             elif event.event == AgentEvent.TEXT_DELTA:
                 if not conscious_started:
-                    yield _sse_event("phase_start", {"phase": "conscious_final"})
+                    active_stream_phase = str(event.data.get("phase") or "conscious_final")
+                    yield _sse_event("phase_start", {"phase": active_stream_phase})
                     conscious_started = True
                 text = event.data.get("text", "")
                 if text:
                     full_text += text
                     yield _sse_event("token", {
-                        "phase": "conscious_final",
+                        "phase": str(event.data.get("phase") or active_stream_phase),
                         "text": text,
                     })
 
@@ -1559,15 +1560,27 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                 tool_name = event.data.get("tool_name", "tool")
                 success = event.data.get("success", False)
                 error = event.data.get("error")
+                display_output = event.data.get("display_output")
+                output = event.data.get("output")
+                ui_payload = output.get("ui") if isinstance(output, dict) else None
                 detail = f"{'OK' if success else 'FAILED'}"
                 if error:
                     detail += f": {error}"
-                yield _sse_event("log", {
+                elif isinstance(display_output, str) and display_output.strip():
+                    detail = display_output.strip()[:1000]
+                payload = {
                     "id": str(uuid.uuid4()),
                     "kind": "tool_result",
                     "title": tool_name,
                     "detail": detail,
-                })
+                    "display_output": display_output,
+                }
+                if isinstance(ui_payload, dict):
+                    payload["ui"] = ui_payload
+                yield _sse_event("log", payload)
+
+            elif event.event == AgentEvent.UI_ARTIFACT:
+                yield _sse_event("ui", event.data)
 
             elif event.event == AgentEvent.CLAIM_FLAGGED:
                 yield _sse_event("log", {
@@ -1598,7 +1611,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
 
         # Signal phase end and completion
         if conscious_started:
-            yield _sse_event("phase_end", {"phase": "conscious_final"})
+            yield _sse_event("phase_end", {"phase": active_stream_phase})
 
         done_payload: dict[str, Any] = {"assistant": full_text, "session_id": session_id}
         if full_text:

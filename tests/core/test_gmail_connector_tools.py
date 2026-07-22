@@ -60,7 +60,7 @@ async def _seed_connected_gmail(db_pool, marker: str, account: str) -> None:
             """
             SELECT start_connection_attempt(
                 'gmail',
-                '["read", "search", "ingest"]'::jsonb,
+                '["read", "search"]'::jsonb,
                 ARRAY[]::text[],
                 '{}'::jsonb,
                 NULL,
@@ -80,7 +80,7 @@ async def _seed_connected_gmail(db_pool, marker: str, account: str) -> None:
                 $2,
                 'integration.gmail.default',
                 $3::text[],
-                '["read", "search", "ingest"]'::jsonb,
+                '["read", "search"]'::jsonb,
                 '{"test": true}'::jsonb
             )
             """,
@@ -118,6 +118,44 @@ async def test_connect_gmail_without_client_secret_returns_next_step(monkeypatch
     assert result.output["status"] == "needs_client_secret"
     assert "client_secret_path" in result.output["accepted_inputs"]
     assert "connect_gmail" in result.output["next_step"]
+    assert result.output["ui"]["kind"] == "connector_setup"
+    assert result.output["ui"]["connector_id"] == "gmail"
+    assert result.output["ui"]["status"] == "needs_client_secret"
+    assert result.output["ui"]["capabilities"] == ["read", "search"]
+
+
+async def test_connect_gmail_persists_memory_policy_as_config(db_pool, monkeypatch, tmp_path):
+    import core.auth.store as auth_store
+
+    monkeypatch.setattr(auth_store, "AUTH_DIR", tmp_path / "auth")
+    for name in (
+        "GOOGLE_GMAIL_CLIENT_SECRET_JSON",
+        "GOOGLE_CLIENT_SECRET_JSON",
+        "GOOGLE_GMAIL_CLIENT_SECRET_PATH",
+        "GOOGLE_CLIENT_SECRET_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    try:
+        result = await ConnectGmailHandler().execute(
+            {"capabilities": ["read", "search"], "memory_policy": "forget"},
+            _ctx(db_pool, get_test_identifier("gmail-memory-policy")),
+        )
+
+        assert result.success
+        assert result.output["status"] == "needs_client_secret"
+        assert result.output["ui"]["memory_policy"] == "forget"
+
+        async with db_pool.acquire() as conn:
+            policy = await conn.fetchval(
+                "SELECT get_config_text('integrations.gmail.memory_policy')"
+            )
+        assert policy == "forget"
+    finally:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('integrations.gmail.memory_policy', '\"ask\"'::jsonb)"
+            )
 
 
 async def test_gmail_setup_status_executes_through_registry(db_pool, monkeypatch, tmp_path):
@@ -140,6 +178,9 @@ async def test_gmail_setup_status_executes_through_registry(db_pool, monkeypatch
     assert result.output["connectors"][0]["id"] == "gmail"
     assert result.output["client_secret_saved"] is False
     assert result.output["credentials_saved"] is False
+    assert result.output["ui"]["kind"] == "connector_setup"
+    assert result.output["ui"]["connector_id"] == "gmail"
+    assert result.output["ui"]["status"] == "needs_client_secret"
 
 
 async def test_connect_and_complete_gmail_oauth_round_trip(db_pool, monkeypatch, tmp_path):
