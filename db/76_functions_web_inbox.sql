@@ -66,6 +66,55 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Queue a user-facing note whose delivery endpoint is the dashboard inbox,
+-- then deliver it immediately. This is the chat/UI path: the user is already
+-- looking at the dashboard, so a dashboard-only note should not depend on the
+-- RabbitMQ/channel-worker relay being alive before it appears.
+CREATE OR REPLACE FUNCTION queue_web_inbox_message(
+    p_message TEXT,
+    p_intent TEXT DEFAULT NULL,
+    p_source TEXT DEFAULT 'tool'
+) RETURNS JSONB AS $$
+DECLARE
+    outbox_id UUID;
+    envelope JSONB;
+    web_inbox_id UUID;
+BEGIN
+    outbox_id := queue_outbox_message(
+        p_message,
+        p_intent,
+        p_source,
+        '{"mode":"web_inbox"}'::jsonb
+    );
+
+    SELECT o.envelope
+    INTO envelope
+    FROM outbox_messages o
+    WHERE o.id = outbox_id;
+
+    web_inbox_id := web_inbox_deliver(jsonb_build_object(
+        'id', envelope->>'message_id',
+        'kind', envelope->>'kind',
+        'payload', envelope->'payload'
+    ));
+
+    UPDATE outbox_messages
+    SET status = 'published',
+        claimed_at = COALESCE(claimed_at, CURRENT_TIMESTAMP),
+        published_at = CURRENT_TIMESTAMP
+    WHERE id = outbox_id;
+
+    RETURN jsonb_build_object(
+        'queued', true,
+        'delivered', web_inbox_id IS NOT NULL,
+        'outbox_id', outbox_id::text,
+        'web_inbox_id', CASE WHEN web_inbox_id IS NULL THEN NULL ELSE web_inbox_id::text END,
+        'delivery', jsonb_build_object('mode', 'web_inbox'),
+        'envelope', envelope
+    );
+END;
+$$ LANGUAGE plpgsql;
+
 -- The feed the dashboard polls: unread count + newest-first messages.
 CREATE OR REPLACE FUNCTION get_web_inbox(p_limit INT DEFAULT 30)
 RETURNS JSONB AS $$

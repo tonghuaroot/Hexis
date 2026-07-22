@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -2206,7 +2205,10 @@ class QueueUserMessageHandler(ToolHandler):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="queue_user_message",
-            description="Queue a message for external delivery to the user.",
+            description=(
+                "Queue a user-facing note. In chat, this delivers immediately "
+                "to the dashboard inbox; in heartbeat, it queues for the normal outbox relay."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -2224,7 +2226,7 @@ class QueueUserMessageHandler(ToolHandler):
             category=ToolCategory.MEMORY,
             energy_cost=0,  # Free - just queuing
             is_read_only=False,
-            allowed_contexts={ToolContext.HEARTBEAT},  # Only for autonomous use
+            allowed_contexts={ToolContext.HEARTBEAT, ToolContext.CHAT},
         )
 
     async def execute(
@@ -2236,18 +2238,35 @@ class QueueUserMessageHandler(ToolHandler):
         intent = arguments.get("intent")
 
         try:
-            # Durably enqueue in the DB-native outbox; the maintenance worker
-            # drains it to the RabbitMQ outbox for delivery.
             async with context.registry.pool.acquire() as conn:
-                await conn.fetchval(
-                    "SELECT queue_outbox_message($1::text, $2::text, 'tool')",
-                    message,
-                    intent,
-                )
+                if context.tool_context == ToolContext.CHAT:
+                    raw = await conn.fetchval(
+                        "SELECT queue_web_inbox_message($1::text, $2::text, 'tool')",
+                        message,
+                        intent,
+                    )
+                    result = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                else:
+                    outbox_id = await conn.fetchval(
+                        "SELECT queue_outbox_message($1::text, $2::text, 'tool')",
+                        message,
+                        intent,
+                    )
+                    result = {
+                        "queued": True,
+                        "delivered": False,
+                        "outbox_id": str(outbox_id),
+                        "delivery": {"mode": "outbox"},
+                    }
+
+            if context.tool_context == ToolContext.CHAT and result.get("delivered"):
+                display = f"Delivered to inbox: {message[:50]}..."
+            else:
+                display = f"Queued message: {message[:50]}..."
 
             return ToolResult.success_result(
-                output={"queued": True, "message": message[:50]},
-                display_output=f"Queued message: {message[:50]}...",
+                output={**result, "message": message[:50]},
+                display_output=display,
             )
 
         except Exception as e:

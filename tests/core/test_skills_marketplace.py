@@ -255,6 +255,7 @@ class TestPluginSkillDirs:
         # Present in the selection catalog (and thus the prompt index)
         selection = await select_skills(registry, ToolContext.CHAT, query="hello")
         assert "plugin-demo" in {s.name for s in selection.available}
+        assert "queue_user_message" in selection.allowed_tool_names
 
         # Discoverable through list_skills
         ctx = ToolExecutionContext(

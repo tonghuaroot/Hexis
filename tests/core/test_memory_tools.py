@@ -18,6 +18,7 @@ from core.tools.memory import (
     LoadDocumentsHandler,
     OpenDocumentHandler,
     OpenDocumentsHandler,
+    QueueUserMessageHandler,
     RecallHandler,
     RememberHandler,
     SearchDocumentsHandler,
@@ -128,6 +129,41 @@ class TestSearchHistoryTouch:
         result = await RecallHandler().execute({}, _ctx(db_pool))
         assert not result.success
         assert "query or one filter" in (result.error or "")
+
+
+class TestQueueUserMessage:
+    async def test_chat_context_delivers_to_web_inbox(self, db_pool):
+        marker = get_test_identifier("chatoutbox")
+        message = f"chat-visible note {marker}"
+        try:
+            result = await QueueUserMessageHandler().execute(
+                {"message": message, "intent": "status"},
+                _ctx(db_pool),
+            )
+            assert result.success, result.error
+            assert result.output["queued"] is True
+            assert result.output["delivered"] is True
+            assert result.output["delivery"] == {"mode": "web_inbox"}
+
+            async with db_pool.acquire() as conn:
+                inbox = await conn.fetchrow(
+                    "SELECT message, intent FROM web_inbox WHERE id = $1::uuid",
+                    result.output["web_inbox_id"],
+                )
+                outbox_status = await conn.fetchval(
+                    "SELECT status FROM outbox_messages WHERE id = $1::uuid",
+                    result.output["outbox_id"],
+                )
+            assert inbox["message"] == message
+            assert inbox["intent"] == "status"
+            assert outbox_status == "published"
+        finally:
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM web_inbox WHERE message = $1", message)
+                await conn.execute(
+                    "DELETE FROM outbox_messages WHERE envelope->'payload'->>'message' = $1",
+                    message,
+                )
 
 
 class TestProvenanceTooling:

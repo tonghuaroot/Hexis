@@ -96,6 +96,38 @@ async def test_feed_and_read_receipts(db_pool):
             await tr.rollback()
 
 
+async def test_queue_web_inbox_message_delivers_without_channel_worker(db_pool):
+    test_id = f"queue-web-{uuid.uuid4().hex[:10]}"
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            result = json.loads(await conn.fetchval(
+                "SELECT queue_web_inbox_message($1::text, $2::text, 'tool')",
+                f"note {test_id}",
+                "status",
+            ))
+            outbox = await conn.fetchrow(
+                "SELECT status, envelope FROM outbox_messages WHERE id = $1::uuid",
+                result["outbox_id"],
+            )
+            delivered = await conn.fetchrow(
+                "SELECT message, intent FROM web_inbox WHERE id = $1::uuid",
+                result["web_inbox_id"],
+            )
+        finally:
+            await tr.rollback()
+
+    assert result["queued"] is True
+    assert result["delivered"] is True
+    assert result["delivery"] == {"mode": "web_inbox"}
+    assert outbox["status"] == "published"
+    envelope = json.loads(outbox["envelope"]) if isinstance(outbox["envelope"], str) else outbox["envelope"]
+    assert envelope["payload"]["delivery"] == {"mode": "web_inbox"}
+    assert delivered["message"] == f"note {test_id}"
+    assert delivered["intent"] == "status"
+
+
 async def test_outbox_consumer_tees_to_web_inbox(db_pool):
     """The channel worker's consumer delivers a copy of every user-bound
     queue body to the web endpoint — even with no chat adapters configured —

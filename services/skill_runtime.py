@@ -21,7 +21,7 @@ if False:  # pragma: no cover - typing only
     from core.tools.registry import ToolRegistry
 
 
-DISCOVERY_TOOL_NAMES = {"list_skills", "use_skill", "propose_skill"}
+DISCOVERY_TOOL_NAMES = {"list_skills", "use_skill", "propose_skill", "queue_user_message"}
 DEFAULT_SKILL_NAMES = {"core-memory"}
 HEARTBEAT_DEFAULT_SKILL_NAMES = {"core-memory", "self-reflection"}
 AUTO_ACTIVATE_SCORE_THRESHOLD = 5
