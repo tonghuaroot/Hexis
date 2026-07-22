@@ -3,9 +3,9 @@ name: skill-authoring
 description: Author or revise reusable Hexis skills from repeated successful workflows
 category: system
 requires:
-  tools: [author_skill, list_skill_proposals, review_skill_proposal]
+  tools: [propose_skill, author_skill, list_skill_proposals, review_skill_proposal]
 contexts: [heartbeat, chat]
-bound_tools: [author_skill, list_skill_proposals, review_skill_proposal, list_skills, use_skill, create_tool]
+bound_tools: [propose_skill, author_skill, list_skill_proposals, review_skill_proposal, list_skills, use_skill, create_tool]
 ---
 
 # Skill Authoring
@@ -18,6 +18,8 @@ Use this skill when a repeated workflow, hard-won lesson, or stable procedure sh
 - A user explicitly asks you to make a behavior reusable.
 - A correction reveals a better standard operating procedure.
 - A project develops a durable local convention that should guide future work.
+- You notice a capability gap that should become an operator-reviewable skill,
+  even before there is enough cross-session evidence for background review.
 
 ## Method
 
@@ -29,11 +31,15 @@ Use this skill when a repeated workflow, hard-won lesson, or stable procedure sh
    - what to avoid,
    - which tools it should unlock.
 4. Bind only the tools the skill genuinely needs. Do not add broad filesystem, shell, or browser access unless the procedure requires it.
-5. Use `author_skill` with `mode: "create"` for a new skill and `mode: "update"` only when replacing an existing one deliberately.
-6. Never try to replace a user-authored skill. `author_skill` updates only files
+5. Prefer `propose_skill` for on-demand growth. It creates a pending review item
+   and writes no skill file. This is the normal path when you discover a reusable
+   gap while working.
+6. Use `author_skill` directly only when the user has explicitly approved
+   immediate skill-file creation/update in the current exchange.
+7. Never try to replace a user-authored skill. `author_skill` updates only files
    carrying Hexis ownership provenance; if ownership cannot be verified, choose
    a new name or leave the exact manual-edit step to the user.
-7. Use `list_skill_proposals` to inspect background review results. Apply,
+8. Use `list_skill_proposals` to inspect background or on-demand review results. Apply,
    reject, or reopen one only through `review_skill_proposal`; applying always
    requires explicit approval and preserves confidence plus source lineage.
 
@@ -41,7 +47,8 @@ Use this skill when a repeated workflow, hard-won lesson, or stable procedure sh
 
 - Keep a skill focused. If it covers two unrelated workflows, split it.
 - Do not encode secrets, credentials, private user data, or one-off facts in a skill.
-- Do not create a skill from a single unverified attempt unless the user explicitly asks.
+- Do not directly author a live skill from a single unverified attempt unless the
+  user explicitly approves it. Use `propose_skill` instead.
 - Skills should make future behavior clearer and cheaper; if it would add more prompt weight than judgment, keep it as ordinary memory instead.
 
 ## Growing New Tools (self-extension)

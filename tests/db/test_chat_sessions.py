@@ -303,3 +303,94 @@ async def test_hypothetical_abuse_example_does_not_create_relationship_injury(db
             await tr.rollback()
 
     assert count == 0
+
+
+async def test_chat_session_artifacts_list_title_and_fork(db_pool):
+    marker = uuid4().hex
+    session_id = str(uuid4())
+
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding(conn)
+            await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2,
+                    'I will keep the artifact visible.',
+                    'cli',
+                    $3::jsonb
+                )
+                """,
+                session_id,
+                f"first artifact turn {marker}",
+                json.dumps({"metadata": {"type": "conversation", "test_marker": marker}}),
+            )
+            await conn.fetchval(
+                """
+                SELECT record_chat_session_turn(
+                    $1::uuid,
+                    $2,
+                    'Second answer for export.',
+                    'cli',
+                    $3::jsonb
+                )
+                """,
+                session_id,
+                f"second artifact turn {marker}",
+                json.dumps({"metadata": {"type": "conversation", "test_marker": marker}}),
+            )
+
+            listed = _j(await conn.fetchval(
+                "SELECT list_chat_sessions(10, 'cli', 'active')",
+            ))
+            artifact = _j(await conn.fetchval(
+                "SELECT get_chat_session_artifact($1::uuid, TRUE, TRUE)",
+                session_id,
+            ))
+            titled = _j(await conn.fetchval(
+                "SELECT set_chat_session_title($1::uuid, 'Artifact session')",
+                session_id,
+            ))
+            forked = _j(await conn.fetchval(
+                "SELECT fork_chat_session($1::uuid, 1, 'Forked artifact session', '{}'::jsonb)",
+                session_id,
+            ))
+            missing = _j(await conn.fetchval(
+                "SELECT get_chat_session_artifact($1::uuid, TRUE, TRUE)",
+                str(uuid4()),
+            ))
+        finally:
+            await tr.rollback()
+
+    sessions = listed["sessions"]
+    listed_session = next(s for s in sessions if s["session_id"] == session_id)
+    assert listed_session["surface"] == "cli"
+    assert listed_session["message_count"] == 4
+    assert marker in listed_session["first_user_snippet"]
+    assert listed_session["last_message_role"] == "assistant"
+
+    assert artifact["found"] is True
+    assert artifact["format"] == "hexis.chat_session.v1"
+    assert artifact["message_count"] == 4
+    assert [m["ordinal"] for m in artifact["messages"]] == [0, 1, 2, 3]
+    assert artifact["messages"][0]["content"] == f"first artifact turn {marker}"
+    assert artifact["messages"][3]["content"] == "Second answer for export."
+
+    assert titled["found"] is True
+    assert titled["session"]["title"] == "Artifact session"
+    assert titled["messages"] == []
+
+    assert forked["found"] is True
+    assert forked["source_session_id"] == session_id
+    assert forked["forked_message_count"] == 2
+    assert forked["session"]["session_id"] != session_id
+    assert forked["session"]["title"] == "Forked artifact session"
+    assert forked["session"]["metadata"]["forked_from_session_id"] == session_id
+    assert [m["ordinal"] for m in forked["messages"]] == [0, 1]
+    assert forked["messages"][0]["metadata"]["forked_from_message_id"]
+
+    assert missing["found"] is False
+    assert missing["reason"] == "not_found"

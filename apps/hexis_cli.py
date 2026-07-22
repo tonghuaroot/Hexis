@@ -207,6 +207,7 @@ _HELP_GROUPS = [
     ]),
     ("Interact", [
         ("chat", "Chat in the terminal"),
+        ("chat-sessions", "List, inspect, export, and fork chat sessions"),
         ("ui", "Start the web dashboard"),
         ("open", "Open the web dashboard in your browser"),
     ]),
@@ -246,7 +247,6 @@ _HELP_GROUPS = [
 def _print_grouped_help() -> None:
     """Print custom grouped help using Rich."""
     from rich.console import Console
-    from rich.text import Text
 
     console = Console()
     console.print(f"\nhexis v{_ver}")
@@ -398,6 +398,59 @@ def build_parser() -> argparse.ArgumentParser:
     chat = sub.add_parser("chat", help="Chat in the terminal")
     chat.add_argument("args", nargs=argparse.REMAINDER, help="Arguments forwarded to chat")
     chat.set_defaults(func="chat")
+
+    chat_sessions = sub.add_parser(
+        "chat-sessions",
+        parents=[_db],
+        help="List, inspect, export, and fork chat sessions",
+    )
+    chat_sessions_sub = chat_sessions.add_subparsers(dest="chat_sessions_command")
+
+    chat_sessions_list = chat_sessions_sub.add_parser("list", parents=[_db], help="List chat sessions")
+    chat_sessions_list.add_argument("--limit", type=int, default=20, help="Max sessions to show (default: 20)")
+    chat_sessions_list.add_argument("--surface", default=None, help="Filter by surface, e.g. web, cli, api")
+    chat_sessions_list.add_argument(
+        "--status",
+        choices=["active", "archived", "all"],
+        default="active",
+        help="Filter by status (default: active)",
+    )
+    chat_sessions_list.add_argument("--json", action="store_true", help="Output JSON")
+    chat_sessions_list.set_defaults(func="chat_sessions_list")
+
+    chat_sessions_show = chat_sessions_sub.add_parser("show", parents=[_db], help="Show one chat session")
+    chat_sessions_show.add_argument("session_id", help="Chat session UUID")
+    chat_sessions_show.add_argument("--visible-only", action="store_true", help="Exclude messages cleared from context")
+    chat_sessions_show.add_argument("--json", action="store_true", help="Output JSON")
+    chat_sessions_show.set_defaults(func="chat_sessions_show")
+
+    chat_sessions_export = chat_sessions_sub.add_parser("export", parents=[_db], help="Export one chat session")
+    chat_sessions_export.add_argument("session_id", help="Chat session UUID")
+    chat_sessions_export.add_argument("--format", choices=["json", "jsonl"], default="json")
+    chat_sessions_export.add_argument("--output", "-o", default=None, help="Output file; defaults to stdout")
+    chat_sessions_export.add_argument("--visible-only", action="store_true", help="Exclude messages cleared from context")
+    chat_sessions_export.set_defaults(func="chat_sessions_export")
+
+    chat_sessions_title = chat_sessions_sub.add_parser("title", parents=[_db], help="Set a chat session title")
+    chat_sessions_title.add_argument("session_id", help="Chat session UUID")
+    chat_sessions_title.add_argument("title", help="New title; pass an empty string to clear")
+    chat_sessions_title.add_argument("--json", action="store_true", help="Output JSON")
+    chat_sessions_title.set_defaults(func="chat_sessions_title")
+
+    chat_sessions_fork = chat_sessions_sub.add_parser("fork", parents=[_db], help="Fork a chat session")
+    chat_sessions_fork.add_argument("session_id", help="Source chat session UUID")
+    chat_sessions_fork.add_argument("--until-ordinal", type=int, default=None, help="Copy through this message ordinal")
+    chat_sessions_fork.add_argument("--title", default=None, help="Title for the forked session")
+    chat_sessions_fork.add_argument("--json", action="store_true", help="Output JSON")
+    chat_sessions_fork.set_defaults(func="chat_sessions_fork")
+
+    chat_sessions_clone = chat_sessions_sub.add_parser("clone", parents=[_db], help="Clone a chat session")
+    chat_sessions_clone.add_argument("session_id", help="Source chat session UUID")
+    chat_sessions_clone.add_argument("--title", default=None, help="Title for the cloned session")
+    chat_sessions_clone.add_argument("--json", action="store_true", help="Output JSON")
+    chat_sessions_clone.set_defaults(func="chat_sessions_clone")
+
+    chat_sessions.set_defaults(func="chat_sessions")
 
     ingest = sub.add_parser("ingest", help="Ingest documents and knowledge")
     ingest.add_argument("args", nargs=argparse.REMAINDER, help="Arguments forwarded to ingest")
@@ -1264,7 +1317,7 @@ async def _tools_status(dsn: str, as_json: bool) -> int:
                     if override.disabled:
                         sys.stdout.write(f"    disabled: {', '.join(override.disabled)}\n")
                     if override.allow_all:
-                        sys.stdout.write(f"    allow_all: true\n")
+                        sys.stdout.write("    allow_all: true\n")
             else:
                 sys.stdout.write("  (none)\n")
 
@@ -1673,7 +1726,7 @@ async def _consents_revoke(dsn: str, model_spec: str, reason: str) -> int:
 
 def _characters_list(as_json: bool) -> int:
     """List available character cards."""
-    from core.init_api import load_character_cards, PACKAGE_CHARACTERS_DIR, USER_CHARACTERS_DIR
+    from core.init_api import load_character_cards, USER_CHARACTERS_DIR
 
     cards = load_character_cards()
 
@@ -1868,7 +1921,6 @@ async def _characters_export(dsn: str, name: str, output: str | None) -> int:
             """)
             traits: dict[str, float] = {}
             for row in traits_rows:
-                content = row["content"]
                 meta = json.loads(row["metadata"]) if row["metadata"] else {}
                 # Typical format: "Openness: 0.9" or stored in metadata
                 if meta.get("trait_name"):
@@ -2001,6 +2053,318 @@ def _get_dsn(args) -> str:
     return db_dsn_from_env()
 
 
+def _coerce_db_json(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        return json.loads(raw)
+    return raw or {}
+
+
+def _short_text(text: Any, limit: int = 180) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    return value[: max(limit - 1, 0)] + "..."
+
+
+def _validate_session_uuid(session_id: str, *, label: str = "session_id") -> str:
+    import uuid
+
+    try:
+        return str(uuid.UUID(session_id))
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {label}: {session_id}. Run `hexis chat-sessions list` to copy a session UUID."
+        ) from exc
+
+
+def _chat_session_export_jsonl(artifact: dict[str, Any]) -> str:
+    session = artifact.get("session") or {}
+    header = {
+        "type": "session",
+        "format": artifact.get("format", "hexis.chat_session.v1"),
+        "exported_at": artifact.get("exported_at"),
+        "message_count": artifact.get("message_count", 0),
+        "visible_message_count": artifact.get("visible_message_count", 0),
+        "include_hidden": artifact.get("include_hidden", True),
+        "session": session,
+    }
+    lines = [json.dumps(header, ensure_ascii=False, default=str)]
+    for message in artifact.get("messages") or []:
+        lines.append(json.dumps({"type": "message", **message}, ensure_ascii=False, default=str))
+    return "\n".join(lines) + "\n"
+
+
+async def _chat_sessions_list(
+    dsn: str,
+    limit: int,
+    surface: str | None,
+    status: str | None,
+    as_json: bool,
+) -> int:
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT list_chat_sessions($1::int, $2::text, $3::text)",
+                limit,
+                surface,
+                status,
+            )
+        data = _coerce_db_json(raw)
+        if as_json:
+            sys.stdout.write(json.dumps(data, indent=2, default=str) + "\n")
+            return 0
+
+        sessions = data.get("sessions") or []
+        if not sessions:
+            sys.stdout.write("No chat sessions found.\n")
+            return 0
+
+        sys.stdout.write(
+            f"Chat sessions ({data.get('count', len(sessions))}/{data.get('total_matching', len(sessions))} shown)\n"
+        )
+        for session in sessions:
+            title = session.get("title") or session.get("first_user_snippet") or "(untitled)"
+            last = session.get("last_message_snippet") or ""
+            sys.stdout.write(
+                f"  {session.get('session_id')}  "
+                f"{session.get('surface', 'chat')}  {session.get('status', 'active')}  "
+                f"{session.get('message_count', 0)} msg  last={session.get('last_active_at')}\n"
+                f"    {title}\n"
+            )
+            if last and last != title:
+                sys.stdout.write(f"    last {session.get('last_message_role')}: {_short_text(last)}\n")
+        sys.stdout.write("\nUse `hexis chat-sessions show <session_id>` or `hexis chat-sessions export <session_id>`.\n")
+        return 0
+    except Exception as exc:
+        message = str(exc)
+        if "list_chat_sessions" in message or "does not exist" in message:
+            _print_err(
+                "Chat-session artifact functions are missing. Run `hexis migrate` to update the schema."
+            )
+        else:
+            _print_err(f"Error: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _chat_sessions_show(
+    dsn: str,
+    session_id: str,
+    visible_only: bool,
+    as_json: bool,
+) -> int:
+    import asyncpg
+
+    try:
+        normalized_session_id = _validate_session_uuid(session_id)
+    except ValueError as exc:
+        _print_err(str(exc))
+        return 1
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT get_chat_session_artifact($1::uuid, TRUE, $2::bool)",
+                normalized_session_id,
+                not visible_only,
+            )
+        artifact = _coerce_db_json(raw)
+        if not artifact.get("found"):
+            _print_err(
+                f"Chat session not found: {normalized_session_id}. "
+                "Run `hexis chat-sessions list --status all` to browse available sessions."
+            )
+            return 1
+        if as_json:
+            sys.stdout.write(json.dumps(artifact, indent=2, default=str) + "\n")
+            return 0
+
+        session = artifact.get("session") or {}
+        sys.stdout.write(
+            f"Session {session.get('session_id')}\n"
+            f"  title: {session.get('title') or '(untitled)'}\n"
+            f"  surface: {session.get('surface')}  status: {session.get('status')}\n"
+            f"  messages: {artifact.get('message_count', 0)} "
+            f"({artifact.get('visible_message_count', 0)} visible)\n"
+            f"  created: {session.get('created_at')}\n"
+            f"  last active: {session.get('last_active_at')}\n\n"
+        )
+        for message in artifact.get("messages") or []:
+            hidden = "" if message.get("visible_in_context") else " [hidden]"
+            sys.stdout.write(f"[{message.get('ordinal')}] {message.get('role')}{hidden}\n")
+            sys.stdout.write(str(message.get("content") or "") + "\n\n")
+        return 0
+    except Exception as exc:
+        message = str(exc)
+        if "get_chat_session_artifact" in message or "does not exist" in message:
+            _print_err(
+                "Chat-session artifact functions are missing. Run `hexis migrate` to update the schema."
+            )
+        else:
+            _print_err(f"Error: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _chat_sessions_export(
+    dsn: str,
+    session_id: str,
+    output_format: str,
+    output: str | None,
+    visible_only: bool,
+) -> int:
+    import asyncpg
+
+    try:
+        normalized_session_id = _validate_session_uuid(session_id)
+    except ValueError as exc:
+        _print_err(str(exc))
+        return 1
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT get_chat_session_artifact($1::uuid, TRUE, $2::bool)",
+                normalized_session_id,
+                not visible_only,
+            )
+        artifact = _coerce_db_json(raw)
+        if not artifact.get("found"):
+            _print_err(
+                f"Chat session not found: {normalized_session_id}. "
+                "Run `hexis chat-sessions list --status all` to browse available sessions."
+            )
+            return 1
+
+        if output_format == "jsonl":
+            content = _chat_session_export_jsonl(artifact)
+        else:
+            content = json.dumps(artifact, indent=2, ensure_ascii=False, default=str) + "\n"
+
+        if output:
+            out_path = Path(output).expanduser()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(content, encoding="utf-8")
+            sys.stdout.write(f"Exported chat session to {out_path}\n")
+        else:
+            sys.stdout.write(content)
+        return 0
+    except Exception as exc:
+        message = str(exc)
+        if "get_chat_session_artifact" in message or "does not exist" in message:
+            _print_err(
+                "Chat-session artifact functions are missing. Run `hexis migrate` to update the schema."
+            )
+        else:
+            _print_err(f"Error: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _chat_sessions_title(dsn: str, session_id: str, title: str, as_json: bool) -> int:
+    import asyncpg
+
+    try:
+        normalized_session_id = _validate_session_uuid(session_id)
+    except ValueError as exc:
+        _print_err(str(exc))
+        return 1
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT set_chat_session_title($1::uuid, $2::text)",
+                normalized_session_id,
+                title,
+            )
+        artifact = _coerce_db_json(raw)
+        if not artifact.get("found"):
+            _print_err(
+                f"Chat session not found: {normalized_session_id}. "
+                "Run `hexis chat-sessions list --status all` to browse available sessions."
+            )
+            return 1
+        if as_json:
+            sys.stdout.write(json.dumps(artifact, indent=2, default=str) + "\n")
+        else:
+            session = artifact.get("session") or {}
+            sys.stdout.write(
+                f"Updated chat session {normalized_session_id}: title={session.get('title') or '(cleared)'}\n"
+            )
+        return 0
+    except Exception as exc:
+        message = str(exc)
+        if "set_chat_session_title" in message or "does not exist" in message:
+            _print_err(
+                "Chat-session title function is missing. Run `hexis migrate` to update the schema."
+            )
+        else:
+            _print_err(f"Error: {exc}")
+        return 1
+    finally:
+        await pool.close()
+
+
+async def _chat_sessions_fork(
+    dsn: str,
+    session_id: str,
+    until_ordinal: int | None,
+    title: str | None,
+    as_json: bool,
+) -> int:
+    import asyncpg
+
+    try:
+        normalized_session_id = _validate_session_uuid(session_id, label="source session_id")
+    except ValueError as exc:
+        _print_err(str(exc))
+        return 1
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT fork_chat_session($1::uuid, $2::int, $3::text, '{}'::jsonb)",
+                normalized_session_id,
+                until_ordinal,
+                title,
+            )
+        artifact = _coerce_db_json(raw)
+        if not artifact.get("found"):
+            _print_err(
+                f"Chat session not found: {normalized_session_id}. "
+                "Run `hexis chat-sessions list --status all` to browse available sessions."
+            )
+            return 1
+        if as_json:
+            sys.stdout.write(json.dumps(artifact, indent=2, default=str) + "\n")
+        else:
+            session = artifact.get("session") or {}
+            sys.stdout.write(
+                f"Created chat session {session.get('session_id')} from {normalized_session_id} "
+                f"with {artifact.get('forked_message_count', 0)} message(s).\n"
+            )
+        return 0
+    except Exception as exc:
+        message = str(exc)
+        if "fork_chat_session" in message or "does not exist" in message:
+            _print_err(
+                "Chat-session fork function is missing. Run `hexis migrate` to update the schema."
+            )
+        else:
+            _print_err(f"Error: {exc}")
+        return 1
+    finally:
+        await pool.close()
 
 
 async def _channels_status(dsn: str, as_json: bool) -> int:
@@ -2367,6 +2731,7 @@ async def _skills_proposals(dsn: str, status: str, as_json: bool) -> int:
             rows = await conn.fetch(
                 """
                 SELECT id, status, name, description, mode, rationale, confidence,
+                       COALESCE(evidence->>'origin', 'background_review') AS origin,
                        cardinality(source_memory_ids) AS source_memories,
                        cardinality(source_unit_ids) AS source_units,
                        created_at, reviewed_at, applied_at, last_error
@@ -2385,7 +2750,7 @@ async def _skills_proposals(dsn: str, status: str, as_json: bool) -> int:
             for proposal in proposals:
                 sys.stdout.write(
                     f"{proposal['id']}  [{proposal['status']}] {proposal['mode']} {proposal['name']} "
-                    f"(confidence {proposal['confidence']:.2f}, "
+                    f"({proposal['origin']}, confidence {proposal['confidence']:.2f}, "
                     f"{proposal['source_units']} source turns)\n"
                     f"  {proposal['description']}\n"
                 )
@@ -2414,6 +2779,7 @@ async def _skills_review(dsn: str, proposal_id: str, action: str, skip_confirm: 
             row = await conn.fetchrow(
                 """
                 SELECT id, status, name, description, content, mode, rationale,
+                       COALESCE(evidence->>'origin', 'background_review') AS origin,
                        confidence, cardinality(source_memory_ids) AS source_memories,
                        cardinality(source_unit_ids) AS source_units
                 FROM skill_improvement_proposals WHERE id = $1::uuid
@@ -2426,6 +2792,7 @@ async def _skills_review(dsn: str, proposal_id: str, action: str, skip_confirm: 
         sys.stdout.write(
             f"Proposal {row['id']} [{row['status']}]\n"
             f"  {row['mode']} skill: {row['name']}\n"
+            f"  Origin: {row['origin']}\n"
             f"  Confidence: {row['confidence']:.2f}\n"
             f"  Evidence: {row['source_units']} source turns, {row['source_memories']} memories\n"
             f"  Description: {row['description']}\n"
@@ -2719,7 +3086,7 @@ async def _channels_setup(dsn: str, channel_type: str) -> int:
 
 def _print_rich_status(p: dict[str, Any]) -> None:
     """Print a rich, human-readable status display."""
-    from apps.cli_theme import console, energy_bar, kv, make_panel, mood_label
+    from apps.cli_theme import console, energy_bar, make_panel, mood_label
     from rich.text import Text
 
     identity = p.get("identity") or "(not configured)"
@@ -3520,7 +3887,6 @@ def _handle_ui_container(
 ) -> int:
     """Start the UI via the containerized service (pip install path)."""
     import threading
-    import time
     import webbrowser
 
     from apps.cli_theme import console
@@ -3783,6 +4149,53 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if func == "characters_export":
         dsn = _get_dsn(args)
         return asyncio.run(_characters_export(dsn, args.name, args.output))
+
+    if func in {"chat_sessions", "chat_sessions_list"}:
+        return asyncio.run(_chat_sessions_list(
+            _get_dsn(args),
+            getattr(args, "limit", 20),
+            getattr(args, "surface", None),
+            getattr(args, "status", "active"),
+            getattr(args, "json", False),
+        ))
+    if func == "chat_sessions_show":
+        return asyncio.run(_chat_sessions_show(
+            _get_dsn(args),
+            args.session_id,
+            args.visible_only,
+            args.json,
+        ))
+    if func == "chat_sessions_export":
+        return asyncio.run(_chat_sessions_export(
+            _get_dsn(args),
+            args.session_id,
+            args.format,
+            args.output,
+            args.visible_only,
+        ))
+    if func == "chat_sessions_title":
+        return asyncio.run(_chat_sessions_title(
+            _get_dsn(args),
+            args.session_id,
+            args.title,
+            args.json,
+        ))
+    if func == "chat_sessions_fork":
+        return asyncio.run(_chat_sessions_fork(
+            _get_dsn(args),
+            args.session_id,
+            args.until_ordinal,
+            args.title,
+            args.json,
+        ))
+    if func == "chat_sessions_clone":
+        return asyncio.run(_chat_sessions_fork(
+            _get_dsn(args),
+            args.session_id,
+            None,
+            args.title,
+            args.json,
+        ))
 
     if func in {"hmx_export", "hmx_import", "hmx_review"}:
         from apps.cli_exchange import run_export, run_import, run_review

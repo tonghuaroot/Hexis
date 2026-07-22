@@ -21,7 +21,7 @@ if False:  # pragma: no cover - typing only
     from core.tools.registry import ToolRegistry
 
 
-DISCOVERY_TOOL_NAMES = {"list_skills", "use_skill"}
+DISCOVERY_TOOL_NAMES = {"list_skills", "use_skill", "propose_skill"}
 DEFAULT_SKILL_NAMES = {"core-memory"}
 HEARTBEAT_DEFAULT_SKILL_NAMES = {"core-memory", "self-reflection"}
 AUTO_ACTIVATE_SCORE_THRESHOLD = 5
@@ -219,7 +219,9 @@ def format_skills_prompt(
         "tools are exposed through the tool API only while that skill is active. "
         "If the task needs a capability that is not active, call `use_skill` with "
         "the skill's name — it returns the skill's full instructions and unlocks "
-        "its tools for this turn. `list_skills` shows the catalog with bound tools.",
+        "its tools for this turn. `list_skills` shows the catalog with bound tools. "
+        "If no existing skill fits a reusable need, call `propose_skill`; it creates "
+        "a reviewable proposal only, not a live skill file.",
     ]
     if active:
         lines.append("Active now:\n" + "\n".join(s.to_index_line() for s in active))

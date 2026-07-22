@@ -1,5 +1,6 @@
 """Tests for Skills Marketplace features (J.1-J.4)."""
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -206,6 +207,7 @@ class TestSkillRuntimeSelection:
 
         assert "skill-authoring" in names
         assert "author_skill" in selection.allowed_tool_names
+        assert "propose_skill" in selection.allowed_tool_names
 
     async def test_selection_carries_full_catalog_for_prompt_index(self, db_pool):
         from core.tools import ToolContext, create_default_registry
@@ -264,7 +266,7 @@ class TestPluginSkillDirs:
         assert "plugin-demo" in {s["name"] for s in listed.output["skills"]}
 
         # Activatable through use_skill, unlocking its bound tools
-        assert get_skill_by_name(registry, ToolContext.CHAT, "plugin-demo") is not None
+        assert await get_skill_by_name(registry, ToolContext.CHAT, "plugin-demo") is not None
         activated = await UseSkillHandler().execute({"name": "plugin-demo"}, ctx)
         assert activated.success is True
         assert "Plugin Demo" in activated.output["instructions"]
@@ -355,6 +357,79 @@ class TestSkillDiscoveryTools:
         assert parsed[0].bound_tools == ["recall", "remember"]
         assert parsed[0].provenance["authored_by"] == "hexis"
         assert parsed[0].provenance["managed_by"] == "author_skill"
+
+    async def test_propose_skill_creates_pending_review_before_apply(
+        self, db_pool, monkeypatch, tmp_path
+    ):
+        from core.tools import ToolContext, ToolExecutionContext, create_default_registry
+        from core.tools.skills import ProposeSkillHandler, ReviewSkillProposalHandler
+        from skills.loader import load_skills_from_dir
+
+        agent_root = tmp_path / "agent-authored"
+        monkeypatch.setattr("core.tools.skills.AGENT_AUTHORED_SKILLS_DIR", agent_root)
+        registry = create_default_registry(db_pool)
+        ctx = ToolExecutionContext(
+            tool_context=ToolContext.CHAT,
+            call_id="propose-skill-test",
+            session_id="11111111-1111-4111-8111-111111111111",
+            registry=registry,
+        )
+        payload = {
+            "need": "The agent noticed a reusable inbox triage workflow that is not covered by any current skill.",
+            "name": "inbox-triage",
+            "description": "Triage an inbox for important actionable items",
+            "category": "productivity",
+            "contexts": ["chat", "heartbeat"],
+            "bound_tools": ["recall"],
+            "content": (
+                "# Inbox Triage\n\n"
+                "Use this when the user asks for recurring inbox triage. First inspect "
+                "available connector state, then identify messages that are urgent, "
+                "important, or waiting on the user. Summarize actions without sending, "
+                "deleting, labeling, or notifying anyone unless a separate authorization "
+                "grant explicitly allows that effect."
+            ),
+            "rationale": "Inbox triage is a reusable operational workflow and should not be rederived every time.",
+            "confidence": 0.82,
+        }
+
+        result = await ProposeSkillHandler().execute(payload, ctx)
+
+        assert result.success is True
+        proposal_id = result.output["proposal_id"]
+        assert result.output["writes_skill_file"] is False
+        assert not (agent_root / "inbox-triage" / "SKILL.md").exists()
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT status, name, confidence, source_unit_ids, evidence
+                FROM skill_improvement_proposals
+                WHERE id = $1::uuid
+                """,
+                proposal_id,
+            )
+        assert row is not None
+        assert row["status"] == "pending"
+        assert row["name"] == "inbox-triage"
+        assert row["confidence"] == pytest.approx(0.82)
+        assert list(row["source_unit_ids"]) == []
+        evidence = row["evidence"] if isinstance(row["evidence"], dict) else json.loads(row["evidence"])
+        assert evidence["origin"] == "on_demand"
+        assert evidence["call_id"] == "propose-skill-test"
+        assert "inbox triage workflow" in evidence["need"]
+
+        applied = await ReviewSkillProposalHandler().execute(
+            {"proposal_id": proposal_id, "action": "apply"},
+            ctx,
+        )
+
+        assert applied.success is True
+        path = agent_root / "inbox-triage" / "SKILL.md"
+        assert path.exists()
+        parsed = load_skills_from_dir(agent_root)
+        assert len(parsed) == 1
+        assert parsed[0].name == "inbox-triage"
+        assert parsed[0].provenance["proposal_id"] == proposal_id
 
     async def test_author_skill_refuses_accidental_overwrite(self, db_pool, monkeypatch, tmp_path):
         from core.tools import ToolContext, ToolExecutionContext, create_default_registry
@@ -965,7 +1040,6 @@ class TestSkillToolBinding:
 class TestDiscoverSkillDirs:
     def test_discovers_bundled(self):
         dirs = discover_skill_dirs()
-        bundled = Path(__file__).resolve().parents[2] / "skills" / "installed"
         assert any(str(d).endswith("installed") for d in dirs)
 
     def test_user_dir_included_if_exists(self):

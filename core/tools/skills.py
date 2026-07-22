@@ -67,6 +67,11 @@ class ListSkillsHandler(ToolHandler):
             {
                 "skills": skills,
                 "acquirable": {
+                    "propose_skill": (
+                        "Create a pending, reviewable skill proposal when no "
+                        "existing skill covers a reusable need. This does not "
+                        "write a skill file."
+                    ),
                     "author_skill": (
                         "Create a new skill with the author_skill tool — packaged "
                         "instructions plus the tools it binds."
@@ -206,6 +211,227 @@ class UseSkillHandler(ToolHandler):
                 "next_step": "Check the skill manifest's bound_tools against the server's tool list.",
             }
         return {"status": "activated", "mcp_tools": mcp_tools}
+
+
+class ProposeSkillHandler(ToolHandler):
+    """Create a durable, reviewable skill proposal without writing files."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="propose_skill",
+            description=(
+                "Draft a reusable Hexis skill proposal when no existing skill covers "
+                "a capability gap or the user asks for a new reusable behavior. "
+                "This only creates a pending review item; it does not write or activate "
+                "a skill file."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "need": {
+                        "type": "string",
+                        "description": "The reusable capability gap or user-requested behavior this skill would cover.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name, lowercase kebab-case, e.g. invoice-triage.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One concise sentence describing when to use the skill.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Markdown skill instructions, including method and quality guidance.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [c.value for c in SkillCategory],
+                        "description": "Skill category.",
+                        "default": SkillCategory.OTHER.value,
+                    },
+                    "contexts": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": [c.value for c in SkillContext]},
+                        "description": "Contexts where the skill can activate.",
+                        "default": [SkillContext.CHAT.value, SkillContext.HEARTBEAT.value],
+                    },
+                    "bound_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Existing tools this skill may unlock.",
+                        "default": [],
+                    },
+                    "requires_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Existing tools required for this skill to load.",
+                        "default": [],
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["create", "update"],
+                        "description": "create refuses to shadow an existing skill; update requires Hexis-managed ownership.",
+                        "default": "create",
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why this reusable skill is worth reviewing.",
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "Confidence that this should become durable. Defaults to 0.75.",
+                    },
+                    "source_memory_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "description": "Optional source memories supporting this proposal.",
+                    },
+                    "source_unit_ids": {
+                        "type": "array",
+                        "items": {"type": "string", "format": "uuid"},
+                        "description": "Optional raw experience units supporting this proposal.",
+                    },
+                },
+                "required": ["need", "name", "description", "content", "rationale"],
+            },
+            category=ToolCategory.EXTERNAL,
+            energy_cost=1,
+            is_read_only=False,
+            requires_approval=False,
+            supports_parallel=False,
+            allowed_contexts={ToolContext.CHAT, ToolContext.HEARTBEAT},
+        )
+
+    def validate(self, arguments: dict[str, Any]) -> list[str]:
+        errors: list[str] = []
+        name = str(arguments.get("name") or "").strip()
+        if not _SKILL_NAME_RE.match(name):
+            errors.append("name must be lowercase kebab-case/underscore, 2-64 chars")
+        if not str(arguments.get("need") or "").strip():
+            errors.append("need is required")
+        if not str(arguments.get("description") or "").strip():
+            errors.append("description is required")
+        if not str(arguments.get("rationale") or "").strip():
+            errors.append("rationale is required")
+        content = str(arguments.get("content") or "").strip()
+        if len(content) < 120:
+            errors.append("content must be substantive (at least 120 characters)")
+        mode = str(arguments.get("mode") or "create")
+        if mode not in {"create", "update"}:
+            errors.append("mode must be create or update")
+        for ctx in arguments.get("contexts") or [SkillContext.CHAT.value, SkillContext.HEARTBEAT.value]:
+            if str(ctx) not in {c.value for c in SkillContext}:
+                errors.append(f"unknown context: {ctx}")
+        category = str(arguments.get("category") or SkillCategory.OTHER.value)
+        if category not in {c.value for c in SkillCategory}:
+            errors.append(f"unknown category: {category}")
+        for field in ("source_memory_ids", "source_unit_ids"):
+            for value in arguments.get(field) or []:
+                try:
+                    uuid.UUID(str(value))
+                except ValueError:
+                    errors.append(f"{field} contains a non-UUID value: {value}")
+        confidence = arguments.get("confidence")
+        if confidence is not None:
+            try:
+                numeric_confidence = float(confidence)
+                if not 0 <= numeric_confidence <= 1:
+                    errors.append("confidence must be between 0 and 1")
+            except (TypeError, ValueError):
+                errors.append("confidence must be numeric")
+        return errors
+
+    async def execute(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        if not context.registry:
+            return ToolResult.error_result("Skill proposals require a registry reference", ToolErrorType.EXECUTION_FAILED)
+
+        name = str(arguments["name"]).strip()
+        mode = str(arguments.get("mode") or "create")
+        existing = await get_skill_by_name(context.registry, context.tool_context, name)
+        try:
+            _skill_dir, skill_path = _agent_skill_path(name)
+        except ValueError as exc:
+            return ToolResult.error_result(str(exc), ToolErrorType.PATH_NOT_ALLOWED)
+
+        if mode == "create":
+            if existing or skill_path.exists():
+                return ToolResult.error_result(
+                    f"Skill '{name}' already exists; propose mode='update' for a Hexis-managed skill or choose a new name.",
+                    ToolErrorType.INVALID_PARAMS,
+                )
+        else:
+            if not existing or not skill_path.exists():
+                return ToolResult.error_result(
+                    f"Skill '{name}' does not exist as a Hexis-managed agent-authored skill; propose mode='create' with a new name.",
+                    ToolErrorType.FILE_NOT_FOUND,
+                )
+            managed, detail, _provenance = _agent_skill_ownership(skill_path)
+            if not managed:
+                return ToolResult.error_result(detail, ToolErrorType.PERMISSION_DENIED)
+
+        bound_tools = _string_list(arguments.get("bound_tools"))
+        requires_tools = _string_list(arguments.get("requires_tools"))
+        if not requires_tools:
+            requires_tools = bound_tools[:]
+        known_tools = set(context.registry.list_names())
+        unknown = sorted((set(bound_tools) | set(requires_tools)) - known_tools)
+        if unknown:
+            return ToolResult.error_result(
+                "Unknown tool(s) in skill proposal metadata: " + ", ".join(unknown),
+                ToolErrorType.INVALID_PARAMS,
+            )
+
+        proposal = {
+            "name": name,
+            "description": str(arguments["description"]).strip(),
+            "content": str(arguments["content"]).strip(),
+            "category": str(arguments.get("category") or SkillCategory.OTHER.value),
+            "contexts": [str(v) for v in (arguments.get("contexts") or [SkillContext.CHAT.value, SkillContext.HEARTBEAT.value])],
+            "bound_tools": bound_tools,
+            "requires_tools": requires_tools,
+            "mode": mode,
+            "rationale": str(arguments["rationale"]).strip(),
+            "confidence": float(arguments.get("confidence", 0.75)),
+        }
+        evidence = {
+            "origin": "on_demand",
+            "kind": "skill_proposal",
+            "need": str(arguments["need"]).strip(),
+            "tool_context": context.tool_context.value,
+            "call_id": context.call_id,
+            "session_id": context.session_id,
+            "heartbeat_id": context.heartbeat_id,
+            "source_memory_ids": _string_list(arguments.get("source_memory_ids")),
+            "source_unit_ids": _string_list(arguments.get("source_unit_ids")),
+        }
+
+        async with context.registry.pool.acquire() as conn:
+            raw = await conn.fetchval(
+                "SELECT create_on_demand_skill_proposal($1::jsonb, $2::jsonb)",
+                json.dumps(proposal),
+                json.dumps(evidence),
+            )
+        created = json.loads(raw) if isinstance(raw, str) else raw
+        proposal_id = str(created.get("proposal_id")) if created else None
+        return ToolResult.success_result(
+            {
+                **(created or {}),
+                "proposal_id": proposal_id,
+                "name": name,
+                "mode": mode,
+                "status": "pending",
+                "writes_skill_file": False,
+                "next_step": (
+                    f"Review with `hexis skills review {proposal_id} --action apply` "
+                    "or call review_skill_proposal with explicit approval."
+                ) if proposal_id else "Run `hexis skills proposals` to inspect pending proposals.",
+            },
+            f"Proposed skill '{name}' for review",
+        )
 
 
 class AuthorSkillHandler(ToolHandler):
@@ -790,6 +1016,7 @@ def create_skill_tools() -> list[ToolHandler]:
     return [
         ListSkillsHandler(),
         UseSkillHandler(),
+        ProposeSkillHandler(),
         AuthorSkillHandler(),
         ListSkillProposalsHandler(),
         ReviewSkillProposalHandler(),
