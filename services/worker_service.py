@@ -666,6 +666,46 @@ class MaintenanceWorker:
         if self.bridge:
             await self.bridge.publish_outbox_payloads(messages)
 
+    async def _tee_outbox_to_web_inbox(self, conn: asyncpg.Connection, messages: list[dict]) -> int:
+        """Make dashboard delivery independent of the channel worker.
+
+        ChannelOutboxConsumer also tees RabbitMQ messages into web_inbox. This
+        local copy uses the same envelope id, so redelivery through RabbitMQ is
+        idempotent instead of duplicative.
+        """
+        if not messages:
+            return 0
+        enabled = await conn.fetchval(
+            "SELECT COALESCE(get_config_bool('channel.web_inbox.enabled'), TRUE)"
+        )
+        if not enabled:
+            return 0
+
+        delivered = 0
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+            delivery_info = payload.get("delivery") or msg.get("delivery")
+            if isinstance(delivery_info, dict) and delivery_info.get("mode") == "silent":
+                continue
+            body = {
+                "id": msg.get("message_id") or msg.get("id"),
+                "kind": msg.get("kind"),
+                "payload": payload,
+            }
+            if msg.get("delivery") is not None:
+                body["delivery"] = msg.get("delivery")
+            if msg.get("task_name") is not None:
+                body["task_name"] = msg.get("task_name")
+            web_id = await conn.fetchval(
+                "SELECT web_inbox_deliver($1::jsonb)",
+                json.dumps(body, default=str),
+            )
+            if web_id:
+                delivered += 1
+        return delivered
+
     async def _run_inbox_poll(self) -> dict[str, Any]:
         if not self.bridge:
             return {"skipped": True, "reason": "no_bridge"}
@@ -708,6 +748,9 @@ class MaintenanceWorker:
                 return {"skipped": True, "reason": "no_scheduled_payload"}
             outbox_messages = payload.get("outbox_messages")
             if isinstance(outbox_messages, list):
+                delivered = await self._tee_outbox_to_web_inbox(conn, outbox_messages)
+                if delivered:
+                    payload["web_inbox_delivered"] = delivered
                 await self._publish_outbox(outbox_messages)
             executed = payload.get("ran") or payload.get("executed_count") or payload.get("executed")
             ran_tasks = payload.get("ran_tasks") or []

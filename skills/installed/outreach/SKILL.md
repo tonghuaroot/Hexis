@@ -22,4 +22,7 @@ scarcest resource there is: someone's attention. Earn the interruption.
    never groups.
 4. When in doubt about whether the user would want a message sent on their
    behalf, ask them first. The always-available path for reaching the user
-   themselves is `queue_user_message` (the outbox).
+   themselves is `queue_user_message` (the outbox). Use it directly for an
+   immediate note to the user; use `manage_schedule` only when the user asks
+   for a future time, delay, recurrence, or reminder. Do not invent a delay to
+   make a note feel more independent.

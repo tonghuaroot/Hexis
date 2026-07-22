@@ -67,6 +67,10 @@ class RabbitMQBridge:
             payload = msg.get("payload")
             msg_id = msg.get("message_id") or msg.get("id")
             body = {"id": msg_id, "kind": kind, "payload": payload}
+            if msg.get("delivery") is not None:
+                body["delivery"] = msg.get("delivery")
+            if msg.get("task_name") is not None:
+                body["task_name"] = msg.get("task_name")
             try:
                 resp = await self._request(
                     "POST",

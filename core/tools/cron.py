@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from .base import (
     ToolCategory,
@@ -21,9 +21,6 @@ from .base import (
     ToolResult,
     ToolSpec,
 )
-
-if TYPE_CHECKING:
-    import asyncpg
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +53,8 @@ class ManageScheduleHandler(ToolHandler):
                 "'cron' (standard cron expression like '0 9 * * *'). "
                 "Shorthand: 'once:+2h', 'daily:07:00', 'weekly:monday:09:00', 'every:5m', "
                 "or standard cron: '*/15 * * * *', '0 9 * * 1-5'. "
+                "Use this only for explicit future or recurring work; for an immediate "
+                "message to the user, call queue_user_message directly and do not invent a delay. "
                 "Action kinds: 'queue_user_message' (send a message prompt to yourself), "
                 "'create_goal' (create a goal when the task fires). "
                 "Delivery modes: 'outbox' (default), 'channel' (specific channel+topic), "
@@ -87,7 +86,8 @@ class ManageScheduleHandler(ToolHandler):
                         "description": (
                             "Schedule specification. Either a shorthand like 'daily:07:00', "
                             "'once:+2h', 'every:5m', 'weekly:monday:09:00' — or a JSON object "
-                            "matching the schedule_kind (e.g. {\"time\": \"07:00\"} for daily)."
+                            "matching the schedule_kind (e.g. {\"time\": \"07:00\"} for daily). "
+                            "Do not use a tiny one-shot delay for an immediate send request."
                         ),
                     },
                     "timezone": {
@@ -97,7 +97,10 @@ class ManageScheduleHandler(ToolHandler):
                     "action_kind": {
                         "type": "string",
                         "enum": list(_VALID_ACTION_KINDS),
-                        "description": "What to do when the task fires. Default: 'queue_user_message'.",
+                        "description": (
+                            "What to do when the task fires. Default: 'queue_user_message'. "
+                            "For immediate user messages, use queue_user_message without scheduling."
+                        ),
                     },
                     "message": {
                         "type": "string",
