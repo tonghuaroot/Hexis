@@ -113,6 +113,16 @@ CREATE INDEX idx_memories_worldview_category ON memories ((metadata->>'category'
 CREATE INDEX idx_memories_goal_priority ON memories ((metadata->>'priority'))
     WHERE type = 'goal';
 CREATE INDEX idx_embedding_cache_created ON embedding_cache (created_at);
+CREATE INDEX IF NOT EXISTS idx_worker_instances_status_seen
+    ON worker_instances (status, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_worker_instances_mode_seen
+    ON worker_instances (mode, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_worker_task_runs_task_started
+    ON worker_task_runs (task_type, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_worker_task_runs_status_started
+    ON worker_task_runs (status, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_worker_task_runs_worker_started
+    ON worker_task_runs (worker_id, started_at DESC);
 CREATE INDEX idx_consent_log_model_endpoint ON consent_log (provider, model, endpoint);
 CREATE UNIQUE INDEX idx_emotional_triggers_pattern ON emotional_triggers (trigger_pattern);
 CREATE INDEX idx_emotional_triggers_embedding ON emotional_triggers USING hnsw (trigger_embedding vector_cosine_ops);

@@ -60,6 +60,48 @@ def _coerce_json_value(val: Any) -> Any:
     return val
 
 
+def _json_ready(val: Any) -> Any:
+    if val is None or isinstance(val, (int, float, bool)):
+        return val
+    if isinstance(val, str):
+        s = val.strip()
+        if s[:1] in ("{", "["):
+            try:
+                return _json_ready(json.loads(s))
+            except Exception:
+                return val
+        return val
+    if isinstance(val, datetime):
+        return val.isoformat()
+    if isinstance(val, dict):
+        return {str(k): _json_ready(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_json_ready(v) for v in val]
+    try:
+        json.dumps(val)
+        return val
+    except TypeError:
+        return str(val)
+
+
+def _record_to_dict(row: Any) -> dict[str, Any]:
+    return {str(k): _json_ready(row[k]) for k in row.keys()}
+
+
+_CURRENT_WORKERS_SQL = """
+SELECT *
+FROM (
+    SELECT
+        worker_runtime_status.*,
+        row_number() OVER (PARTITION BY mode ORDER BY last_seen_at DESC) AS mode_rank
+    FROM worker_runtime_status
+    WHERE status NOT IN ('stopped', 'terminated')
+) ranked
+WHERE mode_rank = 1
+ORDER BY mode
+"""
+
+
 async def status_payload(
     dsn: str | None = None,
     *,
@@ -87,6 +129,19 @@ async def status_payload(
 
         payload["embedding_service_url"] = await conn.fetchval("SELECT get_config_text('embedding.service_url')")
         payload["embedding_dimension"] = int(await conn.fetchval("SELECT embedding_dimension()"))
+
+        try:
+            worker_rows = await conn.fetch(_CURRENT_WORKERS_SQL)
+            workers = [_record_to_dict(r) for r in worker_rows]
+            for worker in workers:
+                worker.pop("mode_rank", None)
+            payload["workers"] = workers
+            task_rows = await conn.fetch("SELECT * FROM worker_task_status")
+            payload["worker_tasks"] = [_record_to_dict(r) for r in task_rows]
+        except Exception as exc:
+            payload["workers"] = []
+            payload["worker_tasks"] = []
+            payload["worker_status_error"] = str(exc)
 
         if include_embedding_health:
             try:
@@ -467,7 +522,91 @@ async def doctor_payload(
         except Exception as exc:
             checks.append({"label": "Heartbeat", "status": "FAIL", "detail": str(exc)})
 
-        # 7. Channels
+        # 7. Worker processes
+        try:
+            worker_rows = await conn.fetch(
+                """
+                SELECT mode, status, last_seen_age_s, is_stale, current_task_type
+                FROM worker_runtime_status
+                WHERE status NOT IN ('stopped', 'terminated')
+                ORDER BY last_seen_at DESC
+                LIMIT 20
+                """
+            )
+            latest_by_mode: dict[str, Any] = {}
+            for row in worker_rows:
+                mode = str(row["mode"])
+                if mode not in latest_by_mode:
+                    latest_by_mode[mode] = row
+
+            expected_modes = ("heartbeat", "maintenance")
+            missing = [m for m in expected_modes if m not in latest_by_mode]
+            stale = [
+                m for m, row in latest_by_mode.items()
+                if row["status"] == "stale" or bool(row["is_stale"])
+            ]
+            if not worker_rows:
+                checks.append({
+                    "label": "Workers",
+                    "status": "WARN",
+                    "detail": "no worker liveness records yet",
+                })
+            elif missing or stale:
+                details = []
+                if missing:
+                    details.append("missing " + ", ".join(missing))
+                if stale:
+                    details.append("stale " + ", ".join(sorted(stale)))
+                checks.append({
+                    "label": "Workers",
+                    "status": "WARN",
+                    "detail": "; ".join(details),
+                })
+            else:
+                parts = [
+                    f"{mode}: {row['status']} ({row['last_seen_age_s']}s ago)"
+                    for mode, row in sorted(latest_by_mode.items())
+                ]
+                checks.append({
+                    "label": "Workers",
+                    "status": "OK",
+                    "detail": ", ".join(parts),
+                })
+        except Exception as exc:
+            checks.append({"label": "Workers", "status": "WARN", "detail": str(exc)})
+
+        # 7b. Worker task failures
+        try:
+            failed_rows = await conn.fetch(
+                """
+                SELECT task_type, failures_since_success, latest_error
+                FROM worker_task_status
+                WHERE failures_since_success > 0
+                ORDER BY failures_since_success DESC, task_type
+                LIMIT 5
+                """
+            )
+            if failed_rows:
+                detail = "; ".join(
+                    f"{r['task_type']}: {r['failures_since_success']} "
+                    f"({r['latest_error'] or 'no error detail'})"
+                    for r in failed_rows
+                )
+                checks.append({
+                    "label": "Worker task failures",
+                    "status": "WARN",
+                    "detail": detail,
+                })
+            else:
+                checks.append({
+                    "label": "Worker task failures",
+                    "status": "OK",
+                    "detail": "no task failure streaks",
+                })
+        except Exception as exc:
+            checks.append({"label": "Worker task failures", "status": "WARN", "detail": str(exc)})
+
+        # 8. Channels
         try:
             ch_rows = await conn.fetch("""
                 SELECT channel_type, COUNT(*) AS sessions
@@ -491,7 +630,7 @@ async def doctor_payload(
         except Exception:
             checks.append({"label": "Channels", "status": "WARN", "detail": "channel tables not available"})
 
-        # 8. Tools
+        # 9. Tools
         try:
             import asyncpg
             from core.agent_api import pool_sizes_from_env
@@ -514,7 +653,7 @@ async def doctor_payload(
         except Exception as exc:
             checks.append({"label": "Tools", "status": "WARN", "detail": str(exc)})
 
-        # 9. Skills
+        # 10. Skills
         try:
             from skills.loader import load_skills_from_dir, discover_skill_dirs
             total = 0
@@ -534,7 +673,7 @@ async def doctor_payload(
         except Exception as exc:
             checks.append({"label": "Skills", "status": "WARN", "detail": str(exc)})
 
-        # 10. Schema (count applied SQL files by checking key tables/functions)
+        # 11. Schema (count applied SQL files by checking key tables/functions)
         try:
             table_count = await conn.fetchval("""
                 SELECT COUNT(*) FROM information_schema.tables
@@ -552,7 +691,7 @@ async def doctor_payload(
         except Exception as exc:
             checks.append({"label": "Schema", "status": "FAIL", "detail": str(exc)})
 
-        # 11. Memory stats
+        # 12. Memory stats
         try:
             mem_stats = await conn.fetch("""
                 SELECT type, COUNT(*) AS cnt
@@ -578,7 +717,7 @@ async def doctor_payload(
         except Exception as exc:
             checks.append({"label": "Memory", "status": "FAIL", "detail": str(exc)})
 
-        # 12. LLM connectivity (opt-in: makes one real call)
+        # 13. LLM connectivity (opt-in: makes one real call)
         if check_llm:
             try:
                 from core.init_api import test_llm_connection
@@ -786,6 +925,19 @@ async def status_payload_rich(
             payload["scheduled_tasks"] = task_count or 0
         except Exception:
             payload["scheduled_tasks"] = 0
+
+        # Worker runtime status
+        try:
+            worker_rows = await conn.fetch(_CURRENT_WORKERS_SQL)
+            workers = [_record_to_dict(r) for r in worker_rows]
+            for worker in workers:
+                worker.pop("mode_rank", None)
+            payload["workers"] = workers
+            task_rows = await conn.fetch("SELECT * FROM worker_task_status")
+            payload["worker_tasks"] = [_record_to_dict(r) for r in task_rows]
+        except Exception:
+            payload["workers"] = []
+            payload["worker_tasks"] = []
 
         return payload
     finally:

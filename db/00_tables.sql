@@ -421,6 +421,40 @@ CREATE TABLE embedding_cache (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS worker_instances (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mode TEXT NOT NULL CHECK (mode IN ('heartbeat', 'maintenance', 'both', 'channel', 'unknown')),
+    instance_name TEXT,
+    process_id INT,
+    host_name TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_success_at TIMESTAMPTZ,
+    last_error_at TIMESTAMPTZ,
+    stopped_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('starting', 'running', 'stopping', 'stopped', 'stale', 'terminated')),
+    current_task_type TEXT,
+    current_task_run_id UUID,
+    build_id TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE TABLE IF NOT EXISTS worker_task_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    worker_id UUID REFERENCES worker_instances(id) ON DELETE SET NULL,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running', 'completed', 'failed', 'unknown')),
+    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finished_at TIMESTAMPTZ,
+    result JSONB,
+    error TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ============================================================================
 -- UNIFIED CONFIG
 -- ============================================================================

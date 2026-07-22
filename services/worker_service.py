@@ -5,6 +5,9 @@ import asyncio
 import json
 import logging
 import os
+import socket
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 import asyncpg
 from dotenv import load_dotenv
@@ -58,6 +61,222 @@ POLL_INTERVAL = float(os.getenv("WORKER_POLL_INTERVAL", 1.0))
 MAX_RETRIES = int(os.getenv("WORKER_MAX_RETRIES", 3))
 
 
+def _json_payload(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, default=str)
+
+
+def _result_has_work(result: Any) -> bool:
+    if result is None:
+        return False
+    if isinstance(result, bool):
+        return result
+    if isinstance(result, int):
+        return result > 0
+    if isinstance(result, (list, tuple, set)):
+        return bool(result)
+    if isinstance(result, dict):
+        return not bool(result.get("skipped"))
+    return True
+
+
+def _worker_metadata() -> dict[str, Any]:
+    return {
+        "process_id": os.getpid(),
+        "host_name": socket.gethostname(),
+        "command": "hexis-worker",
+    }
+
+
+async def _recover_worker_runtime(pool: asyncpg.Pool) -> None:
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT recover_interrupted_worker_runs($1::interval)", "10 minutes")
+    except Exception:
+        logger.debug("worker runtime recovery unavailable", exc_info=True)
+
+
+async def _register_worker_instance(
+    pool: asyncpg.Pool,
+    mode: str,
+    instance: str | None,
+) -> str | None:
+    metadata = _worker_metadata()
+    try:
+        await _recover_worker_runtime(pool)
+        async with pool.acquire() as conn:
+            worker_id = await conn.fetchval(
+                "SELECT register_worker_instance($1, $2, $3::jsonb)",
+                mode,
+                instance,
+                _json_payload(metadata),
+            )
+        return str(worker_id) if worker_id else None
+    except Exception:
+        logger.warning("worker runtime registration failed", exc_info=True)
+        return None
+
+
+async def _mark_worker_seen(
+    pool: asyncpg.Pool | None,
+    worker_id: str | None,
+    *,
+    status: str = "running",
+) -> None:
+    if not pool or not worker_id:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT mark_worker_instance_seen($1::uuid, $2)",
+                worker_id,
+                status,
+            )
+    except Exception:
+        logger.debug("worker liveness update failed", exc_info=True)
+
+
+async def _mark_worker_stopped(
+    pool: asyncpg.Pool | None,
+    worker_id: str | None,
+    *,
+    reason: str | None = None,
+) -> None:
+    if not pool or not worker_id:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT mark_worker_instance_stopped($1::uuid, $2)",
+                worker_id,
+                reason,
+            )
+    except Exception:
+        logger.debug("worker stopped update failed", exc_info=True)
+
+
+async def _start_worker_task_run(
+    pool: asyncpg.Pool | None,
+    worker_id: str | None,
+    task_type: str,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    if not pool or not worker_id:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            run_id = await conn.fetchval(
+                "SELECT start_worker_task_run($1::uuid, $2, $3::jsonb)",
+                worker_id,
+                task_type,
+                _json_payload(metadata or {}),
+            )
+        return str(run_id) if run_id else None
+    except Exception:
+        logger.debug("worker task run start failed for %s", task_type, exc_info=True)
+        return None
+
+
+async def _complete_worker_task_run(
+    pool: asyncpg.Pool | None,
+    run_id: str | None,
+    result: Any,
+) -> None:
+    if not pool or not run_id:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT complete_worker_task_run($1::uuid, $2::jsonb)",
+                run_id,
+                _json_payload(result),
+            )
+    except Exception:
+        logger.debug("worker task run completion failed", exc_info=True)
+
+
+async def _fail_worker_task_run(
+    pool: asyncpg.Pool | None,
+    run_id: str | None,
+    error: str,
+    result: Any | None = None,
+) -> None:
+    if not pool or not run_id:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT fail_worker_task_run($1::uuid, $2, $3::jsonb)",
+                run_id,
+                error,
+                _json_payload(result) if result is not None else None,
+            )
+    except Exception:
+        logger.debug("worker task run failure update failed", exc_info=True)
+
+
+async def _discard_worker_task_run(
+    pool: asyncpg.Pool | None,
+    run_id: str | None,
+    result: Any,
+) -> None:
+    if not pool or not run_id:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT discard_worker_task_run($1::uuid, $2::jsonb)",
+                run_id,
+                _json_payload(result),
+            )
+    except Exception:
+        logger.debug("worker task run discard failed", exc_info=True)
+
+
+async def _record_worker_task_outcome(
+    pool: asyncpg.Pool | None,
+    worker_id: str | None,
+    task_type: str,
+    *,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime,
+    result: Any | None = None,
+    error: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str | None:
+    if not pool or not worker_id:
+        return None
+    try:
+        async with pool.acquire() as conn:
+            run_id = await conn.fetchval(
+                """
+                SELECT record_worker_task_outcome(
+                    $1::uuid,
+                    $2,
+                    $3,
+                    $4::timestamptz,
+                    $5::timestamptz,
+                    $6::jsonb,
+                    $7,
+                    $8::jsonb
+                )
+                """,
+                worker_id,
+                task_type,
+                status,
+                started_at,
+                finished_at,
+                _json_payload(result) if result is not None else None,
+                error,
+                _json_payload(metadata or {}),
+            )
+        return str(run_id) if run_id else None
+    except Exception:
+        logger.debug("worker task outcome recording failed for %s", task_type, exc_info=True)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # HeartbeatWorker — Timer that checks if heartbeat is due and submits events
 # ---------------------------------------------------------------------------
@@ -75,29 +294,38 @@ class HeartbeatWorker:
         self.instance = instance or os.getenv("HEXIS_INSTANCE")
         self.pool: asyncpg.Pool | None = None
         self.running = False
+        self.worker_id: str | None = None
 
     async def connect(self) -> None:
         self.pool = await asyncpg.create_pool(
             dsn=db_dsn_from_env(self.instance), min_size=1, max_size=5,
         )
+        self.worker_id = await _register_worker_instance(self.pool, "heartbeat", self.instance)
         logger.info("HeartbeatWorker connected to database")
 
     async def disconnect(self) -> None:
         if self.pool:
+            await _mark_worker_stopped(self.pool, self.worker_id, reason="shutdown")
             await self.pool.close()
             logger.info("HeartbeatWorker disconnected")
 
-    async def _submit_heartbeat_if_due(self) -> None:
+    async def _submit_heartbeat_if_due(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             payload = await run_heartbeat(conn)
             if not payload:
-                return
+                return {"skipped": True, "reason": "not_due"}
             heartbeat_id = payload.get("heartbeat_id")
             if heartbeat_id:
                 logger.info(f"Heartbeat due: {heartbeat_id} — submitting to gateway")
 
+        run_id = await _start_worker_task_run(
+            self.pool,
+            self.worker_id,
+            "heartbeat",
+            metadata={"heartbeat_id": str(heartbeat_id) if heartbeat_id else None},
+        )
         # Submit the full payload as a gateway event for the consumer
         try:
             gw = Gateway(self.pool)
@@ -106,8 +334,18 @@ class HeartbeatWorker:
                 f"heartbeat:{heartbeat_id or 'unknown'}",
                 payload,
             )
+            result = {"heartbeat_id": str(heartbeat_id) if heartbeat_id else None, "submitted": True}
+            await _complete_worker_task_run(self.pool, run_id, result)
+            return result
         except Exception:
             logger.error("Failed to submit heartbeat event", exc_info=True)
+            await _fail_worker_task_run(
+                self.pool,
+                run_id,
+                "failed to submit heartbeat event",
+                {"heartbeat_id": str(heartbeat_id) if heartbeat_id else None},
+            )
+            return {"failed": True, "heartbeat_id": str(heartbeat_id) if heartbeat_id else None}
 
     async def run(self) -> None:
         self.running = True
@@ -117,6 +355,7 @@ class HeartbeatWorker:
         try:
             while self.running:
                 try:
+                    await _mark_worker_seen(self.pool, self.worker_id)
                     if await self._is_agent_terminated():
                         logger.info("Agent is terminated; heartbeat timer exiting.")
                         break
@@ -350,17 +589,76 @@ class MaintenanceWorker:
         self.running = False
         self.bridge: RabbitMQBridge | None = None
         self.tool_registry = None
+        self.worker_id: str | None = None
 
     async def connect(self) -> None:
         self.pool = await asyncpg.create_pool(dsn=db_dsn_from_env(self.instance), min_size=1, max_size=5)
+        self.worker_id = await _register_worker_instance(self.pool, "maintenance", self.instance)
         logger.info("Connected to database")
         self.bridge = RabbitMQBridge(self.pool)
         await self.bridge.ensure_ready()
 
     async def disconnect(self) -> None:
         if self.pool:
+            await _mark_worker_stopped(self.pool, self.worker_id, reason="shutdown")
             await self.pool.close()
             logger.info("Disconnected from database")
+
+    async def _run_observed_task(
+        self,
+        task_type: str,
+        runner: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        started_at = datetime.now(timezone.utc)
+        try:
+            result = await runner()
+        except Exception as exc:
+            await _record_worker_task_outcome(
+                self.pool,
+                self.worker_id,
+                task_type,
+                status="failed",
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc),
+                result={"task_type": task_type},
+                error=str(exc),
+            )
+            logger.exception("Maintenance task %s failed", task_type)
+            return {"failed": True, "error": str(exc)}
+
+        if _result_has_work(result):
+            await _record_worker_task_outcome(
+                self.pool,
+                self.worker_id,
+                task_type,
+                status="completed",
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc),
+                result=result,
+            )
+        return result
+
+    def _maintenance_task_runners(self) -> list[tuple[str, Callable[[], Awaitable[Any]]]]:
+        return [
+            ("inbox_poll", self._run_inbox_poll),
+            ("outbox_delivery", self._run_outbox_delivery),
+            ("scheduled_tasks", self._run_scheduled_tasks),
+            ("hmx_reembedding", self._run_hmx_reembedding),
+            ("subconscious_maintenance", self._run_maintenance_if_due),
+            ("subconscious_decider", self._run_subconscious_if_due),
+            ("reconsolidation", self._run_reconsolidation_if_pending),
+            ("memory_embedding", self._run_memory_embedding),
+            ("recmem", self._run_recmem_if_enabled),
+            ("source_chunk_embedding", self._run_source_chunk_embedding),
+            ("memory_summarization", self._run_memory_rest_if_enabled),
+            ("conscious_extraction", self._run_extraction_if_enabled),
+            ("origin_seed", self._run_origin_seed_if_enabled),
+            ("skill_improvement", self._run_skill_improvement_if_due),
+            ("gmail_backfill", self._run_gmail_backfill_jobs),
+            ("channel_backfill", self._run_channel_backfill_jobs),
+            ("connector_cognition", self._run_connector_cognition),
+            ("ingestion_jobs", self._run_ingestion_jobs),
+        ]
 
     async def _publish_outbox(self, messages: list[dict]) -> None:
         if not messages:
@@ -368,7 +666,13 @@ class MaintenanceWorker:
         if self.bridge:
             await self.bridge.publish_outbox_payloads(messages)
 
-    async def _run_outbox_delivery(self) -> None:
+    async def _run_inbox_poll(self) -> dict[str, Any]:
+        if not self.bridge:
+            return {"skipped": True, "reason": "no_bridge"}
+        await self.bridge.poll_inbox_messages()
+        return {"skipped": True, "reason": "poll_only"}
+
+    async def _run_outbox_delivery(self) -> dict[str, Any]:
         """Drain the DB-native outbox (tool-queued user messages) to RabbitMQ.
 
         publish_outbox_payloads publishes in order and returns the count that
@@ -376,12 +680,12 @@ class MaintenanceWorker:
         and requeue the rest for the next tick.
         """
         if not self.pool or not self.bridge:
-            return
+            return {"skipped": True, "reason": "no_pool_or_bridge"}
         async with self.pool.acquire() as conn:
             raw = await conn.fetchval("SELECT claim_pending_outbox($1::int)", 50)
             claimed = json.loads(raw) if isinstance(raw, str) else (raw or [])
             if not claimed:
-                return
+                return {"skipped": True, "reason": "no_pending_outbox"}
             ids = [c["id"] for c in claimed]
             envelopes = [c["envelope"] for c in claimed]
             published = await self.bridge.publish_outbox_payloads(envelopes)
@@ -389,14 +693,19 @@ class MaintenanceWorker:
                 await conn.fetchval("SELECT mark_outbox_published($1::uuid[])", ids[:published])
             if published < len(ids):
                 await conn.fetchval("SELECT requeue_outbox($1::uuid[])", ids[published:])
+            return {
+                "claimed": len(ids),
+                "published": int(published),
+                "requeued": max(len(ids) - int(published), 0),
+            }
 
-    async def _run_scheduled_tasks(self) -> None:
+    async def _run_scheduled_tasks(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             payload = await run_scheduled_tasks(conn)
             if not isinstance(payload, dict):
-                return
+                return {"skipped": True, "reason": "no_scheduled_payload"}
             outbox_messages = payload.get("outbox_messages")
             if isinstance(outbox_messages, list):
                 await self._publish_outbox(outbox_messages)
@@ -418,14 +727,17 @@ class MaintenanceWorker:
                     await recompute_cron_next_runs(conn, cron_task_ids)
                 except Exception:
                     logger.warning("Cron recompute failed (non-fatal)", exc_info=True)
+            if executed:
+                return payload
+            return {"skipped": True, "reason": "no_due_scheduled_tasks", "payload": payload}
 
-    async def _run_maintenance_if_due(self) -> None:
+    async def _run_maintenance_if_due(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             stats = await run_maintenance_if_due(conn, {})
             if stats is None:
-                return
+                return {"skipped": True, "reason": "not_due"}
             if not stats.get("skipped"):
                 logger.info(f"Subconscious maintenance: {stats}")
                 try:
@@ -436,97 +748,114 @@ class MaintenanceWorker:
                     )
                 except Exception:
                     logger.debug("Gateway record failed (non-fatal)", exc_info=True)
+            return stats
 
-    async def _run_hmx_reembedding(self) -> None:
+    async def _run_hmx_reembedding(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             result = await run_hmx_reembed_step(conn)
             if not result.get("skipped"):
                 logger.info("HMX re-embedding step: %s", result)
+            return result
 
-    async def _run_subconscious_if_due(self) -> None:
+    async def _run_subconscious_if_due(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             should_run = await should_run_subconscious_decider(conn)
             if not should_run:
-                return
+                return {"skipped": True, "reason": "not_due"}
             result = await run_subconscious_decider(conn)
             await mark_subconscious_decider_run(conn)
             logger.info(f"Subconscious decider: {result}")
+            return result
 
-    async def _run_reconsolidation_if_pending(self) -> None:
+    async def _run_reconsolidation_if_pending(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             has_pending = await conn.fetchval("SELECT has_pending_reconsolidation()")
             if not has_pending:
-                return
+                return {"skipped": True, "reason": "no_pending_tasks"}
             result = await run_reconsolidation_step(conn)
             if not result.get("skipped"):
                 logger.info(f"Reconsolidation step: {result}")
+            return result
 
-    async def _run_ingestion_jobs(self) -> None:
+    async def _run_ingestion_jobs(self) -> dict[str, Any]:
         """Durable ingestion jobs (#87): the queue table is the state — no
         state-doc gate, matching outbox delivery."""
-        try:
-            from services.ingest.jobs import run_ingestion_jobs_step
-
-            await run_ingestion_jobs_step(self.pool)
-        except Exception:
-            logger.exception("ingestion job step failed")
-
-    async def _run_gmail_backfill_jobs(self) -> None:
         if not self.pool:
-            return
-        try:
-            handled = await run_gmail_backfill_step(self.pool)
-            if handled:
-                logger.info("Gmail connector backfill jobs handled: %s", handled)
-        except Exception:
-            logger.exception("Gmail connector backfill step failed")
+            return {"skipped": True, "reason": "no_pool"}
+        from services.ingest.jobs import run_ingestion_jobs_step
 
-    async def _run_channel_backfill_jobs(self) -> None:
-        if not self.pool:
-            return
-        try:
-            handled = await run_channel_backfill_step(self.pool)
-            if handled:
-                logger.info("Channel connector backfill jobs handled: %s", handled)
-        except Exception:
-            logger.exception("Channel connector backfill step failed")
+        handled = await run_ingestion_jobs_step(self.pool)
+        if handled:
+            return {"handled": handled}
+        return {"skipped": True, "reason": "no_due_ingestion_jobs"}
 
-    async def _run_connector_cognition(self) -> None:
+    async def _run_gmail_backfill_jobs(self) -> dict[str, Any]:
         if not self.pool:
-            return
-        try:
-            async with self.pool.acquire() as conn:
-                user_model = await run_user_model_synthesis_step(conn)
-                if not user_model.get("skipped"):
-                    logger.info("Connector user-model synthesis: %s", user_model)
-                importance = await run_connector_importance_step(conn)
-                if not importance.get("skipped"):
-                    logger.info("Connector importance detection: %s", importance)
-        except Exception:
-            logger.exception("Connector cognition step failed")
+            return {"skipped": True, "reason": "no_pool"}
+        handled = await run_gmail_backfill_step(self.pool)
+        if handled:
+            logger.info("Gmail connector backfill jobs handled: %s", handled)
+            return {"handled": handled}
+        return {"skipped": True, "reason": "no_due_gmail_backfill_jobs"}
 
-    async def _run_recmem_if_enabled(self) -> None:
+    async def _run_channel_backfill_jobs(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
+        handled = await run_channel_backfill_step(self.pool)
+        if handled:
+            logger.info("Channel connector backfill jobs handled: %s", handled)
+            return {"handled": handled}
+        return {"skipped": True, "reason": "no_due_channel_backfill_jobs"}
+
+    async def _run_connector_cognition(self) -> dict[str, Any]:
+        if not self.pool:
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
+            user_model = await run_user_model_synthesis_step(conn)
+            if not user_model.get("skipped"):
+                logger.info("Connector user-model synthesis: %s", user_model)
+            importance = await run_connector_importance_step(conn)
+            if not importance.get("skipped"):
+                logger.info("Connector importance detection: %s", importance)
+        if user_model.get("skipped") and importance.get("skipped"):
+            return {
+                "skipped": True,
+                "reason": "no_connector_cognition_work",
+                "user_model": user_model,
+                "importance": importance,
+            }
+        return {"user_model": user_model, "importance": importance}
+
+    async def _run_recmem_if_enabled(self) -> dict[str, Any]:
+        if not self.pool:
+            return {"skipped": True, "reason": "no_pool"}
+        async with self.pool.acquire() as conn:
+            summary: dict[str, Any] = {}
+            did_work = False
             embed_result = await run_recmem_embed_step(conn)
             if not embed_result.get("skipped"):
                 logger.info("RecMem embed step: %s", embed_result)
+                did_work = True
+            summary["embed"] = embed_result
             route_result = await run_recmem_route_step(conn)
             if not route_result.get("skipped"):
                 logger.info("RecMem route step: %s", route_result)
+                did_work = True
+            summary["route"] = route_result
             should_sweep = bool(await conn.fetchval("SELECT should_run_recmem_sweep()"))
             if should_sweep:
                 sweep_result = await run_recmem_sweep_step(conn)
                 await conn.fetchval("SELECT mark_recmem_sweep_run($1::jsonb)", json.dumps(sweep_result))
                 if sweep_result.get("processed", 0):
                     logger.info("RecMem sweep step: %s", sweep_result)
+                summary["sweep"] = sweep_result
+                did_work = True
 
             # Scene consolidation (#73): sessions gone quiet become one
             # episode_create task covering the whole conversation.
@@ -538,84 +867,93 @@ class MaintenanceWorker:
                 )
                 if scene_doc.get("enqueued"):
                     logger.info("Scene consolidation: %s", scene_doc)
+                    did_work = True
+                summary["scene_consolidation"] = scene_doc
 
             task_batch_size = int(await conn.fetchval("SELECT COALESCE(get_config_int('memory.recmem_task_batch_size'), 3)") or 3)
+            consolidation_results = []
             for _ in range(max(task_batch_size, 1)):
                 result = await run_recmem_consolidation_step(conn)
                 if result.get("skipped"):
                     break
+                did_work = True
+                consolidation_results.append(result)
+            if consolidation_results:
+                summary["consolidation"] = consolidation_results
+            if not did_work:
+                return {"skipped": True, "reason": "no_recmem_work", "steps": summary}
+            return summary
 
-    async def _run_source_chunk_embedding(self) -> None:
+    async def _run_source_chunk_embedding(self) -> dict[str, Any]:
         """Embed pending source-document chunks (deferred from ingestion so
         the pipeline never blocks on the embedding sidecar)."""
         if not self.pool:
-            return
-        try:
-            async with self.pool.acquire() as conn:
-                result = await run_source_chunk_embed_step(conn)
-            if not result.get("skipped"):
-                logger.info("Source chunk embed step: %s", result)
-        except Exception:
-            logger.exception("source chunk embed step failed")
+            return {"skipped": True, "reason": "no_pool"}
+        async with self.pool.acquire() as conn:
+            result = await run_source_chunk_embed_step(conn)
+        if not result.get("skipped"):
+            logger.info("Source chunk embed step: %s", result)
+        return result
 
-    async def _run_memory_embedding(self) -> None:
+    async def _run_memory_embedding(self) -> dict[str, Any]:
         """Embed pending durable memories off the memory-creation path."""
         if not self.pool:
-            return
-        try:
-            async with self.pool.acquire() as conn:
-                result = await run_memory_embed_step(conn)
-            if not result.get("skipped"):
-                logger.info("Memory embed step: %s", result)
-        except Exception:
-            logger.exception("memory embed step failed")
+            return {"skipped": True, "reason": "no_pool"}
+        async with self.pool.acquire() as conn:
+            result = await run_memory_embed_step(conn)
+        if not result.get("skipped"):
+            logger.info("Memory embed step: %s", result)
+        return result
 
-    async def _run_memory_rest_if_enabled(self) -> None:
+    async def _run_memory_rest_if_enabled(self) -> dict[str, Any]:
         """Drain the memory-consolidation summarization queue (LLM compaction +
         distill-upward). Consolidation/pruning themselves run in the DB maintenance
         pass; this only does the LLM step. No-op unless retention.enabled."""
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             if not bool(await conn.fetchval("SELECT COALESCE(get_config_bool('retention.enabled'), false)")):
-                return
+                return {"skipped": True, "reason": "retention_disabled"}
             result = await run_memory_summarization_step(conn)
             if not result.get("skipped"):
                 logger.info("Memory summarization: %s", result)
+            return result
 
-    async def _run_extraction_if_enabled(self) -> None:
+    async def _run_extraction_if_enabled(self) -> dict[str, Any]:
         """Sweep conscious episodes (chat turns + heartbeat episodes) into
         selective durable memories (#37). No-op unless extraction.enabled."""
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             result = await run_conscious_extraction_step(conn)
             if not result.get("skipped"):
                 logger.info("Conscious extraction: %s", result)
+            return result
 
-    async def _run_origin_seed_if_enabled(self) -> None:
+    async def _run_origin_seed_if_enabled(self) -> dict[str, Any]:
         """Keep origin memories seeded (#40). Idempotent and config-gated in
         the DB, so flipping origin_memories.enabled takes effect on the next
         tick — no manual SQL, no re-consent. Advisory: a failure (e.g. the
         embedding service being down) waits for the next tick, loudly."""
         if not self.pool:
-            return
-        try:
-            async with self.pool.acquire() as conn:
-                raw = await conn.fetchval("SELECT seed_origin_memories()")
-            result = json.loads(raw) if isinstance(raw, str) else (raw or {})
-            if result.get("seeded"):
-                logger.info("Origin memories seeded: %s", result)
-        except Exception as exc:
-            logger.warning("Origin memory seeding failed (will retry next tick): %s", exc)
+            return {"skipped": True, "reason": "no_pool"}
+        async with self.pool.acquire() as conn:
+            raw = await conn.fetchval("SELECT seed_origin_memories()")
+        result = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        if result.get("seeded"):
+            logger.info("Origin memories seeded: %s", result)
+        if result.get("seeded"):
+            return result
+        return {"skipped": True, "reason": "origin_memories_already_seeded", "result": result}
 
-    async def _run_skill_improvement_if_due(self) -> None:
+    async def _run_skill_improvement_if_due(self) -> dict[str, Any]:
         if not self.pool:
-            return
+            return {"skipped": True, "reason": "no_pool"}
         async with self.pool.acquire() as conn:
             result = await run_skill_improvement_review_step(conn, registry=self.tool_registry)
             if not result.get("skipped"):
                 logger.info("Skill-improvement review: %s", result)
+            return result
 
     async def run(self) -> None:
         self.running = True
@@ -624,31 +962,15 @@ class MaintenanceWorker:
         try:
             while self.running:
                 try:
+                    await _mark_worker_seen(self.pool, self.worker_id)
                     if await self._is_agent_terminated():
                         logger.info("Agent is terminated; maintenance worker exiting.")
                         break
                     if not await self._is_agent_ready():
                         await asyncio.sleep(POLL_INTERVAL)
                         continue
-                    if self.bridge:
-                        await self.bridge.poll_inbox_messages()
-                    await self._run_outbox_delivery()
-                    await self._run_scheduled_tasks()
-                    await self._run_hmx_reembedding()
-                    await self._run_maintenance_if_due()
-                    await self._run_subconscious_if_due()
-                    await self._run_reconsolidation_if_pending()
-                    await self._run_memory_embedding()
-                    await self._run_recmem_if_enabled()
-                    await self._run_source_chunk_embedding()
-                    await self._run_memory_rest_if_enabled()
-                    await self._run_extraction_if_enabled()
-                    await self._run_origin_seed_if_enabled()
-                    await self._run_skill_improvement_if_due()
-                    await self._run_gmail_backfill_jobs()
-                    await self._run_channel_backfill_jobs()
-                    await self._run_connector_cognition()
-                    await self._run_ingestion_jobs()
+                    for task_type, runner in self._maintenance_task_runners():
+                        await self._run_observed_task(task_type, runner)
                 except Exception as exc:
                     logger.error(f"Maintenance loop error: {exc}")
                 await asyncio.sleep(POLL_INTERVAL)
@@ -868,4 +1190,5 @@ __all__ = [
     "create_webhook_handler",
     "main",
     "MAX_RETRIES",
+    "_result_has_work",
 ]

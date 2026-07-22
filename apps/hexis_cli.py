@@ -2763,6 +2763,30 @@ def _print_rich_status(p: dict[str, Any]) -> None:
     else:
         console.print("  [key]Heartbeat[/key] [muted]never run[/muted]")
 
+    # Worker runtime liveness
+    workers = p.get("workers", [])
+    active_workers = [
+        w for w in workers
+        if w.get("status") not in {"stopped", "terminated"}
+    ]
+    if active_workers:
+        latest_by_mode = {}
+        for worker in active_workers:
+            mode = worker.get("mode") or "unknown"
+            latest_by_mode.setdefault(mode, worker)
+        parts = []
+        for mode, worker in sorted(latest_by_mode.items()):
+            status = "stale" if worker.get("is_stale") else worker.get("status", "?")
+            age = worker.get("last_seen_age_s")
+            age_s = f"{age}s" if age is not None else "?"
+            style = "warn" if status == "stale" else "ok"
+            task = worker.get("current_task_type")
+            task_s = f":{task}" if task else ""
+            parts.append(f"[{style}]{mode}{task_s} {status}[/{style}] [muted]({age_s})[/muted]")
+        console.print(f"  [key]Workers  [/key] {', '.join(parts)}")
+    else:
+        console.print("  [key]Workers  [/key] [muted]no liveness records[/muted]")
+
     # Memory counts
     memories = p.get("memories", {})
     if memories:
@@ -2790,6 +2814,18 @@ def _print_rich_status(p: dict[str, Any]) -> None:
     sched = p.get("scheduled_tasks", 0)
     if sched > 0:
         console.print(f"  [key]Scheduled[/key] {sched} active task{'s' if sched != 1 else ''}")
+
+    worker_tasks = p.get("worker_tasks", [])
+    failed_tasks = [
+        t for t in worker_tasks
+        if int(t.get("failures_since_success") or 0) > 0
+    ]
+    if failed_tasks:
+        parts = [
+            f"[warn]{t.get('task_type')} x{t.get('failures_since_success')}[/warn]"
+            for t in failed_tasks[:4]
+        ]
+        console.print(f"  [key]Task Fail[/key] {', '.join(parts)}")
 
     # Mood
     mood = p.get("mood")

@@ -288,3 +288,82 @@ SELECT
     'recmem_sweep'::text AS task_type,
     CASE WHEN should_run_recmem_sweep() THEN 1 ELSE 0 END AS pending_count,
     'Re-route old RecMem raw-only units'::text AS description;
+
+CREATE OR REPLACE VIEW worker_runtime_status AS
+SELECT
+    id,
+    mode,
+    instance_name,
+    process_id,
+    host_name,
+    started_at,
+    last_seen_at,
+    last_success_at,
+    last_error_at,
+    stopped_at,
+    status,
+    current_task_type,
+    current_task_run_id,
+    build_id,
+    metadata,
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_seen_at))::int AS last_seen_age_s,
+    (
+        status IN ('starting', 'running', 'stopping')
+        AND last_seen_at < CURRENT_TIMESTAMP - INTERVAL '3 minutes'
+    ) AS is_stale
+FROM worker_instances
+ORDER BY last_seen_at DESC;
+
+CREATE OR REPLACE VIEW worker_task_status AS
+WITH task_catalog AS (
+    SELECT task_type, max(description) AS description
+    FROM (
+        SELECT task_type, description FROM worker_tasks
+        UNION ALL
+        SELECT DISTINCT task_type, NULL::text AS description FROM worker_task_runs
+    ) catalog
+    GROUP BY task_type
+)
+SELECT
+    tc.task_type,
+    COALESCE(wt.pending_count, 0)::int AS pending_count,
+    tc.description,
+    latest.status AS latest_status,
+    latest.started_at AS latest_started_at,
+    latest.finished_at AS latest_finished_at,
+    latest.result AS latest_result,
+    latest.error AS latest_error,
+    success.finished_at AS last_success_at,
+    COALESCE(failures.failures_since_success, 0)::int AS failures_since_success,
+    COALESCE(running.running_count, 0)::int AS running_count
+FROM task_catalog tc
+LEFT JOIN worker_tasks wt ON wt.task_type = tc.task_type
+LEFT JOIN LATERAL (
+    SELECT status, started_at, finished_at, result, error
+    FROM worker_task_runs wr
+    WHERE wr.task_type = tc.task_type
+    ORDER BY wr.started_at DESC
+    LIMIT 1
+) latest ON true
+LEFT JOIN LATERAL (
+    SELECT finished_at
+    FROM worker_task_runs wr
+    WHERE wr.task_type = tc.task_type
+      AND wr.status = 'completed'
+    ORDER BY wr.finished_at DESC NULLS LAST
+    LIMIT 1
+) success ON true
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS failures_since_success
+    FROM worker_task_runs wr
+    WHERE wr.task_type = tc.task_type
+      AND wr.status = 'failed'
+      AND (success.finished_at IS NULL OR wr.started_at > success.finished_at)
+) failures ON true
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS running_count
+    FROM worker_task_runs wr
+    WHERE wr.task_type = tc.task_type
+      AND wr.status = 'running'
+) running ON true
+ORDER BY tc.task_type;
