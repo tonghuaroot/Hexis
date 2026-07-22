@@ -193,7 +193,7 @@ _HELP_GROUPS = [
         ("status", "Show agent status"),
     ]),
     ("Stack", [
-        ("up", "Start the stack"),
+        ("up", "Start the default stack"),
         ("down", "Stop the stack"),
         ("upgrade", "Update + migrate the schema, keeping your data"),
         ("migrate", "Apply pending schema migrations (no data loss)"),
@@ -202,7 +202,7 @@ _HELP_GROUPS = [
         ("reset", "Wipe the DB and re-initialize"),
         ("ps", "List services"),
         ("logs", "Show logs"),
-        ("start", "Start heartbeat and maintenance workers"),
+        ("start", "Start heartbeat and maintenance workers manually if stopped"),
         ("stop", "Stop workers (containers stay running)"),
     ]),
     ("Interact", [
@@ -429,7 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
     open_cmd.add_argument("--port", type=int, default=3477, help="Port (default: 3477)")
     open_cmd.set_defaults(func="open")
 
-    start = sub.add_parser("start", help="Start heartbeat and maintenance workers")
+    start = sub.add_parser("start", help="Start heartbeat and maintenance workers manually if stopped")
     start.set_defaults(func="start")
 
     stop = sub.add_parser("stop", help="Stop workers (containers stay running)")
@@ -3790,6 +3790,7 @@ def _dispatch(argv: list[str] | None = None) -> int:
         if rc == 0:
             from apps.cli_theme import console
             console.print("\n[ok]Stack is starting.[/ok]\n")
+            console.print("  [ok]Background workers[/ok] Heartbeat and memory maintenance run by default")
 
             # Start the standalone embedding sidecar before probing DB health.
             embedding_probe_allowed = True

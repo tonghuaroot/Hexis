@@ -17,7 +17,7 @@ Connect your Hexis agent to messaging platforms (Discord, Telegram, Slack, Signa
 # Configure a channel
 hexis channels setup discord
 
-# Start channel workers (part of active profile)
+# Start additional live channel workers (part of active profile)
 hexis up --profile active
 
 # Check status

@@ -119,11 +119,8 @@ hexis/
 ## Build, Test, and Development Commands
 
 ```bash
-# Start services (passive - db only; embeddings via local sidecar)
+# Start services (db + RabbitMQ + heartbeat/maintenance workers; embeddings via local sidecar)
 docker compose up -d
-
-# Start services (active - adds heartbeat_worker + maintenance_worker)
-docker compose --profile active up -d
 
 # Apply a schema change WITHOUT losing data (add db/migrations/NNNN_*.sql first)
 hexis migrate            # or `hexis upgrade` to also refresh images/code

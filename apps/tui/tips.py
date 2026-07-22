@@ -39,7 +39,7 @@ TIPS: list[str] = [
     "/status shows energy, mood, and consent at a glance.",
     "/tools lists everything the agent can do right now.",
     "The agent remembers across sessions; it forms memories after each turn.",
-    "Run `hexis start` to enable the autonomous heartbeat.",
+    "`hexis up` starts the heartbeat and memory maintenance workers.",
     "Run `hexis doctor --llm` to verify your model connection.",
     "Re-run `hexis init` any time to reconfigure — it won't wipe anything unasked.",
 ]

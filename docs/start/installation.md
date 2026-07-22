@@ -61,7 +61,7 @@ See [Environment Variables](../operations/environment-variables.md) for the comp
 ## Start the Stack
 
 ```bash
-hexis up         # starts PostgreSQL container
+hexis up         # starts PostgreSQL, RabbitMQ, heartbeat worker, and maintenance worker
 hexis doctor     # verify everything is healthy
 ```
 

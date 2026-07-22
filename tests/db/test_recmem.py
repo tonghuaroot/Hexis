@@ -30,6 +30,38 @@ async def _stub_get_embedding(conn, axis=1):
     )
 
 
+async def _stub_get_embedding_by_keyword(conn, keyword, match_axis=2, other_axis=1):
+    await conn.execute(
+        """
+        CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
+        RETURNS vector[] AS $$
+            SELECT COALESCE(
+                array_agg(
+                    CASE WHEN content ILIKE '%' || $func$keyword$func$ || '%' THEN
+                        (
+                            array_fill(0.0::float, ARRAY[$func$match_axis$func$::int - 1]) ||
+                            ARRAY[1.0::float] ||
+                            array_fill(0.0::float, ARRAY[embedding_dimension() - $func$match_axis$func$::int])
+                        )::vector
+                    ELSE
+                        (
+                            array_fill(0.0::float, ARRAY[$func$other_axis$func$::int - 1]) ||
+                            ARRAY[1.0::float] ||
+                            array_fill(0.0::float, ARRAY[embedding_dimension() - $func$other_axis$func$::int])
+                        )::vector
+                    END
+                ),
+                ARRAY[]::vector[]
+            )
+            FROM unnest(text_contents) AS t(content)
+        $$ LANGUAGE sql;
+        """
+        .replace("$func$keyword$func$", repr(str(keyword)))
+        .replace("$func$match_axis$func$", str(int(match_axis)))
+        .replace("$func$other_axis$func$", str(int(other_axis)))
+    )
+
+
 async def _insert_embedded_unit(conn, source_identity, *, axis=1, route_status="unrouted"):
     return await conn.fetchval(
         """
@@ -88,6 +120,74 @@ async def test_recmem_normalization_preserves_internal_whitespace(db_pool):
         text = " \ncode:\n    x  =  1   \n\tindent\t\n\n"
         normalized = await conn.fetchval("SELECT normalize_recmem_text($1)", text)
         assert normalized == "code:\n    x  =  1\n\tindent"
+
+
+async def test_recmem_span_embeddings_recall_by_best_chunk(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding_by_keyword(conn, "span-target")
+            await conn.execute("SELECT set_config('memory.recmem_embedding_chunk_chars', '700'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_embedding_chunk_overlap_chars', '0'::jsonb)")
+            long_text = (
+                ("ordinary preface " * 90)
+                + " span-target exact passage lives in the middle "
+                + ("ordinary tail " * 90)
+            )
+            unit_id = await conn.fetchval(
+                """
+                SELECT (recmem_ingest_turn($1, 'ack', NULL, 'span-recall-target')->>'unit_id')::uuid
+                """,
+                long_text,
+            )
+            await conn.execute(
+                """
+                UPDATE subconscious_units
+                SET embedding_status = 'in_progress',
+                    embedding_attempts = embedding_attempts + 1,
+                    embedding_claimed_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                """,
+                unit_id,
+            )
+            await conn.fetchval("SELECT ensure_recmem_embedding_chunks($1::uuid)", unit_id)
+            chunks = _json(await conn.fetchval("SELECT claim_recmem_embedding_chunks($1::uuid)", unit_id))
+            assert len(chunks) > 1
+            for chunk in chunks:
+                await conn.execute(
+                    """
+                    UPDATE subconscious_unit_embedding_chunks
+                    SET embedding = (get_embedding(ARRAY[$2::text]))[1],
+                        embedded_at = CURRENT_TIMESTAMP,
+                        embedding_status = 'embedded',
+                        embedding_claimed_at = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1::uuid
+                    """,
+                    chunk["chunk_id"],
+                    chunk["content"],
+                )
+            finalized = _json(await conn.fetchval("SELECT finalize_recmem_unit_embedding($1::uuid)", unit_id))
+            assert finalized["status"] == "embedded"
+
+            row = await conn.fetchrow(
+                """
+                SELECT item_id, content, retrieval_source, source_attribution
+                FROM recmem_recall_context('please find span-target', 5, 0, 0, NULL, FALSE, 0)
+                WHERE item_id = $1
+                """,
+                unit_id,
+            )
+
+            assert row is not None
+            assert row["retrieval_source"] == "chunk_vector"
+            assert "span-target exact passage" in row["content"]
+            attribution = _json(row["source_attribution"])
+            assert attribution["recmem_embedding_chunk"]["unit_id"] == str(unit_id)
+            assert attribution["recmem_embedding_chunk"]["chunk_count"] > 1
+        finally:
+            await tr.rollback()
 
 
 async def test_recmem_ingest_idempotency_and_claim(db_pool):

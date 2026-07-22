@@ -48,23 +48,48 @@ async def run_recmem_embed_step(conn) -> dict[str, Any]:
         unit_id = item.get("unit_id")
         content = item.get("content") or ""
         try:
-            await conn.execute(
-                """
-                UPDATE subconscious_units
-                SET embedding = (get_embedding(ARRAY[$2::text]))[1],
-                    embedded_at = CURRENT_TIMESTAMP,
-                    embedding_status = 'embedded',
-                    embedding_claimed_at = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = $1::uuid
-                  AND embedding_status = 'in_progress'
-                """,
-                str(unit_id),
-                content,
-            )
-            embedded += 1
+            await conn.fetchval("SELECT ensure_recmem_embedding_chunks($1::uuid)", str(unit_id))
+            raw_chunks = await conn.fetchval("SELECT claim_recmem_embedding_chunks($1::uuid)", str(unit_id))
+            chunks = _as_list(_coerce_json(raw_chunks))
+            chunk_ids: list[str] = []
+            chunk_contents: list[str] = []
+            for chunk in chunks:
+                if not isinstance(chunk, dict):
+                    continue
+                chunk_id = chunk.get("chunk_id")
+                chunk_content = chunk.get("content") or ""
+                if chunk_id:
+                    chunk_ids.append(str(chunk_id))
+                    chunk_contents.append(chunk_content)
+
+            if not chunk_ids:
+                raise RuntimeError("no RecMem embedding chunks claimed")
+
+            try:
+                await conn.fetchval(
+                    "SELECT embed_claimed_recmem_chunks($1::uuid[], $2::text[])",
+                    chunk_ids,
+                    chunk_contents,
+                )
+            except Exception as exc:
+                for chunk_id in chunk_ids:
+                    await conn.fetchval("SELECT fail_recmem_embedding_chunk($1::uuid, $2::text)", chunk_id, str(exc))
+                raise RuntimeError(f"RecMem embedding chunk batch failed: {exc}") from exc
+
+            finalized_raw = await conn.fetchval("SELECT finalize_recmem_unit_embedding($1::uuid)", str(unit_id))
+            finalized = _coerce_json(finalized_raw)
+            if isinstance(finalized, dict) and finalized.get("status") == "embedded":
+                embedded += 1
+            else:
+                raise RuntimeError(f"RecMem unit embedding did not finalize: {finalized}")
         except Exception as exc:
             failed += 1
+            logger.warning(
+                "RecMem embedding failed: unit=%s chars=%s error=%s",
+                unit_id,
+                len(content),
+                exc,
+            )
             await conn.fetchval("SELECT fail_recmem_embedding($1::uuid, $2::text)", str(unit_id), str(exc))
 
     return {"claimed": len(items), "embedded": embedded, "failed": failed}

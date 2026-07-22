@@ -26,25 +26,29 @@ All workers are **stateless** -- they can be killed and restarted without losing
 ### Via Docker Compose (Recommended)
 
 ```bash
-# Start all workers
-docker compose --profile active up -d
+# Start the default background stack
+docker compose up -d
 
-# Start specific workers
-docker compose --profile active up -d heartbeat_worker maintenance_worker
+# Start specific default workers
+docker compose up -d heartbeat_worker maintenance_worker
 
 # Stop workers (containers stay)
-docker compose --profile active stop heartbeat_worker maintenance_worker
+docker compose stop heartbeat_worker maintenance_worker
 
 # Restart
-docker compose --profile active restart heartbeat_worker maintenance_worker
+docker compose restart heartbeat_worker maintenance_worker
 ```
 
 ### Via CLI
 
 ```bash
-hexis start    # start workers
+hexis up       # start DB, queue, heartbeat worker, and maintenance worker
+hexis start    # start workers manually if they were stopped
 hexis stop     # stop workers
 ```
+
+Channel workers are opt-in because they open live external connections. Start
+them with `hexis up --profile active` after configuring a channel.
 
 ### Running Locally
 

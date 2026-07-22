@@ -1237,8 +1237,8 @@ async def _run_init(dsn: str, *, wait_seconds: int) -> int:
             f"[key]User:[/key]   {user_name}",
             title="What's set up",
         ))
-        console.print("[muted]Change anything later with `hexis init` \u00b7 "
-                      "enable the autonomous heartbeat with `hexis start`.[/muted]")
+        console.print("[muted]Change anything later with `hexis init`. "
+                      "`hexis up` keeps the heartbeat and memory maintenance workers running.[/muted]")
         console.print("[muted]Hexis runs on your machine and sends no telemetry.[/muted]")
         return 0
 

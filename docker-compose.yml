@@ -49,8 +49,6 @@ services:
     image: rabbitmq:4-management
     container_name: hexis_rabbitmq
     restart: unless-stopped
-    profiles:
-      - active
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-hexis}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-hexis_password}
@@ -109,8 +107,6 @@ services:
       dockerfile: ops/Dockerfile.worker
     container_name: hexis_heartbeat_worker
     restart: unless-stopped
-    profiles:
-      - active
     command: ["hexis-worker", "--mode", "heartbeat"]
     depends_on:
       db:
@@ -149,8 +145,6 @@ services:
       dockerfile: ops/Dockerfile.worker
     container_name: hexis_maintenance_worker
     restart: unless-stopped
-    profiles:
-      - active
     command: ["hexis-worker", "--mode", "maintenance"]
     depends_on:
       db:

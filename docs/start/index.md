@@ -9,7 +9,7 @@ section: start
 
 # Getting Started
 
-Get from zero to a running Hexis agent with persistent memory, identity, and optional autonomy.
+Get from zero to a running Hexis agent with persistent memory, identity, and an hourly autonomous heartbeat.
 
 ## Quick Links
 

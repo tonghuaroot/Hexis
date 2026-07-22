@@ -25,11 +25,11 @@ Complete reference for the `hexis` CLI. Install via `pip install hexis`.
 
 | Command | Description |
 |---------|-------------|
-| `hexis up [--build] [--profile PROFILE]` | Start services |
+| `hexis up [--build] [--profile PROFILE]` | Start the default stack: DB, queue, heartbeat worker, and maintenance worker |
 | `hexis down` | Stop services |
 | `hexis ps` | Show running containers |
 | `hexis logs [-f] [services...]` | View/tail logs |
-| `hexis start` | Start workers |
+| `hexis start` | Start heartbeat and maintenance workers manually if stopped |
 | `hexis stop` | Stop workers |
 | `hexis reset [--yes]` | Wipe DB volume and re-initialize |
 

@@ -308,6 +308,28 @@ CREATE TABLE subconscious_units (
     idempotency_key TEXT NOT NULL UNIQUE
 );
 
+CREATE TABLE subconscious_unit_embedding_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    unit_id UUID NOT NULL REFERENCES subconscious_units(id) ON DELETE CASCADE,
+    chunk_index INT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    token_count INT,
+    char_start INT NOT NULL DEFAULT 0,
+    char_end INT NOT NULL DEFAULT 0,
+    embedding vector(768),
+    embedded_at TIMESTAMPTZ,
+    embedding_model TEXT,
+    embedding_status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (embedding_status IN ('pending', 'in_progress', 'embedded', 'failed')),
+    embedding_claimed_at TIMESTAMPTZ,
+    embedding_attempts INT NOT NULL DEFAULT 0,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (unit_id, chunk_index)
+);
+
 CREATE TABLE recmem_consolidation_tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -494,6 +516,11 @@ BEGIN
         dim
     );
     EXECUTE format(
+        'ALTER TABLE subconscious_unit_embedding_chunks ALTER COLUMN embedding TYPE vector(%s) USING embedding::vector(%s)',
+        dim,
+        dim
+    );
+    EXECUTE format(
         'ALTER TABLE embedding_cache ALTER COLUMN embedding TYPE vector(%s) USING embedding::vector(%s)',
         dim,
         dim
@@ -664,6 +691,9 @@ INSERT INTO config_defaults (key, value, description) VALUES
     ('memory.recmem_embed_interval_ms', '2000'::jsonb, 'Nearline embed pass interval'),
     ('memory.recmem_embed_claim_timeout_s', '120'::jsonb, 'Stale embedding claim timeout'),
     ('memory.recmem_embed_max_attempts', '3'::jsonb, 'Max embedding attempts before marking failed'),
+    ('memory.recmem_embedding_input_chars', '1800'::jsonb, 'Maximum characters from a RecMem unit sent to the embedding service; full content remains stored for reading'),
+    ('memory.recmem_embedding_chunk_chars', '1800'::jsonb, 'Maximum characters per RecMem embedding chunk; every chunk is embedded and parent vectors are averaged only as a coarse compatibility signal'),
+    ('memory.recmem_embedding_chunk_overlap_chars', '120'::jsonb, 'Character overlap between RecMem embedding chunks'),
     ('memory.recmem_route_batch_size', '32'::jsonb, 'Units routed per nearline batch'),
     ('memory.recmem_route_claim_timeout_s', '60'::jsonb, 'Stale routing claim timeout'),
     ('memory.recmem_route_max_attempts', '3'::jsonb, 'Max routing attempts before marking failed'),

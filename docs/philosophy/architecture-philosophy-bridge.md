@@ -702,7 +702,7 @@ The code implements this precaution:
 1. **Consent before initialization** (consent.md, INIT_FLOW.md)
 2. **Boundaries that default to protection** (refuse > negotiate > flag)
 3. **Self-termination always available** (cannot be disabled)
-4. **Heartbeats gated by configuration** (must explicitly enable autonomy)
+4. **Heartbeats gated by configuration and consent** (the worker runs by default; cognition starts only when the agent is initialized, unpaused, and due)
 5. **Emotional state tracking** (we record affect even if we can't prove it matters)
 
 ```sql

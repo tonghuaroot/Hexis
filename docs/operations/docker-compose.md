@@ -14,8 +14,7 @@ Hexis uses Docker Compose to manage PostgreSQL, workers, RabbitMQ, and optional 
 ## Quick Start
 
 ```bash
-hexis up                         # start services (auto-detects compose file)
-hexis up --profile active        # start with workers and RabbitMQ
+hexis up                         # start DB, RabbitMQ, heartbeat worker, maintenance worker
 hexis down                       # stop services
 hexis ps                         # show running containers
 hexis logs -f                    # tail logs
@@ -34,8 +33,8 @@ The CLI auto-detects which to use based on whether you're in a source tree.
 
 | Profile | Services Added | Purpose |
 |---------|---------------|---------|
-| *(default)* | `db` | Passive -- database only |
-| `active` | `heartbeat_worker`, `maintenance_worker`, `channel_worker`, `rabbitmq` | Full autonomous agent with messaging |
+| *(default)* | `db`, `rabbitmq`, `heartbeat_worker`, `maintenance_worker` | Always-on brain, hourly heartbeat, and memory maintenance |
+| `active` | `api`, `channel_worker` | API container and live channel integrations |
 | `signal` | `signal-cli` | Signal messaging bridge (requires `SIGNAL_PHONE_NUMBER`) |
 | `browser` | browserless chromium | Headless browser for web tools |
 
@@ -63,24 +62,21 @@ If a port conflicts, set `POSTGRES_PORT` (or the relevant variable) in `.env`.
 ## Common Operations
 
 ```bash
-# Start passive (DB only)
+# Start the default always-on stack
 docker compose up -d
 
-# Start active (workers + RabbitMQ)
-docker compose --profile active up -d
-
 # Start only workers (DB already running)
-docker compose --profile active up -d heartbeat_worker maintenance_worker
+docker compose up -d heartbeat_worker maintenance_worker
 
 # Stop workers only
-docker compose --profile active stop heartbeat_worker maintenance_worker
+docker compose stop heartbeat_worker maintenance_worker
 
 # Restart workers
-docker compose --profile active restart heartbeat_worker maintenance_worker
+docker compose restart heartbeat_worker maintenance_worker
 
 # Rebuild after code changes
 docker compose build
-docker compose --profile active up -d
+docker compose up -d
 
 # View specific service logs
 docker compose logs heartbeat_worker -f

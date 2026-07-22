@@ -742,7 +742,7 @@ BEGIN
             ),
             NULL,
             NULL,
-            'failed',
+            'pending',
             'raw_only',
             'skipped',
             0.2,
@@ -770,7 +770,6 @@ BEGIN
                     'end_offset', c.chunk_offset + length(c.chunk_content),
                     'chunk_chars', chunk_chars,
                     'total_matches', c.total_matches,
-                    'embedding_skipped', true,
                     'routing_skipped', true,
                     'extraction_skipped', true
                 ))
@@ -781,6 +780,18 @@ BEGIN
         FROM chunks c
         ON CONFLICT (idempotency_key) DO UPDATE
         SET status = 'active',
+            embedding_status = CASE
+                WHEN subconscious_units.embedding_status = 'failed'
+                     AND COALESCE(subconscious_units.metadata#>>'{recmem,embedding_skipped}', 'false')::boolean
+                    THEN 'pending'
+                ELSE subconscious_units.embedding_status
+            END,
+            embedding_claimed_at = CASE
+                WHEN subconscious_units.embedding_status = 'failed'
+                     AND COALESCE(subconscious_units.metadata#>>'{recmem,embedding_skipped}', 'false')::boolean
+                    THEN NULL
+                ELSE subconscious_units.embedding_claimed_at
+            END,
             access_count = subconscious_units.access_count + 1,
             last_accessed = CURRENT_TIMESTAMP,
             metadata = subconscious_units.metadata

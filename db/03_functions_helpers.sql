@@ -196,7 +196,7 @@ RETURNS vector[] AS $$
 	    result := array_fill(NULL::vector, ARRAY[total]);
 
 	    FOR i IN 1..total LOOP
-	        v_content_hash := encode(sha256(text_contents[i]::bytea), 'hex');
+	        v_content_hash := encode(sha256(convert_to(COALESCE(text_contents[i], ''), 'UTF8')), 'hex');
 	        SELECT ec.embedding INTO cached_embedding
 	        FROM embedding_cache ec
 	        WHERE ec.content_hash = v_content_hash;
@@ -213,7 +213,7 @@ RETURNS vector[] AS $$
 	                '',
 	                'i'
 	            );
-	            v_alt_hash := encode(sha256(stripped_text::bytea), 'hex');
+	            v_alt_hash := encode(sha256(convert_to(COALESCE(stripped_text, ''), 'UTF8')), 'hex');
 	            IF v_alt_hash <> v_content_hash THEN
 	                SELECT ec.embedding INTO cached_embedding
 	                FROM embedding_cache ec

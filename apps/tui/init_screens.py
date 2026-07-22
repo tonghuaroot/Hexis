@@ -1243,7 +1243,7 @@ class ConsentScreen(Screen):
             log.write(_plain("  Exit             \u2014 back to the shell"))
             log.write("")
             log.write(_plain("Change anything later with `hexis init`. "
-                             "Enable the autonomous heartbeat with `hexis start`.", "dim"))
+                             "`hexis up` keeps the heartbeat and memory maintenance workers running.", "dim"))
             log.write(_plain("Hexis runs on your machine and sends no telemetry.", "dim"))
             # No timeout \u2014 the user chooses. Present the next-step buttons.
             open_chat = self.query_one("#open-chat", Button)

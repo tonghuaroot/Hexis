@@ -27,6 +27,42 @@ async def _stub_get_embedding(conn, axis=1):
     )
 
 
+async def _stub_get_embedding_with_input_limit(conn, max_chars: int, axis: int = 1):
+    await conn.execute(
+        """
+        CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
+        RETURNS vector[] AS $$
+        DECLARE
+            vectors vector[];
+        BEGIN
+            IF EXISTS (
+                SELECT 1
+                FROM unnest(text_contents) AS t(content)
+                WHERE length(COALESCE(t.content, '')) > $max_chars$::int
+            ) THEN
+                RAISE EXCEPTION 'stub input too large';
+            END IF;
+
+            SELECT COALESCE(
+                array_agg((
+                    array_fill(0.0::float, ARRAY[$axis$::int - 1]) ||
+                    ARRAY[1.0::float] ||
+                    array_fill(0.0::float, ARRAY[embedding_dimension() - $axis$::int])
+                )::vector),
+                ARRAY[]::vector[]
+            )
+            INTO vectors
+            FROM unnest(text_contents);
+
+            RETURN vectors;
+        END;
+        $$ LANGUAGE plpgsql;
+        """
+        .replace("$max_chars$", str(int(max_chars)))
+        .replace("$axis$", str(int(axis)))
+    )
+
+
 async def test_recmem_embed_and_route_steps(db_pool):
     async with db_pool.acquire() as conn:
         tr = conn.transaction()
@@ -47,6 +83,55 @@ async def test_recmem_embed_and_route_steps(db_pool):
             route_result = await recmem.run_recmem_route_step(conn)
             assert route_result["outcomes"]["raw_only"] == 1
             assert await conn.fetchval("SELECT route_status FROM subconscious_units WHERE id = $1", unit) == "raw_only"
+        finally:
+            await tr.rollback()
+
+
+async def test_recmem_embed_step_uses_span_embeddings_for_long_units(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            await _stub_get_embedding_with_input_limit(conn, max_chars=1000, axis=1)
+            await conn.execute("SELECT set_config('memory.recmem_embed_batch_size', '1'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_embedding_chunk_chars', '1000'::jsonb)")
+            await conn.execute("SELECT set_config('memory.recmem_embedding_chunk_overlap_chars', '100'::jsonb)")
+            long_user_text = "please remember the start " + ("very long turn body " * 400) + " important tail"
+            unit = await conn.fetchval(
+                """
+                SELECT (recmem_ingest_turn($1, 'ok', NULL, 'worker-embed-bounded-input')->>'unit_id')::uuid
+                """,
+                long_user_text,
+            )
+
+            assert await conn.fetchval(
+                "SELECT length(content) FROM subconscious_units WHERE id = $1",
+                unit,
+            ) > 1000
+
+            embed_result = await recmem.run_recmem_embed_step(conn)
+            assert embed_result["embedded"] == 1
+            assert embed_result["failed"] == 0
+            assert await conn.fetchval("SELECT embedding_status FROM subconscious_units WHERE id = $1", unit) == "embedded"
+            chunks = await conn.fetchrow(
+                """
+                SELECT count(*) AS n,
+                       max(length(content)) AS max_chars,
+                       bool_or(content ILIKE '%important tail%') AS keeps_tail,
+                       count(*) FILTER (WHERE embedding_status = 'embedded') AS embedded
+                FROM subconscious_unit_embedding_chunks
+                WHERE unit_id = $1
+                """,
+                unit,
+            )
+            assert chunks["n"] > 1
+            assert chunks["embedded"] == chunks["n"]
+            assert chunks["max_chars"] <= 1000
+            assert chunks["keeps_tail"] is True
+            assert await conn.fetchval(
+                "SELECT metadata#>>'{recmem,embedding_chunks,parent_embedding}' FROM subconscious_units WHERE id = $1",
+                unit,
+            ) == "average_chunk_centroid"
         finally:
             await tr.rollback()
 

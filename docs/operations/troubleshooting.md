@@ -40,7 +40,7 @@ Problem?
 ├── Heartbeat not running
 │   ├── Not configured → hexis init
 │   ├── Paused → Check heartbeat_state.is_paused
-│   ├── Workers not started → hexis up --profile active
+│   ├── Workers not started → hexis up
 │   └── No energy → Wait for regeneration
 │
 ├── Memory search returns nothing
@@ -98,7 +98,7 @@ docker compose ps | grep heartbeat
 **Fixes**:
 - Run `hexis init` if not configured
 - Unpause: `UPDATE heartbeat_state SET is_paused = FALSE WHERE id = 1`
-- Start workers: `docker compose --profile active up -d`
+- Start workers: `docker compose up -d heartbeat_worker maintenance_worker`
 
 ### Memory Search Returns Nothing
 

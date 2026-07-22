@@ -116,10 +116,7 @@ hexis init --character jarvis --api-key sk-...
 
 See [Auth Providers](docs/integrations/auth/index.md) for all options. The interactive wizard is also available: `hexis init` with no flags.
 
-```bash
-# Enable the autonomous heartbeat (optional)
-hexis up --profile active
-```
+`hexis up` starts the brain database plus the background heartbeat and maintenance workers. The heartbeat is configured to run hourly by default once initialization is complete.
 
 ## Architecture
 
@@ -174,7 +171,7 @@ hexis init                    # setup wizard
 hexis chat                    # interactive chat
 hexis status                  # agent status
 hexis doctor                  # health check
-hexis up [--profile active]   # start services
+hexis up                     # start services + background workers
 hexis down                    # stop services
 hexis ingest --input ./docs   # knowledge ingestion
 hexis docs search "query"     # search preserved source documents
@@ -195,7 +192,7 @@ See [CLI Reference](docs/reference/cli.md) for the complete command reference.
 | Python Library | Use `CognitiveMemory` as a thin client |
 | Interactive Chat | `hexis chat` with memory enrichment and tools |
 | MCP Server | Expose memory as MCP tools for any runtime |
-| Workers + Heartbeat | Full autonomous agent with `--profile active` |
+| Workers + Heartbeat | Full autonomous agent with `hexis up` |
 | Multi-Tenant | One database per user via `hexis instance` |
 | Cloud Backend | Managed Postgres + N stateless workers |
 

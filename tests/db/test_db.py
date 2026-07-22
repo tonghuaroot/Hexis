@@ -7020,6 +7020,34 @@ async def test_get_embedding_sha256_hash_correctness(db_pool, ensure_embedding_s
         assert cached_embedding is not None, "Cache should use SHA256 hash as key"
 
 
+async def test_get_embedding_accepts_json_escaped_backslashes(db_pool, ensure_embedding_service):
+    """Embedding cache hashing should treat text as UTF-8, not bytea syntax."""
+    async with db_pool.acquire() as conn:
+        test_id = get_test_identifier("get_emb_json_backslashes")
+        inner = json.dumps(
+            {
+                "note": f"tool transcript regression {test_id}",
+                "memory_id": "9bdad2b0-490a-44d0-aa74-4d1299b58a21",
+            }
+        )
+        test_content = json.dumps({"detail": inner})
+
+        expected_hash = await conn.fetchval(
+            "SELECT encode(sha256(convert_to($1::text, 'UTF8')), 'hex')",
+            test_content,
+        )
+        await conn.execute("DELETE FROM embedding_cache WHERE content_hash = $1", expected_hash)
+
+        embedding = await conn.fetchval("SELECT (get_embedding(ARRAY[$1]))[1]", test_content)
+        cached_embedding = await conn.fetchval(
+            "SELECT embedding FROM embedding_cache WHERE content_hash = $1",
+            expected_hash,
+        )
+
+        assert embedding is not None
+        assert cached_embedding is not None
+
+
 async def test_get_embedding_different_content_different_embeddings(db_pool, ensure_embedding_service):
     """Test that different content produces different embeddings"""
     async with db_pool.acquire() as conn:

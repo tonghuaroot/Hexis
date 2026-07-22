@@ -107,7 +107,7 @@ BEGIN
             ),
             NULL,
             NULL,
-            'failed',
+            'pending',
             'raw_only',
             'skipped',
             0.2,
@@ -139,7 +139,6 @@ BEGIN
                     'locator_kind', m.locator_kind,
                     'offset', m.char_start,
                     'end_offset', m.char_end,
-                    'embedding_skipped', true,
                     'routing_skipped', true,
                     'extraction_skipped', true
                 ))
@@ -152,6 +151,18 @@ BEGIN
         FROM matched m
         ON CONFLICT (idempotency_key) DO UPDATE
         SET status = 'active',
+            embedding_status = CASE
+                WHEN subconscious_units.embedding_status = 'failed'
+                     AND COALESCE(subconscious_units.metadata#>>'{recmem,embedding_skipped}', 'false')::boolean
+                    THEN 'pending'
+                ELSE subconscious_units.embedding_status
+            END,
+            embedding_claimed_at = CASE
+                WHEN subconscious_units.embedding_status = 'failed'
+                     AND COALESCE(subconscious_units.metadata#>>'{recmem,embedding_skipped}', 'false')::boolean
+                    THEN NULL
+                ELSE subconscious_units.embedding_claimed_at
+            END,
             access_count = subconscious_units.access_count + 1,
             last_accessed = CURRENT_TIMESTAMP,
             session_id = COALESCE(EXCLUDED.session_id, subconscious_units.session_id),

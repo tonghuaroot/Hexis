@@ -217,8 +217,42 @@ async def test_fail_sets_error(db_pool):
 
 
 # ============================================================================
-# Cleanup
+# Reclaim / Cleanup
 # ============================================================================
+
+
+async def test_reclaim_resets_stale_processing_event(db_pool):
+    gw = Gateway(db_pool)
+    event_id = await gw.submit(EventSource.INTERNAL, "internal:reclaim:stale")
+    event = await gw.dequeue([EventSource.INTERNAL])
+    assert event is not None
+    assert event.id == event_id
+
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE gateway_events SET started_at = now() - interval '15 minutes' "
+            "WHERE id = $1",
+            event_id,
+        )
+
+    reclaimed = await gw.reclaim()
+    assert reclaimed >= 1
+
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, started_at FROM gateway_events WHERE id = $1",
+            event_id,
+        )
+    assert row["status"] == "pending"
+    assert row["started_at"] is None
+
+
+async def test_reclaim_accepts_legacy_string_interval(db_pool):
+    gw = Gateway(db_pool)
+
+    reclaimed = await gw.reclaim("10 minutes")
+
+    assert isinstance(reclaimed, int)
 
 
 async def test_cleanup_removes_old_events(db_pool):

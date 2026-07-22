@@ -14,8 +14,8 @@ The heartbeat is the agent's autonomous cognitive loop. When enabled, the agent 
 ## Quick Start
 
 ```bash
-# Enable the heartbeat
-hexis up --profile active
+# Start the always-on heartbeat and maintenance workers
+hexis up
 
 # Check status
 hexis status
@@ -60,17 +60,17 @@ The heartbeat context is more restricted than chat:
 ### Via Docker Compose
 
 ```bash
-# Start everything (workers + RabbitMQ)
-docker compose --profile active up -d
+# Start everything (DB + RabbitMQ + workers)
+docker compose up -d
 
 # Start only workers (if DB is already running)
-docker compose --profile active up -d heartbeat_worker maintenance_worker
+docker compose up -d heartbeat_worker maintenance_worker
 
 # Stop workers (containers stay)
-docker compose --profile active stop heartbeat_worker maintenance_worker
+docker compose stop heartbeat_worker maintenance_worker
 
 # Restart workers
-docker compose --profile active restart heartbeat_worker maintenance_worker
+docker compose restart heartbeat_worker maintenance_worker
 ```
 
 ### Via CLI

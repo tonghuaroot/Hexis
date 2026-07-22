@@ -77,17 +77,17 @@ hexis demo      # proves recall, refusal, energy, and heartbeat, then rolls back
 hexis maturity  # shows live capability levels and exact next steps
 ```
 
-## Enable Autonomy (Optional)
+## Autonomous Heartbeat
 
 ```bash
-hexis up --profile active
+hexis up
 ```
 
-With the `active` profile, the agent wakes on its own, reviews goals, reflects, and reaches out when it has something to say. Without it, the agent only responds when you talk to it.
+`hexis up` starts the heartbeat and maintenance workers by default. Once init and consent are complete, the heartbeat runs hourly unless it is explicitly paused.
 
 ## What Just Happened
 
-1. `hexis init` started a PostgreSQL container (the agent's brain), started the embedding sidecar, downloaded the embedding model if needed, configured your chosen character's identity/personality/values, and ran a consent flow where the agent agreed to begin.
+1. `hexis init` started the default stack (the database, queue, heartbeat worker, and maintenance worker), started the embedding sidecar, downloaded the embedding model if needed, configured your chosen character's identity/personality/values, and ran a consent flow where the agent agreed to begin.
 2. `hexis chat` opened an interactive conversation with memory enrichment -- your messages are augmented with relevant memories, and the agent forms new memories from the conversation.
 
 ## Next Steps

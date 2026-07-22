@@ -39,6 +39,16 @@ CREATE INDEX idx_working_memory_embedding ON working_memory USING hnsw (embeddin
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_embedding
     ON subconscious_units USING hnsw (embedding vector_cosine_ops)
     WHERE embedding IS NOT NULL AND status = 'active';
+CREATE INDEX IF NOT EXISTS idx_subconscious_unit_chunks_unit
+    ON subconscious_unit_embedding_chunks (unit_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_subconscious_unit_chunks_fts
+    ON subconscious_unit_embedding_chunks USING GIN (to_tsvector('english', content));
+CREATE INDEX IF NOT EXISTS idx_subconscious_unit_chunks_embedding
+    ON subconscious_unit_embedding_chunks USING hnsw (embedding vector_cosine_ops)
+    WHERE embedding IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_subconscious_unit_chunks_embed_queue
+    ON subconscious_unit_embedding_chunks (embedding_status, created_at)
+    WHERE embedding_status IN ('pending', 'in_progress');
 CREATE INDEX IF NOT EXISTS idx_subconscious_units_embed_pending
     ON subconscious_units (created_at)
     WHERE embedding_status = 'pending';
