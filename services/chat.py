@@ -445,10 +445,19 @@ async def stream_chat_events(
         history = await _hydrate_chat_history(pool, session_id, history)
 
         use_rlm = False
+        rlm_streaming_enabled = False
         try:
             async with pool.acquire() as conn:
                 use_rlm_raw = await conn.fetchval("SELECT get_config_bool('chat.use_rlm')")
-                use_rlm = bool(use_rlm_raw)
+                rlm_streaming_enabled = bool(await conn.fetchval(
+                    "SELECT COALESCE(get_config_bool('rlm.chat.streaming_enabled'), false)"
+                ))
+                use_rlm = bool(use_rlm_raw) and rlm_streaming_enabled
+                if use_rlm_raw and not rlm_streaming_enabled:
+                    logger.debug(
+                        "chat.use_rlm is enabled, but rlm.chat.streaming_enabled is false; "
+                        "using token-streaming AgentLoop for this streaming request"
+                    )
                 if use_rlm and llm_config is None:
                     llm_config = await load_llm_config(conn, "llm.chat", fallback_key="llm")
         except Exception:

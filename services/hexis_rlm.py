@@ -11,10 +11,12 @@ Provides:
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from core.llm import chat_completion, normalize_llm_config
@@ -41,6 +43,14 @@ _FINAL_RE = re.compile(r"^\s*FINAL\((.*)\)\s*$", re.MULTILINE | re.DOTALL)
 MAX_OUTPUT_CHARS = 20_000
 
 
+@dataclass(frozen=True)
+class FinalAnswerResolution:
+    """Parsed FINAL/FINAL_VAR result plus any internal repair diagnostic."""
+
+    answer: str | None
+    error: str | None = None
+
+
 def _workspace_metrics(workspace: RLMWorkspace) -> dict[str, Any]:
     """Return every retrieval/workspace counter the RLM can affect."""
     return {
@@ -65,24 +75,107 @@ def find_code_blocks(text: str) -> list[str]:
     return [m.group(1).strip() for m in _CODE_BLOCK_RE.finditer(text)]
 
 
-def find_final_answer(text: str, repl: HexisLocalREPL | None = None) -> str | None:
-    """Find FINAL(...) or FINAL_VAR(...) in response text."""
+def _find_final_var_name(text: str) -> str | None:
+    match = _FINAL_VAR_RE.search(text)
+    if not match:
+        return None
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def _assigned_names_from_code(code: str) -> set[str]:
+    """Return variable names assigned by a REPL block."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    return {
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    }
+
+
+def _is_final_var_error(text: str) -> bool:
+    """Return true when FINAL_VAR returned its own missing-variable diagnostic."""
+    stripped = text.strip()
+    return (
+        stripped.startswith("Error: Variable ")
+        and (
+            "BEFORE calling FINAL_VAR" in stripped
+            or "No variables have been created yet" in stripped
+        )
+    )
+
+
+def resolve_final_answer(
+    text: str,
+    repl: HexisLocalREPL | None = None,
+    *,
+    allow_final_var: bool = True,
+    allowed_final_var_names: set[str] | None = None,
+) -> FinalAnswerResolution:
+    """Find FINAL(...) or FINAL_VAR(...), separating answers from repairable errors."""
     # Check FINAL_VAR first
     match = _FINAL_VAR_RE.search(text)
     if match:
-        variable_name = match.group(1).strip().strip('"').strip("'")
+        variable_name = _find_final_var_name(text) or ""
+        if not allow_final_var:
+            return FinalAnswerResolution(
+                answer=None,
+                error=(
+                    "FINAL_VAR is not valid for chat responses. Use FINAL(...) "
+                    "directly with the user-visible reply."
+                ),
+            )
+        if (
+            allowed_final_var_names is not None
+            and variable_name not in allowed_final_var_names
+        ):
+            return FinalAnswerResolution(
+                answer=None,
+                error=(
+                    f"FINAL_VAR({variable_name}) was not assigned in this "
+                    "iteration. Use FINAL(...) directly, or assign that exact "
+                    "variable in the same ```repl``` block before FINAL_VAR."
+                ),
+            )
         if repl is not None:
             result = repl.execute_code(f"print(FINAL_VAR({variable_name!r}))")
             answer = result.stdout.strip()
-            return answer if answer else (result.stderr.strip() or None)
-        return None
+            stderr = result.stderr.strip()
+            if answer and not _is_final_var_error(answer) and not stderr:
+                return FinalAnswerResolution(answer=answer)
+            diagnostic = stderr or answer or f"FINAL_VAR({variable_name}) did not produce output."
+            return FinalAnswerResolution(answer=None, error=diagnostic)
+        return FinalAnswerResolution(
+            answer=None,
+            error="FINAL_VAR requires an initialized REPL.",
+        )
 
     # Check FINAL
     match = _FINAL_RE.search(text)
     if match:
-        return match.group(1).strip()
+        return FinalAnswerResolution(answer=match.group(1).strip())
 
-    return None
+    return FinalAnswerResolution(answer=None)
+
+
+def find_final_answer(text: str, repl: HexisLocalREPL | None = None) -> str | None:
+    """Find FINAL(...) or a valid FINAL_VAR(...) in response text."""
+    return resolve_final_answer(text, repl).answer
+
+
+def _format_final_error(error: str) -> dict[str, str]:
+    return {
+        "role": "user",
+        "content": (
+            "Your attempted final answer could not be used:\n"
+            f"{error}\n\n"
+            "Repair this internally. Do not expose that diagnostic to the user. "
+            "Either assign the variable first in a ```repl``` block before using "
+            "FINAL_VAR, or use FINAL(...) directly with the user-visible answer."
+        ),
+    }
 
 
 def format_execution_result(result: REPLResult) -> str:
@@ -181,6 +274,14 @@ _USER_PROMPT_FIRST = (
     "Continue writing ```repl``` code blocks and determine your answer. Your next action:"
 )
 
+_CHAT_USER_PROMPT_FIRST = (
+    "You are answering a chat message. If this is ordinary conversation and you "
+    "do not need memory, tools, or document inspection, answer now with FINAL(...). "
+    "If the user's message depends on prior conversations, preferences, documents, "
+    "tool use, or exact context, inspect the `context` variable and use the REPL "
+    "environment first. Your next action:"
+)
+
 _USER_PROMPT_CONTINUE = (
     "The history above shows your previous interactions with the REPL environment. "
     "Continue using the REPL environment, which has the `context` variable and memory syscalls, "
@@ -188,8 +289,10 @@ _USER_PROMPT_CONTINUE = (
 )
 
 
-def _build_user_prompt(iteration: int) -> dict[str, str]:
+def _build_user_prompt(iteration: int, *, allow_direct_chat_final: bool = False) -> dict[str, str]:
     if iteration == 0:
+        if allow_direct_chat_final:
+            return {"role": "user", "content": _CHAT_USER_PROMPT_FIRST}
         return {"role": "user", "content": _USER_PROMPT_FIRST}
     return {"role": "user", "content": _USER_PROMPT_CONTINUE}
 
@@ -204,6 +307,8 @@ def _run_loop(
     loop: asyncio.AbstractEventLoop,
     system_prompt: str,
     max_iterations: int,
+    allow_final_var: bool = True,
+    allow_direct_chat_final: bool = False,
 ) -> dict[str, Any]:
     """
     Synchronous RLM iteration loop (Algorithm 1).
@@ -222,7 +327,9 @@ def _run_loop(
         iteration_count = i + 1
 
         # Build current prompt
-        current_prompt = message_history + [_build_user_prompt(i)]
+        current_prompt = message_history + [
+            _build_user_prompt(i, allow_direct_chat_final=allow_direct_chat_final)
+        ]
 
         # Call LLM
         future = asyncio.run_coroutine_threadsafe(
@@ -239,26 +346,40 @@ def _run_loop(
             logger.warning("Empty LLM response at iteration %d", i)
             break
 
-        # Check for final answer BEFORE executing code
-        final_answer = find_final_answer(response, repl)
-        if final_answer is not None:
+        # Check for final answer BEFORE executing code. A bad FINAL_VAR is not
+        # final; it becomes a repair message inside the RLM loop.
+        final_resolution = resolve_final_answer(
+            response,
+            repl,
+            allow_final_var=allow_final_var,
+        )
+        if final_resolution.answer is not None:
+            final_answer = final_resolution.answer
             logger.info("RLM loop completed at iteration %d with FINAL", i + 1)
             break
 
         # Extract and execute code blocks
         code_blocks = find_code_blocks(response)
+        assigned_names: set[str] = set()
         results: list[REPLResult] = []
 
         for code in code_blocks:
+            assigned_names.update(_assigned_names_from_code(code))
             result = repl.execute_code(code)
             results.append(result)
 
-            # Check if code execution produced a FINAL_VAR via print
-            if "FINAL_VAR" in code:
-                # Re-check for final answer after execution
-                final_answer = find_final_answer(response, repl)
-                if final_answer is not None:
-                    break
+        # Re-check FINAL_VAR after executing code blocks. This supports the
+        # common repair case where the model emits a variable assignment and
+        # FINAL_VAR in the same assistant message.
+        if final_resolution.error and code_blocks:
+            final_resolution = resolve_final_answer(
+                response,
+                repl,
+                allow_final_var=True,
+                allowed_final_var_names=assigned_names if not allow_final_var else None,
+            )
+            if final_resolution.answer is not None:
+                final_answer = final_resolution.answer
 
         if final_answer is not None:
             logger.info("RLM loop completed at iteration %d with FINAL_VAR", i + 1)
@@ -267,6 +388,8 @@ def _run_loop(
         # Format iteration and append to history
         new_messages = format_iteration(response, code_blocks, results)
         message_history.extend(new_messages)
+        if final_resolution.error:
+            message_history.append(_format_final_error(final_resolution.error))
 
     # If we ran out of iterations without a FINAL, use the last response
     if final_answer is None:
@@ -288,7 +411,21 @@ def _run_loop(
         )
         try:
             response = future.result(timeout=120)
-            final_answer = find_final_answer(response, repl) or response
+            final_resolution = resolve_final_answer(
+                response,
+                repl,
+                allow_final_var=allow_final_var,
+            )
+            final_answer = final_resolution.answer
+            if final_answer is None:
+                if final_resolution.error:
+                    logger.warning("RLM final-answer repair failed: %s", final_resolution.error)
+                    final_answer = (
+                        "I hit an internal scratchpad formatting issue while answering. "
+                        "Please send that again."
+                    )
+                else:
+                    final_answer = response
         except Exception:
             final_answer = '{"reasoning": "RLM loop timed out", "actions": [], "goal_changes": []}'
 
@@ -378,6 +515,8 @@ async def run_heartbeat_decision(
                 loop,
                 system_prompt,
                 max_iterations,
+                True,
+                False,
             ),
             timeout=timeout_seconds,
         )
@@ -533,6 +672,8 @@ async def run_chat_turn(
                 loop,
                 system_prompt,
                 max_iterations,
+                False,
+                True,
             ),
             timeout=timeout_seconds,
         )

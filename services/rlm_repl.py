@@ -207,15 +207,16 @@ class HexisLocalREPL:
             with open(context_path, "w") as f:
                 f.write(context_payload)
             self.execute_code(
-                f"with open(r'{context_path}', 'r') as f:\n    {var_name} = f.read()"
+                f"with open(r'{context_path}', 'r') as _context_file:\n"
+                f"    {var_name} = _context_file.read()"
             )
         else:
             context_path = os.path.join(self.temp_dir, f"context_{index}.json")
             with open(context_path, "w") as f:
                 json.dump(context_payload, f, default=str)
             self.execute_code(
-                f"import json\nwith open(r'{context_path}', 'r') as f:\n"
-                f"    {var_name} = json.load(f)"
+                f"import json\nwith open(r'{context_path}', 'r') as _context_file:\n"
+                f"    {var_name} = json.load(_context_file)"
             )
 
         # Alias context_0 as 'context'

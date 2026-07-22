@@ -10,6 +10,7 @@ from services.hexis_rlm import (
     find_final_answer,
     format_execution_result,
     format_iteration,
+    resolve_final_answer,
 )
 from services.rlm_repl import HexisLocalREPL, REPLResult
 
@@ -48,6 +49,19 @@ class TestParsing:
             text = "FINAL_VAR(my_answer)"
             answer = find_final_answer(text, repl)
             assert answer == "the result"
+        finally:
+            repl.cleanup()
+
+    def test_missing_final_var_is_not_final_answer(self):
+        repl = HexisLocalREPL()
+        repl.setup(context_payload=None)
+        try:
+            text = "FINAL_VAR(response)"
+            resolution = resolve_final_answer(text, repl)
+            assert resolution.answer is None
+            assert resolution.error is not None
+            assert "Variable 'response' not found" in resolution.error
+            assert find_final_answer(text, repl) is None
         finally:
             repl.cleanup()
 

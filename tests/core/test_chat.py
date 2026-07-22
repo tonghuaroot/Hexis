@@ -337,3 +337,55 @@ async def test_stream_chat_turn_skips_memory_for_partial_timeout(monkeypatch):
     ]
 
     assert "".join(chunks) == "partial\n\n[Response timed out before completion.]"
+
+
+async def test_stream_chat_events_keeps_token_streaming_when_rlm_streaming_disabled(monkeypatch):
+    seen: dict[str, bool] = {}
+
+    async def fake_agent_profile(*_args, **_kwargs):
+        return {}
+
+    async def fake_stream_agent(*_args, **_kwargs):
+        seen["stream_agent"] = True
+        yield AgentEventData(event=AgentEvent.LOOP_START, data={})
+        yield AgentEventData(event=AgentEvent.TEXT_DELTA, data={"text": "Hello"})
+        yield AgentEventData(event=AgentEvent.TEXT_DELTA, data={"text": " there"})
+        yield AgentEventData(
+            event=AgentEvent.LOOP_END,
+            data={"stopped_reason": "completed", "timed_out": False},
+        )
+
+    async def fake_remember(*_args, **_kwargs):
+        seen["remembered"] = True
+        return {}
+
+    async def fake_energy(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(chat_mod, "get_agent_profile_context", fake_agent_profile)
+    monkeypatch.setattr(chat_mod, "stream_agent", fake_stream_agent)
+    monkeypatch.setattr(chat_mod, "_remember_conversation", fake_remember)
+    monkeypatch.setattr(chat_mod, "_apply_chat_energy_effects", fake_energy)
+
+    events = [
+        event
+        async for event in chat_mod.stream_chat_events(
+            user_message="hi",
+            history=[],
+            llm_config={"provider": "openai", "model": "gpt-4o"},
+            dsn="postgresql://unused",
+            pool=_ConfigPool({
+                "chat.use_rlm": True,
+                "rlm.chat.streaming_enabled": False,
+            }),
+        )
+    ]
+
+    assert seen["stream_agent"] is True
+    assert seen["remembered"] is True
+    assert [
+        event.data.get("text")
+        for event in events
+        if event.event == AgentEvent.TEXT_DELTA
+    ] == ["Hello", " there"]
+    assert not any(event.data.get("runtime") == "rlm" for event in events)
