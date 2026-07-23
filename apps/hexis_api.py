@@ -124,10 +124,18 @@ if _API_KEY:
 # Request / Response models
 # ---------------------------------------------------------------------------
 
+class ChatVisualAttachment(BaseModel):
+    name: str
+    mime_type: str
+    data_url: str
+    byte_size: int | None = Field(default=None, ge=0)
+
+
 class ChatRequest(BaseModel):
     message: str
     history: list[dict[str, Any]] | None = None
     prompt_addenda: list[str] | None = None
+    visual_attachments: list[ChatVisualAttachment] | None = None
     # Client-held session identity (#71): pass the session_id from a prior
     # turn's `done` event to keep one conversation as one session; omit and
     # the server mints one (returned in `done`).
@@ -1504,7 +1512,14 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
             prompt_addenda=addenda,
             surface="api",
             gateway_source_id=f"chat:api:{session_id}",
-            gateway_payload={"message": user_message[:500]},
+            gateway_payload={
+                "message": user_message[:500],
+                "visual_attachment_count": len(req.visual_attachments or []),
+            },
+            visual_attachments=[
+                attachment.model_dump()
+                for attachment in (req.visual_attachments or [])[:8]
+            ],
         ):
             if event.event == AgentEvent.PHASE_CHANGE:
                 phase = event.data.get("phase", "")

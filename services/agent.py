@@ -44,6 +44,34 @@ logger = logging.getLogger(__name__)
 
 _SUBCONSCIOUS_MEMORY_CONTEXT_CHARS = 4000
 _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS = 7000
+_MAX_VISUAL_ATTACHMENTS_PER_TURN = 8
+
+
+def _visual_attachment_parts(visual_attachments: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    parts: list[dict[str, str]] = []
+    for index, attachment in enumerate((visual_attachments or [])[:_MAX_VISUAL_ATTACHMENTS_PER_TURN], start=1):
+        if not isinstance(attachment, dict):
+            continue
+        data_url = str(attachment.get("data_url") or "").strip()
+        mime_type = str(attachment.get("mime_type") or "").strip().lower()
+        if not data_url.startswith("data:image/"):
+            continue
+        if mime_type and not mime_type.startswith("image/"):
+            continue
+        name = str(attachment.get("name") or f"image-{index}").strip() or f"image-{index}"
+        parts.append({"type": "input_text", "text": f"\n[Attached image {index}: {name}]\n"})
+        parts.append({"type": "input_image", "image_url": data_url})
+    return parts
+
+
+def _user_content_with_visuals(
+    text: str,
+    visual_attachments: list[dict[str, Any]] | None,
+) -> str | list[dict[str, str]]:
+    image_parts = _visual_attachment_parts(visual_attachments)
+    if not image_parts:
+        return text
+    return [{"type": "input_text", "text": text}, *image_parts]
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +660,7 @@ async def run_agent(
     timeout_seconds: float | None = None,
     max_tokens: int | None = None,
     max_iterations: int | None = None,
+    visual_attachments: list[dict[str, Any]] | None = None,
 ) -> "AgentLoopResult":
     """
     Unified entry point for both chat and heartbeat agent invocations.
@@ -808,6 +837,10 @@ async def run_agent(
         enriched_parts.append(user_message)
 
     enriched_user_message = "\n\n".join(enriched_parts) if enriched_parts else user_message
+    enriched_user_content = _user_content_with_visuals(
+        enriched_user_message,
+        visual_attachments if mode == "chat" else None,
+    )
 
     # 6. Configure AgentLoop with mode-specific defaults
     if mode == "chat":
@@ -865,7 +898,7 @@ async def run_agent(
         # Fall back to non-streaming here.
         pass
 
-    result = await agent.run(enriched_user_message, history=history)
+    result = await agent.run(enriched_user_message, history=history, user_content=enriched_user_content)
     return result
 
 
@@ -888,6 +921,7 @@ async def stream_agent(
     temperature: float | None = None,
     on_approval: "Callable[[str, dict[str, Any]], Awaitable[bool]] | None" = None,
     prompt_addenda: list[str] | None = None,
+    visual_attachments: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[AgentEventData]:
     """
     Streaming variant of run_agent(). Yields AgentEventData as they happen.
@@ -1018,6 +1052,10 @@ async def stream_agent(
         enriched_parts.append(memory_context)
     enriched_parts.append(f"[USER MESSAGE]\n{user_message}")
     enriched_user_message = "\n\n".join(enriched_parts)
+    enriched_user_content = _user_content_with_visuals(
+        enriched_user_message,
+        visual_attachments if mode == "chat" else None,
+    )
 
     # Configure loop. Limits derive from config (Bar #1) with sane fallbacks;
     # an explicit caller arg still wins.
@@ -1051,5 +1089,5 @@ async def stream_agent(
     )
 
     agent = AgentLoop(loop_config)
-    async for event in agent.stream(enriched_user_message, history=history):
+    async for event in agent.stream(enriched_user_message, history=history, user_content=enriched_user_content):
         yield event

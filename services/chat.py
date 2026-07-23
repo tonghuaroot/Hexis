@@ -234,6 +234,7 @@ async def chat_turn(
     user_label: str | None = None,
     is_group: bool = False,
     surface: str = "chat",
+    visual_attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     dsn = dsn or db_dsn_from_env()
     normalized = normalize_llm_config(llm_config)
@@ -259,7 +260,7 @@ async def chat_turn(
         except Exception:
             use_rlm = False
 
-        if use_rlm:
+        if use_rlm and not visual_attachments:
             from services.hexis_rlm import run_chat_turn
             result = await run_chat_turn(
                 user_message=user_message,
@@ -302,6 +303,7 @@ async def chat_turn(
             is_group=is_group,
             dsn=dsn,
             max_iterations=max_tool_iterations,
+            visual_attachments=visual_attachments,
         )
         assistant_text = loop_result.text
 
@@ -345,6 +347,7 @@ async def stream_chat_turn(
     user_label: str | None = None,
     is_group: bool = False,
     surface: str = "chat",
+    visual_attachments: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[str]:
     """
     Streaming variant of chat_turn().
@@ -369,6 +372,7 @@ async def stream_chat_turn(
         user_label=user_label,
         is_group=is_group,
         surface=surface,
+        visual_attachments=visual_attachments,
     ):
         if event.event == AgentEvent.TEXT_DELTA:
             text = event.data.get("text", "")
@@ -414,6 +418,7 @@ async def stream_chat_events(
     gateway_source_id: str | None = None,
     gateway_payload: dict[str, Any] | None = None,
     on_approval: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None,
+    visual_attachments: list[dict[str, Any]] | None = None,
 ) -> AsyncIterator[AgentEventData]:
     """Canonical streaming chat orchestration.
 
@@ -512,6 +517,8 @@ async def stream_chat_events(
                     "SELECT COALESCE(get_config_bool('rlm.chat.streaming_enabled'), false)"
                 ))
                 use_rlm = bool(use_rlm_raw) and rlm_streaming_enabled
+                if visual_attachments:
+                    use_rlm = False
                 if use_rlm_raw and not rlm_streaming_enabled:
                     logger.debug(
                         "chat.use_rlm is enabled, but rlm.chat.streaming_enabled is false; "
@@ -610,6 +617,7 @@ async def stream_chat_events(
             max_tokens=max_tokens,
             temperature=temperature,
             on_approval=on_approval,
+            visual_attachments=visual_attachments,
         ):
             if event.event == AgentEvent.TEXT_DELTA:
                 text = event.data.get("text", "")

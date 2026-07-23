@@ -32,6 +32,29 @@ def test_convert_messages_basic():
     assert contents[1]["parts"][0]["text"] == "Hi there!"
 
 
+def test_convert_messages_multimodal_user_content():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "What is in this image?"},
+                {"type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="},
+            ],
+        },
+    ]
+    system, contents = _convert_messages(messages)
+    assert system is None
+    assert contents == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "What is in this image?"},
+                {"inlineData": {"mimeType": "image/png", "data": "aW1hZ2U="}},
+            ],
+        }
+    ]
+
+
 def test_convert_messages_tool_calls():
     messages = [
         {"role": "user", "content": "search for X"},

@@ -34,6 +34,47 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _trace_safe_content(content: Any) -> Any:
+    if isinstance(content, str):
+        if content.startswith("data:image/"):
+            return "[image data redacted]"
+        return content
+    if not isinstance(content, list):
+        return content
+
+    safe_parts: list[Any] = []
+    for part in content:
+        if not isinstance(part, dict):
+            safe_parts.append(part)
+            continue
+        ptype = part.get("type")
+        if ptype in {"image_url", "input_image"}:
+            redacted = dict(part)
+            if isinstance(redacted.get("image_url"), dict):
+                image_url = dict(redacted["image_url"])
+                image_url["url"] = "[image data redacted]"
+                redacted["image_url"] = image_url
+            elif "image_url" in redacted:
+                redacted["image_url"] = "[image data redacted]"
+            if "url" in redacted:
+                redacted["url"] = "[image data redacted]"
+            safe_parts.append(redacted)
+            continue
+        safe_parts.append(part)
+    return safe_parts
+
+
+def _trace_safe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    safe: list[dict[str, Any]] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        next_msg = dict(msg)
+        next_msg["content"] = _trace_safe_content(next_msg.get("content"))
+        safe.append(next_msg)
+    return safe
+
+
 # ---------------------------------------------------------------------------
 # Events
 # ---------------------------------------------------------------------------
@@ -185,6 +226,7 @@ class AgentLoop:
         self,
         user_message: str,
         history: list[dict[str, Any]] | None = None,
+        user_content: Any | None = None,
     ) -> AgentLoopResult:
         """Run the agent loop to completion.
 
@@ -196,7 +238,7 @@ class AgentLoop:
             {"role": "system", "content": self.config.system_prompt},
         ]
         messages.extend(history or [])
-        messages.append({"role": "user", "content": user_message})
+        messages.append({"role": "user", "content": user_content if user_content is not None else user_message})
 
         tools = await self._load_tools_for_turn()
         # Fail loud: turn state is authoritative, so a failed start must surface
@@ -235,6 +277,7 @@ class AgentLoop:
         self,
         user_message: str,
         history: list[dict[str, Any]] | None = None,
+        user_content: Any | None = None,
     ) -> AsyncIterator[AgentEventData]:
         """
         Streaming variant of run().
@@ -254,7 +297,7 @@ class AgentLoop:
         self._streaming = True
 
         # Run loop in background task
-        task = asyncio.create_task(self.run(user_message, history))
+        task = asyncio.create_task(self.run(user_message, history, user_content=user_content))
 
         # Signal completion via sentinel
         def _on_done(_: asyncio.Task) -> None:  # type: ignore[type-arg]
@@ -342,7 +385,7 @@ class AgentLoop:
             "iteration": self._iteration_count,
             "provider": llm.get("provider"),
             "model": llm.get("model"),
-            "messages": messages,
+            "messages": _trace_safe_messages(messages),
             "tools": [
                 spec.get("function", {}).get("name", "unknown")
                 for spec in (tools or [])

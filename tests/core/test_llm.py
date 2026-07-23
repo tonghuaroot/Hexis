@@ -188,6 +188,80 @@ class TestMessagesToResponsesInput:
             {"role": "assistant", "content": "hello"},
         ]
 
+    def test_multimodal_user_message(self):
+        image_url = "data:image/png;base64,aW1hZ2U="
+        messages = [
+            {"role": "system", "content": "You are helpful"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What do you see?"},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            },
+        ]
+        instructions, items = llm._messages_to_responses_input(messages)  # noqa: SLF001
+        assert instructions == "You are helpful"
+        assert items == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What do you see?"},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }
+        ]
+
+    def test_codex_multimodal_user_message(self):
+        image_url = "data:image/jpeg;base64,aW1hZ2U="
+        instructions, items = llm._messages_to_codex_responses_input([  # noqa: SLF001
+            {"role": "system", "content": "You are helpful"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            },
+        ])
+        assert instructions == "You are helpful"
+        assert items == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe this image."},
+                    {"type": "input_image", "image_url": image_url},
+                ],
+            }
+        ]
+
+    def test_anthropic_multimodal_user_message(self):
+        messages = llm._messages_to_anthropic_messages([  # noqa: SLF001
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Describe this image."},
+                    {"type": "input_image", "image_url": "data:image/webp;base64,aW1hZ2U="},
+                ],
+            }
+        ])
+        assert messages == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image."},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/webp",
+                            "data": "aW1hZ2U=",
+                        },
+                    },
+                ],
+            }
+        ]
+
     def test_with_tool_calls(self):
         """Test assistant messages with OpenAI-format tool_calls (as stored by agent_loop)."""
         messages = [

@@ -188,14 +188,15 @@ def _messages_to_codex_responses_input(
         content = msg.get("content", "") or ""
 
         if role == "system":
-            if isinstance(content, str) and content.strip():
-                system_parts.append(content)
+            text = _content_text(content)
+            if text.strip():
+                system_parts.append(text)
             continue
 
         if role == "user":
             input_items.append({
                 "role": "user",
-                "content": [{"type": "input_text", "text": str(content)}],
+                "content": _content_to_responses_parts(content),
             })
             continue
 
@@ -203,7 +204,7 @@ def _messages_to_codex_responses_input(
             if content:
                 input_items.append({
                     "role": "assistant",
-                    "content": [{"type": "output_text", "text": str(content)}],
+                    "content": _content_to_responses_parts(content, assistant=True),
                 })
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function", {})
@@ -508,15 +509,16 @@ def _messages_to_responses_input(
         content = msg.get("content", "") or ""
 
         if role == "system":
-            if content.strip():
-                system_parts.append(content)
+            text = _content_text(content)
+            if text.strip():
+                system_parts.append(text)
 
         elif role == "user":
-            input_items.append({"role": "user", "content": content})
+            input_items.append({"role": "user", "content": _content_to_responses(content)})
 
         elif role == "assistant":
             if content:
-                input_items.append({"role": "assistant", "content": content})
+                input_items.append({"role": "assistant", "content": _content_to_responses(content, assistant=True)})
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function", {})
                 args = fn.get("arguments", "{}")
@@ -655,10 +657,169 @@ def _extract_system_prompt(messages: list[dict[str, Any]]) -> tuple[str, list[di
     rest: list[dict[str, Any]] = []
     for msg in messages:
         if msg.get("role") == "system":
-            system_parts.append(str(msg.get("content") or ""))
+            system_parts.append(_content_text(msg.get("content")))
         else:
             rest.append(msg)
     return "\n\n".join([p for p in system_parts if p.strip()]), rest
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"text", "input_text", "output_text"}:
+                text = part.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    return str(content or "")
+
+
+def _image_url_from_part(part: dict[str, Any]) -> str | None:
+    raw = part.get("image_url")
+    if isinstance(raw, dict):
+        url = raw.get("url")
+        return str(url) if url else None
+    if isinstance(raw, str):
+        return raw
+    url = part.get("url")
+    return str(url) if url else None
+
+
+def _data_url_parts(url: str) -> tuple[str | None, str | None]:
+    if not url.startswith("data:") or "," not in url:
+        return None, None
+    header, data = url.split(",", 1)
+    media_type = header[5:].split(";", 1)[0] or None
+    return media_type, data
+
+
+def _content_to_openai_chat(content: Any) -> Any:
+    if not isinstance(content, list):
+        return _content_text(content)
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype in {"text", "input_text", "output_text"}:
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if ptype in {"image_url", "input_image"}:
+            url = _image_url_from_part(part)
+            if url:
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+    return parts or _content_text(content)
+
+
+def _content_to_responses(content: Any, *, assistant: bool = False) -> Any:
+    if not isinstance(content, list):
+        return _content_text(content)
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype in {"text", "input_text", "output_text"}:
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                parts.append({"type": "output_text" if assistant else "input_text", "text": text})
+            continue
+        if not assistant and ptype in {"image_url", "input_image"}:
+            url = _image_url_from_part(part)
+            if url:
+                parts.append({"type": "input_image", "image_url": url})
+    return parts or _content_text(content)
+
+
+def _content_to_responses_parts(content: Any, *, assistant: bool = False) -> list[dict[str, Any]]:
+    converted = _content_to_responses(content, assistant=assistant)
+    if isinstance(converted, list):
+        return converted
+    text = _content_text(converted)
+    return [{"type": "output_text" if assistant else "input_text", "text": text}]
+
+
+def _content_to_anthropic(content: Any) -> Any:
+    if not isinstance(content, list):
+        return _content_text(content)
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype in {"text", "input_text", "output_text"}:
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if ptype in {"image_url", "input_image"}:
+            url = _image_url_from_part(part)
+            if not url:
+                continue
+            media_type, data = _data_url_parts(url)
+            if media_type and data:
+                parts.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data,
+                    },
+                })
+    return parts or _content_text(content)
+
+
+def _messages_to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    converted: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role not in {"user", "assistant", "tool"}:
+            continue
+        next_msg = dict(msg)
+        next_msg["content"] = _content_to_anthropic(next_msg.get("content"))
+        converted.append(next_msg)
+    return converted
+
+
+def _content_to_gemini_parts(content: Any) -> list[Any]:
+    if gemini_types is None:
+        return []
+    if not isinstance(content, list):
+        return [gemini_types.Part(text=_content_text(content))]
+
+    parts: list[Any] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype in {"text", "input_text", "output_text"}:
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                parts.append(gemini_types.Part(text=text))
+            continue
+        if ptype in {"image_url", "input_image"}:
+            url = _image_url_from_part(part)
+            if not url:
+                continue
+            media_type, data = _data_url_parts(url)
+            if not (media_type and data):
+                continue
+            raw = base64.b64decode(data)
+            from_bytes = getattr(gemini_types.Part, "from_bytes", None)
+            if callable(from_bytes):
+                parts.append(from_bytes(data=raw, mime_type=media_type))
+            else:
+                parts.append(gemini_types.Part(
+                    inline_data=gemini_types.Blob(mime_type=media_type, data=raw)
+                ))
+    return parts or [gemini_types.Part(text=_content_text(content))]
 
 
 def _openai_tool_calls(raw_calls: list[Any]) -> list[dict[str, Any]]:
@@ -755,7 +916,7 @@ def _messages_to_gemini_contents(messages: list[dict[str, Any]]) -> list[Any]:
             contents.append(
                 gemini_types.Content(
                     role="user",
-                    parts=[gemini_types.Part(text=str(content))],
+                    parts=_content_to_gemini_parts(content),
                 )
             )
             continue
@@ -763,7 +924,7 @@ def _messages_to_gemini_contents(messages: list[dict[str, Any]]) -> list[Any]:
         if role == "assistant":
             parts: list[Any] = []
             if content:
-                parts.append(gemini_types.Part(text=str(content)))
+                parts.append(gemini_types.Part(text=_content_text(content)))
 
             for tc in msg.get("tool_calls") or []:
                 if not isinstance(tc, dict):
@@ -822,7 +983,7 @@ def _messages_to_gemini_contents(messages: list[dict[str, Any]]) -> list[Any]:
                 contents.append(
                     gemini_types.Content(
                         role="user",
-                        parts=[gemini_types.Part(text=str(content))],
+                        parts=[gemini_types.Part(text=_content_text(content))],
                     )
                 )
             continue
@@ -1024,7 +1185,10 @@ async def chat_completion(
 
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": [
+                {**msg, "content": _content_to_openai_chat(msg.get("content"))}
+                for msg in messages
+            ],
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
@@ -1061,6 +1225,7 @@ async def chat_completion(
         if auth_mode == "setup-token":
             from core.providers.anthropic_http import anthropic_http_completion
             system_prompt, rest = _extract_system_prompt(messages)
+            rest = _messages_to_anthropic_messages(rest)
             return await _retry_on_transient(lambda: anthropic_http_completion(
                 endpoint=endpoint or "https://api.anthropic.com",
                 api_key=api_key or "",
@@ -1075,6 +1240,7 @@ async def chat_completion(
             raise RuntimeError("anthropic package is required for Anthropic provider.")
         client = anthropic.AsyncAnthropic(api_key=api_key)
         system_prompt, rest = _extract_system_prompt(messages)
+        rest = _messages_to_anthropic_messages(rest)
         anthropic_tools = _anthropic_tools(tools)
 
         async def _do_anthropic_completion():
@@ -1100,6 +1266,7 @@ async def chat_completion(
     if provider == "minimax-portal":
         from core.providers.anthropic_http import anthropic_http_completion
         system_prompt, rest = _extract_system_prompt(messages)
+        rest = _messages_to_anthropic_messages(rest)
         return await anthropic_http_completion(
             endpoint=endpoint or "https://api.minimax.io/anthropic",
             api_key=api_key or "",
@@ -1244,7 +1411,10 @@ async def stream_chat_completion(
 
         payload: dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": [
+                {**msg, "content": _content_to_openai_chat(msg.get("content"))}
+                for msg in messages
+            ],
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,
@@ -1333,6 +1503,7 @@ async def stream_chat_completion(
         if auth_mode == "setup-token":
             from core.providers.anthropic_http import stream_anthropic_http_completion
             system_prompt, rest = _extract_system_prompt(messages)
+            rest = _messages_to_anthropic_messages(rest)
             return await _retry_on_transient(lambda: stream_anthropic_http_completion(
                 endpoint=endpoint or "https://api.anthropic.com",
                 api_key=api_key or "",
@@ -1348,6 +1519,7 @@ async def stream_chat_completion(
             raise RuntimeError("anthropic package is required for Anthropic provider.")
         client = anthropic.AsyncAnthropic(api_key=api_key)
         system_prompt, rest = _extract_system_prompt(messages)
+        rest = _messages_to_anthropic_messages(rest)
         anthropic_tools = _anthropic_tools(tools)
         sdk_kwargs: dict[str, Any] = {
             "model": model,
@@ -1405,6 +1577,7 @@ async def stream_chat_completion(
     if provider == "minimax-portal":
         from core.providers.anthropic_http import stream_anthropic_http_completion
         system_prompt, rest = _extract_system_prompt(messages)
+        rest = _messages_to_anthropic_messages(rest)
         return await stream_anthropic_http_completion(
             endpoint=endpoint or "https://api.minimax.io/anthropic",
             api_key=api_key or "",
@@ -1516,6 +1689,7 @@ async def stream_text_completion(
             raise RuntimeError("anthropic package is required for Anthropic provider.")
         client = anthropic.AsyncAnthropic(api_key=api_key)
         system_prompt, rest = _extract_system_prompt(messages)
+        rest = _messages_to_anthropic_messages(rest)
         async with client.messages.stream(
             model=model,
             system=system_prompt or None,
@@ -1576,6 +1750,7 @@ async def stream_text_completion(
     if provider == "minimax-portal":
         from core.providers.anthropic_http import stream_anthropic_http_completion
         system_prompt, rest = _extract_system_prompt(messages)
+        rest = _messages_to_anthropic_messages(rest)
         result = await stream_anthropic_http_completion(
             endpoint=endpoint or "https://api.minimax.io/anthropic",
             api_key=api_key or "",

@@ -38,8 +38,24 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  attachments?: ChatImageAttachment[];
   presentation?: MessagePresentation;
   ui?: ChatUiArtifact[];
+};
+
+type ChatImageAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  dataUrl: string;
+  byteSize: number;
+};
+
+type ChatVisualAttachmentPayload = {
+  name: string;
+  mime_type: string;
+  data_url: string;
+  byte_size: number;
 };
 
 type ConnectorSetupCapabilityOption = {
@@ -175,6 +191,7 @@ const PASTE_ATTACH_THRESHOLD = 2000;
 // The turn's system prompt carries the attachment text up to this cap so the
 // agent can discuss the document immediately; ingestion holds the full text.
 const ATTACHMENT_PROMPT_CHARS = 16000;
+const INLINE_IMAGE_MAX_BYTES = 6 * 1024 * 1024;
 function attachmentTitle(content: string): string {
   const firstLine = content.split("\n").map((line) => line.trim()).find(Boolean) || "";
   if (!firstLine) return "Pasted text";
@@ -195,6 +212,34 @@ function attachmentAddendum(attachment: PastedAttachment): string {
       ? "\n[Document truncated here for the live turn — the full text is in memory via ingestion.]"
       : "",
   ].join("\n");
+}
+
+function imageAttachmentAddendum(attachment: FileAttachment, liveVisual: boolean): string {
+  return [
+    `----- ATTACHED IMAGE: ${attachment.name} -----`,
+    liveVisual
+      ? "The user attached this image to their message. You can inspect the image directly in this turn; do not reduce it to text extraction or assume it is only a text document."
+      : "The user attached this image to their message. It was too large to include as live visual context; the original file is preserved in the filing cabinet.",
+    "The original image is also preserved as a source artifact. Text extraction may run in the background when applicable, but the visual attachment is primary.",
+  ].join("\n");
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  if (typeof FileReader !== "undefined") {
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error || new Error("Failed to read image."));
+      reader.onload = () => {
+        if (typeof reader.result === "string") resolve(reader.result);
+        else reject(new Error("Image reader returned non-text data."));
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `data:${file.type || "application/octet-stream"};base64,${btoa(binary)}`;
 }
 
 function clipboardImageFiles(event: React.ClipboardEvent<HTMLTextAreaElement>): File[] {
@@ -1048,6 +1093,38 @@ export default function ChatPage() {
     setFileAttachments([]);
     const attachmentAddenda = toIngest.map(attachmentAddendum);
     const ingestNotes: string[] = [];
+    const visualAttachments: ChatVisualAttachmentPayload[] = [];
+    const visibleImageAttachments: ChatImageAttachment[] = [];
+
+    for (const attachment of filesToUpload) {
+      if (!isImageAttachmentFile(attachment.file) || attachment.size > INLINE_IMAGE_MAX_BYTES) {
+        continue;
+      }
+      try {
+        const dataUrl = await fileToDataUrl(attachment.file);
+        visualAttachments.push({
+          name: attachment.name,
+          mime_type: attachment.mimeType || attachment.file.type || "image/png",
+          data_url: dataUrl,
+          byte_size: attachment.size,
+        });
+        visibleImageAttachments.push({
+          id: attachment.id,
+          name: attachment.name,
+          mimeType: attachment.mimeType || attachment.file.type || "image/png",
+          dataUrl,
+          byteSize: attachment.size,
+        });
+      } catch (err) {
+        appendLog({
+          id: crypto.randomUUID(),
+          category: "error",
+          title: "Image preview error",
+          detail: `Image "${attachment.name}" could not be prepared for the live turn: ${err instanceof Error ? err.message : String(err)}`,
+          ts: Date.now(),
+        });
+      }
+    }
 
     // Dropped files upload as original bytes: preserved as source artifacts
     // first, then ingested by a durable background job.
@@ -1060,19 +1137,26 @@ export default function ChatPage() {
         const res = await fetch("/api/ingest/file", { method: "POST", body: form });
         if (res.ok) {
           const isImage = isImageAttachmentFile(attachment.file);
+          const liveVisual = visualAttachments.some((item) => item.name === attachment.name);
           ingestNotes.push(
-            `[Attached ${isImage ? "image" : "file"} "${attachment.name}" (${formatBytes(attachment.size)}) — original preserved, being ingested into memory${
-              attachment.sensitivity === "private" ? " as private (kept out of group conversations and exports)" : ""
-            }${isImage ? " via OCR" : ""}. Search it later with search_documents / search_document_chunks.]`
+            isImage
+              ? `[Attached image "${attachment.name}" (${formatBytes(attachment.size)}) — ${
+                  liveVisual ? "visible in this turn; " : "too large for live visual context; "
+                }original preserved in the filing cabinet${
+                  attachment.sensitivity === "private" ? " as private (kept out of group conversations and exports)" : ""
+                }.]`
+              : `[Attached file "${attachment.name}" (${formatBytes(attachment.size)}) — original preserved, being ingested into memory${
+                  attachment.sensitivity === "private" ? " as private (kept out of group conversations and exports)" : ""
+                }. Search it later with search_documents / search_document_chunks.]`
           );
           attachmentAddenda.push(
-            [
-              `----- ATTACHED ${isImage ? "IMAGE" : "FILE"}: ${attachment.name} -----`,
-              isImage
-                ? "The user attached this image to their message. Its original bytes are preserved and OCR ingestion is running in the background — visual pixels are not inlined here."
-                : "The user attached this file to their message. Its original bytes are preserved and it is being ingested in the background — the text is not inlined here.",
-              "Once ingestion completes (usually under a minute), search_documents / search_document_chunks will find it and open_document can read the extracted content.",
-            ].join("\n")
+            isImage
+              ? imageAttachmentAddendum(attachment, liveVisual)
+              : [
+                  `----- ATTACHED FILE: ${attachment.name} -----`,
+                  "The user attached this file to their message. Its original bytes are preserved and it is being ingested in the background — the text is not inlined here.",
+                  "Once ingestion completes (usually under a minute), search_documents / search_document_chunks will find it and open_document can read the extracted content.",
+                ].join("\n")
           );
         } else {
           const detail = await res.text();
@@ -1150,6 +1234,7 @@ export default function ChatPage() {
       id: crypto.randomUUID(),
       role: "user",
       content: messageText,
+      attachments: visibleImageAttachments,
     };
     const assistantMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -1172,6 +1257,7 @@ export default function ChatPage() {
       const chatBody: {
         message: string;
         prompt_addenda: string[];
+        visual_attachments?: ChatVisualAttachmentPayload[];
         session_id?: string | null;
         history?: { role: string; content: string }[];
       } = {
@@ -1179,6 +1265,9 @@ export default function ChatPage() {
         prompt_addenda: [...promptAddenda, ...attachmentAddenda],
         session_id: currentSessionId,
       };
+      if (visualAttachments.length > 0) {
+        chatBody.visual_attachments = visualAttachments;
+      }
       if (!currentSessionId && historyPayload.length > 0) {
         chatBody.history = historyPayload;
       }
@@ -1622,7 +1711,26 @@ export default function ChatPage() {
                           />
                         ))}
                       </div>
-                    ) : <p className="whitespace-pre-wrap">{message.content}</p>}
+                    ) : (
+                      <div className="space-y-3">
+                        {message.attachments?.length ? (
+                          <div className="grid gap-2">
+                            {message.attachments.map((attachment) => (
+                              <Image
+                                key={attachment.id}
+                                src={attachment.dataUrl}
+                                alt={attachment.name}
+                                width={360}
+                                height={240}
+                                unoptimized
+                                className="max-h-72 w-full rounded-md object-contain"
+                              />
+                            ))}
+                          </div>
+                        ) : null}
+                        {message.content ? <p className="whitespace-pre-wrap">{message.content}</p> : null}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
