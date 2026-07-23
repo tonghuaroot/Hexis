@@ -478,6 +478,10 @@ async def stream_chat_events(
                     "ui": run.ui,
                 },
             )
+            yield AgentEventData(
+                event=AgentEvent.LOOP_END,
+                data={"stopped_reason": "completed", "runtime": "connector_setup"},
+            )
             if assistant_text:
                 persisted = await _remember_conversation(
                     CognitiveMemory(pool),
@@ -497,10 +501,6 @@ async def stream_chat_events(
                         "result": persisted,
                     },
                 )
-            yield AgentEventData(
-                event=AgentEvent.LOOP_END,
-                data={"stopped_reason": "completed", "runtime": "connector_setup"},
-            )
             return
 
         use_rlm = False
@@ -544,6 +544,10 @@ async def stream_chat_events(
                         event=AgentEvent.TEXT_DELTA,
                         data={"text": assistant_text, "runtime": "rlm"},
                     )
+                yield AgentEventData(
+                    event=AgentEvent.LOOP_END,
+                    data={"stopped_reason": "completed", "runtime": "rlm"},
+                )
                 if assistant_text:
                     persisted = await _remember_conversation(
                         CognitiveMemory(pool),
@@ -573,10 +577,6 @@ async def stream_chat_events(
                                 "result": energy_result,
                             },
                         )
-                yield AgentEventData(
-                    event=AgentEvent.LOOP_END,
-                    data={"stopped_reason": "completed", "runtime": "rlm"},
-                )
             except Exception as exc:
                 logger.exception("RLM chat stream failed")
                 yield AgentEventData(

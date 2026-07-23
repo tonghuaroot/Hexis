@@ -103,6 +103,39 @@ async def test_chat_returns_sse_stream(client):
     }
 
 
+async def test_chat_sends_done_before_post_loop_memory_events(client):
+    """The visible turn completes before post-response bookkeeping logs."""
+    async def fake_stream(*args, **kwargs):
+        yield AgentEventData(event=AgentEvent.LOOP_START)
+        yield AgentEventData(event=AgentEvent.TEXT_DELTA, data={"text": "Answered."})
+        yield AgentEventData(
+            event=AgentEvent.LOOP_END,
+            data={"stopped_reason": "completed"},
+        )
+        yield AgentEventData(
+            event=AgentEvent.PHASE_CHANGE,
+            data={
+                "phase": "memory_write",
+                "status": "end",
+                "detail": "Late memory write completed",
+            },
+        )
+
+    with patch.object(web_module, "stream_chat_events", fake_stream):
+        resp = await client.post("/api/chat", json={"message": "Hello"})
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    done_index = next(i for i, event in enumerate(events) if event["event"] == "done")
+    memory_index = next(
+        i
+        for i, event in enumerate(events)
+        if event["event"] == "log"
+        and json.loads(event["data"]).get("title") == "Memory Formation"
+    )
+    assert done_index < memory_index
+
+
 async def test_chat_missing_message(client):
     """Chat endpoint rejects requests without a message."""
     resp = await client.post("/api/chat", json={})

@@ -11,12 +11,18 @@ from typing import Any, Callable
 
 from .base import (
     ToolCategory,
-    ToolContext,
     ToolErrorType,
     ToolExecutionContext,
     ToolHandler,
     ToolResult,
     ToolSpec,
+)
+from .config import ToolsConfig
+from .web_search_providers import (
+    WebSearchProviderError,
+    WebSearchProviderRegistry,
+    create_default_web_search_registry,
+    display_output_for_search,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,18 +64,25 @@ def _validate_url_host(url: str) -> list[str]:
 
 class WebSearchHandler(ToolHandler):
     """
-    Web search using Tavily API.
+    Provider-neutral web search.
 
     Provides up-to-date information from the web for questions about
     recent events, facts, or topics the agent is uncertain about.
     """
 
-    def __init__(self, api_key_resolver: Callable[[], str | None] | None = None):
+    def __init__(
+        self,
+        api_key_resolver: Callable[[], str | None] | None = None,
+        provider_registry: WebSearchProviderRegistry | None = None,
+    ):
         """
         Args:
-            api_key_resolver: Callable that returns the API key, or None to use config.
+            api_key_resolver: Optional Tavily API key resolver for legacy callers.
+            provider_registry: Optional provider registry override for tests/plugins.
         """
-        self._api_key_resolver = api_key_resolver
+        self._provider_registry = provider_registry or create_default_web_search_registry(
+            tavily_api_key_resolver=api_key_resolver,
+        )
 
     @property
     def spec(self) -> ToolSpec:
@@ -94,17 +107,6 @@ class WebSearchHandler(ToolHandler):
                         "default": 5,
                         "minimum": 1,
                         "maximum": 10,
-                    },
-                    "search_depth": {
-                        "type": "string",
-                        "enum": ["basic", "advanced"],
-                        "description": "Search depth - 'advanced' provides more detailed results.",
-                        "default": "basic",
-                    },
-                    "include_answer": {
-                        "type": "boolean",
-                        "description": "Include AI-generated answer summary.",
-                        "default": False,
                     },
                 },
                 "required": ["query"],
@@ -135,103 +137,25 @@ class WebSearchHandler(ToolHandler):
                 ToolErrorType.PERMISSION_DENIED,
             )
 
-        # Get API key
-        api_key = None
-        if self._api_key_resolver:
-            api_key = self._api_key_resolver()
-        else:
-            # Try to get from config
-            try:
-                config = await context.registry.get_config()
-                api_key = config.get_api_key("tavily")
-            except Exception:
-                pass
-
-        if not api_key:
-            return ToolResult.error_result(
-                "Web search API key not configured. Set TAVILY_API_KEY environment variable "
-                "or configure via 'hexis tools set-api-key tavily env:TAVILY_API_KEY'",
-                ToolErrorType.MISSING_CONFIG,
-            )
-
         query = arguments["query"]
         max_results = min(arguments.get("max_results", 5), 10)
-        search_depth = arguments.get("search_depth", "basic")
-        include_answer = arguments.get("include_answer", False)
-
         try:
-            import aiohttp
-        except ImportError:
-            return ToolResult.error_result(
-                "aiohttp not installed - required for web search",
-                ToolErrorType.MISSING_DEPENDENCY,
+            config = await context.registry.get_config() if context.registry else ToolsConfig()
+            response, provider_errors = await self._provider_registry.search(
+                query=query,
+                max_results=max_results,
+                config=config,
             )
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                payload = {
-                    "api_key": api_key,
-                    "query": query,
-                    "max_results": max_results,
-                    "search_depth": search_depth,
-                    "include_answer": include_answer,
-                }
-
-                async with session.post(
-                    "https://api.tavily.com/search",
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status == 401:
-                        return ToolResult.error_result(
-                            "Invalid Tavily API key",
-                            ToolErrorType.AUTH_FAILED,
-                        )
-                    if resp.status == 429:
-                        return ToolResult.error_result(
-                            "Rate limit exceeded - try again later",
-                            ToolErrorType.RATE_LIMITED,
-                        )
-                    if resp.status != 200:
-                        text = await resp.text()
-                        return ToolResult.error_result(
-                            f"Search failed with status {resp.status}: {text[:200]}",
-                            ToolErrorType.EXECUTION_FAILED,
-                        )
-
-                    data = await resp.json()
-
-            # Parse results
-            results = []
-            for r in data.get("results", []):
-                results.append({
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "snippet": r.get("content", "")[:500],
-                    "score": r.get("score"),
-                })
-
-            output = {
-                "query": query,
-                "results": results,
-                "count": len(results),
-            }
-
-            if include_answer and data.get("answer"):
-                output["answer"] = data["answer"]
-
-            # Format display output
-            display_lines = [f"Search results for: {query}"]
-            for i, r in enumerate(results[:5], 1):
-                display_lines.append(f"{i}. {r['title']}")
-                display_lines.append(f"   {r['snippet'][:100]}...")
-
+            output = response.to_dict()
+            if provider_errors:
+                output["provider_errors"] = provider_errors
             return ToolResult.success_result(
                 output=output,
-                display_output="\n".join(display_lines),
+                display_output=display_output_for_search(response),
             )
-
-        except aiohttp.ClientTimeout:
+        except WebSearchProviderError as exc:
+            return ToolResult.error_result(str(exc), exc.error_type)
+        except TimeoutError:
             return ToolResult.error_result(
                 "Search request timed out",
                 ToolErrorType.TIMEOUT,
@@ -239,7 +163,6 @@ class WebSearchHandler(ToolHandler):
         except Exception as e:
             logger.exception("Web search failed")
             return ToolResult.error_result(str(e), ToolErrorType.EXECUTION_FAILED)
-
 
 class WebFetchHandler(ToolHandler):
     """
@@ -349,7 +272,7 @@ class WebFetchHandler(ToolHandler):
 
             if not content:
                 return ToolResult.error_result(
-                    f"Failed to extract content from URL - page may be empty or use JavaScript rendering",
+                    "Failed to extract content from URL - page may be empty or use JavaScript rendering",
                     ToolErrorType.EXECUTION_FAILED,
                 )
 
@@ -564,8 +487,9 @@ def create_web_tools(
     Create all web tool handlers.
 
     Args:
-        api_key_resolver: Optional callable to resolve Tavily API key.
-            If not provided, tools will look up the key from config.
+        api_key_resolver: Legacy optional callable to resolve a Tavily API key.
+            Provider selection and DB-configured keys are handled by the
+            web-search provider registry.
 
     Returns:
         List of web tool handlers.

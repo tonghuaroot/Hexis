@@ -97,6 +97,10 @@ class ToolsConfig:
     # API keys (values are env var references like "env:TAVILY_API_KEY")
     api_keys: dict[str, str] = field(default_factory=dict)
 
+    # Web search provider config. Example:
+    # {"provider": "auto"} or {"provider": "tavily"}.
+    web_search: dict[str, Any] = field(default_factory=dict)
+
     # Custom energy costs (overrides defaults)
     costs: dict[str, int] = field(default_factory=dict)
 
@@ -155,6 +159,7 @@ class ToolsConfig:
             disabled_categories=disabled_categories,
             mcp_servers=mcp_servers,
             api_keys=dict(data.get("api_keys", {})),
+            web_search=dict(data.get("web_search", {})) if isinstance(data.get("web_search"), dict) else {},
             costs=dict(data.get("costs", {})),
             context_overrides=context_overrides,
             allowed_optional=list(data.get("allowed_optional", [])),
@@ -174,6 +179,7 @@ class ToolsConfig:
             "disabled_categories": [c.value for c in self.disabled_categories],
             "mcp_servers": [s.to_dict() for s in self.mcp_servers],
             "api_keys": self.api_keys,
+            "web_search": self.web_search,
             "costs": self.costs,
             "context_overrides": {
                 k.value: v.to_dict() for k, v in self.context_overrides.items()

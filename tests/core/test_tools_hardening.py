@@ -1,4 +1,3 @@
-import json
 import sys
 import types
 from types import SimpleNamespace
@@ -10,7 +9,7 @@ from core.tools.registry import ToolRegistry
 from core.tools.config import ToolsConfig
 from core.tools.policy import PolicyCheckResult
 from core.tools.base import ToolHandler, ToolResult, ToolSpec, ToolCategory
-from core.tools.web import WebFetchHandler, WebSummarizeHandler
+from core.tools.web import WebFetchHandler, WebSearchHandler, WebSummarizeHandler
 class DummyHandler(ToolHandler):
     def __init__(self, name: str, cost: int, supports_parallel: bool = True):
         self._spec = ToolSpec(
@@ -82,6 +81,146 @@ def test_web_url_private_ip_validation():
 
     errs = handler.validate({"url": "http://172.0.0.1/test"})
     assert not any("internal" in e.lower() for e in errs)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.core
+async def test_web_search_uses_keyless_fallback_without_tavily(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+        text = """
+        <html><body>
+          <a class="result-link" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fprofile&amp;rut=x">
+            Example Result
+          </a>
+          <td class="result-snippet">Useful search snippet.</td>
+        </body></html>
+        """
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, *, params):
+            assert url == "https://lite.duckduckgo.com/lite/"
+            assert params == {"q": "example query"}
+            return FakeResponse()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    handler = WebSearchHandler(api_key_resolver=lambda: None)
+    context = ToolExecutionContext(tool_context=ToolContext.CHAT, call_id="x")
+
+    result = await handler.execute({"query": "example query", "max_results": 3}, context)
+
+    assert result.success is True
+    assert result.output["provider"] == {
+        "id": "duckduckgo_lite",
+        "label": "DuckDuckGo Lite",
+    }
+    assert result.output["external_content"] == {
+        "untrusted": True,
+        "source": "web_search",
+        "provider": "duckduckgo_lite",
+    }
+    assert result.output["results"] == [
+        {
+            "title": "Example Result",
+            "url": "https://example.com/profile",
+            "snippet": "Useful search snippet.",
+            "score": None,
+            "site_name": "example.com",
+        }
+    ]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.core
+async def test_web_search_falls_back_to_bing_when_duckduckgo_is_empty(monkeypatch):
+    class FakeResponse:
+        def __init__(self, text):
+            self.status_code = 200
+            self.text = text
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, *, params):
+            if url == "https://lite.duckduckgo.com/lite/":
+                assert params == {"q": "example query"}
+                return FakeResponse("<html><body>no results</body></html>")
+            assert url == "https://www.bing.com/search"
+            assert params == {"q": "example query", "format": "rss"}
+            return FakeResponse(
+                """<?xml version="1.0" encoding="utf-8" ?>
+                <rss version="2.0"><channel>
+                  <item>
+                    <title>Fallback Result</title>
+                    <link>https://example.net/profile</link>
+                    <description>Fallback snippet.</description>
+                  </item>
+                </channel></rss>"""
+            )
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    handler = WebSearchHandler(api_key_resolver=lambda: None)
+    context = ToolExecutionContext(tool_context=ToolContext.CHAT, call_id="x")
+
+    result = await handler.execute({"query": "example query", "max_results": 3}, context)
+
+    assert result.success is True
+    assert result.output["provider"]["id"] == "bing_rss"
+    assert result.output["provider_errors"] == [
+        "DuckDuckGo Lite: DuckDuckGo Lite returned no parseable results."
+    ]
+    assert result.output["results"][0]["title"] == "Fallback Result"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.core
+async def test_web_search_explicit_provider_does_not_silently_fallback(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    class FakeRegistry:
+        async def get_config(self):
+            return ToolsConfig(web_search={"provider": "tavily"})
+
+    handler = WebSearchHandler(api_key_resolver=lambda: None)
+    context = ToolExecutionContext(tool_context=ToolContext.CHAT, call_id="x")
+    context.registry = FakeRegistry()
+
+    result = await handler.execute({"query": "example query"}, context)
+
+    assert result.success is False
+    assert result.error_type == ToolErrorType.MISSING_CONFIG
+    assert "TAVILY_API_KEY" in (result.error or "")
+
+
+@pytest.mark.core
+def test_tools_config_preserves_web_search_provider():
+    config = ToolsConfig(web_search={"provider": "searxng", "searxng_url": "http://localhost:8080"})
+    restored = ToolsConfig.from_json(config.to_json())
+
+    assert restored.web_search == {
+        "provider": "searxng",
+        "searxng_url": "http://localhost:8080",
+    }
 
 
 @pytest.mark.asyncio(loop_scope="session")

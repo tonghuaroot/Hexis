@@ -678,6 +678,22 @@ def build_parser() -> argparse.ArgumentParser:
     tools_set_cost.add_argument("cost", type=int, help="Energy cost")
     tools_set_cost.set_defaults(func="tools_set_cost")
 
+    tools_web_search = tools_sub.add_parser("web-search", parents=[_db], help="Manage web search providers")
+    tools_web_sub = tools_web_search.add_subparsers(dest="web_search_command", required=True)
+    tools_web_status = tools_web_sub.add_parser("status", help="Show web search provider status")
+    tools_web_status.add_argument("--json", action="store_true", help="Output JSON")
+    tools_web_status.set_defaults(func="tools_web_search_status")
+    tools_web_provider = tools_web_sub.add_parser("set-provider", help="Choose the web_search provider")
+    tools_web_provider.add_argument(
+        "provider",
+        choices=["auto", "tavily", "brave", "searxng", "duckduckgo_lite", "bing_rss"],
+        help="Provider id. Use auto to pick the best available provider.",
+    )
+    tools_web_provider.set_defaults(func="tools_web_search_set_provider")
+    tools_web_searxng = tools_web_sub.add_parser("set-searxng-url", help="Configure a SearXNG base URL")
+    tools_web_searxng.add_argument("url", help="SearXNG base URL, for example http://localhost:8080")
+    tools_web_searxng.set_defaults(func="tools_web_search_set_searxng_url")
+
     tools_add_mcp = tools_sub.add_parser("add-mcp", parents=[_db], help="Add an MCP server")
     tools_add_mcp.add_argument("name", help="Server name")
     tools_add_mcp.add_argument("command", help="Command to run (e.g. 'npx')")
@@ -1197,6 +1213,98 @@ async def _tools_set_cost(dsn: str, tool_name: str, cost: int) -> int:
         await pool.close()
 
 
+async def _tools_web_search_status(dsn: str, as_json: bool) -> int:
+    """Show web search provider status."""
+    import asyncpg
+    from core.tools.config import load_tools_config
+    from core.tools.web_search_providers import create_default_web_search_registry
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        config = await load_tools_config(pool)
+        registry = create_default_web_search_registry()
+        statuses = [status.to_dict() for status in registry.statuses(config)]
+        payload = {
+            "configured_provider": config.web_search.get("provider") or "auto",
+            "searxng_url": config.web_search.get("searxng_url") or "",
+            "providers": statuses,
+        }
+        if as_json:
+            sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        else:
+            from apps.cli_theme import console as _con, make_table as _mt, enabled_badge
+
+            _con.print("[bold]Web Search Providers[/bold]")
+            _con.print(f"Configured provider: [bold]{payload['configured_provider']}[/bold]\n")
+            table = _mt(
+                ("Provider", {"style": "bold"}),
+                "Selected",
+                "Available",
+                "Credential",
+                "Hint",
+                title="web_search",
+            )
+            for status in statuses:
+                table.add_row(
+                    status["id"],
+                    "[ok]yes[/ok]" if status["selected"] else "[muted]no[/muted]",
+                    enabled_badge(bool(status["available"])),
+                    "required" if status["requires_credential"] else "not required",
+                    status["reason"] or status["credential_hint"],
+                )
+            _con.print(table)
+        return 0
+    finally:
+        await pool.close()
+
+
+async def _tools_web_search_set_provider(dsn: str, provider: str) -> int:
+    """Configure the active web_search provider."""
+    import asyncpg
+    from core.tools.config import load_tools_config, save_tools_config
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        config = await load_tools_config(pool)
+        if provider == "auto":
+            config.web_search.pop("provider", None)
+        else:
+            config.web_search["provider"] = provider
+        if "web_search" in config.disabled:
+            config.disabled.remove("web_search")
+        await save_tools_config(pool, config)
+        from apps.cli_theme import console as _con
+        _con.print(f"[ok]✔[/ok] web_search provider set to [bold]{provider}[/bold]")
+        return 0
+    finally:
+        await pool.close()
+
+
+async def _tools_web_search_set_searxng_url(dsn: str, url: str) -> int:
+    """Configure a SearXNG base URL."""
+    import asyncpg
+    from core.tools.config import load_tools_config, save_tools_config
+
+    value = url.strip().rstrip("/")
+    if not value.startswith(("http://", "https://")):
+        _print_err("SearXNG URL must start with http:// or https://")
+        return 1
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+    try:
+        config = await load_tools_config(pool)
+        config.web_search["searxng_url"] = value
+        config.web_search["provider"] = "searxng"
+        if "web_search" in config.disabled:
+            config.disabled.remove("web_search")
+        await save_tools_config(pool, config)
+        from apps.cli_theme import console as _con
+        _con.print(f"[ok]✔[/ok] Configured SearXNG for web_search: [bold]{value}[/bold]")
+        return 0
+    finally:
+        await pool.close()
+
+
 async def _tools_add_mcp(dsn: str, name: str, command: str, args: list[str], env_pairs: list[str]) -> int:
     """Add an MCP server."""
     import asyncpg
@@ -1255,13 +1363,18 @@ async def _tools_status(dsn: str, as_json: bool) -> int:
     """Show tools configuration."""
     import asyncpg
     from core.tools.config import load_tools_config
+    from core.tools.web_search_providers import create_default_web_search_registry
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
     try:
         config = await load_tools_config(pool)
+        web_registry = create_default_web_search_registry()
+        web_statuses = [status.to_dict() for status in web_registry.statuses(config)]
 
         if as_json:
-            sys.stdout.write(config.to_json() + "\n")
+            payload = config.to_dict()
+            payload["web_search_status"] = web_statuses
+            sys.stdout.write(json.dumps(payload, indent=2) + "\n")
         else:
             sys.stdout.write("Tools Configuration\n")
             sys.stdout.write("=" * 50 + "\n\n")
@@ -1289,6 +1402,20 @@ async def _tools_status(dsn: str, as_json: bool) -> int:
                     sys.stdout.write(f"  {k}: {display}\n")
             else:
                 sys.stdout.write("  (none configured)\n")
+
+            sys.stdout.write("\nWeb Search:\n")
+            sys.stdout.write(f"  provider: {config.web_search.get('provider') or 'auto'}\n")
+            selected = [item for item in web_statuses if item.get("selected")]
+            if selected:
+                item = selected[0]
+                sys.stdout.write(
+                    f"  selected: {item['id']} ({'available' if item['available'] else 'unavailable'})\n"
+                )
+            for item in web_statuses:
+                marker = "*" if item.get("selected") else " "
+                credential = "credential required" if item.get("requires_credential") else "keyless"
+                availability = "available" if item.get("available") else "unavailable"
+                sys.stdout.write(f"  {marker} {item['id']}: {availability}; {credential}\n")
 
             # Custom costs
             sys.stdout.write("\nCustom Energy Costs:\n")
@@ -4594,6 +4721,15 @@ def _dispatch(argv: list[str] | None = None) -> int:
     if func == "tools_set_cost":
         dsn = _get_dsn(args)
         return asyncio.run(_tools_set_cost(dsn, args.tool_name, args.cost))
+    if func == "tools_web_search_status":
+        dsn = _get_dsn(args)
+        return asyncio.run(_tools_web_search_status(dsn, args.json))
+    if func == "tools_web_search_set_provider":
+        dsn = _get_dsn(args)
+        return asyncio.run(_tools_web_search_set_provider(dsn, args.provider))
+    if func == "tools_web_search_set_searxng_url":
+        dsn = _get_dsn(args)
+        return asyncio.run(_tools_web_search_set_searxng_url(dsn, args.url))
     if func == "tools_add_mcp":
         dsn = _get_dsn(args)
         return asyncio.run(_tools_add_mcp(dsn, args.name, args.command, args.args, args.env))

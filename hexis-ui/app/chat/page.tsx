@@ -114,6 +114,22 @@ type FileAttachment = {
   sensitivity: "private" | null;
 };
 
+type SearchConfigProvider = "tavily" | "brave" | "searxng" | "auto";
+
+const SEARCH_CONFIG_PROVIDERS: { id: SearchConfigProvider; label: string }[] = [
+  { id: "tavily", label: "Tavily" },
+  { id: "brave", label: "Brave" },
+  { id: "searxng", label: "SearXNG" },
+  { id: "auto", label: "Auto" },
+];
+
+function searchConfigPlaceholder(provider: SearchConfigProvider): string {
+  if (provider === "brave") return "brave-... or env:BRAVE_SEARCH_API_KEY";
+  if (provider === "searxng") return "https://searxng.example";
+  if (provider === "auto") return "uses keyless fallback";
+  return "tvly-... or env:TAVILY_API_KEY";
+}
+
 function formatBytes(size: number): string {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -458,6 +474,7 @@ export default function ChatPage() {
   const [promptAddenda, setPromptAddenda] = useState<string[]>([]);
   const [currentPhase, setCurrentPhase] = useState<string | null>(null);
   const [showSearchConfig, setShowSearchConfig] = useState(false);
+  const [searchConfigProvider, setSearchConfigProvider] = useState<SearchConfigProvider>("tavily");
   const [searchConfigValue, setSearchConfigValue] = useState("");
   const [searchConfigSaving, setSearchConfigSaving] = useState(false);
   const [searchConfigError, setSearchConfigError] = useState<string | null>(null);
@@ -658,8 +675,8 @@ export default function ChatPage() {
     const latestAssistant = [...messages]
       .reverse()
       .find((msg) => msg.role === "assistant" && msg.content);
-    if (latestAssistant && isSearchToolMisconfigured(latestAssistant.content)) {
-      setShowSearchConfig(true);
+    if (latestAssistant) {
+      setShowSearchConfig(isSearchToolMisconfigured(latestAssistant.content));
     }
   }, [messages]);
 
@@ -775,8 +792,12 @@ export default function ChatPage() {
 
   const handleConfigureSearchTool = async () => {
     const value = searchConfigValue.trim();
-    if (!value) {
-      setSearchConfigError("Enter a Tavily key or env reference (for example: env:TAVILY_API_KEY).");
+    if (searchConfigProvider !== "auto" && !value) {
+      setSearchConfigError(
+        searchConfigProvider === "searxng"
+          ? "Enter a SearXNG URL."
+          : `Enter a ${searchConfigProvider === "brave" ? "Brave" : "Tavily"} key or env reference.`
+      );
       return;
     }
 
@@ -784,9 +805,17 @@ export default function ChatPage() {
     setSearchConfigError(null);
     setSearchConfigNotice(null);
     try {
-      const payload = value.startsWith("env:")
-        ? { key_ref: value, enable: true }
-        : { api_key: value, enable: true };
+      const payload: Record<string, unknown> = {
+        provider: searchConfigProvider,
+        enable: true,
+      };
+      if (searchConfigProvider === "searxng") {
+        payload.searxng_url = value;
+      } else if (value.startsWith("env:")) {
+        payload.key_ref = value;
+      } else if (value) {
+        payload.api_key = value;
+      }
       const res = await fetch("/api/settings/tools/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -805,7 +834,7 @@ export default function ChatPage() {
       });
       setShowSearchConfig(false);
       setSearchConfigValue("");
-      setSearchConfigNotice("Search tool configured. Retry your question.");
+      setSearchConfigNotice("Web search configured. Retry your question.");
       setSessionNotice(null);
     } catch (err: unknown) {
       setSearchConfigError(
@@ -1102,6 +1131,8 @@ export default function ChatPage() {
     setHistoryDraft("");
     setSending(true);
     setCurrentPhase(null);
+    setShowSearchConfig(false);
+    setSearchConfigError(null);
     setSearchConfigNotice(null);
     setSessionNotice(null);
 
@@ -1286,6 +1317,8 @@ export default function ChatPage() {
               saveSessionId(payload.session_id);
               setSessionId(payload.session_id);
             }
+            setSending(false);
+            setCurrentPhase(null);
           }
         }
       }
@@ -1492,8 +1525,29 @@ export default function ChatPage() {
           {showSearchConfig ? (
             <div className="border-b border-amber-200 bg-amber-50 px-4 py-3 sm:px-6">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <span className="text-sm font-medium text-amber-900">Web search needs a Tavily key</span>
-                <input value={searchConfigValue} onChange={(event) => setSearchConfigValue(event.target.value)} placeholder="tvly-... or env:TAVILY_API_KEY" className="min-w-0 flex-1 rounded-md border border-amber-200 bg-white px-3 py-2 text-sm" />
+                <span className="text-sm font-medium text-amber-900">Configure web search</span>
+                <select
+                  value={searchConfigProvider}
+                  onChange={(event) => {
+                    setSearchConfigProvider(event.target.value as SearchConfigProvider);
+                    setSearchConfigValue("");
+                    setSearchConfigError(null);
+                  }}
+                  className="rounded-md border border-amber-200 bg-white px-3 py-2 text-sm"
+                >
+                  {SEARCH_CONFIG_PROVIDERS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.label}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={searchConfigValue}
+                  onChange={(event) => setSearchConfigValue(event.target.value)}
+                  placeholder={searchConfigPlaceholder(searchConfigProvider)}
+                  disabled={searchConfigProvider === "auto"}
+                  className="min-w-0 flex-1 rounded-md border border-amber-200 bg-white px-3 py-2 text-sm disabled:bg-amber-100 disabled:text-amber-800"
+                />
                 <button onClick={handleConfigureSearchTool} disabled={searchConfigSaving} className="rounded-md bg-[var(--foreground)] px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{searchConfigSaving ? "Saving" : "Enable"}</button>
                 <button onClick={() => setShowSearchConfig(false)} className="px-2 py-2 text-xs text-amber-800">Dismiss</button>
               </div>
@@ -2311,6 +2365,8 @@ function isSearchToolMisconfigured(text: string): boolean {
   return (
     normalized.includes("web search api key not configured") ||
     (normalized.includes("web search") && normalized.includes("not configured")) ||
+    normalized.includes("no tavily api key") ||
+    normalized.includes("keyless search fallbacks failed") ||
     normalized.includes("tavily_api_key")
   );
 }

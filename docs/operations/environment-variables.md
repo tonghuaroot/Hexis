@@ -95,7 +95,8 @@ These are only needed for API-key providers. OAuth providers store credentials i
 | Variable | Description |
 |----------|-------------|
 | `TAVILY_API_KEY` | Tavily search API key |
-| `BRAVE_API_KEY` | Brave Search API key |
+| `BRAVE_SEARCH_API_KEY` | Brave Search API key |
+| `SEARXNG_URL` | SearXNG base URL for self-hosted no-key web search |
 | `FIRECRAWL_API_KEY` | Firecrawl scraping API key |
 | `HUBSPOT_API_KEY` | HubSpot CRM API key |
 | `TODOIST_API_KEY` | Todoist API key |

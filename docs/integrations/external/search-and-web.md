@@ -13,20 +13,39 @@ Enable web search, content fetching, and page scraping capabilities.
 
 ## Built-in Web Tools
 
-These tools are available without external API keys:
+These tools are available in the default tool registry:
 
 | Tool | Energy | Description |
 |------|--------|-------------|
-| `web_search` | 2 | Search the web (uses configured search provider) |
+| `web_search` | 2 | Search the web through the configured provider |
 | `web_fetch` | 2 | Fetch and extract content from a URL |
 | `web_summarize` | 4 | Fetch a URL and generate a summary |
+
+`web_search` is provider-neutral. It uses the highest-quality available provider
+in this order:
+
+1. `tavily` when `TAVILY_API_KEY` or `api_keys.tavily` is configured.
+2. `brave` when `BRAVE_SEARCH_API_KEY` or `api_keys.brave_search` is configured.
+3. `searxng` when `SEARXNG_URL` or `web_search.searxng_url` is configured.
+4. `duckduckgo_lite`, keyless fallback.
+5. `bing_rss`, keyless secondary fallback.
+
+Choose a provider explicitly:
+
+```bash
+hexis tools web-search status
+hexis tools web-search set-provider auto
+hexis tools web-search set-provider tavily
+hexis tools web-search set-searxng-url http://localhost:8080
+```
 
 ## Brave Search
 
 ### Setup
 
 ```bash
-hexis tools set-api-key brave env:BRAVE_API_KEY
+hexis tools set-api-key brave_search env:BRAVE_SEARCH_API_KEY
+hexis tools web-search set-provider brave
 hexis tools enable brave_search
 ```
 

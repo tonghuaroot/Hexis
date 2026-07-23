@@ -1487,6 +1487,13 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         full_text = ""
         conscious_started = False
         active_stream_phase = "conscious_final"
+        done_sent = False
+
+        def build_done_payload() -> dict[str, Any]:
+            payload: dict[str, Any] = {"assistant": full_text, "session_id": session_id}
+            if full_text:
+                payload["presentation"] = presentation_from_text(full_text).to_dict()
+            return payload
 
         async for event in stream_chat_events(
             user_message=user_message,
@@ -1609,14 +1616,22 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                     "message": event.data.get("error", "Unknown error"),
                 })
 
-        # Signal phase end and completion
-        if conscious_started:
-            yield _sse_event("phase_end", {"phase": active_stream_phase})
+            elif event.event == AgentEvent.LOOP_END and not done_sent:
+                # The assistant-visible turn is complete at LOOP_END. Memory
+                # persistence and energy bookkeeping can still emit logs after
+                # this, but they must not keep the composer in "Thinking..."
+                # while the response is already finished.
+                if conscious_started:
+                    yield _sse_event("phase_end", {"phase": active_stream_phase})
+                yield _sse_event("done", build_done_payload())
+                done_sent = True
 
-        done_payload: dict[str, Any] = {"assistant": full_text, "session_id": session_id}
-        if full_text:
-            done_payload["presentation"] = presentation_from_text(full_text).to_dict()
-        yield _sse_event("done", done_payload)
+        # Signal phase end and completion for runtimes that do not surface a
+        # LOOP_END event before returning.
+        if conscious_started and not done_sent:
+            yield _sse_event("phase_end", {"phase": active_stream_phase})
+        if not done_sent:
+            yield _sse_event("done", build_done_payload())
 
     except Exception as e:
         logger.exception("Chat stream error")

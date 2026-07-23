@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
+from uuid import UUID
 
 try:
     import psycopg2
@@ -318,13 +319,14 @@ class MemoryRepo:
                 return []
             return json.loads(result) if isinstance(result, str) else result
 
-    def touch(self, ids: list[str]) -> None:
+    def touch(self, ids: list[str | UUID]) -> None:
         """Mark memories as accessed (updates access_count/last_accessed)."""
         if not ids:
             return
+        uuid_ids = [item if isinstance(item, UUID) else UUID(str(item)) for item in ids]
         conn = self._get_conn()
         with conn.cursor() as cur:
-            cur.execute("SELECT touch_memories(%s)", (ids,))
+            cur.execute("SELECT touch_memories(%s::uuid[])", (uuid_ids,))
 
     def close(self) -> None:
         if self._conn and not self._conn.closed:
