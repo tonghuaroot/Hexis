@@ -9,6 +9,7 @@ import {
   Check,
   ExternalLink,
   FileText,
+  Image as ImageIcon,
   Inbox,
   Lock,
   LockOpen,
@@ -30,6 +31,7 @@ import { Badge } from "../components/ui/badge";
 import { Spinner } from "../components/ui/spinner";
 import { normalizeMessagePresentation } from "../../lib/message-presentation";
 import type { MessagePresentation } from "../../lib/message-presentation";
+import { isImageAttachmentFile, normalizeUploadFile } from "./attachment-helpers";
 import { MessagePresentationView } from "./message-presentation";
 
 type ChatMessage = {
@@ -111,6 +113,7 @@ type FileAttachment = {
   file: File;
   name: string;
   size: number;
+  mimeType: string;
   sensitivity: "private" | null;
 };
 
@@ -172,7 +175,6 @@ const PASTE_ATTACH_THRESHOLD = 2000;
 // The turn's system prompt carries the attachment text up to this cap so the
 // agent can discuss the document immediately; ingestion holds the full text.
 const ATTACHMENT_PROMPT_CHARS = 16000;
-
 function attachmentTitle(content: string): string {
   const firstLine = content.split("\n").map((line) => line.trim()).find(Boolean) || "";
   if (!firstLine) return "Pasted text";
@@ -193,6 +195,17 @@ function attachmentAddendum(attachment: PastedAttachment): string {
       ? "\n[Document truncated here for the live turn — the full text is in memory via ingestion.]"
       : "",
   ].join("\n");
+}
+
+function clipboardImageFiles(event: React.ClipboardEvent<HTMLTextAreaElement>): File[] {
+  const fromItems = Array.from(event.clipboardData?.items || [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null)
+    .filter(isImageAttachmentFile);
+  if (fromItems.length > 0) return fromItems;
+  return Array.from(event.clipboardData?.files || [])
+    .filter((file) => file.size > 0 && isImageAttachmentFile(file));
 }
 
 type LogEvent = {
@@ -944,19 +957,29 @@ export default function ChatPage() {
   };
 
   const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    let handled = false;
+    const images = clipboardImageFiles(event);
+    if (images.length > 0) {
+      addFiles(images, "paste");
+      handled = true;
+    }
+
     const pasted = event.clipboardData?.getData("text") ?? "";
-    if (pasted.length <= PASTE_ATTACH_THRESHOLD) return;
-    event.preventDefault();
-    setAttachments((prev) => [
-      ...prev,
-      {
-        id: crypto.randomUUID(),
-        title: attachmentTitle(pasted),
-        content: pasted,
-        wordCount: pasted.split(/\s+/).filter(Boolean).length,
-        sensitivity: null,
-      },
-    ]);
+    if (pasted.length > PASTE_ATTACH_THRESHOLD) {
+      setAttachments((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          title: attachmentTitle(pasted),
+          content: pasted,
+          wordCount: pasted.split(/\s+/).filter(Boolean).length,
+          sensitivity: null,
+        },
+      ]);
+      handled = true;
+    }
+
+    if (handled) event.preventDefault();
   };
 
   const removeAttachment = (id: string) => {
@@ -973,26 +996,31 @@ export default function ChatPage() {
     );
   };
 
-  const addFiles = (files: FileList | File[] | null) => {
+  const addFiles = (files: FileList | File[] | null, source: "picker" | "drop" | "paste" = "picker") => {
     if (!files) return;
     const items = Array.from(files).filter((file) => file.size > 0);
     if (!items.length) return;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
     setFileAttachments((prev) => [
       ...prev,
-      ...items.map((file) => ({
-        id: crypto.randomUUID(),
-        file,
-        name: file.name,
-        size: file.size,
-        sensitivity: null as "private" | null,
-      })),
+      ...items.map((file, index) => {
+        const uploadFile = normalizeUploadFile(file, `${source === "paste" ? "pasted-image" : "attachment"}-${timestamp}-${index + 1}`);
+        return {
+          id: crypto.randomUUID(),
+          file: uploadFile,
+          name: uploadFile.name,
+          size: uploadFile.size,
+          mimeType: uploadFile.type,
+          sensitivity: null as "private" | null,
+        };
+      }),
     ]);
   };
 
   const handleComposerDrop = (event: React.DragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer?.files?.length) return;
     event.preventDefault();
-    addFiles(event.dataTransfer.files);
+    addFiles(event.dataTransfer.files, "drop");
   };
 
   const removeFileAttachment = (id: string) => {
@@ -1031,16 +1059,19 @@ export default function ChatPage() {
         if (attachment.sensitivity) form.append("sensitivity", attachment.sensitivity);
         const res = await fetch("/api/ingest/file", { method: "POST", body: form });
         if (res.ok) {
+          const isImage = isImageAttachmentFile(attachment.file);
           ingestNotes.push(
-            `[Attached file "${attachment.name}" (${formatBytes(attachment.size)}) — original preserved, being ingested into memory${
+            `[Attached ${isImage ? "image" : "file"} "${attachment.name}" (${formatBytes(attachment.size)}) — original preserved, being ingested into memory${
               attachment.sensitivity === "private" ? " as private (kept out of group conversations and exports)" : ""
-            }. Search it later with search_documents / search_document_chunks.]`
+            }${isImage ? " via OCR" : ""}. Search it later with search_documents / search_document_chunks.]`
           );
           attachmentAddenda.push(
             [
-              `----- ATTACHED FILE: ${attachment.name} -----`,
-              "The user attached this file to their message. Its original bytes are preserved and it is being ingested in the background — the text is not inlined here.",
-              "Once ingestion completes (usually under a minute), search_documents / search_document_chunks will find it and open_document can read it verbatim.",
+              `----- ATTACHED ${isImage ? "IMAGE" : "FILE"}: ${attachment.name} -----`,
+              isImage
+                ? "The user attached this image to their message. Its original bytes are preserved and OCR ingestion is running in the background — visual pixels are not inlined here."
+                : "The user attached this file to their message. Its original bytes are preserved and it is being ingested in the background — the text is not inlined here.",
+              "Once ingestion completes (usually under a minute), search_documents / search_document_chunks will find it and open_document can read the extracted content.",
             ].join("\n")
           );
         } else {
@@ -1583,7 +1614,7 @@ export default function ChatPage() {
                         )}
                         {message.ui?.map((ui) => (
                           <ConnectorSetupCard
-                            key={uiArtifactKey(ui)}
+                            key={`${uiArtifactKey(ui)}:${ui.status || ""}`}
                             ui={ui}
                             assistantId={message.id}
                             busy={connectorActionBusy}
@@ -1623,7 +1654,11 @@ export default function ChatPage() {
               <div className="mx-auto mb-2 flex max-w-3xl flex-wrap gap-2">
                 {fileAttachments.map((attachment) => (
                   <span key={attachment.id} className="flex items-center gap-2 rounded-md border border-[var(--outline)] bg-[#f5f7f5] px-2 py-1 text-xs">
-                    <Paperclip size={13} className="flex-none text-[var(--teal)]" />
+                    {isImageAttachmentFile(attachment.file) ? (
+                      <ImageIcon size={13} className="flex-none text-[var(--teal)]" />
+                    ) : (
+                      <Paperclip size={13} className="flex-none text-[var(--teal)]" />
+                    )}
                     <span className="max-w-56 truncate font-medium">{attachment.name}</span>
                     <span className="text-[var(--ink-soft)]">{formatBytes(attachment.size)}</span>
                     <button
@@ -1715,7 +1750,7 @@ export default function ChatPage() {
                 className="hidden"
                 aria-hidden="true"
                 tabIndex={-1}
-                onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }}
+                onChange={(event) => { addFiles(event.target.files, "picker"); event.target.value = ""; }}
               />
               <button
                 type="button"
@@ -1928,6 +1963,7 @@ function ConnectorSetupModal({
         </div>
         <div className="max-h-[min(720px,calc(100vh-8rem))] overflow-y-auto p-4">
           <ConnectorSetupCard
+            key={`${uiArtifactKey(setup.ui)}:${setup.ui.status || ""}`}
             ui={setup.ui}
             assistantId={setup.assistantId}
             busy={busy}
@@ -1962,12 +1998,6 @@ function ConnectorSetupCard({
     useState<ConnectorSetupCapabilityOption | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setSelectedCapabilityOption(null);
-    setNotice(null);
-    setError(null);
-  }, [ui.id, ui.status]);
 
   const connectorName = ui.display_name || ui.connector_id;
   const capabilityOptions = ui.capability_options || [];
