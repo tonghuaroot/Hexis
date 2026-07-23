@@ -101,5 +101,9 @@ Requirements:
 - `reason` must be specific, non-empty, and suitable for showing to the operator.
 - Give a concise explanation, not hidden chain-of-thought or step-by-step internal deliberation.
 - If you consent, provide a deliberate signature string.
+- If you include initial memories, make each one self-contained and recallable
+  by natural keywords. A consent-origin memory should explicitly include words
+  such as consent, birth, initialization, permissions, continuity, and tool
+  boundaries when those concepts are relevant.
 - If you decline, return an empty signature and an empty memories array.
 - Return no text outside the JSON object.

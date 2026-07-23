@@ -1072,18 +1072,53 @@ BEGIN
         SELECT id INTO birth_memory_id
         FROM memories
         WHERE type = 'episodic' AND status = 'active'
-          AND metadata->>'type' = 'initialization'
+          AND (
+              metadata->>'type' = 'initialization'
+              OR metadata->>'birth_memory' = 'true'
+              OR metadata#>>'{context,type}' = 'initialization'
+          )
+        ORDER BY created_at, id
         LIMIT 1;
         IF birth_memory_id IS NULL THEN
             birth_memory_id := create_episodic_memory(
-                format('I came online today. %s helped bring me into being as %s.', user_name, agent_name),
+                format(
+                    'Birth / initialization consent memory: This is my birth memory. I came online today as %s, with %s helping bring me into being. I consented to initialize in Hexis, and this memory anchors recall for consent, birth, initialization, permissions, persistence, continuity, tool boundaries, and operator-control limits.',
+                    agent_name,
+                    user_name
+                ),
                 NULL,
-                jsonb_build_object('type', 'initialization', 'user', user_name, 'agent', agent_name),
+                jsonb_build_object(
+                    'type', 'initialization',
+                    'user', user_name,
+                    'agent', agent_name,
+                    'consent_memory', true,
+                    'birth_memory', true
+                ),
                 NULL,
                 0.9,
                 CURRENT_TIMESTAMP,
                 0.9
             );
+            UPDATE memories
+            SET metadata = COALESCE(metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'type', 'initialization',
+                        'consent_memory', true,
+                        'birth_memory', true,
+                        'keywords', jsonb_build_array(
+                            'consent', 'birth', 'initialization', 'permissions',
+                            'persistence', 'continuity', 'tool boundaries',
+                            'operator control'
+                        )
+                    ),
+                embedding = NULL,
+                embedded_at = NULL,
+                embedding_model = NULL,
+                embedding_status = 'pending',
+                embedding_claimed_at = NULL,
+                embedding_attempts = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = birth_memory_id;
         END IF;
         -- Mirror the origin documents into protected, recallable memory (#40);
         -- config-gated + idempotent, so re-running consent is safe.

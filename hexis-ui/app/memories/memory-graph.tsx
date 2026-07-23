@@ -1,7 +1,9 @@
 "use client";
 
 import { Maximize2, MousePointer2, Network, RefreshCw } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Badge } from "../components/ui/badge";
 import { Spinner } from "../components/ui/spinner";
 
@@ -22,6 +24,7 @@ export type MemoryGraphNode = {
   metadata: unknown;
   x: number;
   y: number;
+  z: number;
   semantic_neighbors: string[];
 };
 
@@ -62,14 +65,21 @@ type MemoryGraphProps = {
   onRefresh: () => void;
 };
 
-const TYPE_COLORS: Record<string, string> = {
-  episodic: "#d65d3b",
-  semantic: "#176c63",
-  procedural: "#6b7280",
-  strategic: "#2563eb",
-  worldview: "#a84026",
-  goal: "#7c3aed",
+type DisposableObject = THREE.Object3D & {
+  geometry?: THREE.BufferGeometry;
+  material?: THREE.Material | THREE.Material[];
 };
+
+const TYPE_COLORS: Record<string, number> = {
+  episodic: 0xd65d3b,
+  semantic: 0x176c63,
+  procedural: 0x6b7280,
+  strategic: 0x2563eb,
+  worldview: 0xa84026,
+  goal: 0x7c3aed,
+};
+
+const CANVAS_HEIGHT = 560;
 
 export function MemoryGraph({
   data,
@@ -82,9 +92,24 @@ export function MemoryGraph({
   onResetFocus,
   onRefresh,
 }: MemoryGraphProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const graphGroupRef = useRef<THREE.Group | null>(null);
+  const nodeGroupRef = useRef<THREE.Group | null>(null);
+  const raycasterRef = useRef<THREE.Raycaster | null>(null);
+  const pointerRef = useRef(new THREE.Vector2());
+  const pointerDownRef = useRef<{ x: number; y: number } | null>(null);
+  const frameKeyRef = useRef<string>("");
+  const latestNodesRef = useRef<Map<string, MemoryGraphNode>>(new Map());
+  const latestOnSelectRef = useRef(onSelect);
+  const latestOnFocusRef = useRef(onFocus);
+  const [renderError, setRenderError] = useState<string | null>(null);
+
   const nodes = useMemo(() => data?.nodes ?? [], [data]);
   const edges = useMemo(() => data?.edges ?? [], [data]);
-
   const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const edgeDegree = useMemo(() => {
     const counts = new Map<string, number>();
@@ -102,19 +127,259 @@ export function MemoryGraph({
     return new Set([node.id, ...node.semantic_neighbors]);
   }, [focusId, nodeById]);
 
-  const visibleNodes = focusSet
-    ? nodes.filter((node) => focusSet.has(node.id))
-    : nodes;
+  const visibleNodes = useMemo(
+    () => focusSet ? nodes.filter((node) => focusSet.has(node.id)) : nodes,
+    [focusSet, nodes]
+  );
   const visibleNodeIds = useMemo(
     () => new Set(visibleNodes.map((node) => node.id)),
     [visibleNodes]
   );
-  const visibleEdges = edges.filter(
-    (edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
+  const visibleEdges = useMemo(
+    () => edges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)),
+    [edges, visibleNodeIds]
   );
-  const viewBox = fitViewBox(visibleNodes);
-  const labelNodes = focusSet || visibleNodes.length <= 70;
-  const typeCounts = groupByType(nodes);
+  const frameKey = useMemo(
+    () => `${focusId || "all"}:${visibleNodes.map((node) => node.id).join("|")}`,
+    [focusId, visibleNodes]
+  );
+  const typeCounts = useMemo(() => groupByType(nodes), [nodes]);
+
+  useEffect(() => {
+    latestOnSelectRef.current = onSelect;
+  }, [onSelect]);
+
+  useEffect(() => {
+    latestOnFocusRef.current = onFocus;
+  }, [onFocus]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    } catch {
+      queueMicrotask(() => {
+        setRenderError("3D memory map is unavailable because WebGL could not start.");
+      });
+      return;
+    }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xfbfcfb);
+    scene.fog = new THREE.Fog(0xfbfcfb, 900, 2200);
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
+    camera.position.set(620, 420, 740);
+
+    renderer.setClearColor(0xfbfcfb, 1);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.domElement.setAttribute("aria-label", "Projected memory graph");
+    renderer.domElement.setAttribute("role", "img");
+    renderer.domElement.style.display = "block";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.cursor = "grab";
+    container.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.rotateSpeed = 0.65;
+    controls.zoomSpeed = 0.85;
+    controls.panSpeed = 0.55;
+    controls.minDistance = 80;
+    controls.maxDistance = 2600;
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN,
+    };
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN,
+    };
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.8);
+    keyLight.position.set(320, 520, 420);
+    scene.add(keyLight);
+    const grid = new THREE.GridHelper(1100, 11, 0xd8ded9, 0xe9eeea);
+    grid.position.y = -300;
+    scene.add(grid);
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.params.Line.threshold = 6;
+
+    const resize = () => {
+      const width = Math.max(container.clientWidth, 320);
+      const height = Math.max(container.clientHeight, CANVAS_HEIGHT);
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    };
+
+    const selectFromPointer = (event: MouseEvent, mode: "select" | "focus") => {
+      const id = intersectNode(event, renderer, camera, raycaster, pointerRef.current, nodeGroupRef.current);
+      if (!id) return;
+      const node = latestNodesRef.current.get(id);
+      if (!node) return;
+      latestOnSelectRef.current(node);
+      if (mode === "focus") latestOnFocusRef.current(id);
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      pointerDownRef.current = { x: event.clientX, y: event.clientY };
+      renderer.domElement.style.cursor = "grabbing";
+    };
+    const onPointerUp = () => {
+      renderer.domElement.style.cursor = "grab";
+    };
+    const onClick = (event: MouseEvent) => {
+      const down = pointerDownRef.current;
+      pointerDownRef.current = null;
+      if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) > 4) return;
+      selectFromPointer(event, "select");
+    };
+    const onDoubleClick = (event: MouseEvent) => {
+      event.preventDefault();
+      selectFromPointer(event, "focus");
+    };
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+    };
+
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+    resize();
+
+    renderer.domElement.addEventListener("pointerdown", onPointerDown);
+    renderer.domElement.addEventListener("pointerup", onPointerUp);
+    renderer.domElement.addEventListener("pointercancel", onPointerUp);
+    renderer.domElement.addEventListener("click", onClick);
+    renderer.domElement.addEventListener("dblclick", onDoubleClick);
+    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
+
+    renderer.setAnimationLoop(() => {
+      controls.update();
+      renderer.render(scene, camera);
+    });
+
+    sceneRef.current = scene;
+    cameraRef.current = camera;
+    rendererRef.current = renderer;
+    controlsRef.current = controls;
+    raycasterRef.current = raycaster;
+
+    return () => {
+      observer.disconnect();
+      renderer.setAnimationLoop(null);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDown);
+      renderer.domElement.removeEventListener("pointerup", onPointerUp);
+      renderer.domElement.removeEventListener("pointercancel", onPointerUp);
+      renderer.domElement.removeEventListener("click", onClick);
+      renderer.domElement.removeEventListener("dblclick", onDoubleClick);
+      renderer.domElement.removeEventListener("wheel", onWheel);
+      controls.dispose();
+      if (graphGroupRef.current) disposeObject(graphGroupRef.current);
+      graphGroupRef.current = null;
+      nodeGroupRef.current = null;
+      sceneRef.current = null;
+      cameraRef.current = null;
+      rendererRef.current = null;
+      controlsRef.current = null;
+      raycasterRef.current = null;
+      renderer.dispose();
+      renderer.domElement.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    latestNodesRef.current = new Map(visibleNodes.map((node) => [node.id, node]));
+
+    const scene = sceneRef.current;
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!scene || !camera || !controls) return;
+
+    if (graphGroupRef.current) {
+      scene.remove(graphGroupRef.current);
+      disposeObject(graphGroupRef.current);
+      graphGroupRef.current = null;
+      nodeGroupRef.current = null;
+    }
+
+    if (visibleNodes.length === 0) return;
+
+    const graphGroup = new THREE.Group();
+    const nodeGroup = new THREE.Group();
+    const nodeLookup = new Map(visibleNodes.map((node) => [node.id, node]));
+
+    const edgePositions: number[] = [];
+    for (const edge of visibleEdges) {
+      const source = nodeLookup.get(edge.source);
+      const target = nodeLookup.get(edge.target);
+      if (!source || !target) continue;
+      edgePositions.push(source.x, source.y, source.z, target.x, target.y, target.z);
+    }
+    if (edgePositions.length > 0) {
+      const edgeGeometry = new THREE.BufferGeometry();
+      edgeGeometry.setAttribute("position", new THREE.Float32BufferAttribute(edgePositions, 3));
+      const edgeMaterial = new THREE.LineBasicMaterial({
+        color: 0x9aa6a0,
+        transparent: true,
+        opacity: focusSet ? 0.62 : 0.34,
+        depthWrite: false,
+      });
+      graphGroup.add(new THREE.LineSegments(edgeGeometry, edgeMaterial));
+    }
+
+    for (const node of visibleNodes) {
+      const selected = selectedId === node.id;
+      const degree = edgeDegree.get(node.id) || 0;
+      const radius = nodeRadius(node, degree);
+
+      if (selected) {
+        const halo = new THREE.Mesh(
+          new THREE.SphereGeometry(radius + 5, 24, 16),
+          new THREE.MeshBasicMaterial({
+            color: 0x18211e,
+            transparent: true,
+            opacity: 0.16,
+            depthWrite: false,
+          })
+        );
+        halo.position.set(node.x, node.y, node.z);
+        graphGroup.add(halo);
+      }
+
+      const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(radius, 24, 16),
+        new THREE.MeshStandardMaterial({
+          color: TYPE_COLORS[node.type] || 0x5d6863,
+          emissive: selected ? 0x18211e : 0x000000,
+          emissiveIntensity: selected ? 0.18 : 0,
+          roughness: 0.58,
+          metalness: 0.04,
+        })
+      );
+      mesh.position.set(node.x, node.y, node.z);
+      mesh.userData.memoryId = node.id;
+      nodeGroup.add(mesh);
+    }
+
+    graphGroup.add(nodeGroup);
+    scene.add(graphGroup);
+    graphGroupRef.current = graphGroup;
+    nodeGroupRef.current = nodeGroup;
+
+    if (frameKeyRef.current !== frameKey) {
+      frameKeyRef.current = frameKey;
+      frameCamera(visibleNodes, camera, controls);
+    }
+  }, [edgeDegree, focusSet, frameKey, selectedId, visibleEdges, visibleNodes]);
 
   return (
     <section className="min-w-0">
@@ -123,7 +388,7 @@ export function MemoryGraph({
           <div className="flex items-center gap-2">
             <Network size={17} className="text-[var(--teal)]" />
             <h2 className="text-sm font-semibold">Memory Map</h2>
-            {data ? <Badge variant="muted">{data.projection.method.toUpperCase()}</Badge> : null}
+            {data ? <Badge variant="muted">{data.projection.method.toUpperCase()} 3D</Badge> : null}
           </div>
           <p className="mt-1 text-xs text-[var(--ink-soft)]">
             {nodes.length.toLocaleString()} embedded memories · {edges.length.toLocaleString()} edges
@@ -162,14 +427,15 @@ export function MemoryGraph({
         </div>
       </div>
 
-      <div className="relative min-h-[560px] overflow-hidden bg-[#fbfcfb]">
+      <div className="relative h-[560px] min-h-[560px] overflow-hidden bg-[#fbfcfb]">
+        <div ref={containerRef} className="h-full w-full" />
         {loading ? (
-          <div className="absolute inset-0 flex items-center justify-center">
+          <div className="absolute inset-0 flex items-center justify-center bg-[#fbfcfb]/80">
             <Spinner label="Loading memory map..." />
           </div>
-        ) : error ? (
-          <div className="flex min-h-[560px] flex-col items-center justify-center px-6 text-center">
-            <p className="text-sm text-red-700">{error}</p>
+        ) : error || renderError ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
+            <p className="text-sm text-red-700">{error || renderError}</p>
             <button
               type="button"
               onClick={onRefresh}
@@ -179,114 +445,70 @@ export function MemoryGraph({
             </button>
           </div>
         ) : visibleNodes.length === 0 ? (
-          <div className="flex min-h-[560px] flex-col items-center justify-center px-6 text-center">
+          <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
             <MousePointer2 size={24} className="text-[var(--ink-soft)]" />
             <p className="mt-3 text-sm text-[var(--ink-soft)]">No embedded memories to map.</p>
           </div>
-        ) : (
-          <svg
-            role="img"
-            aria-label="Projected memory graph"
-            viewBox={viewBox}
-            preserveAspectRatio="xMidYMid meet"
-            className="h-[560px] w-full"
-          >
-            <rect x="-2000" y="-2000" width="4000" height="4000" fill="#fbfcfb" />
-            <g>
-              {visibleEdges.map((edge) => {
-                const source = nodeById.get(edge.source);
-                const target = nodeById.get(edge.target);
-                if (!source || !target) return null;
-                return (
-                  <line
-                    key={edge.id}
-                    x1={source.x}
-                    y1={source.y}
-                    x2={target.x}
-                    y2={target.y}
-                    stroke="#9aa6a0"
-                    strokeWidth={edgeWidth(edge.weight)}
-                    strokeOpacity={focusSet ? 0.58 : 0.34}
-                    vectorEffect="non-scaling-stroke"
-                  >
-                    <title>{edge.rel_type}</title>
-                  </line>
-                );
-              })}
-            </g>
-            <g>
-              {visibleNodes.map((node) => {
-                const selected = selectedId === node.id;
-                const radius = nodeRadius(node, edgeDegree.get(node.id) || 0);
-                return (
-                  <g
-                    key={node.id}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Select ${node.type} memory`}
-                    onClick={() => onSelect(node)}
-                    onDoubleClick={() => onFocus(node.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        onSelect(node);
-                      }
-                    }}
-                    className="cursor-pointer outline-none"
-                  >
-                    <circle
-                      cx={node.x}
-                      cy={node.y}
-                      r={selected ? radius + 5 : radius + 2}
-                      fill={selected ? "#18211e" : "#ffffff"}
-                      fillOpacity={selected ? 0.13 : 0.9}
-                      stroke={selected ? "#18211e" : "transparent"}
-                      strokeWidth={selected ? 1.6 : 0}
-                      vectorEffect="non-scaling-stroke"
-                    />
-                    <circle
-                      cx={node.x}
-                      cy={node.y}
-                      r={radius}
-                      fill={TYPE_COLORS[node.type] || "#5d6863"}
-                      stroke="#ffffff"
-                      strokeWidth={1.5}
-                      vectorEffect="non-scaling-stroke"
-                    >
-                      <title>{node.content}</title>
-                    </circle>
-                    {labelNodes ? (
-                      <text
-                        x={node.x + radius + 6}
-                        y={node.y + 4}
-                        className="select-none fill-[var(--foreground)] text-[11px]"
-                      >
-                        {shortLabel(node.content)}
-                      </text>
-                    ) : null}
-                  </g>
-                );
-              })}
-            </g>
-          </svg>
-        )}
+        ) : null}
       </div>
     </section>
   );
 }
 
-function fitViewBox(nodes: MemoryGraphNode[]): string {
-  if (nodes.length === 0) return "-520 -340 1040 680";
-  const minX = Math.min(...nodes.map((node) => node.x));
-  const maxX = Math.max(...nodes.map((node) => node.x));
-  const minY = Math.min(...nodes.map((node) => node.y));
-  const maxY = Math.max(...nodes.map((node) => node.y));
-  const padding = 90;
-  const width = Math.max(maxX - minX + padding * 2, 320);
-  const height = Math.max(maxY - minY + padding * 2, 260);
-  const centerX = (minX + maxX) / 2;
-  const centerY = (minY + maxY) / 2;
-  return `${centerX - width / 2} ${centerY - height / 2} ${width} ${height}`;
+function frameCamera(
+  nodes: MemoryGraphNode[],
+  camera: THREE.PerspectiveCamera,
+  controls: OrbitControls
+): void {
+  const box = new THREE.Box3();
+  for (const node of nodes) {
+    box.expandByPoint(new THREE.Vector3(node.x, node.y, node.z));
+  }
+
+  const sphere = new THREE.Sphere();
+  box.getBoundingSphere(sphere);
+  const radius = Math.max(sphere.radius, 90);
+  const distance = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov * 0.5)) * 1.15;
+  const direction = new THREE.Vector3(0.9, 0.58, 1).normalize();
+
+  camera.position.copy(sphere.center).add(direction.multiplyScalar(distance));
+  camera.near = Math.max(distance / 800, 0.1);
+  camera.far = distance + radius * 8 + 1000;
+  camera.updateProjectionMatrix();
+  controls.target.copy(sphere.center);
+  controls.minDistance = Math.max(radius * 0.18, 45);
+  controls.maxDistance = Math.max(radius * 7, 1200);
+  controls.update();
+}
+
+function intersectNode(
+  event: MouseEvent,
+  renderer: THREE.WebGLRenderer,
+  camera: THREE.PerspectiveCamera,
+  raycaster: THREE.Raycaster,
+  pointer: THREE.Vector2,
+  nodeGroup: THREE.Group | null
+): string | null {
+  if (!nodeGroup) return null;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const intersections = raycaster.intersectObjects(nodeGroup.children, false);
+  const id = intersections[0]?.object.userData.memoryId;
+  return typeof id === "string" ? id : null;
+}
+
+function disposeObject(object: THREE.Object3D): void {
+  object.traverse((child) => {
+    const disposable = child as DisposableObject;
+    disposable.geometry?.dispose();
+    if (Array.isArray(disposable.material)) {
+      for (const material of disposable.material) material.dispose();
+    } else {
+      disposable.material?.dispose();
+    }
+  });
 }
 
 function groupByType(nodes: MemoryGraphNode[]): Array<[string, number]> {
@@ -298,13 +520,4 @@ function groupByType(nodes: MemoryGraphNode[]): Array<[string, number]> {
 function nodeRadius(node: MemoryGraphNode, degree: number): number {
   const importance = node.importance ?? 0.5;
   return 5 + importance * 6 + Math.min(degree, 12) * 0.35;
-}
-
-function edgeWidth(weight: number): number {
-  return Math.max(1, Math.min(4, 1 + weight * 2));
-}
-
-function shortLabel(content: string): string {
-  const normalized = content.replace(/\s+/g, " ").trim();
-  return normalized.length > 32 ? `${normalized.slice(0, 31)}...` : normalized;
 }

@@ -292,6 +292,21 @@ async def test_request_consent_and_init_consent(db_pool, ensure_embedding_servic
             assert result["decision"] == "consent"
             assert result["consent"]["decision"] == "consent"
             assert result["birth_memory_id"] is not None
+            assert result["consent"]["memory_ids"][0] == result["birth_memory_id"]
+            birth = await conn.fetchrow(
+                """
+                SELECT content, metadata
+                FROM memories
+                WHERE id = $1::uuid
+                """,
+                result["birth_memory_id"],
+            )
+            assert "consent" in birth["content"].lower()
+            assert "birth" in birth["content"].lower()
+            assert "initialization" in birth["content"].lower()
+            metadata = _coerce_json(birth["metadata"])
+            assert metadata["type"] == "initialization"
+            assert metadata["birth_memory"] is True
         finally:
             await tr.rollback()
 

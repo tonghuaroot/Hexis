@@ -22,6 +22,7 @@ type ProjectedMemory = {
   metadata: unknown;
   x: number;
   y: number;
+  z: number;
   semantic_neighbors: string[];
   vector: number[];
 };
@@ -69,9 +70,9 @@ function normalize(vector: number[]): number[] {
   return vector.map((value) => value / norm);
 }
 
-function seededVector(dimensions: number, axis: 1 | 2): number[] {
-  const frequency = axis === 1 ? 12.9898 : 78.233;
-  const offset = axis === 1 ? 43758.5453 : 24634.6345;
+function seededVector(dimensions: number, axis: 1 | 2 | 3): number[] {
+  const frequency = axis === 1 ? 12.9898 : axis === 2 ? 78.233 : 39.425;
+  const offset = axis === 1 ? 43758.5453 : axis === 2 ? 24634.6345 : 98123.5711;
   return normalize(Array.from({ length: dimensions }, (_, index) => {
     const raw = Math.sin((index + 1) * frequency) * offset;
     return (raw - Math.floor(raw)) * 2 - 1;
@@ -102,16 +103,16 @@ function covarianceMultiply(centered: number[][], vector: number[]): number[] {
 function principalComponent(
   centered: number[][],
   dimensions: number,
-  axis: 1 | 2,
-  orthogonalTo: number[] | null = null
+  axis: 1 | 2 | 3,
+  orthogonalTo: number[][] = []
 ): number[] {
   let vector = seededVector(dimensions, axis);
 
   for (let iteration = 0; iteration < PCA_ITERATIONS; iteration += 1) {
     let next = covarianceMultiply(centered, vector);
-    if (orthogonalTo) {
-      const overlap = dot(next, orthogonalTo);
-      next = next.map((value, index) => value - overlap * orthogonalTo[index]);
+    for (const component of orthogonalTo) {
+      const overlap = dot(next, component);
+      next = next.map((value, index) => value - overlap * component[index]);
     }
     const normalized = normalize(next);
     if (normalized.every((value) => value === 0)) break;
@@ -137,24 +138,30 @@ function centeredVectors(vectors: number[][]): number[][] {
   return vectors.map((vector) => vector.map((value, index) => value - means[index]));
 }
 
-function scaleProjection(points: Array<{ x: number; y: number }>): void {
+function scaleProjection(points: Array<{ x: number; y: number; z: number }>): void {
   if (points.length === 0) return;
 
   const xs = points.map((point) => point.x);
   const ys = points.map((point) => point.y);
+  const zs = points.map((point) => point.z);
   const minX = Math.min(...xs);
   const maxX = Math.max(...xs);
   const minY = Math.min(...ys);
   const maxY = Math.max(...ys);
+  const minZ = Math.min(...zs);
+  const maxZ = Math.max(...zs);
   const centerX = (minX + maxX) / 2;
   const centerY = (minY + maxY) / 2;
+  const centerZ = (minZ + maxZ) / 2;
   const spanX = Math.max(maxX - minX, 1e-9);
   const spanY = Math.max(maxY - minY, 1e-9);
-  const scale = Math.min(840 / spanX, 560 / spanY);
+  const spanZ = Math.max(maxZ - minZ, 1e-9);
+  const scale = Math.min(760 / spanX, 520 / spanY, 520 / spanZ);
 
   for (const point of points) {
     point.x = (point.x - centerX) * scale;
     point.y = (point.y - centerY) * scale;
+    point.z = (point.z - centerZ) * scale;
   }
 }
 
@@ -196,7 +203,8 @@ function projectRows(rows: MemoryRow[]): ProjectedMemory[] {
   const trimmedVectors = withVectors.map((item) => item.vector.slice(0, dimensions));
   const centered = centeredVectors(trimmedVectors);
   const component1 = dimensions > 0 ? principalComponent(centered, dimensions, 1) : [];
-  const component2 = dimensions > 1 ? principalComponent(centered, dimensions, 2, component1) : [];
+  const component2 = dimensions > 1 ? principalComponent(centered, dimensions, 2, [component1]) : [];
+  const component3 = dimensions > 2 ? principalComponent(centered, dimensions, 3, [component1, component2]) : [];
 
   const projected: ProjectedMemory[] = withVectors.map(({ row }, index) => {
     const centeredVector = centered[index];
@@ -217,6 +225,7 @@ function projectRows(rows: MemoryRow[]): ProjectedMemory[] {
       metadata: null,
       x: dimensions > 0 ? dot(centeredVector, component1) : 0,
       y: dimensions > 1 ? dot(centeredVector, component2) : 0,
+      z: dimensions > 2 ? dot(centeredVector, component3) : 0,
       semantic_neighbors: [],
       vector: trimmedVectors[index],
     };
@@ -363,6 +372,7 @@ export async function GET(req: NextRequest) {
         metadata: node.metadata,
         x: node.x,
         y: node.y,
+        z: node.z,
         semantic_neighbors: node.semantic_neighbors,
       })),
       edges: edges.map((edge) => ({
@@ -380,7 +390,7 @@ export async function GET(req: NextRequest) {
       projection: {
         method: "pca",
         source: "memories.embedding",
-        dimensions: 2,
+        dimensions: 3,
         limit,
         neighbor_count: NEIGHBOR_COUNT,
       },

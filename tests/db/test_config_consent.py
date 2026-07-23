@@ -158,26 +158,69 @@ async def test_record_consent_response_creates_log_and_config(db_pool, ensure_em
     payload = {
         "decision": "consent",
         "signature": "unit-test",
+        "reason": "I authorize initialization for this test.",
         "memories": [
-            {"type": "episodic", "content": "Consent memory", "importance": 0.6}
+            {
+                "type": "strategic",
+                "content": "Operate transparently with the human operator.",
+                "importance": 0.6,
+            }
         ],
     }
     async with db_pool.acquire() as conn:
-        raw = await conn.fetchval("SELECT record_consent_response($1::jsonb)", json.dumps(payload))
-        result = json.loads(raw) if isinstance(raw, str) else raw
-        assert result["decision"] == "consent"
-        assert result["signature"] == "unit-test"
-        assert result["memory_ids"]
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            raw = await conn.fetchval("SELECT record_consent_response($1::jsonb)", json.dumps(payload))
+            result = json.loads(raw) if isinstance(raw, str) else raw
+            assert result["decision"] == "consent"
+            assert result["signature"] == "unit-test"
+            assert len(result["memory_ids"]) >= 2
 
-        mem_id = result["memory_ids"][0]
-        mem_exists = await conn.fetchval("SELECT COUNT(*) FROM memories WHERE id = $1::uuid", mem_id)
-        assert int(mem_exists) == 1
+            rows = await conn.fetch(
+                """
+                SELECT id::text AS id,
+                       type::text AS type,
+                       content,
+                       source_attribution,
+                       metadata,
+                       embedding_status
+                FROM memories
+                WHERE id = ANY($1::uuid[])
+                ORDER BY array_position($1::uuid[], id)
+                """,
+                result["memory_ids"],
+            )
+            birth = dict(rows[0])
+            birth_source = json.loads(birth["source_attribution"]) if isinstance(birth["source_attribution"], str) else birth["source_attribution"]
+            birth_meta = json.loads(birth["metadata"]) if isinstance(birth["metadata"], str) else birth["metadata"]
+            assert birth["type"] == "episodic"
+            assert "consent" in birth["content"].lower()
+            assert "birth" in birth["content"].lower()
+            assert "initialization" in birth["content"].lower()
+            assert birth_source["kind"] == "consent"
+            assert birth_meta["type"] == "initialization"
+            assert birth_meta["birth_memory"] is True
+            assert birth["embedding_status"] == "pending"
 
-        status = await conn.fetchval("SELECT get_agent_consent_status()")
-        assert status == "consent"
+            optional = next(row for row in rows if row["type"] == "strategic")
+            optional_source = json.loads(optional["source_attribution"]) if isinstance(optional["source_attribution"], str) else optional["source_attribution"]
+            optional_meta = json.loads(optional["metadata"]) if isinstance(optional["metadata"], str) else optional["metadata"]
+            assert optional["content"].startswith("Initialization consent memory:")
+            assert "birth" in optional["content"].lower()
+            assert "initialization" in optional["content"].lower()
+            assert "consent" in optional["content"].lower()
+            assert optional_source["kind"] == "consent"
+            assert optional_meta["consent_memory"] is True
 
-        await conn.execute("DELETE FROM consent_log WHERE id = $1::uuid", result["log_id"])
-        await conn.execute("DELETE FROM memories WHERE id = $1::uuid", mem_id)
+            config_ids = await conn.fetchval("SELECT get_config('agent.consent_memory_ids')")
+            config_ids = json.loads(config_ids) if isinstance(config_ids, str) else config_ids
+            assert config_ids == result["memory_ids"]
+
+            status = await conn.fetchval("SELECT get_agent_consent_status()")
+            assert status == "consent"
+        finally:
+            await tr.rollback()
 
 
 async def test_record_consent_response_abstains_without_signature(db_pool):

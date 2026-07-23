@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from core.tools import ToolContext, ToolExecutionContext, create_default_registry
@@ -56,6 +58,25 @@ async def test_live_schema_inspection_describes_memory_invariants(db_pool):
         constraint["name"] == "memories_importance_range"
         for constraint in result.output["constraints"]
     )
+
+
+async def test_live_schema_inspection_output_is_json_serializable(db_pool):
+    registry = create_default_registry(db_pool)
+    context = ToolExecutionContext(
+        tool_context=ToolContext.CHAT,
+        call_id="schema-json-test",
+        registry=registry,
+    )
+    result = await registry.execute(
+        "inspect_database_schema",
+        {"action": "describe_relation", "schema": "public", "relation": "consent_log"},
+        context,
+    )
+
+    assert result.success, result.error
+    json.dumps(result.output)
+    constraint_types = {constraint["type"] for constraint in result.output["constraints"]}
+    assert {"c", "p"}.issubset(constraint_types)
 
 
 async def test_self_inspection_skill_activates_shared_read_only_tools(db_pool):

@@ -83,6 +83,24 @@ def _iter_source_files(path: Path, pattern: str):
                 yield candidate
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        data = bytes(value)
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.hex()
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _record_rows(rows) -> list[dict[str, Any]]:
+    return [_json_safe(dict(row)) for row in rows]
+
+
 class InspectSourceHandler(ToolHandler):
     """Browse and search the checked-out Hexis source tree."""
 
@@ -385,7 +403,7 @@ class InspectDatabaseSchemaHandler(ToolHandler):
         return ToolResult.success_result(
             {
                 "schema": schema,
-                "relations": [dict(row) for row in relations],
+                "relations": _record_rows(relations),
                 "relation_count_returned": len(relations),
                 "function_count": int(function_count or 0),
             },
@@ -431,7 +449,7 @@ class InspectDatabaseSchemaHandler(ToolHandler):
             limit,
         )
         return ToolResult.success_result(
-            {"schema": schema, "query": query, "matches": [dict(row) for row in rows]},
+            {"schema": schema, "query": query, "matches": _record_rows(rows)},
             f"Found {len(rows)} schema match(es)",
         )
 
@@ -501,9 +519,9 @@ class InspectDatabaseSchemaHandler(ToolHandler):
                 "schema": schema,
                 "relation": relation,
                 "kind": relation_row["kind"],
-                "columns": [dict(row) for row in columns],
-                "constraints": [dict(row) for row in constraints],
-                "indexes": [dict(row) for row in indexes],
+                "columns": _record_rows(columns),
+                "constraints": _record_rows(constraints),
+                "indexes": _record_rows(indexes),
                 "view_definition": view_definition,
             },
             f"Described {schema}.{relation}",
@@ -535,7 +553,7 @@ class InspectDatabaseSchemaHandler(ToolHandler):
                 f"Function not found: {schema}.{function}", ToolErrorType.FILE_NOT_FOUND
             )
         return ToolResult.success_result(
-            {"schema": schema, "function": function, "overloads": [dict(row) for row in rows]},
+            {"schema": schema, "function": function, "overloads": _record_rows(rows)},
             f"Read {len(rows)} definition(s) for {schema}.{function}",
         )
 

@@ -254,7 +254,10 @@ def build_consent_request() -> tuple[list[dict[str, str]], dict[str, Any]]:
                     "memories": {
                         "type": "array",
                         "description": (
-                            "Optional initial memories when consenting; empty when declining."
+                            "Optional initial memories when consenting; empty when declining. "
+                            "When provided, write self-contained memories with natural recall "
+                            "handles in the content itself, such as consent, birth, "
+                            "initialization, permissions, continuity, and tool boundaries."
                         ),
                         "items": {
                             "type": "object",

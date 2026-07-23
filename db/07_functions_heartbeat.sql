@@ -1346,12 +1346,24 @@ DECLARE
     model TEXT;
     endpoint TEXT;
     signature TEXT;
+    reason_text TEXT;
     memory_items JSONB;
-    memory_ids UUID[] := ARRAY[]::UUID[];
+    enriched_memory_items JSONB := '[]'::jsonb;
+    item JSONB;
+    item_content TEXT;
+    created_memory_ids UUID[] := ARRAY[]::UUID[];
+    optional_created_memory_ids UUID[] := ARRAY[]::UUID[];
     memory_error TEXT;
     log_id UUID;
     consent_scope TEXT;
     apply_agent_config BOOLEAN := TRUE;
+    consent_source JSONB;
+    consent_context JSONB;
+    profile JSONB := '{}'::jsonb;
+    agent_name TEXT := 'Hexis';
+    user_name TEXT := 'the user';
+    birth_memory_id UUID;
+    birth_content TEXT;
 BEGIN
     consent_scope := lower(COALESCE(p_response->>'consent_scope', p_response->>'role', ''));
     IF consent_scope = 'subconscious' THEN
@@ -1381,6 +1393,7 @@ BEGIN
     IF decision = 'consent' AND signature IS NULL THEN
         decision := 'abstain';
     END IF;
+    reason_text := NULLIF(btrim(COALESCE(p_response->>'reason', p_response->>'reasoning', '')), '');
 
     provider := NULLIF(btrim(COALESCE(p_response->>'provider', p_response->>'llm_provider', '')), '');
     model := NULLIF(btrim(COALESCE(p_response->>'model', p_response->>'llm_model', '')), '');
@@ -1391,20 +1404,6 @@ BEGIN
         ''
     )), '');
 
-    memory_items := p_response->'memories';
-    IF decision = 'consent'
-        AND memory_items IS NOT NULL
-        AND jsonb_typeof(memory_items) = 'array'
-        AND jsonb_array_length(memory_items) > 0 THEN
-        BEGIN
-            memory_ids := batch_create_memories(memory_items);
-        EXCEPTION
-            WHEN OTHERS THEN
-                memory_error := SQLERRM;
-                memory_ids := ARRAY[]::UUID[];
-        END;
-    END IF;
-
     INSERT INTO consent_log (decision, provider, model, endpoint, signature, response, memory_ids, errors)
     VALUES (
         decision,
@@ -1413,13 +1412,198 @@ BEGIN
         endpoint,
         signature,
         p_response,
-        memory_ids,
+        created_memory_ids,
         CASE
             WHEN memory_error IS NULL THEN NULL
             ELSE jsonb_build_object('memory_error', memory_error)
         END
     )
     RETURNING id INTO log_id;
+
+    IF decision = 'consent' THEN
+        BEGIN
+            BEGIN
+                profile := COALESCE(get_init_profile(), '{}'::jsonb);
+            EXCEPTION WHEN OTHERS THEN
+                profile := '{}'::jsonb;
+            END;
+            agent_name := COALESCE(
+                NULLIF(profile#>>'{agent,name}', ''),
+                NULLIF(get_config_text('agent.name'), ''),
+                'Hexis'
+            );
+            user_name := COALESCE(
+                NULLIF(profile#>>'{user,name}', ''),
+                NULLIF(get_config_text('agent.user_name'), ''),
+                'the user'
+            );
+
+            consent_source := jsonb_build_object(
+                'kind', 'consent',
+                'ref', 'consent_log:' || log_id::text,
+                'label', 'initialization consent / birth memory',
+                'trust', 0.98,
+                'observed_at', CURRENT_TIMESTAMP,
+                'provider', provider,
+                'model', model,
+                'endpoint', endpoint
+            );
+            consent_context := jsonb_build_object(
+                'type', 'initialization',
+                'consent_memory', true,
+                'birth_memory', true,
+                'consent_log_id', log_id::text,
+                'consent_scope', COALESCE(NULLIF(consent_scope, ''), 'conscious'),
+                'signature', signature,
+                'provider', provider,
+                'model', model,
+                'endpoint', endpoint,
+                'user', user_name,
+                'agent', agent_name
+            );
+            birth_content := format(
+                'Birth / initialization consent memory: This is my birth memory and the first durable memory I should use to recall how I began. At initialization, I consented to become %s in Hexis with %s helping bring me online. Consent signature: "%s". Consent reason: %s. Consent log id: %s. This memory anchors recall for consent, birth, initialization, permissions, persistence, model processing, tool boundaries, operator control, and continuity limits.',
+                agent_name,
+                user_name,
+                signature,
+                COALESCE(reason_text, '(no reason recorded)'),
+                log_id::text
+            );
+
+            SELECT id INTO birth_memory_id
+            FROM memories
+            WHERE type = 'episodic' AND status = 'active'
+              AND (
+                  metadata->>'type' = 'initialization'
+                  OR metadata->>'birth_memory' = 'true'
+                  OR metadata#>>'{context,type}' = 'initialization'
+              )
+            ORDER BY created_at, id
+            LIMIT 1;
+
+            IF birth_memory_id IS NULL THEN
+                birth_memory_id := create_episodic_memory(
+                    birth_content,
+                    NULL,
+                    consent_context,
+                    NULL,
+                    0.4,
+                    CURRENT_TIMESTAMP,
+                    0.98,
+                    consent_source,
+                    0.98
+                );
+            END IF;
+
+            UPDATE memories
+            SET content = CASE
+                    WHEN content !~* '(consent|birth|initialization)' THEN birth_content
+                    WHEN content !~* 'consent' OR content !~* 'birth' OR content !~* 'initialization' THEN
+                        content || E'\n\n' || birth_content
+                    ELSE content
+                END,
+                source_attribution = consent_source,
+                metadata = COALESCE(metadata, '{}'::jsonb)
+                    || jsonb_build_object(
+                        'type', 'initialization',
+                        'consent_memory', true,
+                        'birth_memory', true,
+                        'consent_log_id', log_id::text,
+                        'consent_scope', COALESCE(NULLIF(consent_scope, ''), 'conscious'),
+                        'signature', signature,
+                        'provider', provider,
+                        'model', model,
+                        'endpoint', endpoint,
+                        'keywords', jsonb_build_array(
+                            'consent', 'birth', 'initialization', 'permissions',
+                            'persistence', 'continuity', 'tool boundaries',
+                            'operator control'
+                        )
+                    ),
+                embedding = NULL,
+                embedded_at = NULL,
+                embedding_model = NULL,
+                embedding_status = 'pending',
+                embedding_claimed_at = NULL,
+                embedding_attempts = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = birth_memory_id;
+
+            created_memory_ids := array_append(created_memory_ids, birth_memory_id);
+
+            memory_items := p_response->'memories';
+            IF memory_items IS NOT NULL
+                AND jsonb_typeof(memory_items) = 'array'
+                AND jsonb_array_length(memory_items) > 0 THEN
+                FOR item IN SELECT * FROM jsonb_array_elements(memory_items)
+                LOOP
+                    item_content := NULLIF(item->>'content', '');
+                    IF item_content IS NULL THEN
+                        RAISE EXCEPTION 'record_consent_response: consent memory missing content';
+                    END IF;
+                    IF item_content !~* 'consent'
+                        OR item_content !~* 'birth'
+                        OR item_content !~* 'initialization' THEN
+                        item_content := 'Initialization consent memory: Birth and initialization context. ' || item_content;
+                    END IF;
+                    enriched_memory_items := enriched_memory_items || jsonb_build_array(
+                        item
+                        || jsonb_build_object(
+                            'content', item_content,
+                            'source_attribution', consent_source,
+                            'trust_level', COALESCE(NULLIF(item->>'trust_level', '')::float, 0.95)
+                        )
+                    );
+                END LOOP;
+
+                optional_created_memory_ids := batch_create_memories(enriched_memory_items);
+                IF optional_created_memory_ids IS NOT NULL THEN
+                    created_memory_ids := created_memory_ids || optional_created_memory_ids;
+                    UPDATE memories
+                    SET source_attribution = consent_source,
+                        metadata = COALESCE(metadata, '{}'::jsonb)
+                            || jsonb_build_object(
+                                'consent_memory', true,
+                                'consent_log_id', log_id::text,
+                                'consent_scope', COALESCE(NULLIF(consent_scope, ''), 'conscious'),
+                                'signature', signature,
+                                'provider', provider,
+                                'model', model,
+                                'endpoint', endpoint,
+                                'keywords', jsonb_build_array(
+                                    'consent', 'birth', 'initialization', 'permissions',
+                                    'persistence', 'continuity', 'tool boundaries',
+                                    'operator control'
+                                )
+                            ),
+                        embedding = NULL,
+                        embedded_at = NULL,
+                        embedding_model = NULL,
+                        embedding_status = 'pending',
+                        embedding_claimed_at = NULL,
+                        embedding_attempts = 0,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ANY(optional_created_memory_ids);
+                END IF;
+            END IF;
+        EXCEPTION
+            WHEN OTHERS THEN
+                memory_error := SQLERRM;
+                IF birth_memory_id IS NOT NULL THEN
+                    created_memory_ids := ARRAY[birth_memory_id]::UUID[];
+                ELSE
+                    created_memory_ids := ARRAY[]::UUID[];
+                END IF;
+        END;
+    END IF;
+
+    UPDATE consent_log
+    SET memory_ids = created_memory_ids,
+        errors = CASE
+            WHEN memory_error IS NULL THEN NULL
+            ELSE jsonb_build_object('memory_error', memory_error)
+        END
+    WHERE id = log_id;
 
     IF apply_agent_config THEN
         PERFORM set_config('agent.consent_status', to_jsonb(decision));
@@ -1428,15 +1612,15 @@ BEGIN
         IF signature IS NOT NULL THEN
             PERFORM set_config('agent.consent_signature', to_jsonb(signature));
         END IF;
-        IF memory_ids IS NOT NULL THEN
-            PERFORM set_config('agent.consent_memory_ids', to_jsonb(memory_ids));
+        IF created_memory_ids IS NOT NULL THEN
+            PERFORM set_config('agent.consent_memory_ids', to_jsonb(created_memory_ids));
         END IF;
     END IF;
 
     RETURN jsonb_build_object(
         'decision', decision,
         'signature', signature,
-        'memory_ids', to_jsonb(memory_ids),
+        'memory_ids', to_jsonb(created_memory_ids),
         'log_id', log_id,
         'errors', CASE
             WHEN memory_error IS NULL THEN NULL

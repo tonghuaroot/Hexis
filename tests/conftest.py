@@ -174,6 +174,7 @@ async def configure_agent_for_tests(db_pool):
     original_init_started_at: Any | None = None
     original_init_completed_at: Any | None = None
     inserted_consent_log_id: str | None = None
+    inserted_consent_memory_ids: list[str] = []
 
     async with db_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -213,6 +214,9 @@ async def configure_agent_for_tests(db_pool):
                 recorded = {}
         if isinstance(recorded, dict):
             inserted_consent_log_id = str(recorded.get("log_id") or "") or None
+            raw_memory_ids = recorded.get("memory_ids") or []
+            if isinstance(raw_memory_ids, list):
+                inserted_consent_memory_ids = [str(item) for item in raw_memory_ids if item]
 
         # Minimal config so CLI `hexis config validate` passes in subprocess smoke tests.
         await conn.execute("SELECT set_config('agent.is_configured', 'true'::jsonb)")
@@ -258,6 +262,11 @@ async def configure_agent_for_tests(db_pool):
 
         if inserted_consent_log_id:
             await conn.execute("DELETE FROM consent_log WHERE id = $1::uuid", inserted_consent_log_id)
+        if inserted_consent_memory_ids:
+            await conn.execute(
+                "DELETE FROM memories WHERE id = ANY($1::uuid[])",
+                inserted_consent_memory_ids,
+            )
 
         if original_hb_interval is not None:
             # Phase 7 (ReduceScopeCreep): use unified config
