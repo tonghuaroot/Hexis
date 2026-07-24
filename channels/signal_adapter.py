@@ -13,6 +13,13 @@ import logging
 import os
 from typing import Any, Callable, Awaitable
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    compute_backoff_seconds,
+    format_provider_error,
+    request_json,
+)
+
 from .base import ChannelAdapter, ChannelCapabilities, ChannelMessage, parse_allowlist, resolve_channel_token
 from .media import Attachment
 
@@ -112,14 +119,32 @@ class SignalAdapter(ChannelAdapter):
     async def _listen_sse(self) -> None:
         """Listen to SSE event stream from signal-cli REST API."""
         url = f"{self._api_url}/api/v1/receive/{self._phone_number}"
+        consecutive_failures = 0
         while self._connected:
             try:
                 async with self._session.get(url, timeout=None) as resp:
                     if resp.status != 200:
-                        logger.warning("Signal SSE connection failed: HTTP %d", resp.status)
-                        await asyncio.sleep(5)
+                        body = await resp.text()
+                        if resp.status in (401, 403, 404):
+                            raise RuntimeError(
+                                f"Signal SSE endpoint unavailable/auth failed: HTTP {resp.status}: {body[:300]}"
+                            )
+                        consecutive_failures += 1
+                        delay_s = compute_backoff_seconds(
+                            consecutive_failures,
+                            initial_delay=5.0,
+                            max_delay=120.0,
+                            jitter=0.2,
+                        )
+                        logger.warning(
+                            "Signal SSE connection failed: HTTP %d; reconnecting in %.1fs",
+                            resp.status,
+                            delay_s,
+                        )
+                        await asyncio.sleep(delay_s)
                         continue
 
+                    consecutive_failures = 0
                     async for line in resp.content:
                         line_str = line.decode("utf-8", errors="replace").strip()
                         if not line_str or line_str.startswith(":"):
@@ -131,9 +156,18 @@ class SignalAdapter(ChannelAdapter):
 
             except asyncio.CancelledError:
                 break
+            except RuntimeError:
+                raise
             except Exception:
-                logger.exception("Signal SSE stream error, reconnecting in 5s")
-                await asyncio.sleep(5)
+                consecutive_failures += 1
+                delay_s = compute_backoff_seconds(
+                    consecutive_failures,
+                    initial_delay=5.0,
+                    max_delay=120.0,
+                    jitter=0.2,
+                )
+                logger.exception("Signal SSE stream error, reconnecting in %.1fs", delay_s)
+                await asyncio.sleep(delay_s)
 
     async def _handle_sse_event(self, data_str: str) -> None:
         """Parse and route an SSE event from signal-cli."""
@@ -204,7 +238,7 @@ class SignalAdapter(ChannelAdapter):
         reply_to: str | None = None,
         thread_id: str | None = None,
     ) -> str | None:
-        if not self._session or self._session.closed:
+        if not self._connected:
             logger.error("Signal session not connected")
             return None
 
@@ -215,18 +249,23 @@ class SignalAdapter(ChannelAdapter):
                 "recipients": [channel_id],
             }
 
-            async with self._session.post(
+            result = await request_json(
+                "signal",
+                "POST",
                 f"{self._api_url}/api/v2/send",
-                json=payload,
-                timeout=30,
-            ) as resp:
-                if resp.status in (200, 201):
-                    result = await resp.json()
-                    return str(result.get("timestamp", ""))
-                else:
-                    body = await resp.text()
-                    logger.error("Signal send failed: HTTP %d: %s", resp.status, body[:200])
-                    return None
+                json_body=payload,
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(result, dict):
+                logger.error("Signal send failed: invalid response payload")
+                return None
+            return str(result.get("timestamp") or result.get("id") or "")
+        except IntegrationHttpError as exc:
+            logger.error("%s", format_provider_error("Signal", exc))
+            return None
         except Exception:
             logger.exception("Failed to send Signal message to %s", channel_id)
             return None

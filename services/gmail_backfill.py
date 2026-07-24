@@ -14,13 +14,16 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
-
 from core.auth.google_gmail import (
     GmailOAuthError,
     GOOGLE_GMAIL_PROFILE_URL,
     load_default_credentials,
     refresh_default_credentials_if_needed,
+)
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,11 +216,19 @@ async def _gmail_get(
     if not isinstance(token, str) or not token:
         raise GmailBackfillError("Saved Gmail credentials are missing an access token.")
     url = path if path.startswith("http") else f"{GMAIL_API_BASE}{path}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise GmailBackfillError(f"Gmail API failed: HTTP {resp.status_code}: {resp.text}")
-    payload = resp.json()
+    try:
+        payload = await request_json(
+            "gmail",
+            "GET",
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=30.0,
+            attempts=4,
+            max_delay=20.0,
+        )
+    except IntegrationHttpError as exc:
+        raise GmailBackfillError(format_provider_error("Gmail", exc)) from exc
     if not isinstance(payload, dict):
         raise GmailBackfillError("Gmail API returned an invalid payload.")
     return payload

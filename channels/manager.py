@@ -10,7 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 from typing import Any, TYPE_CHECKING
+
+from core.integration_reliability import bounded_text, compute_backoff_seconds
 
 from .base import ChannelAdapter, ChannelMessage
 from .commands import CommandRegistry, parse_command
@@ -21,6 +25,27 @@ if TYPE_CHECKING:
     import asyncpg
 
 logger = logging.getLogger(__name__)
+
+ADAPTER_RESTART_INITIAL_S = float(os.getenv("CHANNEL_ADAPTER_RESTART_INITIAL_S", "5.0"))
+ADAPTER_RESTART_MAX_S = float(os.getenv("CHANNEL_ADAPTER_RESTART_MAX_S", "300.0"))
+TYPING_COOLDOWN_INITIAL_S = float(os.getenv("CHANNEL_TYPING_COOLDOWN_INITIAL_S", "30.0"))
+TYPING_COOLDOWN_MAX_S = float(os.getenv("CHANNEL_TYPING_COOLDOWN_MAX_S", "300.0"))
+
+
+def _non_recoverable_adapter_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    signals = (
+        "not configured",
+        "not found",
+        "missing",
+        "required",
+        "invalid token",
+        "unauthorized",
+        "forbidden",
+        "authentication",
+        "auth",
+    )
+    return any(signal in text for signal in signals)
 
 
 class ChannelManager:
@@ -42,6 +67,8 @@ class ChannelManager:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._running = False
         self._commands = commands or CommandRegistry()
+        self._typing_failures: dict[tuple[str, str], int] = {}
+        self._typing_blocked_until: dict[tuple[str, str], float] = {}
 
     @property
     def adapters(self) -> dict[str, ChannelAdapter]:
@@ -112,23 +139,61 @@ class ChannelManager:
 
     async def _run_adapter(self, ctype: str, adapter: ChannelAdapter, on_message) -> None:
         """Run an adapter with restart-on-crash."""
+        consecutive_failures = 0
         while self._running:
             try:
                 await self._record_runtime_status(ctype, "running", configured=True, running=True)
                 await self._record_presence(ctype, None, "online", metadata={"source": "channel_manager"})
                 await adapter.start(on_message)
+                consecutive_failures = 0
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.exception("Channel adapter %s crashed, restarting in 10s", ctype)
+                if _non_recoverable_adapter_error(exc):
+                    detail = bounded_text(exc, limit=500)
+                    logger.error(
+                        "Channel adapter %s paused after non-recoverable startup error: %s",
+                        ctype,
+                        detail,
+                    )
+                    await self._record_runtime_status(
+                        ctype,
+                        "paused",
+                        configured=True,
+                        running=False,
+                        error=(
+                            f"{detail}. Fix this channel's configuration or credentials, "
+                            "then restart the channel worker."
+                        ),
+                        metadata={
+                            "source": "channel_manager",
+                            "error_kind": "configuration_or_auth",
+                            "recoverable": False,
+                        },
+                    )
+                    break
+                consecutive_failures += 1
+                delay_s = compute_backoff_seconds(
+                    consecutive_failures,
+                    initial_delay=ADAPTER_RESTART_INITIAL_S,
+                    max_delay=ADAPTER_RESTART_MAX_S,
+                    jitter=0.2,
+                )
+                logger.exception("Channel adapter %s crashed, restarting in %.1fs", ctype, delay_s)
                 await self._record_runtime_status(
                     ctype,
                     "error",
                     configured=True,
                     running=False,
                     error=str(exc),
+                    metadata={
+                        "source": "channel_manager",
+                        "consecutive_failures": consecutive_failures,
+                        "restart_delay_s": delay_s,
+                        "recoverable": True,
+                    },
                 )
-                await asyncio.sleep(10)
+                await asyncio.sleep(delay_s)
         await self._record_runtime_status(ctype, "stopped", configured=True, running=False)
         await self._record_presence(ctype, None, "offline", metadata={"source": "channel_manager"})
 
@@ -226,9 +291,12 @@ class ChannelManager:
                 return
 
         # Send typing indicator while processing
-        if adapter.capabilities.typing_indicator:
+        if adapter.capabilities.typing_indicator and not self._typing_cooldown_active(
+            msg.channel_type, msg.channel_id
+        ):
             try:
                 await adapter.send_typing(msg.channel_id)
+                self._record_typing_success(msg.channel_type, msg.channel_id)
                 await self._record_presence(
                     msg.channel_type,
                     msg.channel_id,
@@ -243,8 +311,15 @@ class ChannelManager:
                     },
                     ttl_seconds=15,
                 )
-            except Exception:
-                pass  # Non-critical
+            except Exception as exc:
+                delay_s = self._record_typing_failure(msg.channel_type, msg.channel_id)
+                logger.debug(
+                    "Typing indicator failed for %s/%s; cooling down for %.1fs: %s",
+                    msg.channel_type,
+                    msg.channel_id,
+                    delay_s,
+                    bounded_text(exc, limit=200),
+                )
 
         # Use streaming for channels that support edit_message
         if adapter.capabilities.edit_message:
@@ -293,6 +368,34 @@ class ChannelManager:
         if isinstance(message, MessagePresentation):
             return await adapter.send_presentation(channel_id, message, **kwargs)
         return await adapter.send(channel_id, message, **kwargs)
+
+    def _typing_cooldown_active(self, channel_type: str, channel_id: str) -> bool:
+        key = (channel_type, channel_id)
+        blocked_until = self._typing_blocked_until.get(key)
+        if blocked_until is None:
+            return False
+        if time.monotonic() >= blocked_until:
+            self._typing_blocked_until.pop(key, None)
+            return False
+        return True
+
+    def _record_typing_success(self, channel_type: str, channel_id: str) -> None:
+        key = (channel_type, channel_id)
+        self._typing_failures.pop(key, None)
+        self._typing_blocked_until.pop(key, None)
+
+    def _record_typing_failure(self, channel_type: str, channel_id: str) -> float:
+        key = (channel_type, channel_id)
+        failures = self._typing_failures.get(key, 0) + 1
+        self._typing_failures[key] = failures
+        delay_s = compute_backoff_seconds(
+            failures,
+            initial_delay=TYPING_COOLDOWN_INITIAL_S,
+            max_delay=TYPING_COOLDOWN_MAX_S,
+            jitter=0.2,
+        )
+        self._typing_blocked_until[key] = time.monotonic() + delay_s
+        return delay_s
 
     async def stop_all(self) -> None:
         """Stop all adapters gracefully."""

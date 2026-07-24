@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import request_json
 from core.tools.base import (
     ToolCategory,
     ToolContext,
@@ -96,146 +97,132 @@ class SearchTwitterHandler(ToolHandler):
     async def execute(
         self, arguments: dict[str, Any], context: ToolExecutionContext
     ) -> ToolResult:
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         query = arguments["query"]
         max_results = max(1, min(arguments.get("max_results", 10), 100))
         attempts: list[str] = []
 
-        async with httpx.AsyncClient() as client:
-            # Tier 1: FxTwitter (free)
+        # Tier 1: FxTwitter (free)
+        try:
+            tweets = await self._search_fxtwitter(query, max_results)
+            if tweets:
+                return ToolResult.success_result(
+                    {
+                        "tweets": tweets,
+                        "count": len(tweets),
+                        "provider": "fxtwitter",
+                        "tier": 1,
+                    },
+                    display_output=f"Found {len(tweets)} tweet(s) for '{query}' (FxTwitter)",
+                )
+            attempts.append("FxTwitter: no results")
+        except Exception as e:
+            logger.warning("FxTwitter search failed: %s", e)
+            attempts.append(f"FxTwitter: {e}")
+
+        # Tier 2: TwitterAPI.io
+        twitterapi_key = await resolve_api_key(
+            context,
+            config_key="twitterapi_io",
+            env_names=("TWITTERAPI_IO_API_KEY",),
+        )
+        if twitterapi_key:
             try:
-                tweets = await self._search_fxtwitter(client, query, max_results)
+                tweets = await self._search_twitterapi_io(
+                    query,
+                    max_results,
+                    twitterapi_key,
+                )
                 if tweets:
                     return ToolResult.success_result(
                         {
                             "tweets": tweets,
                             "count": len(tweets),
-                            "provider": "fxtwitter",
-                            "tier": 1,
+                            "provider": "twitterapi_io",
+                            "tier": 2,
                         },
-                        display_output=f"Found {len(tweets)} tweet(s) for '{query}' (FxTwitter)",
+                        display_output=f"Found {len(tweets)} tweet(s) for '{query}' (TwitterAPI.io)",
                     )
-                attempts.append("FxTwitter: no results")
+                attempts.append("TwitterAPI.io: no results")
             except Exception as e:
-                logger.warning("FxTwitter search failed: %s", e)
-                attempts.append(f"FxTwitter: {e}")
+                attempts.append(f"TwitterAPI.io: {e}")
+        else:
+            attempts.append("TwitterAPI.io: skipped (no API key)")
 
-            # Tier 2: TwitterAPI.io
-            twitterapi_key = await resolve_api_key(
-                context,
-                config_key="twitterapi_io",
-                env_names=("TWITTERAPI_IO_API_KEY",),
-            )
-            if twitterapi_key:
-                try:
-                    tweets = await self._search_twitterapi_io(
-                        client,
-                        query,
-                        max_results,
-                        twitterapi_key,
+        # Tier 3: Xquik
+        xquik_key = await resolve_api_key(
+            context,
+            config_key="xquik",
+            env_names=("XQUIK_API_KEY",),
+        )
+        if xquik_key:
+            try:
+                tweets = await self._search_xquik(query, max_results, xquik_key)
+                if tweets:
+                    return ToolResult.success_result(
+                        {
+                            "tweets": tweets,
+                            "count": len(tweets),
+                            "provider": "xquik",
+                            "tier": 3,
+                        },
+                        display_output=f"Found {len(tweets)} tweet(s) for '{query}' (Xquik)",
                     )
-                    if tweets:
-                        return ToolResult.success_result(
-                            {
-                                "tweets": tweets,
-                                "count": len(tweets),
-                                "provider": "twitterapi_io",
-                                "tier": 2,
-                            },
-                            display_output=f"Found {len(tweets)} tweet(s) for '{query}' (TwitterAPI.io)",
-                        )
-                    attempts.append("TwitterAPI.io: no results")
-                except Exception as e:
-                    attempts.append(f"TwitterAPI.io: {e}")
-            else:
-                attempts.append("TwitterAPI.io: skipped (no API key)")
+                attempts.append("Xquik: no results")
+            except Exception as e:
+                attempts.append(f"Xquik: {e}")
+        else:
+            attempts.append("Xquik: skipped (no API key)")
 
-            # Tier 3: Xquik
-            xquik_key = await resolve_api_key(
-                context,
-                config_key="xquik",
-                env_names=("XQUIK_API_KEY",),
-            )
-            if xquik_key:
-                try:
-                    tweets = await self._search_xquik(
-                        client, query, max_results, xquik_key
+        # Tier 4: Official X API v2
+        x_bearer = await resolve_api_key(
+            context,
+            config_key="x_api_bearer",
+            env_names=("X_API_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"),
+        )
+        if x_bearer:
+            try:
+                tweets = await self._search_x_api(query, max_results, x_bearer)
+                if tweets:
+                    return ToolResult.success_result(
+                        {
+                            "tweets": tweets,
+                            "count": len(tweets),
+                            "provider": "x_api_v2",
+                            "tier": 4,
+                        },
+                        display_output=f"Found {len(tweets)} tweet(s) for '{query}' (X API v2)",
                     )
-                    if tweets:
-                        return ToolResult.success_result(
-                            {
-                                "tweets": tweets,
-                                "count": len(tweets),
-                                "provider": "xquik",
-                                "tier": 3,
-                            },
-                            display_output=f"Found {len(tweets)} tweet(s) for '{query}' (Xquik)",
-                        )
-                    attempts.append("Xquik: no results")
-                except Exception as e:
-                    attempts.append(f"Xquik: {e}")
-            else:
-                attempts.append("Xquik: skipped (no API key)")
+                attempts.append("X API v2: no results")
+            except Exception as e:
+                attempts.append(f"X API v2: {e}")
+        else:
+            attempts.append("X API v2: skipped (no bearer token)")
 
-            # Tier 4: Official X API v2
-            x_bearer = await resolve_api_key(
-                context,
-                config_key="x_api_bearer",
-                env_names=("X_API_BEARER_TOKEN", "TWITTER_BEARER_TOKEN"),
-            )
-            if x_bearer:
-                try:
-                    tweets = await self._search_x_api(
-                        client, query, max_results, x_bearer
+        # Tier 5: xAI Search fallback (best-effort)
+        xai_key = await resolve_api_key(
+            context,
+            explicit_resolver=self._api_key_resolver,
+            config_key="xai",
+            env_names=("XAI_API_KEY",),
+        )
+        if xai_key:
+            try:
+                tweets = await self._search_xai(query, max_results, xai_key)
+                if tweets:
+                    return ToolResult.success_result(
+                        {
+                            "tweets": tweets,
+                            "count": len(tweets),
+                            "provider": "xai_search",
+                            "tier": 5,
+                        },
+                        display_output=f"Found {len(tweets)} tweet(s) for '{query}' (xAI search)",
                     )
-                    if tweets:
-                        return ToolResult.success_result(
-                            {
-                                "tweets": tweets,
-                                "count": len(tweets),
-                                "provider": "x_api_v2",
-                                "tier": 4,
-                            },
-                            display_output=f"Found {len(tweets)} tweet(s) for '{query}' (X API v2)",
-                        )
-                    attempts.append("X API v2: no results")
-                except Exception as e:
-                    attempts.append(f"X API v2: {e}")
-            else:
-                attempts.append("X API v2: skipped (no bearer token)")
-
-            # Tier 5: xAI Search fallback (best-effort)
-            xai_key = await resolve_api_key(
-                context,
-                explicit_resolver=self._api_key_resolver,
-                config_key="xai",
-                env_names=("XAI_API_KEY",),
-            )
-            if xai_key:
-                try:
-                    tweets = await self._search_xai(client, query, max_results, xai_key)
-                    if tweets:
-                        return ToolResult.success_result(
-                            {
-                                "tweets": tweets,
-                                "count": len(tweets),
-                                "provider": "xai_search",
-                                "tier": 5,
-                            },
-                            display_output=f"Found {len(tweets)} tweet(s) for '{query}' (xAI search)",
-                        )
-                    attempts.append("xAI search: no results")
-                except Exception as e:
-                    attempts.append(f"xAI search: {e}")
-            else:
-                attempts.append("xAI search: skipped (no API key)")
+                attempts.append("xAI search: no results")
+            except Exception as e:
+                attempts.append(f"xAI search: {e}")
+        else:
+            attempts.append("xAI search: skipped (no API key)")
 
         return ToolResult.error_result(
             "Twitter search unavailable across all tiers. "
@@ -244,16 +231,18 @@ class SearchTwitterHandler(ToolHandler):
         )
 
     async def _search_fxtwitter(
-        self, client: Any, query: str, max_results: int
+        self, query: str, max_results: int
     ) -> list[dict[str, Any]]:
-        resp = await client.get(
+        data = await request_json(
+            "fxtwitter",
+            "GET",
             f"{_FXTWITTER_BASE}/search",
             params={"query": query},
-            timeout=15,
+            timeout=15.0,
+            attempts=3,
+            max_delay=10.0,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        tweets_raw = data.get("tweets", data.get("results", []))
+        tweets_raw = data.get("tweets", data.get("results", [])) if isinstance(data, dict) else []
         tweets: list[dict[str, Any]] = []
         for t in tweets_raw[:max_results]:
             author = t.get("author", {}) if isinstance(t.get("author"), dict) else {}
@@ -272,22 +261,26 @@ class SearchTwitterHandler(ToolHandler):
 
     async def _search_twitterapi_io(
         self,
-        client: Any,
         query: str,
         max_results: int,
         api_key: str,
     ) -> list[dict[str, Any]]:
         # Endpoint format is kept flexible to tolerate provider-side schema changes.
-        resp = await client.get(
+        data = await request_json(
+            "twitterapi_io",
+            "GET",
             f"{_TWITTERAPI_IO_BASE}/twitter/tweet/advanced_search",
             headers={"X-API-Key": api_key, "Accept": "application/json"},
             params={"query": query, "limit": max_results},
-            timeout=20,
+            timeout=20.0,
+            attempts=3,
+            max_delay=10.0,
         )
-        resp.raise_for_status()
-        data = resp.json()
 
-        candidates = data.get("tweets") or data.get("results") or data.get("data") or []
+        candidates = (
+            data.get("tweets") or data.get("results") or data.get("data") or []
+            if isinstance(data, dict) else []
+        )
         tweets: list[dict[str, Any]] = []
         for t in candidates[:max_results]:
             user = t.get("user") or t.get("author") or {}
@@ -311,12 +304,13 @@ class SearchTwitterHandler(ToolHandler):
 
     async def _search_xquik(
         self,
-        client: Any,
         query: str,
         max_results: int,
         api_key: str,
     ) -> list[dict[str, Any]]:
-        resp = await client.get(
+        data = await request_json(
+            "xquik",
+            "GET",
             f"{_XQUIK_BASE}/x/tweets/search",
             headers={
                 "x-api-key": api_key,
@@ -324,12 +318,15 @@ class SearchTwitterHandler(ToolHandler):
                 "Accept": "application/json",
             },
             params={"q": query, "limit": min(max_results, 100), "queryType": "Latest"},
-            timeout=20,
+            timeout=20.0,
+            attempts=3,
+            max_delay=10.0,
         )
-        resp.raise_for_status()
-        data = resp.json()
 
-        candidates = data.get("tweets") or data.get("results") or data.get("data") or []
+        candidates = (
+            data.get("tweets") or data.get("results") or data.get("data") or []
+            if isinstance(data, dict) else []
+        )
         tweets: list[dict[str, Any]] = []
         for t in candidates[:max_results]:
             user = t.get("author") or t.get("user") or {}
@@ -372,13 +369,14 @@ class SearchTwitterHandler(ToolHandler):
 
     async def _search_x_api(
         self,
-        client: Any,
         query: str,
         max_results: int,
         bearer_token: str,
     ) -> list[dict[str, Any]]:
         capped = max(10, min(max_results, 100))
-        resp = await client.get(
+        data = await request_json(
+            "x_api",
+            "GET",
             f"{_X_API_BASE}/tweets/search/recent",
             headers={"Authorization": f"Bearer {bearer_token}"},
             params={
@@ -388,19 +386,20 @@ class SearchTwitterHandler(ToolHandler):
                 "expansions": "author_id",
                 "user.fields": "username,name",
             },
-            timeout=20,
+            timeout=20.0,
+            attempts=3,
+            max_delay=10.0,
         )
-        resp.raise_for_status()
-        data = resp.json()
 
         user_map: dict[str, dict[str, Any]] = {}
-        includes = data.get("includes", {})
+        includes = data.get("includes", {}) if isinstance(data, dict) else {}
         for u in includes.get("users", []):
             if u.get("id"):
                 user_map[str(u["id"])] = u
 
         tweets: list[dict[str, Any]] = []
-        for t in (data.get("data") or [])[:max_results]:
+        rows = data.get("data") if isinstance(data, dict) else []
+        for t in (rows or [])[:max_results]:
             metrics = t.get("public_metrics") or {}
             user = user_map.get(str(t.get("author_id")), {})
             tweets.append(
@@ -418,23 +417,24 @@ class SearchTwitterHandler(ToolHandler):
 
     async def _search_xai(
         self,
-        client: Any,
         query: str,
         max_results: int,
         api_key: str,
     ) -> list[dict[str, Any]]:
-        resp = await client.get(
+        data = await request_json(
+            "xai_search",
+            "GET",
             f"{_XAI_SEARCH_BASE}/search",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
             },
             params={"q": query, "limit": max_results},
-            timeout=20,
+            timeout=20.0,
+            attempts=3,
+            max_delay=10.0,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        results = data.get("results") or data.get("tweets") or []
+        results = data.get("results") or data.get("tweets") or [] if isinstance(data, dict) else []
         tweets: list[dict[str, Any]] = []
         for r in results[:max_results]:
             tweets.append(

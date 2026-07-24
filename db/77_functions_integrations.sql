@@ -30,6 +30,12 @@ INSERT INTO integration_connectors (
         "status": "available",
         "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
       },
+      "ingest": {
+        "label": "Remember what is read",
+        "scope_kind": "local",
+        "status": "available",
+        "scopes": []
+      },
       "label": {
         "label": "Apply/remove labels",
         "scope_kind": "modify",
@@ -68,7 +74,7 @@ INSERT INTO integration_connectors (
       "secret_storage": "~/.hexis/auth",
       "supported_surfaces": ["chat", "cli", "web", "channels"],
       "default_capabilities": ["read", "search"],
-      "capability_order": ["read", "search", "label", "spam_triage", "send", "reply", "delete"],
+      "capability_order": ["read", "search", "ingest", "label", "spam_triage", "send", "reply", "delete"],
       "required_scopes": ["https://www.googleapis.com/auth/userinfo.email"],
       "scope_order": [
         "https://www.googleapis.com/auth/userinfo.email",
@@ -81,6 +87,11 @@ INSERT INTO integration_connectors (
         "emails": "read",
         "mail": "read",
         "gmail": "read",
+        "learn": "ingest",
+        "memory": "ingest",
+        "remember": "ingest",
+        "retain": "ingest",
+        "store": "ingest",
         "filter": "spam_triage",
         "filter_spam": "spam_triage",
         "spam": "spam_triage",

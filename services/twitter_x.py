@@ -12,12 +12,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-import httpx
-
 from core.auth.twitter_x import (
     TwitterXOAuthError,
     load_default_credentials,
     refresh_default_credentials_if_needed,
+)
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,8 +91,7 @@ def _check_account(credentials: dict[str, Any], account_key: str | None) -> str 
     return requested or saved
 
 
-def _rate_limit_metadata(resp: httpx.Response) -> dict[str, Any]:
-    headers = resp.headers
+def _rate_limit_metadata(headers: dict[str, str]) -> dict[str, Any]:
     return {
         key: headers.get(key)
         for key in ("x-rate-limit-limit", "x-rate-limit-remaining", "x-rate-limit-reset")
@@ -109,27 +111,25 @@ async def twitter_x_request(
     if not isinstance(token, str) or not token:
         raise TwitterXProviderError("Saved Twitter/X credentials are missing an access token.")
     url = path if path.startswith("http") else f"{TWITTER_X_API_BASE}{path}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.request(
+    try:
+        response = await request_json_response(
+            "twitter_x",
             method.upper(),
             url,
             headers={"Authorization": f"Bearer {token}"},
             params=params,
-            json=json_body,
+            json_body=json_body,
+            timeout=30.0,
+            attempts=4,
+            max_delay=30.0,
+            retry_unsafe_methods=False,
         )
-    if resp.status_code == 429:
-        meta = _rate_limit_metadata(resp)
-        reset = meta.get("x-rate-limit-reset")
-        extra = f" Reset: {reset}." if reset else ""
-        raise TwitterXProviderError(f"Twitter/X API rate limit exceeded.{extra}")
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise TwitterXProviderError(f"Twitter/X API failed: HTTP {resp.status_code}: {resp.text}")
-    if not resp.content:
-        return {"_rate_limit": _rate_limit_metadata(resp)}
-    payload = resp.json()
+    except IntegrationHttpError as exc:
+        raise TwitterXProviderError(format_provider_error("Twitter/X", exc)) from exc
+    payload = response.json_data
     if not isinstance(payload, dict):
         raise TwitterXProviderError("Twitter/X API returned an invalid payload.")
-    payload["_rate_limit"] = _rate_limit_metadata(resp)
+    payload["_rate_limit"] = _rate_limit_metadata(response.headers)
     return payload
 
 

@@ -19,6 +19,13 @@ from urllib.parse import parse_qs, urlparse
 
 from bs4 import BeautifulSoup
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+    request_text_response,
+)
+
 from .base import ToolErrorType
 from .config import ToolsConfig
 
@@ -212,6 +219,22 @@ def _format_display_output(response: WebSearchResponse) -> str:
     return "\n".join(display_lines)
 
 
+def _tool_error_type(exc: IntegrationHttpError) -> ToolErrorType:
+    if exc.error_kind == "auth_failed":
+        return ToolErrorType.AUTH_FAILED
+    if exc.error_kind == "rate_limited":
+        return ToolErrorType.RATE_LIMITED
+    if exc.error_kind == "timeout":
+        return ToolErrorType.FETCH_TIMEOUT
+    if exc.error_kind == "network":
+        return ToolErrorType.NETWORK_ERROR
+    return ToolErrorType.HTTP_ERROR
+
+
+def _raise_web_search_error(provider_label: str, exc: IntegrationHttpError) -> None:
+    raise WebSearchProviderError(format_provider_error(provider_label, exc), _tool_error_type(exc)) from exc
+
+
 class TavilySearchProvider(WebSearchProvider):
     id = "tavily"
     label = "Tavily"
@@ -242,34 +265,29 @@ class TavilySearchProvider(WebSearchProvider):
         if not api_key:
             raise WebSearchProviderError(self.credential_hint, ToolErrorType.MISSING_CONFIG)
 
-        try:
-            import httpx
-        except ImportError as exc:
-            raise WebSearchProviderError("httpx is required for Tavily search.", ToolErrorType.MISSING_DEPENDENCY) from exc
-
         started = time.monotonic()
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
+        try:
+            data = await request_json(
+                "tavily",
+                "POST",
                 "https://api.tavily.com/search",
-                json={
+                json_body={
                     "api_key": api_key,
                     "query": query,
                     "max_results": max_results,
                     "search_depth": "basic",
                     "include_answer": False,
                 },
+                timeout=30.0,
+                attempts=3,
+                max_delay=15.0,
+                retry_unsafe_methods=True,
             )
-        if resp.status_code == 401:
-            raise WebSearchProviderError("Invalid Tavily API key.", ToolErrorType.AUTH_FAILED)
-        if resp.status_code == 429:
-            raise WebSearchProviderError("Tavily rate limit exceeded.", ToolErrorType.RATE_LIMITED)
-        if resp.status_code != 200:
-            raise WebSearchProviderError(
-                f"Tavily search failed with status {resp.status_code}: {resp.text[:200]}",
-                ToolErrorType.HTTP_ERROR,
-            )
+        except IntegrationHttpError as exc:
+            _raise_web_search_error("Tavily", exc)
 
-        data = resp.json()
+        if not isinstance(data, dict):
+            raise WebSearchProviderError("Tavily returned an invalid payload.", ToolErrorType.HTTP_ERROR)
         results = [
             WebSearchResult(
                 title=str(item.get("title") or ""),
@@ -310,28 +328,22 @@ class BraveSearchProvider(WebSearchProvider):
         if not token:
             raise WebSearchProviderError(self.credential_hint, ToolErrorType.MISSING_CONFIG)
 
-        try:
-            import httpx
-        except ImportError as exc:
-            raise WebSearchProviderError("httpx is required for Brave Search.", ToolErrorType.MISSING_DEPENDENCY) from exc
-
         started = time.monotonic()
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
+        try:
+            data = await request_json(
+                "brave_search",
+                "GET",
                 "https://api.search.brave.com/res/v1/web/search",
                 headers={"X-Subscription-Token": token, "Accept": "application/json"},
                 params={"q": query, "count": max_results},
+                timeout=15.0,
+                attempts=3,
+                max_delay=15.0,
             )
-        if resp.status_code == 401:
-            raise WebSearchProviderError("Invalid Brave Search API key.", ToolErrorType.AUTH_FAILED)
-        if resp.status_code == 429:
-            raise WebSearchProviderError("Brave Search rate limit exceeded.", ToolErrorType.RATE_LIMITED)
-        if resp.status_code != 200:
-            raise WebSearchProviderError(
-                f"Brave Search failed with status {resp.status_code}: {resp.text[:200]}",
-                ToolErrorType.HTTP_ERROR,
-            )
-        data = resp.json()
+        except IntegrationHttpError as exc:
+            _raise_web_search_error("Brave Search", exc)
+        if not isinstance(data, dict):
+            raise WebSearchProviderError("Brave Search returned an invalid payload.", ToolErrorType.HTTP_ERROR)
         results = [
             WebSearchResult(
                 title=str(item.get("title") or ""),
@@ -375,24 +387,23 @@ class SearxngSearchProvider(WebSearchProvider):
         if not base_url:
             raise WebSearchProviderError(self.credential_hint, ToolErrorType.MISSING_CONFIG)
 
-        try:
-            import httpx
-        except ImportError as exc:
-            raise WebSearchProviderError("httpx is required for SearXNG search.", ToolErrorType.MISSING_DEPENDENCY) from exc
-
         started = time.monotonic()
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            resp = await client.get(
+        try:
+            data = await request_json(
+                "searxng",
+                "GET",
                 f"{base_url}/search",
                 params={"q": query, "format": "json"},
                 headers={"User-Agent": _SEARCH_USER_AGENT},
+                timeout=20.0,
+                attempts=3,
+                max_delay=15.0,
+                follow_redirects=True,
             )
-        if resp.status_code != 200:
-            raise WebSearchProviderError(
-                f"SearXNG returned status {resp.status_code}: {resp.text[:200]}",
-                ToolErrorType.HTTP_ERROR,
-            )
-        data = resp.json()
+        except IntegrationHttpError as exc:
+            _raise_web_search_error("SearXNG", exc)
+        if not isinstance(data, dict):
+            raise WebSearchProviderError("SearXNG returned an invalid payload.", ToolErrorType.HTTP_ERROR)
         results = [
             WebSearchResult(
                 title=str(item.get("title") or ""),
@@ -430,28 +441,26 @@ class DuckDuckGoLiteSearchProvider(WebSearchProvider):
         max_results: int,
         config: ToolsConfig,
     ) -> WebSearchResponse:
-        try:
-            import httpx
-        except ImportError as exc:
-            raise WebSearchProviderError("httpx is required for DuckDuckGo Lite search.", ToolErrorType.MISSING_DEPENDENCY) from exc
-
         started = time.monotonic()
-        async with httpx.AsyncClient(
-            timeout=15,
-            follow_redirects=True,
-            headers={"User-Agent": _SEARCH_USER_AGENT},
-        ) as client:
-            resp = await client.get(_DUCKDUCKGO_LITE_ENDPOINT, params={"q": query})
-        if resp.status_code != 200:
-            raise WebSearchProviderError(
-                f"DuckDuckGo Lite returned status {resp.status_code}.",
-                ToolErrorType.HTTP_ERROR,
+        try:
+            response = await request_text_response(
+                "duckduckgo_lite",
+                "GET",
+                _DUCKDUCKGO_LITE_ENDPOINT,
+                params={"q": query},
+                headers={"User-Agent": _SEARCH_USER_AGENT},
+                timeout=15.0,
+                attempts=3,
+                max_delay=15.0,
+                follow_redirects=True,
             )
+        except IntegrationHttpError as exc:
+            _raise_web_search_error("DuckDuckGo Lite", exc)
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = BeautifulSoup(response.text, "html.parser")
         links = soup.select("a.result-link")
         snippets = soup.select(".result-snippet")
-        if not links and "anomaly-modal" in resp.text:
+        if not links and "anomaly-modal" in response.text:
             raise WebSearchProviderError(
                 "DuckDuckGo Lite returned a bot-detection page.",
                 ToolErrorType.RATE_LIMITED,
@@ -507,25 +516,23 @@ class BingRssSearchProvider(WebSearchProvider):
         max_results: int,
         config: ToolsConfig,
     ) -> WebSearchResponse:
-        try:
-            import httpx
-        except ImportError as exc:
-            raise WebSearchProviderError("httpx is required for Bing RSS search.", ToolErrorType.MISSING_DEPENDENCY) from exc
-
         started = time.monotonic()
-        async with httpx.AsyncClient(
-            timeout=15,
-            follow_redirects=True,
-            headers={"User-Agent": _SEARCH_USER_AGENT},
-        ) as client:
-            resp = await client.get(_BING_RSS_ENDPOINT, params={"q": query, "format": "rss"})
-        if resp.status_code != 200:
-            raise WebSearchProviderError(
-                f"Bing RSS returned status {resp.status_code}.",
-                ToolErrorType.HTTP_ERROR,
+        try:
+            response = await request_text_response(
+                "bing_rss",
+                "GET",
+                _BING_RSS_ENDPOINT,
+                params={"q": query, "format": "rss"},
+                headers={"User-Agent": _SEARCH_USER_AGENT},
+                timeout=15.0,
+                attempts=3,
+                max_delay=15.0,
+                follow_redirects=True,
             )
+        except IntegrationHttpError as exc:
+            _raise_web_search_error("Bing RSS", exc)
 
-        root = ET.fromstring(resp.text)
+        root = ET.fromstring(response.text)
         results: list[WebSearchResult] = []
         for item in root.findall("./channel/item"):
             title = _clean_text(item.findtext("title"))

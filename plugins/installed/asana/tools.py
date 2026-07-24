@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import IntegrationHttpError, request_json
 from core.tools.base import (
     ToolCategory,
     ToolContext,
@@ -20,6 +21,7 @@ from core.tools.base import (
     ToolSpec,
 )
 from core.tools.api_keys import resolve_api_key
+from core.tools.integration_http import integration_error_result
 
 logger = logging.getLogger(__name__)
 
@@ -91,13 +93,6 @@ class CreateAsanaTaskHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed.", ToolErrorType.MISSING_DEPENDENCY
-            )
-
         data: dict[str, Any] = {"name": arguments["name"]}
         for key in ("notes", "assignee", "due_on"):
             if arguments.get(key):
@@ -108,15 +103,18 @@ class CreateAsanaTaskHandler(ToolHandler):
             data["workspace"] = arguments["workspace_gid"]
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{_BASE_URL}/tasks",
-                    headers=_headers(token),
-                    json={"data": data},
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                result = resp.json().get("data", {})
+            payload = await request_json(
+                "asana",
+                "POST",
+                f"{_BASE_URL}/tasks",
+                headers=_headers(token),
+                json_body={"data": data},
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            result = payload.get("data", {}) if isinstance(payload, dict) else {}
             return ToolResult.success_result(
                 {
                     "gid": result.get("gid"),
@@ -126,6 +124,8 @@ class CreateAsanaTaskHandler(ToolHandler):
                 },
                 display_output=f"Created Asana task: {result.get('name')}",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Asana", e)
         except Exception as e:
             return ToolResult.error_result(f"Asana API error: {e}")
 
@@ -169,27 +169,22 @@ class ListAsanaProjectsHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed.", ToolErrorType.MISSING_DEPENDENCY
-            )
-
         params: dict[str, str] = {"opt_fields": "name,color,due_on,permalink_url"}
         if arguments.get("workspace_gid"):
             params["workspace"] = arguments["workspace_gid"]
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/projects",
-                    headers=_headers(token),
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                projects = resp.json().get("data", [])
+            payload = await request_json(
+                "asana",
+                "GET",
+                f"{_BASE_URL}/projects",
+                headers=_headers(token),
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
+            projects = payload.get("data", []) if isinstance(payload, dict) else []
             formatted = []
             for p in projects:
                 formatted.append({
@@ -201,6 +196,8 @@ class ListAsanaProjectsHandler(ToolHandler):
                 {"projects": formatted, "count": len(formatted)},
                 display_output=f"Found {len(formatted)} project(s)",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Asana", e)
         except Exception as e:
             return ToolResult.error_result(f"Asana API error: {e}")
 

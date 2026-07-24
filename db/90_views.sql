@@ -314,6 +314,20 @@ SELECT
 FROM worker_instances
 ORDER BY last_seen_at DESC;
 
+CREATE OR REPLACE VIEW worker_start_storm_status AS
+SELECT
+    mode,
+    instance_name,
+    COUNT(*) FILTER (WHERE started_at >= CURRENT_TIMESTAMP - INTERVAL '2 minutes')::int AS starts_last_2m,
+    COUNT(*) FILTER (WHERE started_at >= CURRENT_TIMESTAMP - INTERVAL '10 minutes')::int AS starts_last_10m,
+    MAX(started_at) AS latest_start_at,
+    (
+        COUNT(*) FILTER (WHERE started_at >= CURRENT_TIMESTAMP - INTERVAL '2 minutes') > 5
+    ) AS is_storming
+FROM worker_start_events
+GROUP BY mode, instance_name
+ORDER BY latest_start_at DESC;
+
 CREATE OR REPLACE VIEW worker_task_status AS
 WITH task_catalog AS (
     SELECT task_type, max(description) AS description

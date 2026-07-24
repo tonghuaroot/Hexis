@@ -8,6 +8,8 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from core.integration_reliability import IntegrationHttpError, iter_sse_json_events
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -334,89 +336,96 @@ async def _codex_responses_attempt(
     on_text_delta: Any | None = None,
 ) -> dict[str, Any]:
     """Single attempt at a Codex Responses API streaming call."""
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
-            if resp.status_code < 200 or resp.status_code >= 300:
-                text = await resp.aread()
-                raise _codex_http_error(resp, text)
+    content_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    # Current function call (arguments stream)
+    current_fc: dict[str, Any] | None = None
 
-            content_parts: list[str] = []
-            tool_calls: list[dict[str, Any]] = []
-            # Current function call (arguments stream)
-            current_fc: dict[str, Any] | None = None
+    try:
+        async for event in iter_sse_json_events(
+            "openai-codex",
+            "POST",
+            url,
+            headers=headers,
+            json_body=payload,
+            timeout=timeout,
+            attempts=3,
+            max_delay=_LLM_RETRY_MAX_WAIT,
+            retry_unsafe_methods=True,
+        ):
+            event_type = event.get("type")
 
-            async for event in _iter_sse_events_json(resp):
-                event_type = event.get("type")
+            if event_type == "response.output_text.delta":
+                delta = event.get("delta", "")
+                if isinstance(delta, str) and delta:
+                    content_parts.append(delta)
+                    if on_text_delta:
+                        import asyncio
 
-                if event_type == "response.output_text.delta":
+                        result = on_text_delta(delta)
+                        if asyncio.iscoroutine(result):
+                            await result
+                continue
+
+            if event_type == "response.output_item.added":
+                item = event.get("item") or {}
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    current_fc = {
+                        "call_id": item.get("call_id"),
+                        "name": item.get("name"),
+                        "args_buf": item.get("arguments") or "",
+                    }
+                continue
+
+            if event_type == "response.function_call_arguments.delta":
+                if current_fc is not None:
                     delta = event.get("delta", "")
                     if isinstance(delta, str) and delta:
-                        content_parts.append(delta)
-                        if on_text_delta:
-                            import asyncio
+                        current_fc["args_buf"] = (current_fc.get("args_buf") or "") + delta
+                continue
 
-                            result = on_text_delta(delta)
-                            if asyncio.iscoroutine(result):
-                                await result
+            if event_type == "response.function_call_arguments.done":
+                if current_fc is not None:
+                    args = event.get("arguments", "")
+                    if isinstance(args, str) and args:
+                        current_fc["args_buf"] = args
+                continue
+
+            if event_type in {"response.done", "response.completed"}:
+                break
+
+            if event_type in {"error", "response.failed"}:
+                message = (
+                    event.get("message")
+                    or (event.get("error") or {}).get("message")
+                    or "Codex request failed"
+                )
+                raise RuntimeError(str(message))
+
+            if event_type == "response.output_item.done":
+                item = event.get("item") or {}
+                if not isinstance(item, dict) or item.get("type") != "function_call":
                     continue
+                call_id = item.get("call_id") or (current_fc or {}).get("call_id")
+                name = item.get("name") or (current_fc or {}).get("name")
+                args_str = item.get("arguments") or (current_fc or {}).get("args_buf") or ""
 
-                if event_type == "response.output_item.added":
-                    item = event.get("item") or {}
-                    if isinstance(item, dict) and item.get("type") == "function_call":
-                        current_fc = {
-                            "call_id": item.get("call_id"),
-                            "name": item.get("name"),
-                            "args_buf": item.get("arguments") or "",
-                        }
-                    continue
+                try:
+                    args = json.loads(args_str) if isinstance(args_str, str) and args_str else {}
+                except Exception:
+                    logger.debug("Failed to parse tool arguments: %r", str(args_str)[:200])
+                    args = {}
+                tool_calls.append({
+                    "id": call_id,
+                    "name": name or "",
+                    "arguments": args,
+                })
+                current_fc = None
+                continue
+    except IntegrationHttpError as exc:
+        raise RuntimeError(str(exc)) from exc
 
-                if event_type == "response.function_call_arguments.delta":
-                    if current_fc is not None:
-                        delta = event.get("delta", "")
-                        if isinstance(delta, str) and delta:
-                            current_fc["args_buf"] = (current_fc.get("args_buf") or "") + delta
-                    continue
-
-                if event_type == "response.function_call_arguments.done":
-                    if current_fc is not None:
-                        args = event.get("arguments", "")
-                        if isinstance(args, str) and args:
-                            current_fc["args_buf"] = args
-                    continue
-
-                if event_type in {"response.done", "response.completed"}:
-                    break
-
-                if event_type in {"error", "response.failed"}:
-                    message = (
-                        event.get("message")
-                        or (event.get("error") or {}).get("message")
-                        or "Codex request failed"
-                    )
-                    raise RuntimeError(str(message))
-
-                if event_type == "response.output_item.done":
-                    item = event.get("item") or {}
-                    if not isinstance(item, dict) or item.get("type") != "function_call":
-                        continue
-                    call_id = item.get("call_id") or (current_fc or {}).get("call_id")
-                    name = item.get("name") or (current_fc or {}).get("name")
-                    args_str = item.get("arguments") or (current_fc or {}).get("args_buf") or ""
-
-                    try:
-                        args = json.loads(args_str) if isinstance(args_str, str) and args_str else {}
-                    except Exception:
-                        logger.debug("Failed to parse tool arguments: %r", str(args_str)[:200])
-                        args = {}
-                    tool_calls.append({
-                        "id": call_id,
-                        "name": name or "",
-                        "arguments": args,
-                    })
-                    current_fc = None
-                    continue
-
-            return {"content": "".join(content_parts), "tool_calls": tool_calls, "raw": None}
+    return {"content": "".join(content_parts), "tool_calls": tool_calls, "raw": None}
 
 
 # ---------------------------------------------------------------------------
@@ -1751,22 +1760,30 @@ async def stream_text_completion(
             "user-agent": f"hexis (python; {os.uname().sysname if hasattr(os, 'uname') else 'unknown'})",
         }
         timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                if resp.status_code < 200 or resp.status_code >= 300:
-                    text = await resp.aread()
-                    raise _codex_http_error(resp, text)
-                async for event in _iter_sse_events_json(resp):
-                    event_type = event.get("type")
-                    if event_type == "response.output_text.delta":
-                        delta = event.get("delta", "")
-                        if isinstance(delta, str) and delta:
-                            yield delta
-                    elif event_type in {"response.done", "response.completed"}:
-                        return
-                    elif event_type in {"error", "response.failed"}:
-                        message = event.get("message") or "Codex request failed"
-                        raise RuntimeError(str(message))
+        try:
+            async for event in iter_sse_json_events(
+                "openai-codex",
+                "POST",
+                url,
+                headers=headers,
+                json_body=payload,
+                timeout=timeout,
+                attempts=3,
+                max_delay=_LLM_RETRY_MAX_WAIT,
+                retry_unsafe_methods=True,
+            ):
+                event_type = event.get("type")
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta", "")
+                    if isinstance(delta, str) and delta:
+                        yield delta
+                elif event_type in {"response.done", "response.completed"}:
+                    return
+                elif event_type in {"error", "response.failed"}:
+                    message = event.get("message") or "Codex request failed"
+                    raise RuntimeError(str(message))
+        except IntegrationHttpError as exc:
+            raise RuntimeError(str(exc)) from exc
         return
 
     if provider == "minimax-portal":

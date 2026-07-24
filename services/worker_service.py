@@ -59,6 +59,9 @@ logger = logging.getLogger("heartbeat_worker")
 
 POLL_INTERVAL = float(os.getenv("WORKER_POLL_INTERVAL", 1.0))
 MAX_RETRIES = int(os.getenv("WORKER_MAX_RETRIES", 3))
+WORKER_STORM_MAX_STARTS = int(os.getenv("WORKER_STORM_MAX_STARTS", 5))
+WORKER_STORM_WINDOW_SECONDS = int(os.getenv("WORKER_STORM_WINDOW_SECONDS", 120))
+WORKER_STORM_BACKOFF_CAP_SECONDS = int(os.getenv("WORKER_STORM_BACKOFF_CAP_SECONDS", 300))
 
 
 def _json_payload(value: Any) -> str:
@@ -95,6 +98,46 @@ async def _recover_worker_runtime(pool: asyncpg.Pool) -> None:
         logger.debug("worker runtime recovery unavailable", exc_info=True)
 
 
+async def _record_worker_start_and_maybe_backoff(
+    pool: asyncpg.Pool,
+    mode: str,
+    instance: str | None,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                """
+                SELECT record_worker_start_and_check_storm(
+                    $1, $2, $3::jsonb, $4, $5, $6
+                )
+                """,
+                mode,
+                instance,
+                _json_payload(metadata),
+                WORKER_STORM_MAX_STARTS,
+                WORKER_STORM_WINDOW_SECONDS,
+                WORKER_STORM_BACKOFF_CAP_SECONDS,
+            )
+        result = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except Exception:
+        logger.debug("worker start storm check unavailable", exc_info=True)
+        return {"storm": False}
+
+    backoff_s = float(result.get("backoff_seconds") or 0)
+    if backoff_s > 0:
+        logger.warning(
+            "Worker start storm detected for %s/%s: %s starts in %ss; backing off %.1fs",
+            mode,
+            instance or "default",
+            result.get("count"),
+            result.get("window_seconds"),
+            backoff_s,
+        )
+        await asyncio.sleep(backoff_s)
+    return result
+
+
 async def _register_worker_instance(
     pool: asyncpg.Pool,
     mode: str,
@@ -103,6 +146,9 @@ async def _register_worker_instance(
     metadata = _worker_metadata()
     try:
         await _recover_worker_runtime(pool)
+        storm = await _record_worker_start_and_maybe_backoff(pool, mode, instance, metadata)
+        if isinstance(storm, dict):
+            metadata["start_storm"] = storm
         async with pool.acquire() as conn:
             worker_id = await conn.fetchval(
                 "SELECT register_worker_instance($1, $2, $3::jsonb)",

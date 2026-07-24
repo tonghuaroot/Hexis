@@ -15,6 +15,12 @@ import logging
 import os
 from typing import Any, Callable, Awaitable
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
+
 from .base import ChannelAdapter, ChannelCapabilities, ChannelMessage, parse_allowlist, resolve_channel_token
 from .media import Attachment
 
@@ -85,7 +91,6 @@ class WhatsAppAdapter(ChannelAdapter):
         self,
         on_message: Callable[[ChannelMessage], Awaitable[None]],
     ) -> None:
-        import aiohttp
         from aiohttp import web
 
         self._access_token = _resolve_token(self._config, "access_token", "WHATSAPP_ACCESS_TOKEN")
@@ -110,7 +115,6 @@ class WhatsAppAdapter(ChannelAdapter):
         self._app_secret = _resolve_token(self._config, "app_secret", "WHATSAPP_APP_SECRET")
 
         self._on_message = on_message
-        self._session = aiohttp.ClientSession()
 
         # Build webhook server
         app = web.Application()
@@ -305,7 +309,7 @@ class WhatsAppAdapter(ChannelAdapter):
         reply_to: str | None = None,
         thread_id: str | None = None,
     ) -> str | None:
-        if not self._session or self._session.closed:
+        if not self._connected:
             logger.error("WhatsApp session not connected")
             return None
 
@@ -327,15 +331,25 @@ class WhatsAppAdapter(ChannelAdapter):
             }
 
             url = f"{GRAPH_API_BASE}/{self._phone_number_id}/messages"
-            async with self._session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status in (200, 201):
-                    result = await resp.json()
-                    messages = result.get("messages", [])
-                    return messages[0]["id"] if messages else None
-                else:
-                    body = await resp.text()
-                    logger.error("WhatsApp send failed: HTTP %d: %s", resp.status, body[:200])
-                    return None
+            result = await request_json(
+                "whatsapp",
+                "POST",
+                url,
+                headers=headers,
+                json_body=payload,
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(result, dict):
+                logger.error("WhatsApp send failed: invalid response payload")
+                return None
+            messages = result.get("messages", [])
+            return messages[0]["id"] if messages else None
+        except IntegrationHttpError as exc:
+            logger.error("%s", format_provider_error("WhatsApp", exc))
+            return None
         except Exception:
             logger.exception("Failed to send WhatsApp message to %s", channel_id)
             return None
@@ -357,7 +371,7 @@ class WhatsAppAdapter(ChannelAdapter):
         *,
         reply_to: str | None = None,
     ) -> str | None:
-        if not self._session or self._session.closed:
+        if not self._connected:
             return None
 
         try:
@@ -402,15 +416,25 @@ class WhatsAppAdapter(ChannelAdapter):
             }
 
             url = f"{GRAPH_API_BASE}/{self._phone_number_id}/messages"
-            async with self._session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status in (200, 201):
-                    result = await resp.json()
-                    messages = result.get("messages", [])
-                    return messages[0]["id"] if messages else None
-                else:
-                    body = await resp.text()
-                    logger.error("WhatsApp send_media failed: HTTP %d: %s", resp.status, body[:200])
-                    return None
+            result = await request_json(
+                "whatsapp",
+                "POST",
+                url,
+                headers=headers,
+                json_body=payload,
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(result, dict):
+                logger.error("WhatsApp send_media failed: invalid response payload")
+                return None
+            messages = result.get("messages", [])
+            return messages[0]["id"] if messages else None
+        except IntegrationHttpError as exc:
+            logger.error("%s", format_provider_error("WhatsApp", exc))
+            return None
         except Exception:
             logger.exception("Failed to send WhatsApp media to %s", channel_id)
             return None

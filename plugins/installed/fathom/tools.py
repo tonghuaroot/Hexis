@@ -11,6 +11,7 @@ import json
 import logging
 from typing import Any, Callable, TYPE_CHECKING
 
+from core.integration_reliability import IntegrationHttpError, request_json
 from core.tools.base import (
     ToolCategory,
     ToolContext,
@@ -21,6 +22,7 @@ from core.tools.base import (
     ToolSpec,
 )
 from core.tools.api_keys import resolve_api_key
+from core.tools.integration_http import integration_error_result
 
 if TYPE_CHECKING:
     import asyncpg
@@ -85,14 +87,6 @@ class FetchFathomTranscriptsHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         limit = arguments.get("limit", 10)
         since_days = arguments.get("since_days", 7)
 
@@ -106,17 +100,22 @@ class FetchFathomTranscriptsHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/recordings",
-                    headers=_headers(token),
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await request_json(
+                "fathom",
+                "GET",
+                f"{_BASE_URL}/recordings",
+                headers=_headers(token),
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
 
-            recordings = data if isinstance(data, list) else data.get("recordings", [])
+            recordings = (
+                data if isinstance(data, list)
+                else data.get("recordings", []) if isinstance(data, dict)
+                else []
+            )
             formatted = []
             for rec in recordings:
                 formatted.append({
@@ -132,6 +131,8 @@ class FetchFathomTranscriptsHandler(ToolHandler):
                 {"recordings": formatted, "count": len(formatted)},
                 display_output=f"Found {len(formatted)} Fathom recording(s)",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Fathom", e)
         except Exception as e:
             return ToolResult.error_result(f"Fathom API error: {e}")
 
@@ -182,26 +183,21 @@ class IngestFathomTranscriptHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         recording_id = arguments["recording_id"]
 
         try:
             # Fetch transcript
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/recordings/{recording_id}/transcript",
-                    headers=_headers(token),
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                transcript_data = resp.json()
+            transcript_data = await request_json(
+                "fathom",
+                "GET",
+                f"{_BASE_URL}/recordings/{recording_id}/transcript",
+                headers=_headers(token),
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+            )
+            if not isinstance(transcript_data, dict):
+                transcript_data = {}
 
             # Extract transcript text and metadata
             transcript_text = transcript_data.get("transcript") or transcript_data.get("text", "")
@@ -279,6 +275,8 @@ class IngestFathomTranscriptHandler(ToolHandler):
                     f"Contacts: {contacts_created} new, {contacts_updated} updated."
                 ),
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Fathom", e)
         except Exception as e:
             return ToolResult.error_result(f"Fathom API error: {e}")
 

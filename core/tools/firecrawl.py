@@ -10,6 +10,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
+
 from .base import (
     ToolCategory,
     ToolContext,
@@ -75,14 +81,6 @@ class FirecrawlScrapeHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         url = arguments["url"]
         formats = arguments.get("formats", ["markdown"])
 
@@ -92,15 +90,22 @@ class FirecrawlScrapeHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{_BASE_URL}/v1/scrape",
-                    headers=_headers(token),
-                    json=body,
-                    timeout=30,
+            data = await request_json(
+                "firecrawl",
+                "POST",
+                f"{_BASE_URL}/v1/scrape",
+                headers=_headers(token),
+                json_body=body,
+                timeout=30.0,
+                attempts=3,
+                max_delay=20.0,
+                retry_unsafe_methods=True,
+            )
+            if not isinstance(data, dict):
+                return ToolResult.error_result(
+                    "Firecrawl returned an invalid payload.",
+                    ToolErrorType.HTTP_ERROR,
                 )
-                resp.raise_for_status()
-                data = resp.json()
 
             result_data = data.get("data", data)
             content = result_data.get("markdown", result_data.get("content", ""))
@@ -116,6 +121,15 @@ class FirecrawlScrapeHandler(ToolHandler):
                 },
                 display_output=f"Scraped: {metadata.get('title', url)}",
             )
+        except IntegrationHttpError as e:
+            kind = (
+                ToolErrorType.AUTH_FAILED if e.error_kind == "auth_failed"
+                else ToolErrorType.RATE_LIMITED if e.error_kind == "rate_limited"
+                else ToolErrorType.NETWORK_ERROR if e.error_kind == "network"
+                else ToolErrorType.FETCH_TIMEOUT if e.error_kind == "timeout"
+                else ToolErrorType.HTTP_ERROR
+            )
+            return ToolResult.error_result(format_provider_error("Firecrawl", e), kind)
         except Exception as e:
             return ToolResult.error_result(f"Firecrawl API error: {e}")
 

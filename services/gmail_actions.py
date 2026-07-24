@@ -11,10 +11,13 @@ import base64
 from email.message import EmailMessage
 from typing import Any
 
-import httpx
-
 from core.auth.google_gmail import (
     refresh_default_credentials_if_needed,
+)
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
 )
 
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1"
@@ -60,18 +63,20 @@ async def _gmail_request(
     if not isinstance(token, str) or not token:
         raise GmailActionError("Saved Gmail credentials are missing an access token.")
     url = path if path.startswith("http") else f"{GMAIL_API_BASE}{path}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.request(
+    try:
+        payload = await request_json(
+            "gmail",
             method.upper(),
             url,
             headers={"Authorization": f"Bearer {token}"},
-            json=json_body,
+            json_body=json_body,
+            timeout=30.0,
+            attempts=3,
+            max_delay=20.0,
+            retry_unsafe_methods=False,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise GmailActionError(f"Gmail API failed: HTTP {resp.status_code}: {resp.text}")
-    if not resp.content:
-        return {}
-    payload = resp.json()
+    except IntegrationHttpError as exc:
+        raise GmailActionError(format_provider_error("Gmail", exc)) from exc
     if not isinstance(payload, dict):
         raise GmailActionError("Gmail API returned an invalid payload.")
     return payload

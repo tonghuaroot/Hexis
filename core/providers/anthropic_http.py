@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from core.integration_reliability import IntegrationHttpError, iter_sse_json_events
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -223,69 +225,62 @@ async def stream_anthropic_http_completion(
     restore_map = _tool_name_restore_map(tools, auth_mode)
 
     timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, headers=headers, json=body) as resp:
-            if resp.status_code < 200 or resp.status_code >= 300:
-                error_text = await resp.aread()
-                raise RuntimeError(
-                    f"Anthropic HTTP request failed: HTTP {resp.status_code}: "
-                    f"{error_text.decode('utf-8', errors='replace')}"
-                )
+    try:
+        async for event in iter_sse_json_events(
+            "anthropic-http",
+            "POST",
+            url,
+            headers=headers,
+            json_body=body,
+            timeout=timeout,
+            attempts=3,
+            max_delay=60.0,
+            retry_unsafe_methods=True,
+        ):
+            event_type = event.get("type", "")
 
-            # Parse SSE events
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if not data_str or data_str == "[DONE]":
-                    continue
-                try:
-                    event = json.loads(data_str)
-                except Exception:
-                    continue
+            if event_type == "content_block_start":
+                block = event.get("content_block") or {}
+                if block.get("type") == "tool_use":
+                    current_tool = {
+                        "id": block.get("id") or str(uuid.uuid4()),
+                        "name": block.get("name", ""),
+                        "arguments_json": "",
+                    }
 
-                event_type = event.get("type", "")
+            elif event_type == "content_block_delta":
+                delta = event.get("delta") or {}
+                dtype = delta.get("type", "")
+                if dtype == "text_delta":
+                    text = delta.get("text", "")
+                    if text:
+                        text_parts.append(text)
+                        if on_text_delta:
+                            result = on_text_delta(text)
+                            if asyncio.iscoroutine(result):
+                                await result
+                elif dtype == "input_json_delta" and current_tool is not None:
+                    current_tool["arguments_json"] += delta.get("partial_json", "")
 
-                if event_type == "content_block_start":
-                    block = event.get("content_block") or {}
-                    if block.get("type") == "tool_use":
-                        current_tool = {
-                            "id": block.get("id") or str(uuid.uuid4()),
-                            "name": block.get("name", ""),
-                            "arguments_json": "",
-                        }
+            elif event_type == "content_block_stop":
+                if current_tool is not None:
+                    raw_args = current_tool["arguments_json"]
+                    try:
+                        args = json.loads(raw_args) if raw_args else {}
+                    except Exception:
+                        args = {}
+                    name = current_tool["name"]
+                    tool_calls.append({
+                        "id": current_tool["id"],
+                        "name": restore_map.get(name, name),
+                        "arguments": args,
+                    })
+                    current_tool = None
 
-                elif event_type == "content_block_delta":
-                    delta = event.get("delta") or {}
-                    dtype = delta.get("type", "")
-                    if dtype == "text_delta":
-                        text = delta.get("text", "")
-                        if text:
-                            text_parts.append(text)
-                            if on_text_delta:
-                                result = on_text_delta(text)
-                                if asyncio.iscoroutine(result):
-                                    await result
-                    elif dtype == "input_json_delta" and current_tool is not None:
-                        current_tool["arguments_json"] += delta.get("partial_json", "")
-
-                elif event_type == "content_block_stop":
-                    if current_tool is not None:
-                        raw_args = current_tool["arguments_json"]
-                        try:
-                            args = json.loads(raw_args) if raw_args else {}
-                        except Exception:
-                            args = {}
-                        name = current_tool["name"]
-                        tool_calls.append({
-                            "id": current_tool["id"],
-                            "name": restore_map.get(name, name),
-                            "arguments": args,
-                        })
-                        current_tool = None
-
-                elif event_type == "error":
-                    msg = (event.get("error") or {}).get("message", "Anthropic streaming error")
-                    raise RuntimeError(msg)
+            elif event_type == "error":
+                msg = (event.get("error") or {}).get("message", "Anthropic streaming error")
+                raise RuntimeError(msg)
+    except IntegrationHttpError as exc:
+        raise RuntimeError(str(exc)) from exc
 
     return {"content": "".join(text_parts), "tool_calls": tool_calls, "raw": None}

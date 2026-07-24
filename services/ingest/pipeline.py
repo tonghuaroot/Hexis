@@ -20,6 +20,12 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import UUID
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_bytes_response,
+)
+
 from .config import (
     Appraisal,
     Config,
@@ -115,15 +121,27 @@ class IngestionPipeline:
             return "rss"
         return "web"
 
-    def _read_pdf_url_result(self, url: str) -> tuple[ReaderResult, dict[str, Any]]:
+    async def _read_pdf_url_result(self, url: str) -> tuple[ReaderResult, dict[str, Any]]:
         import tempfile
-        import urllib.request
         from urllib.parse import urlparse
 
-        request = urllib.request.Request(url, headers={"User-Agent": "Hexis/1.0"})
-        with urllib.request.urlopen(request, timeout=60) as response:
-            raw = response.read()
-            mime_type = response.headers.get("Content-Type") or "application/pdf"
+        try:
+            response = await request_bytes_response(
+                "url_ingest",
+                "GET",
+                url,
+                headers={"User-Agent": "Hexis/1.0"},
+                timeout=60.0,
+                attempts=3,
+                max_delay=15.0,
+                follow_redirects=True,
+                max_bytes=self.config.upload_max_bytes,
+            )
+        except IntegrationHttpError as exc:
+            raise RuntimeError(format_provider_error("URL ingest", exc)) from exc
+
+        raw = response.content
+        mime_type = response.headers.get("content-type") or "application/pdf"
 
         original_filename = Path(urlparse(url).path).name or "download.pdf"
         if not original_filename.lower().endswith(".pdf"):
@@ -348,7 +366,7 @@ class IngestionPipeline:
                     metadata={"url": url},
                 )
             elif source_type == "pdf":
-                reader_result, artifact_info = self._read_pdf_url_result(url)
+                reader_result, artifact_info = await self._read_pdf_url_result(url)
                 content = reader_result.text
             elif source_type == "rss":
                 content = RssReader.read(url)

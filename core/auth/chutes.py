@@ -8,9 +8,12 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
-import httpx
-
 from core.auth.utils import advisory_lock_key, generate_pkce, needs_refresh, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 # Constants (from OpenClaw src/agents/chutes-oauth.ts)
 CHUTES_ISSUER = "https://api.chutes.ai"
@@ -71,16 +74,20 @@ async def exchange_code(
     if client_secret:
         data["client_secret"] = client_secret
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        body = await request_json(
+            "chutes_oauth",
+            "POST",
             CHUTES_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data=data,
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Chutes token exchange failed: HTTP {resp.status_code}: {resp.text}")
-
-    body = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Chutes token exchange", exc)) from exc
     access = body.get("access_token")
     refresh = body.get("refresh_token")
     expires_in = body.get("expires_in")
@@ -109,16 +116,20 @@ async def refresh_token(creds: ChutesCredentials) -> ChutesCredentials:
     if secret:
         data["client_secret"] = secret
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        body = await request_json(
+            "chutes_oauth",
+            "POST",
             CHUTES_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data=data,
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Chutes token refresh failed: HTTP {resp.status_code}: {resp.text}")
-
-    body = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Chutes token refresh", exc)) from exc
     access = body.get("access_token")
     refresh = body.get("refresh_token", creds.refresh)
     expires_in = body.get("expires_in")
@@ -137,13 +148,16 @@ async def refresh_token(creds: ChutesCredentials) -> ChutesCredentials:
 
 async def _fetch_userinfo(access_token: str) -> tuple[str | None, str | None]:
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                CHUTES_USERINFO_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-        if resp.status_code == 200:
-            data = resp.json()
+        data = await request_json(
+            "chutes",
+            "GET",
+            CHUTES_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10.0,
+            attempts=2,
+            max_delay=2.0,
+        )
+        if isinstance(data, dict):
             return data.get("username") or data.get("email"), data.get("sub")
     except Exception:
         pass

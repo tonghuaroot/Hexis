@@ -15,7 +15,7 @@ import re
 import time
 from pathlib import Path
 
-import httpx
+from core.integration_reliability import request_json
 
 MODELS_DEV_URL = "https://models.dev/api.json"
 _CACHE = Path.home() / ".cache" / "hexis" / "models_dev.json"
@@ -84,10 +84,16 @@ async def _models_dev() -> dict:
     if cached is not None:
         _MEM = cached
         return cached
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(MODELS_DEV_URL)
-        resp.raise_for_status()
-        data = resp.json()
+    data = await request_json(
+        "models_dev",
+        "GET",
+        MODELS_DEV_URL,
+        timeout=_TIMEOUT,
+        attempts=3,
+        max_delay=5.0,
+    )
+    if not isinstance(data, dict):
+        raise RuntimeError("models.dev returned an invalid catalog payload.")
     _cache_write(data)
     _MEM = data
     return data

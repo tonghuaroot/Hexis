@@ -14,6 +14,13 @@ import os
 import time
 from typing import Any, Callable, Awaitable
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+    request_text_response,
+)
+
 from .base import ChannelAdapter, ChannelCapabilities, ChannelMessage, parse_allowlist, resolve_channel_token
 from .media import Attachment
 
@@ -117,7 +124,7 @@ class IMessageAdapter(ChannelAdapter):
 
     async def _poll_messages(self) -> None:
         """Fetch new messages since last poll."""
-        if not self._session or self._session.closed:
+        if not self._connected:
             return
 
         params = {
@@ -129,26 +136,35 @@ class IMessageAdapter(ChannelAdapter):
         }
 
         try:
-            async with self._session.get(
+            data = await request_json(
+                "bluebubbles",
+                "GET",
                 f"{self._api_url}/api/v1/message",
                 params=params,
-                timeout=10,
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning("BlueBubbles poll failed: HTTP %d", resp.status)
-                    return
+                timeout=10.0,
+                attempts=3,
+                max_delay=5.0,
+            )
+            if not isinstance(data, dict):
+                logger.warning("BlueBubbles poll failed: invalid response payload")
+                return
 
-                data = await resp.json()
-                messages = data.get("data", [])
+            messages = data.get("data", [])
+            if not isinstance(messages, list):
+                logger.warning("BlueBubbles poll failed: invalid messages payload")
+                return
 
-                for msg in messages:
-                    await self._handle_message(msg)
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                await self._handle_message(msg)
 
-                    # Update cursor
-                    date_created = msg.get("dateCreated")
-                    if date_created and date_created > self._last_timestamp:
-                        self._last_timestamp = date_created
-
+                # Update cursor
+                date_created = msg.get("dateCreated")
+                if date_created and date_created > self._last_timestamp:
+                    self._last_timestamp = date_created
+        except IntegrationHttpError as exc:
+            logger.warning("%s", format_provider_error("BlueBubbles poll", exc))
         except Exception:
             logger.exception("Error polling BlueBubbles messages")
 
@@ -221,7 +237,7 @@ class IMessageAdapter(ChannelAdapter):
         reply_to: str | None = None,
         thread_id: str | None = None,
     ) -> str | None:
-        if not self._session or self._session.closed:
+        if not self._connected:
             logger.error("iMessage session not connected")
             return None
 
@@ -234,38 +250,48 @@ class IMessageAdapter(ChannelAdapter):
 
             params = {"password": self._password}
 
-            async with self._session.post(
+            result = await request_json(
+                "bluebubbles",
+                "POST",
                 f"{self._api_url}/api/v1/message/text",
-                json=payload,
+                json_body=payload,
                 params=params,
-                timeout=30,
-            ) as resp:
-                if resp.status in (200, 201):
-                    result = await resp.json()
-                    data = result.get("data", {})
-                    return data.get("guid") or str(data.get("dateCreated", ""))
-                else:
-                    body = await resp.text()
-                    logger.error("iMessage send failed: HTTP %d: %s", resp.status, body[:200])
-                    return None
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(result, dict):
+                logger.error("iMessage send failed: invalid response payload")
+                return None
+            data = result.get("data", {})
+            return data.get("guid") or str(data.get("dateCreated", ""))
+        except IntegrationHttpError as exc:
+            logger.error("%s", format_provider_error("BlueBubbles", exc))
+            return None
         except Exception:
             logger.exception("Failed to send iMessage to %s", channel_id)
             return None
 
     async def send_typing(self, channel_id: str) -> None:
         """BlueBubbles supports typing indicators via API."""
-        if not self._session or self._session.closed:
+        if not self._connected:
             return
         try:
             params = {"password": self._password}
             payload = {"chatGuid": channel_id}
-            async with self._session.post(
+            await request_text_response(
+                "bluebubbles",
+                "POST",
                 f"{self._api_url}/api/v1/chat/{channel_id}/typing",
-                json=payload,
+                json_body=payload,
                 params=params,
-                timeout=5,
-            ) as resp:
-                pass  # Best effort
+                timeout=5.0,
+                attempts=1,
+                retry_unsafe_methods=False,
+            )
+        except IntegrationHttpError:
+            logger.debug("BlueBubbles typing indicator failed", exc_info=True)
         except Exception:
             logger.debug("Silent exception in IMessageAdapter", exc_info=True)
 
@@ -280,6 +306,7 @@ class IMessageAdapter(ChannelAdapter):
         if not self._session or self._session.closed:
             return None
 
+        file_handle = None
         try:
             import aiohttp
 
@@ -291,9 +318,10 @@ class IMessageAdapter(ChannelAdapter):
                 data.add_field("message", caption)
 
             if attachment.local_path:
+                file_handle = open(attachment.local_path, "rb")
                 data.add_field(
                     "attachment",
-                    open(attachment.local_path, "rb"),
+                    file_handle,
                     filename=attachment.filename or "attachment",
                     content_type=attachment.mime_type or "application/octet-stream",
                 )
@@ -302,9 +330,10 @@ class IMessageAdapter(ChannelAdapter):
                 from .media import download_attachment
                 downloaded = await download_attachment(attachment)
                 if downloaded.local_path:
+                    file_handle = open(downloaded.local_path, "rb")
                     data.add_field(
                         "attachment",
-                        open(downloaded.local_path, "rb"),
+                        file_handle,
                         filename=downloaded.filename or "attachment",
                         content_type=downloaded.mime_type or "application/octet-stream",
                     )
@@ -313,20 +342,37 @@ class IMessageAdapter(ChannelAdapter):
             else:
                 return None
 
+            timeout = aiohttp.ClientTimeout(total=60)
             async with self._session.post(
                 f"{self._api_url}/api/v1/message/attachment",
                 data=data,
                 params=params,
-                timeout=60,
+                timeout=timeout,
             ) as resp:
                 if resp.status in (200, 201):
                     result = await resp.json()
                     msg_data = result.get("data", {})
                     return msg_data.get("guid")
                 else:
-                    body = await resp.text()
+                    body = await _read_aiohttp_text_limited(resp)
                     logger.error("iMessage send_media failed: HTTP %d: %s", resp.status, body[:200])
                     return None
         except Exception:
             logger.exception("Failed to send iMessage media to %s", channel_id)
             return None
+        finally:
+            if file_handle is not None:
+                file_handle.close()
+
+
+async def _read_aiohttp_text_limited(resp: Any, limit: int = 8_000) -> str:
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in resp.content.iter_chunked(2048):
+        total += len(chunk)
+        if total > limit:
+            chunks.append(chunk[: max(limit - (total - len(chunk)), 0)])
+            chunks.append(b"... [truncated]")
+            break
+        chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors="replace")

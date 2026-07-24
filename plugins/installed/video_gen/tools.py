@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import IntegrationHttpError, request_json
 from core.tools.base import (
     ToolCategory,
     ToolContext,
@@ -20,6 +21,7 @@ from core.tools.base import (
     ToolSpec,
 )
 from core.tools.api_keys import resolve_api_key
+from core.tools.integration_http import integration_error_result
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +101,6 @@ class GenerateVideoHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         prompt = arguments.get("prompt", "").strip()
         if not prompt:
             return ToolResult.error_result("Prompt is required.")
@@ -129,15 +123,19 @@ class GenerateVideoHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{_BASE_URL}/generations",
-                    headers=_headers(token),
-                    json=body,
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await request_json(
+                "runway",
+                "POST",
+                f"{_BASE_URL}/generations",
+                headers=_headers(token),
+                json_body=body,
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(data, dict):
+                data = {}
 
             return ToolResult.success_result(
                 {
@@ -152,6 +150,8 @@ class GenerateVideoHandler(ToolHandler):
                     f"status: {data.get('status')}, {duration}s, {aspect_ratio})"
                 ),
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Runway", e)
         except Exception as e:
             return ToolResult.error_result(f"Runway API error: {e}")
 

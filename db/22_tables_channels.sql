@@ -59,6 +59,48 @@ CREATE TABLE IF NOT EXISTS channel_deliveries (
 CREATE INDEX IF NOT EXISTS idx_channel_deliveries_created
     ON channel_deliveries(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS channel_unreachable_targets (
+    channel_type TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    error_kind TEXT NOT NULL DEFAULT 'unreachable',
+    failure_count INTEGER NOT NULL DEFAULT 1,
+    marked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    suppress_until TIMESTAMPTZ NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (channel_type, channel_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_unreachable_targets_suppress_until
+    ON channel_unreachable_targets(suppress_until);
+
+CREATE TABLE IF NOT EXISTS channel_delivery_obligations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    obligation_key TEXT NOT NULL UNIQUE,
+    source_outbox_message_id TEXT,
+    channel_type TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    sender_id TEXT,
+    thread_id TEXT,
+    content TEXT NOT NULL,
+    message JSONB NOT NULL DEFAULT '{}'::jsonb,
+    delivery_mode TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'attempting', 'delivered', 'failed', 'abandoned')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    attempting_at TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_delivery_obligations_recoverable
+    ON channel_delivery_obligations (state, next_attempt_at, updated_at)
+    WHERE state IN ('pending', 'attempting', 'failed');
+
 CREATE TABLE IF NOT EXISTS channel_presence_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     channel_type TEXT NOT NULL,

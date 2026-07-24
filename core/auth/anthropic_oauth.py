@@ -21,9 +21,12 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-import httpx
-
 from core.auth.utils import advisory_lock_key, generate_pkce, needs_refresh, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,17 +130,20 @@ async def exchange_authorization_code(
         "code_verifier": verifier,
     }
 
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "anthropic_oauth",
+            "POST",
             ANTHROPIC_OAUTH_TOKEN_URL,
             headers={"Content-Type": "application/json"},
-            json=body,
+            json_body=body,
+            timeout=20.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Anthropic token exchange failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Anthropic token exchange", exc)) from exc
     access = data.get("access_token")
     refresh = data.get("refresh_token")
     expires_in = data.get("expires_in")
@@ -163,18 +169,17 @@ async def refresh_anthropic_token(refresh_token: str) -> AnthropicOAuthCredentia
     last_exc: Exception | None = None
     for endpoint in ANTHROPIC_OAUTH_TOKEN_ENDPOINTS:
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    endpoint,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    data=data,
-                )
-            if resp.status_code < 200 or resp.status_code >= 300:
-                last_exc = RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-                logger.debug("Anthropic token refresh failed at %s: %s", endpoint, last_exc)
-                continue
-
-            result = resp.json()
+            result = await request_json(
+                "anthropic_oauth",
+                "POST",
+                endpoint,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data=data,
+                timeout=15.0,
+                attempts=2,
+                max_delay=5.0,
+                retry_unsafe_methods=True,
+            )
             access = result.get("access_token")
             if not isinstance(access, str) or not access:
                 raise RuntimeError("Anthropic refresh response was missing access_token")
@@ -184,6 +189,10 @@ async def refresh_anthropic_token(refresh_token: str) -> AnthropicOAuthCredentia
                 refresh=result.get("refresh_token", refresh_token),
                 expires_ms=now_ms() + int(result.get("expires_in", 3600)) * 1000,
             )
+        except IntegrationHttpError as exc:
+            last_exc = RuntimeError(format_provider_error("Anthropic token refresh", exc))
+            logger.debug("Anthropic token refresh failed at %s: %s", endpoint, last_exc)
+            continue
         except RuntimeError:
             raise
         except Exception as exc:

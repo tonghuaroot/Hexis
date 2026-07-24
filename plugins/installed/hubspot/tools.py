@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import IntegrationHttpError, request_json
 from core.tools.base import (
     ToolCategory,
     ToolContext,
@@ -20,6 +21,7 @@ from core.tools.base import (
     ToolSpec,
 )
 from core.tools.api_keys import resolve_api_key
+from core.tools.integration_http import integration_error_result
 
 logger = logging.getLogger(__name__)
 
@@ -73,14 +75,6 @@ class ListHubSpotDealsHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         limit = arguments.get("limit", 10)
         params: dict[str, Any] = {
             "limit": limit,
@@ -88,18 +82,20 @@ class ListHubSpotDealsHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/crm/v3/objects/deals",
-                    headers=_headers(token),
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await request_json(
+                "hubspot",
+                "GET",
+                f"{_BASE_URL}/crm/v3/objects/deals",
+                headers=_headers(token),
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
 
             deals = []
-            for d in data.get("results", []):
+            rows = data.get("results", []) if isinstance(data, dict) else []
+            for d in rows:
                 props = d.get("properties", {})
                 deal = {
                     "id": d.get("id"),
@@ -117,6 +113,8 @@ class ListHubSpotDealsHandler(ToolHandler):
                 {"deals": deals, "count": len(deals)},
                 display_output=f"Found {len(deals)} deal(s)",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("HubSpot", e)
         except Exception as e:
             return ToolResult.error_result(f"HubSpot API error: {e}")
 
@@ -161,27 +159,22 @@ class GetHubSpotDealHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         deal_id = arguments["deal_id"]
         params = {"properties": "dealname,amount,dealstage,closedate,pipeline,hubspot_owner_id"}
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/crm/v3/objects/deals/{deal_id}",
-                    headers=_headers(token),
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await request_json(
+                "hubspot",
+                "GET",
+                f"{_BASE_URL}/crm/v3/objects/deals/{deal_id}",
+                headers=_headers(token),
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
+            if not isinstance(data, dict):
+                data = {}
 
             props = data.get("properties", {})
             return ToolResult.success_result(
@@ -198,6 +191,8 @@ class GetHubSpotDealHandler(ToolHandler):
                 },
                 display_output=f"Deal: {props.get('dealname', deal_id)}",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("HubSpot", e)
         except Exception as e:
             return ToolResult.error_result(f"HubSpot API error: {e}")
 

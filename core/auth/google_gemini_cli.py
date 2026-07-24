@@ -8,9 +8,12 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
-import httpx
-
 from core.auth.utils import advisory_lock_key, generate_pkce, needs_refresh, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 # Constants (from OpenClaw extensions/google-gemini-cli-auth/oauth.ts)
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -94,8 +97,10 @@ async def exchange_code(
 ) -> dict[str, Any]:
     """Exchange authorization code for tokens. Returns raw token response."""
     client_id, client_secret = _get_client_credentials(client_id, client_secret)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "google_oauth",
+            "POST",
             GOOGLE_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
@@ -106,12 +111,14 @@ async def exchange_code(
                 "redirect_uri": GEMINI_CLI_REDIRECT_URI,
                 "code_verifier": verifier,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(
-            f"Google token exchange failed: HTTP {resp.status_code}: {resp.text}"
-        )
-    return resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Google token exchange", exc)) from exc
+    return data
 
 
 async def refresh_access_token(
@@ -122,8 +129,10 @@ async def refresh_access_token(
 ) -> tuple[str, int]:
     """Refresh Google OAuth token. Returns (access_token, expires_ms)."""
     client_id, client_secret = _get_client_credentials(client_id, client_secret)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "google_oauth",
+            "POST",
             GOOGLE_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
@@ -132,12 +141,13 @@ async def refresh_access_token(
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(
-            f"Google token refresh failed: HTTP {resp.status_code}: {resp.text}"
-        )
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Google token refresh", exc)) from exc
     access = data.get("access_token")
     expires_in = data.get("expires_in", 3600)
     if not isinstance(access, str):
@@ -147,13 +157,17 @@ async def refresh_access_token(
 
 async def fetch_user_email(access_token: str) -> str | None:
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                GOOGLE_USERINFO_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-        if resp.status_code == 200:
-            return resp.json().get("email")
+        data = await request_json(
+            "google_userinfo",
+            "GET",
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10.0,
+            attempts=2,
+            max_delay=2.0,
+        )
+        if isinstance(data, dict):
+            return data.get("email")
     except Exception:
         pass
     return None
@@ -185,19 +199,22 @@ async def discover_project(access_token: str) -> str:
     )
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{GOOGLE_CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
-                headers=headers,
-                content=body,
-            )
-        if resp.status_code == 200:
-            data = resp.json()
-            project = data.get("cloudaicompanionProject")
-            if isinstance(project, str):
-                return project
-            if isinstance(project, dict) and project.get("id"):
-                return project["id"]
+        data = await request_json(
+            "google_code_assist",
+            "POST",
+            f"{GOOGLE_CODE_ASSIST_ENDPOINT}/v1internal:loadCodeAssist",
+            headers=headers,
+            json_body=json.loads(body),
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
+        )
+        project = data.get("cloudaicompanionProject") if isinstance(data, dict) else None
+        if isinstance(project, str):
+            return project
+        if isinstance(project, dict) and project.get("id"):
+            return project["id"]
     except Exception:
         pass
 

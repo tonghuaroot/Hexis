@@ -11,10 +11,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-import httpx
-
 from core.auth.store import auth_lock, delete_auth, load_auth, save_auth
 from core.auth.utils import create_state, generate_pkce, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 GMAIL_CONNECTOR_ID = "gmail"
 GMAIL_DEFAULT_CREDENTIAL_REF = "integration.gmail.default"
@@ -164,8 +167,10 @@ async def refresh_default_credentials_if_needed(*, leeway_ms: int = 60_000) -> d
             )
 
         async def _refresh() -> dict[str, Any]:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+            try:
+                data = await request_json(
+                    "google_oauth",
+                    "POST",
                     str(credentials.get("token_uri") or GOOGLE_TOKEN_URL),
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     data={
@@ -174,11 +179,14 @@ async def refresh_default_credentials_if_needed(*, leeway_ms: int = 60_000) -> d
                         "refresh_token": refresh_token,
                         "grant_type": "refresh_token",
                     },
+                    timeout=30.0,
+                    attempts=3,
+                    max_delay=15.0,
+                    retry_unsafe_methods=True,
                 )
-            if resp.status_code < 200 or resp.status_code >= 300:
-                raise GmailOAuthError(f"Google token refresh failed: HTTP {resp.status_code}: {resp.text}")
-            data = resp.json()
-            if not isinstance(data.get("access_token"), str):
+            except IntegrationHttpError as exc:
+                raise GmailOAuthError(format_provider_error("Google token refresh", exc)) from exc
+            if not isinstance(data, dict) or not isinstance(data.get("access_token"), str):
                 raise GmailOAuthError("Google token refresh did not return an access token.")
             return data
 
@@ -366,8 +374,10 @@ async def _exchange_code(
     client_secret: str,
     redirect_uri: str,
 ) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "google_oauth",
+            "POST",
             GOOGLE_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
@@ -378,11 +388,14 @@ async def _exchange_code(
                 "redirect_uri": redirect_uri,
                 "code_verifier": verifier,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=15.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise GmailOAuthError(f"Google token exchange failed: HTTP {resp.status_code}: {resp.text}")
-    data = resp.json()
-    if not isinstance(data.get("access_token"), str):
+    except IntegrationHttpError as exc:
+        raise GmailOAuthError(format_provider_error("Google token exchange", exc)) from exc
+    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str):
         raise GmailOAuthError("Google token exchange did not return an access token.")
     return data
 
@@ -390,21 +403,33 @@ async def _exchange_code(
 async def _fetch_account_email(access_token: str) -> str | None:
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(GOOGLE_GMAIL_PROFILE_URL, headers=headers)
-        if resp.status_code == 200:
-            email = resp.json().get("emailAddress")
-            if isinstance(email, str) and email.strip():
-                return email.strip().lower()
+        payload = await request_json(
+            "gmail_profile",
+            "GET",
+            GOOGLE_GMAIL_PROFILE_URL,
+            headers=headers,
+            timeout=10.0,
+            attempts=2,
+            max_delay=2.0,
+        )
+        email = payload.get("emailAddress") if isinstance(payload, dict) else None
+        if isinstance(email, str) and email.strip():
+            return email.strip().lower()
     except Exception:
         pass
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(GOOGLE_USERINFO_URL, headers=headers)
-        if resp.status_code == 200:
-            email = resp.json().get("email")
-            if isinstance(email, str) and email.strip():
-                return email.strip().lower()
+        payload = await request_json(
+            "google_userinfo",
+            "GET",
+            GOOGLE_USERINFO_URL,
+            headers=headers,
+            timeout=10.0,
+            attempts=2,
+            max_delay=2.0,
+        )
+        email = payload.get("email") if isinstance(payload, dict) else None
+        if isinstance(email, str) and email.strip():
+            return email.strip().lower()
     except Exception:
         pass
     return None

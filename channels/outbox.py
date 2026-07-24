@@ -14,6 +14,7 @@ Delivery modes:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -22,9 +23,17 @@ from typing import Any, TYPE_CHECKING
 
 import requests
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    bounded_text,
+    format_provider_error,
+    request_text_response,
+)
+
 from .presentation import (
     MessagePresentation,
     normalize_message_presentation,
+    presentation_from_text,
     render_presentation,
 )
 
@@ -40,6 +49,10 @@ RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "hexis_password")
 RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
 RABBITMQ_OUTBOX_QUEUE = os.getenv("RABBITMQ_OUTBOX_QUEUE", "hexis.outbox")
 POLL_INTERVAL = float(os.getenv("OUTBOX_POLL_INTERVAL", "2.0"))
+RECOVERED_DELIVERY_MARKER = (
+    "Recovered delivery: Hexis restarted or lost confirmation during the previous "
+    "send attempt, so this may duplicate an earlier message.\n\n"
+)
 
 
 class ChannelOutboxConsumer:
@@ -76,6 +89,7 @@ class ChannelOutboxConsumer:
 
     async def _poll(self, max_messages: int = 10) -> int:
         """Fetch and process messages from the outbox queue."""
+        recovered = await self._recover_delivery_obligations()
         vhost = _vhost_path()
         try:
             resp = await _rmq_request(
@@ -113,7 +127,7 @@ class ChannelOutboxConsumer:
             except Exception:
                 logger.exception("Failed to process outbox message: %s", str(body)[:200])
 
-        return processed
+        return processed + recovered
 
     async def _process_message(self, body: dict[str, Any]) -> None:
         """Route an outbox message to the appropriate channel."""
@@ -208,6 +222,8 @@ class ChannelOutboxConsumer:
         Config key: channel.routing.{domain} = JSON {"channel": "...", "target_id": "...", "topic": "..."}
         Returns True if routing was found and delivery attempted, False otherwise.
         """
+        channel_type = ""
+        target_id = ""
         try:
             async with self._pool.acquire() as conn:
                 raw = await conn.fetchval(
@@ -224,14 +240,23 @@ class ChannelOutboxConsumer:
             if not channel_type or not target_id:
                 return False
             thread_id = str(route.get("topic") or "") or None
-            msg_id = await self._manager.send(
-                channel_type, target_id, message, thread_id=thread_id
+            if await self._skip_if_unreachable(
+                outbox_msg_id, channel_type, target_id, None, content, f"domain:{domain}"
+            ):
+                return True
+            delivered = await self._send_with_obligation(
+                outbox_msg_id=outbox_msg_id,
+                channel_type=channel_type,
+                channel_id=target_id,
+                sender_id=thread_id,
+                thread_id=thread_id,
+                message=message,
+                content=content,
+                delivery_mode=f"domain:{domain}",
             )
-            await self._log_delivery(
-                outbox_msg_id, channel_type, target_id, thread_id, content, f"domain:{domain}", True
-            )
-            return True
+            return delivered
         except Exception as e:
+            await self._mark_unreachable_target(channel_type, target_id, e)
             logger.warning("Domain routing for %s failed: %s", domain, e)
             return False
 
@@ -251,13 +276,24 @@ class ChannelOutboxConsumer:
 
         thread_id = str(payload.get("thread_id") or "") or None
 
+        if await self._skip_if_unreachable(
+            outbox_msg_id, channel_type, target_id, thread_id, content, "direct"
+        ):
+            return
+
         try:
-            msg_id = await self._manager.send(
-                channel_type, target_id, message, thread_id=thread_id
+            await self._send_with_obligation(
+                outbox_msg_id=outbox_msg_id,
+                channel_type=channel_type,
+                channel_id=target_id,
+                sender_id=thread_id,
+                thread_id=thread_id,
+                message=message,
+                content=content,
+                delivery_mode="direct",
             )
-            await self._log_delivery(outbox_msg_id, channel_type, target_id, thread_id, content, "direct", True)
         except Exception as e:
-            await self._log_delivery(outbox_msg_id, channel_type, target_id, thread_id, content, "direct", False, str(e))
+            logger.debug("Direct delivery failed", exc_info=True)
 
     async def _deliver_last_active(
         self,
@@ -283,11 +319,24 @@ class ChannelOutboxConsumer:
         channel_id = row["channel_id"]
         resolved_sender = row["sender_id"]
 
+        if await self._skip_if_unreachable(
+            outbox_msg_id, channel_type, channel_id, resolved_sender, content, "last_active"
+        ):
+            return
+
         try:
-            await self._manager.send(channel_type, channel_id, message)
-            await self._log_delivery(outbox_msg_id, channel_type, channel_id, resolved_sender, content, "last_active", True)
+            await self._send_with_obligation(
+                outbox_msg_id=outbox_msg_id,
+                channel_type=channel_type,
+                channel_id=channel_id,
+                sender_id=resolved_sender,
+                thread_id=None,
+                message=message,
+                content=content,
+                delivery_mode="last_active",
+            )
         except Exception as e:
-            await self._log_delivery(outbox_msg_id, channel_type, channel_id, resolved_sender, content, "last_active", False, str(e))
+            logger.debug("Last-active delivery failed", exc_info=True)
 
     async def _deliver_broadcast(
         self,
@@ -305,11 +354,23 @@ class ChannelOutboxConsumer:
             channel_type = row["channel_type"]
             channel_id = row["channel_id"]
             sender_id = row["sender_id"]
+            if await self._skip_if_unreachable(
+                outbox_msg_id, channel_type, channel_id, sender_id, content, "broadcast"
+            ):
+                continue
             try:
-                await self._manager.send(channel_type, channel_id, message)
-                await self._log_delivery(outbox_msg_id, channel_type, channel_id, sender_id, content, "broadcast", True)
+                await self._send_with_obligation(
+                    outbox_msg_id=outbox_msg_id,
+                    channel_type=channel_type,
+                    channel_id=channel_id,
+                    sender_id=sender_id,
+                    thread_id=None,
+                    message=message,
+                    content=content,
+                    delivery_mode="broadcast",
+                )
             except Exception as e:
-                await self._log_delivery(outbox_msg_id, channel_type, channel_id, sender_id, content, "broadcast", False, str(e))
+                logger.debug("Broadcast delivery failed", exc_info=True)
 
     async def _deliver_webhook(
         self,
@@ -332,18 +393,330 @@ class ChannelOutboxConsumer:
         }
         headers = {"Content-Type": "application/json"}
 
-        try:
-            def _do() -> requests.Response:
-                return requests.post(url, json=body, headers=headers, timeout=8)
+        if await self._skip_if_unreachable(outbox_msg_id, "webhook", url, None, content, "webhook"):
+            return
 
-            resp = await asyncio.to_thread(_do)
-            if 200 <= resp.status_code < 300:
-                await self._log_delivery(outbox_msg_id, "webhook", url, None, content, "webhook", True)
-            else:
-                err = f"HTTP {resp.status_code}: {resp.text[:300]}"
-                await self._log_delivery(outbox_msg_id, "webhook", url, None, content, "webhook", False, err)
+        try:
+            await request_text_response(
+                "webhook",
+                "POST",
+                url,
+                headers=headers,
+                json_body=body,
+                timeout=8.0,
+                attempts=3,
+                max_delay=5.0,
+                retry_unsafe_methods=False,
+            )
+            await self._clear_unreachable_target("webhook", url)
+            await self._log_delivery(outbox_msg_id, "webhook", url, None, content, "webhook", True)
+        except IntegrationHttpError as e:
+            await self._mark_unreachable_target("webhook", url, e)
+            await self._log_delivery(
+                outbox_msg_id,
+                "webhook",
+                url,
+                None,
+                content,
+                "webhook",
+                False,
+                format_provider_error("Webhook", e),
+            )
         except Exception as e:
+            await self._mark_unreachable_target("webhook", url, e)
             await self._log_delivery(outbox_msg_id, "webhook", url, None, content, "webhook", False, str(e))
+
+    async def _send_with_obligation(
+        self,
+        *,
+        outbox_msg_id: str,
+        channel_type: str,
+        channel_id: str,
+        sender_id: str | None,
+        thread_id: str | None,
+        message: str | MessagePresentation,
+        content: str,
+        delivery_mode: str,
+        obligation_id: str | None = None,
+        already_claimed: bool = False,
+        recovered: bool = False,
+    ) -> bool:
+        if obligation_id is None:
+            obligation = await self._record_delivery_obligation(
+                outbox_msg_id,
+                channel_type,
+                channel_id,
+                sender_id,
+                thread_id,
+                content,
+                message,
+                delivery_mode,
+            )
+            if obligation.get("already_delivered"):
+                return True
+            obligation_id = str(obligation.get("id") or "") or None
+
+        if obligation_id and not already_claimed:
+            claimed = await self._claim_delivery_obligation(obligation_id)
+            if claimed is False:
+                return False
+
+        outbound_message = message
+        outbound_content = content
+        if recovered:
+            outbound_content = RECOVERED_DELIVERY_MARKER + content
+            outbound_message = _prepend_recovery_marker(message, content)
+
+        try:
+            msg_id = await self._manager.send(
+                channel_type,
+                channel_id,
+                outbound_message,
+                thread_id=thread_id,
+            )
+            _require_delivery_id(msg_id, channel_type, channel_id)
+            if obligation_id:
+                await self._mark_delivery_obligation_delivered(obligation_id)
+            await self._clear_unreachable_target(channel_type, channel_id)
+            await self._log_delivery(
+                outbox_msg_id,
+                channel_type,
+                channel_id,
+                sender_id,
+                outbound_content,
+                delivery_mode,
+                True,
+            )
+            return True
+        except Exception as exc:
+            if obligation_id:
+                await self._mark_delivery_obligation_failed(obligation_id, exc)
+            await self._mark_unreachable_target(channel_type, channel_id, exc)
+            await self._log_delivery(
+                outbox_msg_id,
+                channel_type,
+                channel_id,
+                sender_id,
+                outbound_content,
+                delivery_mode,
+                False,
+                bounded_delivery_error(exc),
+            )
+            return False
+
+    async def _recover_delivery_obligations(self) -> int:
+        try:
+            async with self._pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT claim_recoverable_channel_deliveries($1::int)",
+                    25,
+                )
+        except Exception:
+            logger.debug("Failed to claim recoverable delivery obligations", exc_info=True)
+            return 0
+
+        rows = _coerce_json_list(raw)
+        recovered = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            channel_type = str(row.get("channel_type") or "")
+            channel_id = str(row.get("channel_id") or "")
+            content = str(row.get("content") or "")
+            message = _message_from_wire(row.get("message"), content)
+            outbox_msg_id = str(row.get("source_outbox_message_id") or "")
+            delivery_mode = str(row.get("delivery_mode") or "recovered")
+            sender_id = row.get("sender_id")
+            thread_id = row.get("thread_id")
+            if await self._skip_if_unreachable(
+                outbox_msg_id,
+                channel_type,
+                channel_id,
+                str(sender_id) if sender_id is not None else None,
+                content,
+                delivery_mode,
+            ):
+                obligation_id = str(row.get("id") or "")
+                if obligation_id:
+                    await self._mark_delivery_obligation_failed(
+                        obligation_id,
+                        RuntimeError("target is temporarily marked unreachable"),
+                    )
+                continue
+            if await self._send_with_obligation(
+                outbox_msg_id=outbox_msg_id,
+                channel_type=channel_type,
+                channel_id=channel_id,
+                sender_id=str(sender_id) if sender_id is not None else None,
+                thread_id=str(thread_id) if thread_id is not None else None,
+                message=message,
+                content=content,
+                delivery_mode=delivery_mode,
+                obligation_id=str(row.get("id") or ""),
+                already_claimed=True,
+                recovered=bool(row.get("needs_marker")),
+            ):
+                recovered += 1
+        return recovered
+
+    async def _skip_if_unreachable(
+        self,
+        outbox_msg_id: str,
+        channel_type: str,
+        channel_id: str,
+        sender_id: str | None,
+        content: str,
+        delivery_mode: str,
+    ) -> bool:
+        try:
+            async with self._pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT should_skip_channel_target($1, $2)",
+                    channel_type,
+                    channel_id,
+                )
+        except Exception:
+            logger.debug("Failed to check unreachable target registry", exc_info=True)
+            return False
+
+        info = _coerce_json_object(raw)
+        if not bool(info.get("skip")):
+            return False
+
+        reason = str(info.get("reason") or "target is temporarily marked unreachable")
+        suppress_until = info.get("suppress_until")
+        error = f"Skipped delivery: target marked unreachable"
+        if suppress_until:
+            error += f" until {suppress_until}"
+        if reason:
+            error += f" ({reason})"
+        await self._log_delivery(
+            outbox_msg_id,
+            channel_type,
+            channel_id,
+            sender_id,
+            content,
+            delivery_mode,
+            False,
+            error,
+        )
+        return True
+
+    async def _clear_unreachable_target(self, channel_type: str, channel_id: str) -> None:
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT clear_channel_target_unreachable($1, $2)",
+                    channel_type,
+                    channel_id,
+                )
+        except Exception:
+            logger.debug("Failed to clear unreachable target marker", exc_info=True)
+
+    async def _mark_unreachable_target(
+        self,
+        channel_type: str,
+        channel_id: str,
+        exc: BaseException,
+    ) -> None:
+        error_kind = _target_unreachable_error_kind(exc)
+        if error_kind is None:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT mark_channel_target_unreachable($1, $2, $3, $4, $5, $6::jsonb)",
+                    channel_type,
+                    channel_id,
+                    bounded_delivery_error(exc),
+                    error_kind,
+                    _unreachable_suppress_seconds(error_kind),
+                    json.dumps({"source": "channel_outbox"}),
+                )
+        except Exception:
+            logger.debug("Failed to mark unreachable target", exc_info=True)
+
+    async def _record_delivery_obligation(
+        self,
+        outbox_msg_id: str,
+        channel_type: str,
+        channel_id: str,
+        sender_id: str | None,
+        thread_id: str | None,
+        content: str,
+        message: str | MessagePresentation,
+        delivery_mode: str,
+    ) -> dict[str, Any]:
+        key = _delivery_obligation_key(
+            outbox_msg_id,
+            delivery_mode,
+            channel_type,
+            channel_id,
+            sender_id,
+            thread_id,
+            content,
+        )
+        try:
+            async with self._pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    """
+                    SELECT upsert_channel_delivery_obligation(
+                        $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9
+                    )
+                    """,
+                    key,
+                    outbox_msg_id,
+                    channel_type,
+                    channel_id,
+                    sender_id,
+                    thread_id,
+                    content,
+                    json.dumps(_message_to_wire(message), default=str),
+                    delivery_mode,
+                )
+            return _coerce_json_object(raw)
+        except Exception:
+            logger.debug("Failed to record delivery obligation", exc_info=True)
+            return {}
+
+    async def _claim_delivery_obligation(self, obligation_id: str) -> bool | None:
+        try:
+            async with self._pool.acquire() as conn:
+                raw = await conn.fetchval(
+                    "SELECT claim_channel_delivery_obligation($1::uuid)",
+                    obligation_id,
+                )
+            info = _coerce_json_object(raw)
+            return bool(info.get("claimed"))
+        except Exception:
+            logger.debug("Failed to claim delivery obligation", exc_info=True)
+            return None
+
+    async def _mark_delivery_obligation_delivered(self, obligation_id: str) -> None:
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT mark_channel_delivery_obligation_delivered($1::uuid)",
+                    obligation_id,
+                )
+        except Exception:
+            logger.debug("Failed to mark delivery obligation delivered", exc_info=True)
+
+    async def _mark_delivery_obligation_failed(
+        self,
+        obligation_id: str,
+        exc: BaseException,
+    ) -> None:
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.fetchval(
+                    "SELECT mark_channel_delivery_obligation_failed($1::uuid, $2, $3)",
+                    obligation_id,
+                    bounded_delivery_error(exc),
+                    _delivery_retry_seconds(exc),
+                )
+        except Exception:
+            logger.debug("Failed to mark delivery obligation failed", exc_info=True)
 
     async def _log_delivery(
         self,
@@ -409,3 +782,148 @@ def _resolve_payload_message(
     presentation = normalize_message_presentation(raw_presentation)
     mirror = content or render_presentation(presentation)
     return presentation, mirror
+
+
+def _require_delivery_id(message_id: str | None, channel_type: str, channel_id: str) -> None:
+    if message_id:
+        return
+    raise RuntimeError(f"{channel_type} delivery to {channel_id} did not return a platform message id.")
+
+
+def _coerce_json_object(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _coerce_json_list(raw: Any) -> list[Any]:
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def bounded_delivery_error(exc: BaseException) -> str:
+    if isinstance(exc, IntegrationHttpError):
+        return format_provider_error(exc.provider.title(), exc)
+    return bounded_text(f"{type(exc).__name__}: {exc}", limit=500)
+
+
+def _target_unreachable_error_kind(exc: BaseException) -> str | None:
+    if isinstance(exc, IntegrationHttpError):
+        if exc.status_code in {404, 410}:
+            return "not_found"
+        if exc.error_kind == "not_found":
+            return "not_found"
+        return None
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    signals = (
+        "chat not found",
+        "channel not found",
+        "channel_not_found",
+        "user not found",
+        "user_not_found",
+        "recipient not found",
+        "target not found",
+        "not a registered user",
+        "not registered",
+        "group chat was deleted",
+        "bot was blocked",
+        "bot blocked",
+        "bot was kicked",
+        "bot kicked",
+        "user is deactivated",
+        "cannot send messages to this user",
+        "cannot message this user",
+        "not in channel",
+        "left the channel",
+        "no such channel",
+        "gone",
+    )
+    if any(signal in text for signal in signals):
+        return "not_found"
+    if "forbidden" in text and ("chat" in text or "bot" in text or "user" in text or "recipient" in text):
+        return "forbidden"
+    return None
+
+
+def _unreachable_suppress_seconds(error_kind: str) -> int:
+    if error_kind == "forbidden":
+        return 24 * 60 * 60
+    if error_kind == "not_found":
+        return 24 * 60 * 60
+    return 60 * 60
+
+
+def _delivery_retry_seconds(exc: BaseException) -> int:
+    if isinstance(exc, IntegrationHttpError):
+        if exc.retry_after_seconds is not None:
+            return int(max(30, min(exc.retry_after_seconds, 24 * 60 * 60)))
+        if exc.error_kind == "rate_limited":
+            return 15 * 60
+        if exc.transient:
+            return 5 * 60
+    if _target_unreachable_error_kind(exc):
+        return 60 * 60
+    return 5 * 60
+
+
+def _delivery_obligation_key(
+    outbox_msg_id: str,
+    delivery_mode: str,
+    channel_type: str,
+    channel_id: str,
+    sender_id: str | None,
+    thread_id: str | None,
+    content: str,
+) -> str:
+    source = outbox_msg_id or hashlib.sha256(content.encode("utf-8", "replace")).hexdigest()
+    payload = "|".join(
+        [
+            source,
+            delivery_mode,
+            channel_type,
+            channel_id,
+            sender_id or "",
+            thread_id or "",
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
+
+
+def _message_to_wire(message: str | MessagePresentation) -> dict[str, Any]:
+    if isinstance(message, MessagePresentation):
+        return {"kind": "presentation", "value": message.to_dict()}
+    return {"kind": "text", "value": str(message)}
+
+
+def _message_from_wire(raw: Any, fallback_text: str) -> str | MessagePresentation:
+    value = _coerce_json_object(raw)
+    if value.get("kind") == "presentation" and isinstance(value.get("value"), dict):
+        try:
+            return normalize_message_presentation(value["value"])
+        except Exception:
+            return fallback_text
+    text = value.get("value")
+    return str(text) if isinstance(text, str) else fallback_text
+
+
+def _prepend_recovery_marker(
+    message: str | MessagePresentation,
+    content: str,
+) -> str | MessagePresentation:
+    if isinstance(message, MessagePresentation):
+        return presentation_from_text(RECOVERED_DELIVERY_MARKER + content)
+    return RECOVERED_DELIVERY_MARKER + str(message)

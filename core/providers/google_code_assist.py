@@ -13,6 +13,8 @@ from typing import Any
 
 import httpx
 
+from core.integration_reliability import IntegrationHttpError, iter_sse_json_events
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -347,35 +349,28 @@ async def stream_google_code_assist_completion(
     all_tool_calls: list[dict[str, Any]] = []
 
     timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, headers=headers, json=body) as resp:
-            if resp.status_code < 200 or resp.status_code >= 300:
-                error_text = await resp.aread()
-                raise RuntimeError(
-                    f"Google Code Assist request failed: HTTP {resp.status_code}: "
-                    f"{error_text.decode('utf-8', errors='replace')}"
-                )
-
-            # Parse SSE: each event has `data: {...}` lines
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data_str = line[6:].strip()
-                if not data_str or data_str == "[DONE]":
-                    continue
-                try:
-                    chunk = json.loads(data_str)
-                except Exception:
-                    continue
-
-                text, tool_calls = _parse_candidates(chunk)
-                if text:
-                    all_text.append(text)
-                    if on_text_delta:
-                        result = on_text_delta(text)
-                        if asyncio.iscoroutine(result):
-                            await result
-                if tool_calls:
-                    all_tool_calls.extend(tool_calls)
+    try:
+        async for chunk in iter_sse_json_events(
+            "google-code-assist",
+            "POST",
+            url,
+            headers=headers,
+            json_body=body,
+            timeout=timeout,
+            attempts=3,
+            max_delay=60.0,
+            retry_unsafe_methods=True,
+        ):
+            text, tool_calls = _parse_candidates(chunk)
+            if text:
+                all_text.append(text)
+                if on_text_delta:
+                    result = on_text_delta(text)
+                    if asyncio.iscoroutine(result):
+                        await result
+            if tool_calls:
+                all_tool_calls.extend(tool_calls)
+    except IntegrationHttpError as exc:
+        raise RuntimeError(str(exc)) from exc
 
     return {"content": "".join(all_text), "tool_calls": all_tool_calls, "raw": None}

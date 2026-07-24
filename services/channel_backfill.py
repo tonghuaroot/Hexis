@@ -16,10 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import httpx
-
 from channels.base import parse_allowlist
 from channels.slack_adapter import _resolve_token as _resolve_slack_token
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 from services.channel_worker import _load_channel_config
 
 logger = logging.getLogger(__name__)
@@ -671,15 +674,24 @@ def _iter_twitter_archive_sources(path: Path, *, account_key: str) -> Iterable[d
 
 async def _slack_get(token: str, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
     url = path if path.startswith("http") else f"{SLACK_API_BASE}{path}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url, headers={"Authorization": f"Bearer {token}"}, params=params)
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise ChannelBackfillError(f"Slack API failed: HTTP {resp.status_code}: {resp.text}")
-    payload = resp.json()
+    try:
+        payload = await request_json(
+            "slack",
+            "GET",
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=30.0,
+            attempts=4,
+            max_delay=30.0,
+        )
+    except IntegrationHttpError as exc:
+        raise ChannelBackfillError(format_provider_error("Slack", exc)) from exc
     if not isinstance(payload, dict):
         raise ChannelBackfillError("Slack API returned an invalid payload.")
     if not payload.get("ok", False):
-        raise ChannelBackfillError(f"Slack API failed: {payload.get('error') or 'unknown_error'}")
+        error = str(payload.get("error") or "unknown_error")
+        raise ChannelBackfillError(f"Slack API failed: {error}")
     return payload
 
 

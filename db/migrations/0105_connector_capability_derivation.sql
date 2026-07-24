@@ -15,6 +15,12 @@ SET capability_manifest = '{
         "status": "available",
         "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
       },
+      "ingest": {
+        "label": "Remember what is read",
+        "scope_kind": "local",
+        "status": "available",
+        "scopes": []
+      },
       "label": {
         "label": "Apply/remove labels",
         "scope_kind": "modify",
@@ -48,7 +54,7 @@ SET capability_manifest = '{
     }'::jsonb,
     setup_manifest = setup_manifest || '{
       "default_capabilities": ["read", "search"],
-      "capability_order": ["read", "search", "label", "spam_triage", "send", "reply", "delete"],
+      "capability_order": ["read", "search", "ingest", "label", "spam_triage", "send", "reply", "delete"],
       "required_scopes": ["https://www.googleapis.com/auth/userinfo.email"],
       "scope_order": [
         "https://www.googleapis.com/auth/userinfo.email",
@@ -61,6 +67,11 @@ SET capability_manifest = '{
         "emails": "read",
         "mail": "read",
         "gmail": "read",
+        "learn": "ingest",
+        "memory": "ingest",
+        "remember": "ingest",
+        "retain": "ingest",
+        "store": "ingest",
         "filter": "spam_triage",
         "filter_spam": "spam_triage",
         "spam": "spam_triage",

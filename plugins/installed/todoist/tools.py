@@ -7,10 +7,10 @@ Uses the Todoist REST API v2 with a bearer token.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import IntegrationHttpError, request_json, request_text_response
 from core.tools.base import (
     ToolCategory,
     ToolContext,
@@ -21,6 +21,7 @@ from core.tools.base import (
     ToolSpec,
 )
 from core.tools.api_keys import resolve_api_key
+from core.tools.integration_http import integration_error_result
 
 logger = logging.getLogger(__name__)
 
@@ -95,30 +96,25 @@ class CreateTodoistTaskHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        import asyncio
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         body: dict[str, Any] = {"content": arguments["content"]}
         for key in ("description", "due_string", "priority", "project_id", "labels"):
             if arguments.get(key) is not None:
                 body[key] = arguments[key]
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{_BASE_URL}/tasks",
-                    headers=_headers(token),
-                    json=body,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                task = resp.json()
+            task = await request_json(
+                "todoist",
+                "POST",
+                f"{_BASE_URL}/tasks",
+                headers=_headers(token),
+                json_body=body,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(task, dict):
+                task = {}
             return ToolResult.success_result(
                 {
                     "id": task.get("id"),
@@ -129,6 +125,8 @@ class CreateTodoistTaskHandler(ToolHandler):
                 },
                 display_output=f"Created task: {task.get('content')}",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Todoist", e)
         except Exception as e:
             return ToolResult.error_result(f"Todoist API error: {e}")
 
@@ -180,13 +178,6 @@ class ListTodoistTasksHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed.", ToolErrorType.MISSING_DEPENDENCY
-            )
-
         params: dict[str, str] = {}
         if arguments.get("project_id"):
             params["project_id"] = arguments["project_id"]
@@ -196,15 +187,18 @@ class ListTodoistTasksHandler(ToolHandler):
             params["filter"] = arguments["filter"]
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/tasks",
-                    headers=_headers(token),
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                tasks = resp.json()
+            tasks = await request_json(
+                "todoist",
+                "GET",
+                f"{_BASE_URL}/tasks",
+                headers=_headers(token),
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
+            if not isinstance(tasks, list):
+                tasks = []
             formatted = []
             for t in tasks:
                 formatted.append({
@@ -219,6 +213,8 @@ class ListTodoistTasksHandler(ToolHandler):
                 {"tasks": formatted, "count": len(formatted)},
                 display_output=f"Found {len(formatted)} task(s)",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Todoist", e)
         except Exception as e:
             return ToolResult.error_result(f"Todoist API error: {e}")
 
@@ -264,26 +260,24 @@ class CompleteTodoistTaskHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed.", ToolErrorType.MISSING_DEPENDENCY
-            )
-
         task_id = arguments["task_id"]
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{_BASE_URL}/tasks/{task_id}/close",
-                    headers=_headers(token),
-                    timeout=15,
-                )
-                resp.raise_for_status()
+            await request_text_response(
+                "todoist",
+                "POST",
+                f"{_BASE_URL}/tasks/{task_id}/close",
+                headers=_headers(token),
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
             return ToolResult.success_result(
                 {"task_id": task_id, "completed": True},
                 display_output=f"Completed task {task_id}",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("Todoist", e)
         except Exception as e:
             return ToolResult.error_result(f"Todoist API error: {e}")
 

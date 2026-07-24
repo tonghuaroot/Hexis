@@ -10,6 +10,13 @@ import logging
 import os
 from typing import Any, Callable
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+    request_text_response,
+)
+
 from .base import (
     ToolCategory,
     ToolContext,
@@ -21,6 +28,25 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _integration_tool_error_type(exc: IntegrationHttpError) -> ToolErrorType:
+    if exc.error_kind == "auth_failed":
+        return ToolErrorType.AUTH_FAILED
+    if exc.error_kind == "rate_limited":
+        return ToolErrorType.RATE_LIMITED
+    if exc.error_kind == "timeout":
+        return ToolErrorType.FETCH_TIMEOUT
+    if exc.error_kind == "network":
+        return ToolErrorType.NETWORK_ERROR
+    return ToolErrorType.HTTP_ERROR
+
+
+def _integration_error_result(provider_label: str, exc: IntegrationHttpError) -> ToolResult:
+    return ToolResult.error_result(
+        format_provider_error(provider_label, exc),
+        _integration_tool_error_type(exc),
+    )
 
 
 async def _load_db_channel_config(
@@ -115,16 +141,6 @@ class DiscordSendHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        try:
-            import aiohttp
-        except ImportError:
-            return ToolResult(
-                success=False,
-                output=None,
-                error="aiohttp not installed",
-                error_type=ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         config = {}
         if self._config_resolver:
             config = self._config_resolver() or {}
@@ -156,8 +172,6 @@ class DiscordSendHandler(ToolHandler):
         username: str | None,
         embed: dict | None,
     ) -> ToolResult:
-        import aiohttp
-
         payload: dict[str, Any] = {"content": message}
         if username:
             payload["username"] = username
@@ -165,22 +179,24 @@ class DiscordSendHandler(ToolHandler):
             payload["embeds"] = [embed]
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(webhook_url, json=payload) as resp:
-                    if resp.status not in (200, 204):
-                        error_text = await resp.text()
-                        return ToolResult(
-                            success=False,
-                            output=None,
-                            error=f"Discord webhook error ({resp.status}): {error_text}",
-                            error_type=ToolErrorType.EXECUTION_FAILED,
-                        )
+            await request_text_response(
+                "discord",
+                "POST",
+                webhook_url,
+                json_body=payload,
+                timeout=20.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
 
             return ToolResult(
                 success=True,
                 output={"sent": True, "method": "webhook"},
                 display_output=f"Discord message sent: {message[:50]}...",
             )
+        except IntegrationHttpError as e:
+            return _integration_error_result("Discord webhook", e)
         except Exception as e:
             logger.exception("Discord webhook error")
             return ToolResult(
@@ -197,35 +213,35 @@ class DiscordSendHandler(ToolHandler):
         message: str,
         embed: dict | None,
     ) -> ToolResult:
-        import aiohttp
-
         payload: dict[str, Any] = {"content": message}
         if embed:
             payload["embeds"] = [embed]
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"https://discord.com/api/v10/channels/{channel_id}/messages",
-                    json=payload,
-                    headers={"Authorization": f"Bot {bot_token}"},
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        return ToolResult(
-                            success=False,
-                            output=None,
-                            error=f"Discord API error ({resp.status}): {error_text}",
-                            error_type=ToolErrorType.EXECUTION_FAILED,
-                        )
-
-                    data = await resp.json()
+            data = await request_json(
+                "discord",
+                "POST",
+                f"https://discord.com/api/v10/channels/{channel_id}/messages",
+                json_body=payload,
+                headers={"Authorization": f"Bot {bot_token}"},
+                timeout=20.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(data, dict):
+                return ToolResult.error_result(
+                    "Discord API returned an invalid payload.",
+                    ToolErrorType.HTTP_ERROR,
+                )
 
             return ToolResult(
                 success=True,
                 output={"sent": True, "method": "bot", "message_id": data.get("id")},
                 display_output=f"Discord message sent to channel {channel_id}",
             )
+        except IntegrationHttpError as e:
+            return _integration_error_result("Discord API", e)
         except Exception as e:
             logger.exception("Discord bot error")
             return ToolResult(
@@ -298,16 +314,6 @@ class SlackSendHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        try:
-            import aiohttp
-        except ImportError:
-            return ToolResult(
-                success=False,
-                output=None,
-                error="aiohttp not installed",
-                error_type=ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         config = self._config_resolver() if self._config_resolver else None
         if not config:
             config = await _load_db_channel_config(context, "slack")
@@ -352,29 +358,29 @@ class SlackSendHandler(ToolHandler):
         message: str,
         blocks: list | None,
     ) -> ToolResult:
-        import aiohttp
-
         payload: dict[str, Any] = {"text": message}
         if blocks:
             payload["blocks"] = blocks
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(webhook_url, json=payload) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        return ToolResult(
-                            success=False,
-                            output=None,
-                            error=f"Slack webhook error: {error_text}",
-                            error_type=ToolErrorType.EXECUTION_FAILED,
-                        )
+            await request_text_response(
+                "slack",
+                "POST",
+                webhook_url,
+                json_body=payload,
+                timeout=20.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
 
             return ToolResult(
                 success=True,
                 output={"sent": True, "method": "webhook"},
                 display_output=f"Slack message sent: {message[:50]}...",
             )
+        except IntegrationHttpError as e:
+            return _integration_error_result("Slack webhook", e)
         except Exception as e:
             logger.exception("Slack webhook error")
             return ToolResult(
@@ -392,8 +398,6 @@ class SlackSendHandler(ToolHandler):
         blocks: list | None,
         thread_ts: str | None,
     ) -> ToolResult:
-        import aiohttp
-
         payload: dict[str, Any] = {
             "channel": channel,
             "text": message,
@@ -404,21 +408,29 @@ class SlackSendHandler(ToolHandler):
             payload["thread_ts"] = thread_ts
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://slack.com/api/chat.postMessage",
-                    json=payload,
-                    headers={"Authorization": f"Bearer {bot_token}"},
-                ) as resp:
-                    data = await resp.json()
-
-                    if not data.get("ok"):
-                        return ToolResult(
-                            success=False,
-                            output=None,
-                            error=f"Slack API error: {data.get('error')}",
-                            error_type=ToolErrorType.EXECUTION_FAILED,
-                        )
+            data = await request_json(
+                "slack",
+                "POST",
+                "https://slack.com/api/chat.postMessage",
+                json_body=payload,
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=20.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(data, dict):
+                return ToolResult.error_result(
+                    "Slack API returned an invalid payload.",
+                    ToolErrorType.HTTP_ERROR,
+                )
+            if not data.get("ok"):
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=f"Slack API error: {data.get('error')}",
+                    error_type=ToolErrorType.EXECUTION_FAILED,
+                )
 
             return ToolResult(
                 success=True,
@@ -430,6 +442,8 @@ class SlackSendHandler(ToolHandler):
                 },
                 display_output=f"Slack message sent to {channel}",
             )
+        except IntegrationHttpError as e:
+            return _integration_error_result("Slack API", e)
         except Exception as e:
             logger.exception("Slack API error")
             return ToolResult(
@@ -504,16 +518,6 @@ class TelegramSendHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        try:
-            import aiohttp
-        except ImportError:
-            return ToolResult(
-                success=False,
-                output=None,
-                error="aiohttp not installed",
-                error_type=ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         config = self._config_resolver() if self._config_resolver else None
         if not config:
             config = await _load_db_channel_config(context, "telegram")
@@ -565,20 +569,28 @@ class TelegramSendHandler(ToolHandler):
             payload["reply_to_message_id"] = reply_to
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                    json=payload,
-                ) as resp:
-                    data = await resp.json()
-
-                    if not data.get("ok"):
-                        return ToolResult(
-                            success=False,
-                            output=None,
-                            error=f"Telegram API error: {data.get('description')}",
-                            error_type=ToolErrorType.EXECUTION_FAILED,
-                        )
+            data = await request_json(
+                "telegram",
+                "POST",
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json_body=payload,
+                timeout=20.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(data, dict):
+                return ToolResult.error_result(
+                    "Telegram API returned an invalid payload.",
+                    ToolErrorType.HTTP_ERROR,
+                )
+            if not data.get("ok"):
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=f"Telegram API error: {data.get('description')}",
+                    error_type=ToolErrorType.EXECUTION_FAILED,
+                )
 
             result_msg = data.get("result", {})
             return ToolResult(
@@ -590,6 +602,8 @@ class TelegramSendHandler(ToolHandler):
                 },
                 display_output=f"Telegram message sent to {chat_id}",
             )
+        except IntegrationHttpError as e:
+            return _integration_error_result("Telegram API", e)
         except Exception as e:
             logger.exception("Telegram API error")
             return ToolResult(
@@ -649,16 +663,6 @@ class SignalSendHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        try:
-            import aiohttp
-        except ImportError:
-            return ToolResult(
-                success=False,
-                output=None,
-                error="aiohttp not installed",
-                error_type=ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         config = self._config_resolver() if self._config_resolver else None
         if not config:
             config = await _load_db_channel_config(context, "signal")
@@ -698,18 +702,18 @@ class SignalSendHandler(ToolHandler):
             "recipients": [recipient],
         }
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{api_url}/api/v2/send", json=payload, timeout=30) as resp:
-                    body_text = await resp.text()
-                    if resp.status not in (200, 201):
-                        return ToolResult.error_result(
-                            f"Signal send failed: HTTP {resp.status}: {body_text[:200]}",
-                            ToolErrorType.EXECUTION_FAILED,
-                        )
-                    try:
-                        data = await resp.json()
-                    except Exception:
-                        data = {"raw": body_text}
+            data = await request_json(
+                "signal",
+                "POST",
+                f"{api_url}/api/v2/send",
+                json_body=payload,
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=False,
+            )
+            if not isinstance(data, dict):
+                data = {"raw": data}
             return ToolResult.success_result(
                 {
                     "sent": True,
@@ -719,6 +723,8 @@ class SignalSendHandler(ToolHandler):
                 },
                 display_output=f"Signal message sent to {recipient}",
             )
+        except IntegrationHttpError as exc:
+            return _integration_error_result("Signal API", exc)
         except Exception as exc:
             logger.exception("Signal API error")
             return ToolResult.error_result(

@@ -6,9 +6,12 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from core.auth.utils import advisory_lock_key, generate_pkce, needs_refresh, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 # Constants (from OpenClaw extensions/qwen-portal-auth/oauth.ts)
 QWEN_PORTAL_BASE = "https://chat.qwen.ai"
@@ -43,21 +46,25 @@ class DeviceCodeResponse:
 async def start_device_flow() -> tuple[DeviceCodeResponse, str]:
     """Start the device code flow. Returns (response, verifier) for PKCE."""
     verifier, challenge = generate_pkce()
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "qwen_portal_oauth",
+            "POST",
             QWEN_PORTAL_DEVICE_CODE_URL,
             headers={"Content-Type": "application/json"},
-            json={
+            json_body={
                 "client_id": QWEN_PORTAL_CLIENT_ID,
                 "scope": QWEN_PORTAL_SCOPE,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Qwen device code request failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Qwen device code", exc)) from exc
     return DeviceCodeResponse(
         device_code=data["device_code"],
         user_code=data["user_code"],
@@ -81,18 +88,25 @@ async def poll_for_token(
     interval_ms = max(1000, interval_seconds * 1000)
 
     while now_ms() < deadline:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+        try:
+            data = await request_json(
+                "qwen_portal_oauth",
+                "POST",
                 QWEN_PORTAL_TOKEN_URL,
                 headers={"Content-Type": "application/json"},
-                json={
+                json_body={
                     "client_id": QWEN_PORTAL_CLIENT_ID,
                     "device_code": device_code,
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     "code_verifier": verifier,
                 },
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=True,
             )
-        data = resp.json()
+        except IntegrationHttpError as exc:
+            raise RuntimeError(format_provider_error("Qwen device flow", exc)) from exc
 
         if isinstance(data.get("access_token"), str):
             access = data["access_token"]
@@ -124,20 +138,24 @@ async def poll_for_token(
 
 
 async def refresh_token(creds: QwenPortalCredentials) -> QwenPortalCredentials:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "qwen_portal_oauth",
+            "POST",
             QWEN_PORTAL_TOKEN_URL,
             headers={"Content-Type": "application/json"},
-            json={
+            json_body={
                 "client_id": QWEN_PORTAL_CLIENT_ID,
                 "grant_type": "refresh_token",
                 "refresh_token": creds.refresh,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Qwen token refresh failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Qwen token refresh", exc)) from exc
     access = data.get("access_token")
     refresh = data.get("refresh_token", creds.refresh)
     expires_in = data.get("expires_in", 3600)

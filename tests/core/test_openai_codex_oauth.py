@@ -1,6 +1,6 @@
 import base64
 import json
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -86,9 +86,7 @@ def test_credentials_from_legacy_shape_accepts_accountId():
 
 @pytest.mark.asyncio
 async def test_list_openai_codex_models_uses_account_catalog_and_filters_rows():
-    response = Mock()
-    response.status_code = 200
-    response.json.return_value = {
+    catalog = {
         "models": [
             {"slug": "gpt-live", "visibility": "list", "supported_in_api": True},
             {"slug": "gpt-hidden", "visibility": "hide", "supported_in_api": True},
@@ -96,11 +94,6 @@ async def test_list_openai_codex_models_uses_account_catalog_and_filters_rows():
             {"id": "gpt-id", "visibility": "list", "show_in_picker": True},
         ]
     }
-    client = AsyncMock()
-    client.get.return_value = response
-    context = AsyncMock()
-    context.__aenter__.return_value = client
-    context.__aexit__.return_value = None
     creds = OpenAICodexCredentials(
         access="access-secret",
         refresh="refresh-secret",
@@ -108,11 +101,12 @@ async def test_list_openai_codex_models_uses_account_catalog_and_filters_rows():
         account_id="account-visible",
     )
 
-    with patch("core.auth.openai_codex.httpx.AsyncClient", return_value=context):
+    with patch("core.auth.openai_codex.request_json", AsyncMock(return_value=catalog)) as request_json:
         models = await list_openai_codex_models(creds)
 
     assert models == ["gpt-live", "gpt-id"]
-    request = client.get.await_args
-    assert request.args[0].endswith("/codex/models?client_version=1.0.0")
-    assert request.kwargs["headers"]["ChatGPT-Account-ID"] == "account-visible"
-    assert request.kwargs["headers"]["Authorization"] == "Bearer access-secret"
+    request_json.assert_awaited_once()
+    args, kwargs = request_json.await_args
+    assert args[2].endswith("/codex/models?client_version=1.0.0")
+    assert kwargs["headers"]["ChatGPT-Account-ID"] == "account-visible"
+    assert kwargs["headers"]["Authorization"] == "Bearer access-secret"

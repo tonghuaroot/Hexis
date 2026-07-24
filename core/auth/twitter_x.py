@@ -11,10 +11,13 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-import httpx
-
 from core.auth.store import auth_lock, delete_auth, load_auth, save_auth
 from core.auth.utils import create_state, generate_pkce, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 TWITTER_X_CONNECTOR_ID = "twitter_x"
 TWITTER_X_DEFAULT_CREDENTIAL_REF = "integration.twitter_x.default"
@@ -222,16 +225,21 @@ async def refresh_default_credentials_if_needed(*, leeway_ms: int = 60_000) -> d
             data["client_id"] = client_id
 
         async def _refresh() -> dict[str, Any]:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
+            try:
+                payload = await request_json(
+                    "twitter_x_oauth",
+                    "POST",
                     TWITTER_X_TOKEN_URL,
                     headers=_token_headers(client_config),
                     data=data,
+                    timeout=30.0,
+                    attempts=3,
+                    max_delay=15.0,
+                    retry_unsafe_methods=True,
                 )
-            if resp.status_code < 200 or resp.status_code >= 300:
-                raise TwitterXOAuthError(f"Twitter/X token refresh failed: HTTP {resp.status_code}: {resp.text}")
-            payload = resp.json()
-            if not isinstance(payload.get("access_token"), str):
+            except IntegrationHttpError as exc:
+                raise TwitterXOAuthError(format_provider_error("Twitter/X token refresh", exc)) from exc
+            if not isinstance(payload, dict) or not isinstance(payload.get("access_token"), str):
                 raise TwitterXOAuthError("Twitter/X token refresh did not return an access token.")
             return payload
 
@@ -382,31 +390,37 @@ async def _exchange_code(
     }
     if not client_config.get("client_secret"):
         data["client_id"] = client_config["client_id"]
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        payload = await request_json(
+            "twitter_x_oauth",
+            "POST",
             TWITTER_X_TOKEN_URL,
             headers=_token_headers(client_config),
             data=data,
+            timeout=30.0,
+            attempts=3,
+            max_delay=15.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise TwitterXOAuthError(f"Twitter/X token exchange failed: HTTP {resp.status_code}: {resp.text}")
-    payload = resp.json()
-    if not isinstance(payload.get("access_token"), str):
+    except IntegrationHttpError as exc:
+        raise TwitterXOAuthError(format_provider_error("Twitter/X token exchange", exc)) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("access_token"), str):
         raise TwitterXOAuthError("Twitter/X token exchange did not return an access token.")
     return payload
 
 
 async def _fetch_account(access_token: str) -> dict[str, str] | None:
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(
-                TWITTER_X_ME_URL,
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={"user.fields": "username,name,verified,protected"},
-            )
-        if resp.status_code != 200:
-            return None
-        payload = resp.json()
+        payload = await request_json(
+            "twitter_x",
+            "GET",
+            TWITTER_X_ME_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"user.fields": "username,name,verified,protected"},
+            timeout=10.0,
+            attempts=2,
+            max_delay=2.0,
+        )
     except Exception:
         return None
     data = payload.get("data") if isinstance(payload, dict) else None

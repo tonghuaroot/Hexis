@@ -88,6 +88,7 @@ class Config:
     # $HEXIS_ARTIFACT_DIR or ~/.hexis/artifacts.
     artifact_max_db_bytes: int = 26214400
     artifact_dir: str | None = None
+    upload_max_bytes: int = 104857600
 
     # Spreadsheet row cap per sheet — capping always warns, never silent.
     xlsx_max_rows_per_sheet: int = 5000
@@ -351,6 +352,7 @@ INGEST_CONFIG_KEYS = {
     "max_parallel_files": "ingest.max_parallel_files",
     "llm_json_retries": "ingest.llm_json_retries",
     "artifact_max_db_bytes": "ingest.artifact_max_db_bytes",
+    "upload_max_bytes": "ingest.upload_max_bytes",
     "xlsx_max_rows_per_sheet": "ingest.xlsx_max_rows_per_sheet",
     "auto_load_to_desk": "ingest.auto_load_to_desk",
 }

@@ -7,9 +7,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from core.auth.utils import advisory_lock_key, needs_refresh, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 # Constants (from OpenClaw src/providers/github-copilot-auth.ts + github-copilot.js)
 GITHUB_COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
@@ -77,20 +80,24 @@ class DeviceCodeResponse:
 
 async def start_device_flow(domain: str = GITHUB_DEFAULT_DOMAIN) -> DeviceCodeResponse:
     urls = _urls(domain)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "github_copilot_oauth",
+            "POST",
             urls["device_code"],
             headers={
                 "Accept": "application/json",
                 "Content-Type": "application/json",
                 "User-Agent": "GitHubCopilotChat/0.35.0",
             },
-            json={"client_id": GITHUB_COPILOT_CLIENT_ID, "scope": "read:user"},
+            json_body={"client_id": GITHUB_COPILOT_CLIENT_ID, "scope": "read:user"},
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"GitHub device code request failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("GitHub device code", exc)) from exc
     return DeviceCodeResponse(
         device_code=data["device_code"],
         user_code=data["user_code"],
@@ -114,21 +121,28 @@ async def poll_for_github_token(
     interval_ms = max(1000, interval_seconds * 1000)
 
     while now_ms() < deadline:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+        try:
+            data = await request_json(
+                "github_copilot_oauth",
+                "POST",
                 urls["access_token"],
                 headers={
                     "Accept": "application/json",
                     "Content-Type": "application/json",
                     "User-Agent": "GitHubCopilotChat/0.35.0",
                 },
-                json={
+                json_body={
                     "client_id": GITHUB_COPILOT_CLIENT_ID,
                     "device_code": device_code,
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 },
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=True,
             )
-        data = resp.json()
+        except IntegrationHttpError as exc:
+            raise RuntimeError(format_provider_error("GitHub device flow", exc)) from exc
         if isinstance(data.get("access_token"), str):
             return data["access_token"]
 
@@ -152,19 +166,22 @@ async def exchange_github_for_copilot(
     """Exchange a GitHub token for a Copilot internal token."""
     domain = enterprise_domain or GITHUB_DEFAULT_DOMAIN
     urls = _urls(domain)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(
+    try:
+        data = await request_json(
+            "github_copilot",
+            "GET",
             urls["copilot_token"],
             headers={
                 "Accept": "application/json",
                 "Authorization": f"Bearer {github_token}",
                 **COPILOT_HEADERS,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"Copilot token exchange failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("Copilot token exchange", exc)) from exc
     token = data.get("token")
     expires_at = data.get("expires_at")
     if not isinstance(token, str) or not isinstance(expires_at, (int, float)):

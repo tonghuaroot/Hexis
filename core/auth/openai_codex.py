@@ -10,9 +10,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from core.auth.utils import _b64url_decode, create_state, generate_pkce  # noqa: F401 – re-exported
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 # ---------------------------------------------------------------------------
 # Constants (mirrored from OpenClaw/pi-ai)
@@ -139,8 +142,10 @@ async def exchange_authorization_code(
     verifier: str,
     redirect_uri: str = OPENAI_CODEX_REDIRECT_URI,
 ) -> OpenAICodexCredentials:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "openai_codex_oauth",
+            "POST",
             OPENAI_CODEX_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
@@ -150,12 +155,13 @@ async def exchange_authorization_code(
                 "code_verifier": verifier,
                 "redirect_uri": redirect_uri,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"OpenAI Codex token exchange failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("OpenAI Codex token exchange", exc)) from exc
     access = data.get("access_token")
     refresh = data.get("refresh_token")
     expires_in = data.get("expires_in")
@@ -176,8 +182,10 @@ async def exchange_authorization_code(
 
 
 async def refresh_openai_codex_token(refresh_token: str) -> OpenAICodexCredentials:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "openai_codex_oauth",
+            "POST",
             OPENAI_CODEX_TOKEN_URL,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             data={
@@ -185,12 +193,13 @@ async def refresh_openai_codex_token(refresh_token: str) -> OpenAICodexCredentia
                 "refresh_token": refresh_token,
                 "client_id": OPENAI_CODEX_CLIENT_ID,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"OpenAI Codex token refresh failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("OpenAI Codex token refresh", exc)) from exc
     access = data.get("access_token")
     refresh = data.get("refresh_token")
     expires_in = data.get("expires_in")
@@ -216,20 +225,22 @@ async def list_openai_codex_models(
     """List picker-visible models from the authenticated Codex workspace."""
     if creds is None:
         creds = await ensure_fresh_openai_codex_credentials(skew_seconds=0)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
+    try:
+        data = await request_json(
+            "openai_codex",
+            "GET",
             OPENAI_CODEX_MODELS_URL,
             headers={
                 "Authorization": f"Bearer {creds.access}",
                 "ChatGPT-Account-ID": creds.account_id,
                 "Accept": "application/json",
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
         )
-    if response.status_code < 200 or response.status_code >= 300:
-        raise RuntimeError(
-            f"OpenAI Codex model discovery failed: HTTP {response.status_code}: {response.text}"
-        )
-    data = response.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("OpenAI Codex model discovery", exc)) from exc
     rows = data.get("models") if isinstance(data, dict) else None
     if not isinstance(rows, list):
         raise RuntimeError("OpenAI Codex model discovery response was missing models.")

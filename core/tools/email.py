@@ -15,6 +15,12 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Callable
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_text_response,
+)
+
 from .base import (
     ToolCategory,
     ToolContext,
@@ -31,6 +37,18 @@ GMAIL_SETUP_HINT = (
     "Gmail credentials not configured. Use the gmail-connector-setup skill "
     "and call connect_gmail to start OAuth setup in this conversation."
 )
+
+
+def _integration_tool_error_type(exc: IntegrationHttpError) -> ToolErrorType:
+    if exc.error_kind == "auth_failed":
+        return ToolErrorType.AUTH_FAILED
+    if exc.error_kind == "rate_limited":
+        return ToolErrorType.RATE_LIMITED
+    if exc.error_kind == "timeout":
+        return ToolErrorType.FETCH_TIMEOUT
+    if exc.error_kind == "network":
+        return ToolErrorType.NETWORK_ERROR
+    return ToolErrorType.HTTP_ERROR
 
 
 class EmailSendHandler(ToolHandler):
@@ -270,16 +288,6 @@ class SendGridEmailHandler(ToolHandler):
                 error_type=ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import aiohttp
-        except ImportError:
-            return ToolResult(
-                success=False,
-                output=None,
-                error="aiohttp not installed",
-                error_type=ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         to_email = arguments["to"]
         subject = arguments["subject"]
         body = arguments["body"]
@@ -306,23 +314,20 @@ class SendGridEmailHandler(ToolHandler):
                 "content": content,
             }
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "https://api.sendgrid.com/v3/mail/send",
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                ) as resp:
-                    if resp.status not in (200, 202):
-                        error_text = await resp.text()
-                        return ToolResult(
-                            success=False,
-                            output=None,
-                            error=f"SendGrid API error ({resp.status}): {error_text}",
-                            error_type=ToolErrorType.EXECUTION_FAILED,
-                        )
+            await request_text_response(
+                "sendgrid",
+                "POST",
+                "https://api.sendgrid.com/v3/mail/send",
+                json_body=payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0,
+                attempts=3,
+                max_delay=15.0,
+                retry_unsafe_methods=False,
+            )
 
             return ToolResult(
                 success=True,
@@ -334,6 +339,13 @@ class SendGridEmailHandler(ToolHandler):
                 display_output=f"Email sent to {to_email}: {subject}",
             )
 
+        except IntegrationHttpError as e:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=format_provider_error("SendGrid", e),
+                error_type=_integration_tool_error_type(e),
+            )
         except Exception as e:
             logger.exception("SendGrid send error")
             return ToolResult(

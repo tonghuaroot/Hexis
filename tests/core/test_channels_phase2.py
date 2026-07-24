@@ -302,6 +302,28 @@ class TestSignalAdapter:
         result = _resolve_token({"phone_number": "+15551234567"})
         assert result == "+15551234567"
 
+    async def test_send_uses_reliability_helper(self, monkeypatch):
+        from channels.signal_adapter import SignalAdapter
+
+        calls: list[dict[str, Any]] = []
+
+        async def fake_request_json(provider, method, url, **kwargs):
+            calls.append({"provider": provider, "method": method, "url": url, "kwargs": kwargs})
+            return {"timestamp": "signal-ts-1"}
+
+        monkeypatch.setattr("channels.signal_adapter.request_json", fake_request_json)
+
+        adapter = SignalAdapter({"api_url": "http://signal.test"})
+        adapter._connected = True
+        adapter._phone_number = "+15551234567"
+
+        result = await adapter.send("+15557654321", "hello")
+
+        assert result == "signal-ts-1"
+        assert calls[0]["provider"] == "signal"
+        assert calls[0]["method"] == "POST"
+        assert calls[0]["kwargs"]["retry_unsafe_methods"] is False
+
 
 # ============================================================================
 # WhatsApp Adapter
@@ -344,6 +366,29 @@ class TestWhatsAppAdapter:
         result = _resolve_token({}, "access_token", "WHATSAPP_ACCESS_TOKEN")
         assert result == "EAAtest123"
 
+    async def test_send_uses_reliability_helper(self, monkeypatch):
+        from channels.whatsapp_adapter import WhatsAppAdapter
+
+        calls: list[dict[str, Any]] = []
+
+        async def fake_request_json(provider, method, url, **kwargs):
+            calls.append({"provider": provider, "method": method, "url": url, "kwargs": kwargs})
+            return {"messages": [{"id": "wamid.1"}]}
+
+        monkeypatch.setattr("channels.whatsapp_adapter.request_json", fake_request_json)
+
+        adapter = WhatsAppAdapter()
+        adapter._connected = True
+        adapter._access_token = "token"
+        adapter._phone_number_id = "phone-id"
+
+        result = await adapter.send("+15557654321", "hello")
+
+        assert result == "wamid.1"
+        assert calls[0]["provider"] == "whatsapp"
+        assert calls[0]["method"] == "POST"
+        assert calls[0]["kwargs"]["retry_unsafe_methods"] is False
+
 
 # ============================================================================
 # iMessage Adapter
@@ -385,6 +430,28 @@ class TestIMessageAdapter:
         monkeypatch.setenv("IMESSAGE_PASSWORD", "secret123")
         result = _resolve_config({}, "password", "IMESSAGE_PASSWORD")
         assert result == "secret123"
+
+    async def test_send_uses_reliability_helper(self, monkeypatch):
+        from channels.imessage_adapter import IMessageAdapter
+
+        calls: list[dict[str, Any]] = []
+
+        async def fake_request_json(provider, method, url, **kwargs):
+            calls.append({"provider": provider, "method": method, "url": url, "kwargs": kwargs})
+            return {"data": {"guid": "imessage-guid-1"}}
+
+        monkeypatch.setattr("channels.imessage_adapter.request_json", fake_request_json)
+
+        adapter = IMessageAdapter({"api_url": "http://bluebubbles.test"})
+        adapter._connected = True
+        adapter._password = "secret"
+
+        result = await adapter.send("chat-guid", "hello")
+
+        assert result == "imessage-guid-1"
+        assert calls[0]["provider"] == "bluebubbles"
+        assert calls[0]["method"] == "POST"
+        assert calls[0]["kwargs"]["retry_unsafe_methods"] is False
 
 
 # ============================================================================
@@ -628,6 +695,21 @@ class _MockAdapterWithEdit:
 
 
 class TestManagerCommandRouting:
+    def test_typing_failure_enters_cooldown_until_success(self):
+        from channels.manager import ChannelManager
+
+        manager = ChannelManager(pool=MagicMock())
+        assert manager._typing_cooldown_active("test", "ch1") is False
+
+        delay = manager._record_typing_failure("test", "ch1")
+
+        assert delay > 0
+        assert manager._typing_cooldown_active("test", "ch1") is True
+
+        manager._record_typing_success("test", "ch1")
+
+        assert manager._typing_cooldown_active("test", "ch1") is False
+
     async def test_command_intercepted(self):
         """Test that /help is handled by command registry, not conversation."""
         from channels.manager import ChannelManager
@@ -759,11 +841,7 @@ class TestOutboxConsumer:
         consumer = ChannelOutboxConsumer(manager, pool)
         consumer._log_delivery = AsyncMock()
 
-        class _Resp:
-            status_code = 200
-            text = "ok"
-
-        with patch("channels.outbox.requests.post", return_value=_Resp()) as mock_post:
+        with patch("channels.outbox.request_text_response", new=AsyncMock()) as mock_post:
             await consumer._deliver_webhook(
                 "Hello webhook",
                 {"content": "Hello webhook"},
@@ -771,11 +849,162 @@ class TestOutboxConsumer:
                 "outbox-2",
             )
 
-        mock_post.assert_called_once()
+        mock_post.assert_awaited_once()
         consumer._log_delivery.assert_awaited_once()
         args = consumer._log_delivery.await_args.args
         assert args[1] == "webhook"
         assert args[2] == "https://example.com/hook"
+        assert args[6] is True
+
+    async def test_adapter_none_id_logs_delivery_failure(self):
+        from channels.outbox import ChannelOutboxConsumer
+
+        pool = MagicMock()
+        mock_conn = AsyncMock()
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        manager = MagicMock()
+        manager.send = AsyncMock(return_value=None)
+
+        consumer = ChannelOutboxConsumer(manager, pool)
+        consumer._log_delivery = AsyncMock()
+        body = {
+            "kind": "channel_message",
+            "payload": {
+                "content": "This should fail",
+                "delivery_mode": "direct",
+                "target_channel": "discord",
+                "target_id": "ch123",
+            },
+        }
+
+        await consumer._process_message(body)
+
+        args = consumer._log_delivery.await_args.args
+        assert args[1] == "discord"
+        assert args[6] is False
+        assert "did not return a platform message id" in args[7]
+
+    async def test_unreachable_target_skips_direct_delivery(self):
+        from channels.outbox import ChannelOutboxConsumer
+
+        pool = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.fetchval = AsyncMock(return_value={
+            "skip": True,
+            "reason": "chat not found",
+            "suppress_until": "2026-07-24T00:00:00Z",
+        })
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        manager = MagicMock()
+        manager.send = AsyncMock(return_value="sent-1")
+
+        consumer = ChannelOutboxConsumer(manager, pool)
+        consumer._log_delivery = AsyncMock()
+
+        await consumer._deliver_direct(
+            "hello",
+            "hello",
+            {"target_channel": "telegram", "target_id": "chat-404"},
+            "outbox-skip",
+        )
+
+        manager.send.assert_not_called()
+        args = consumer._log_delivery.await_args.args
+        assert args[1] == "telegram"
+        assert args[2] == "chat-404"
+        assert args[6] is False
+        assert "target marked unreachable" in args[7]
+
+    async def test_unreachable_failure_marks_target(self):
+        from channels.outbox import ChannelOutboxConsumer
+
+        pool = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.fetchval = AsyncMock(side_effect=[
+            {"skip": False},
+            {"success": True, "failure_count": 1},
+        ])
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        manager = MagicMock()
+        manager.send = AsyncMock(side_effect=RuntimeError("Telegram chat not found"))
+
+        consumer = ChannelOutboxConsumer(manager, pool)
+        consumer._log_delivery = AsyncMock()
+
+        await consumer._deliver_direct(
+            "hello",
+            "hello",
+            {"target_channel": "telegram", "target_id": "chat-404"},
+            "outbox-mark",
+        )
+
+        sql_calls = [call.args[0] for call in mock_conn.fetchval.await_args_list]
+        assert any("mark_channel_target_unreachable" in sql for sql in sql_calls)
+        args = consumer._log_delivery.await_args.args
+        assert args[6] is False
+        assert "chat not found" in args[7].lower()
+
+    async def test_transient_failure_does_not_mark_target(self):
+        from channels.outbox import ChannelOutboxConsumer
+
+        pool = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.fetchval = AsyncMock(return_value={"skip": False})
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        manager = MagicMock()
+        manager.send = AsyncMock(side_effect=RuntimeError("temporary provider timeout"))
+
+        consumer = ChannelOutboxConsumer(manager, pool)
+        consumer._log_delivery = AsyncMock()
+
+        await consumer._deliver_direct(
+            "hello",
+            "hello",
+            {"target_channel": "telegram", "target_id": "chat-1"},
+            "outbox-transient",
+        )
+
+        sql_calls = [call.args[0] for call in mock_conn.fetchval.await_args_list]
+        assert not any("mark_channel_target_unreachable" in sql for sql in sql_calls)
+        args = consumer._log_delivery.await_args.args
+        assert args[6] is False
+
+    async def test_successful_delivery_clears_unreachable_target(self):
+        from channels.outbox import ChannelOutboxConsumer
+
+        pool = MagicMock()
+        mock_conn = AsyncMock()
+        mock_conn.fetchval = AsyncMock(side_effect=[
+            '{"skip": false}',
+            True,
+        ])
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        manager = MagicMock()
+        manager.send = AsyncMock(return_value="sent-1")
+
+        consumer = ChannelOutboxConsumer(manager, pool)
+        consumer._log_delivery = AsyncMock()
+
+        await consumer._deliver_direct(
+            "hello",
+            "hello",
+            {"target_channel": "telegram", "target_id": "chat-1"},
+            "outbox-clear",
+        )
+
+        sql_calls = [call.args[0] for call in mock_conn.fetchval.await_args_list]
+        assert any("clear_channel_target_unreachable" in sql for sql in sql_calls)
+        args = consumer._log_delivery.await_args.args
         assert args[6] is True
 
 

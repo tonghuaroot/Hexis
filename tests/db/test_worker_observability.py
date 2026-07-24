@@ -158,3 +158,44 @@ async def test_worker_runtime_recovers_stale_runs(db_pool):
             assert "worker stopped" in run["error"]
         finally:
             await tr.rollback()
+
+
+async def test_worker_start_storm_detection_records_backoff(db_pool):
+    async with db_pool.acquire() as conn:
+        tr = conn.transaction()
+        await tr.start()
+        try:
+            latest = None
+            for i in range(4):
+                latest = _coerce_json(
+                    await conn.fetchval(
+                        """
+                        SELECT record_worker_start_and_check_storm(
+                            'maintenance',
+                            'storm-test',
+                            jsonb_build_object('process_id', $1::int, 'host_name', 'test-host'),
+                            2,
+                            120,
+                            300
+                        )
+                        """,
+                        9000 + i,
+                    )
+                )
+            assert latest is not None
+            assert latest["storm"] is True
+            assert latest["count"] == 4
+            assert latest["backoff_seconds"] > 0
+
+            row = await conn.fetchrow(
+                """
+                SELECT starts_last_2m, latest_start_at
+                FROM worker_start_storm_status
+                WHERE mode = 'maintenance' AND instance_name = 'storm-test'
+                """
+            )
+            assert row is not None
+            assert row["starts_last_2m"] == 4
+            assert row["latest_start_at"] is not None
+        finally:
+            await tr.rollback()

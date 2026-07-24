@@ -16,6 +16,12 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_bytes_response,
+)
+
 logger = logging.getLogger(__name__)
 
 # Default maximum attachment size (10 MB)
@@ -135,8 +141,6 @@ async def download_attachment(
     Returns a new Attachment with local_path populated (or the original if
     download fails or is skipped).
     """
-    import aiohttp
-
     if not attachment.url:
         return attachment
 
@@ -148,46 +152,37 @@ async def download_attachment(
     os.makedirs(target_dir, exist_ok=True)
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(attachment.url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    logger.warning("Download failed: HTTP %d for %s", resp.status, attachment.url[:100])
-                    return attachment
+        response = await request_bytes_response(
+            "attachment",
+            "GET",
+            attachment.url,
+            headers={"User-Agent": "Hexis/1.0"},
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            follow_redirects=True,
+            max_bytes=max_size,
+        )
 
-                # Check Content-Length before downloading
-                content_length = resp.content_length
-                if content_length and content_length > max_size:
-                    logger.warning("Attachment too large: %d bytes (max %d)", content_length, max_size)
-                    return attachment
+        raw = response.content
+        filename = attachment.filename or _filename_from_response(response, attachment.url)
+        filepath = os.path.join(target_dir, filename)
 
-                # Derive filename
-                filename = attachment.filename or _filename_from_response(resp, attachment.url)
-                filepath = os.path.join(target_dir, filename)
+        with open(filepath, "wb") as f:
+            f.write(raw)
 
-                # Stream download with size enforcement
-                downloaded = 0
-                with open(filepath, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(8192):
-                        downloaded += len(chunk)
-                        if downloaded > max_size:
-                            logger.warning("Attachment exceeded max size during download")
-                            break
-                        f.write(chunk)
+        return Attachment(
+            url=attachment.url,
+            filename=filename,
+            mime_type=attachment.mime_type or response.headers.get("content-type"),
+            size=len(raw),
+            platform_id=attachment.platform_id,
+            local_path=filepath,
+        )
 
-                if downloaded > max_size:
-                    os.unlink(filepath)
-                    return attachment
-
-                # Return updated attachment
-                return Attachment(
-                    url=attachment.url,
-                    filename=filename,
-                    mime_type=attachment.mime_type or resp.content_type,
-                    size=downloaded,
-                    platform_id=attachment.platform_id,
-                    local_path=filepath,
-                )
-
+    except IntegrationHttpError as exc:
+        logger.warning("%s", format_provider_error("Attachment download", exc))
+        return attachment
     except Exception:
         logger.exception("Failed to download attachment: %s", attachment.url[:100])
         return attachment
@@ -196,7 +191,7 @@ async def download_attachment(
 def _filename_from_response(resp, url: str) -> str:
     """Derive a filename from Content-Disposition header or URL path."""
     # Try Content-Disposition
-    cd = resp.headers.get("Content-Disposition", "")
+    cd = resp.headers.get("content-disposition") or resp.headers.get("Content-Disposition", "")
     if "filename=" in cd:
         parts = cd.split("filename=")
         if len(parts) > 1:

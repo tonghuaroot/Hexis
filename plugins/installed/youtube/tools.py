@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import IntegrationHttpError, request_json
 from core.tools.base import (
     ToolCategory,
     ToolContext,
@@ -20,6 +21,7 @@ from core.tools.base import (
     ToolSpec,
 )
 from core.tools.api_keys import resolve_api_key
+from core.tools.integration_http import integration_error_result
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +68,6 @@ class GetYouTubeChannelStatsHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         channel_id = arguments["channel_id"]
         params = {
             "key": api_key,
@@ -82,16 +76,17 @@ class GetYouTubeChannelStatsHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/youtube/v3/channels",
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await request_json(
+                "youtube",
+                "GET",
+                f"{_BASE_URL}/youtube/v3/channels",
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
 
-            items = data.get("items", [])
+            items = data.get("items", []) if isinstance(data, dict) else []
             if not items:
                 return ToolResult.error_result(f"Channel not found: {channel_id}")
 
@@ -110,6 +105,8 @@ class GetYouTubeChannelStatsHandler(ToolHandler):
                 },
                 display_output=f"Channel: {snippet.get('title', channel_id)}",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("YouTube", e)
         except Exception as e:
             return ToolResult.error_result(f"YouTube API error: {e}")
 
@@ -154,14 +151,6 @@ class GetYouTubeVideoStatsHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         video_id = arguments["video_id"]
         params = {
             "key": api_key,
@@ -170,16 +159,17 @@ class GetYouTubeVideoStatsHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/youtube/v3/videos",
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await request_json(
+                "youtube",
+                "GET",
+                f"{_BASE_URL}/youtube/v3/videos",
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
 
-            items = data.get("items", [])
+            items = data.get("items", []) if isinstance(data, dict) else []
             if not items:
                 return ToolResult.error_result(f"Video not found: {video_id}")
 
@@ -201,6 +191,8 @@ class GetYouTubeVideoStatsHandler(ToolHandler):
                 },
                 display_output=f"Video: {snippet.get('title', video_id)}",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("YouTube", e)
         except Exception as e:
             return ToolResult.error_result(f"YouTube API error: {e}")
 
@@ -253,14 +245,6 @@ class SearchYouTubeVideosHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         query = arguments["query"]
         max_results = arguments.get("max_results", 5)
         order = arguments.get("order", "relevance")
@@ -275,17 +259,19 @@ class SearchYouTubeVideosHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/youtube/v3/search",
-                    params=params,
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await request_json(
+                "youtube",
+                "GET",
+                f"{_BASE_URL}/youtube/v3/search",
+                params=params,
+                timeout=15.0,
+                attempts=3,
+                max_delay=10.0,
+            )
 
             videos = []
-            for item in data.get("items", []):
+            rows = data.get("items", []) if isinstance(data, dict) else []
+            for item in rows:
                 snippet = item.get("snippet", {})
                 video_id = item.get("id", {}).get("videoId")
                 videos.append({
@@ -300,6 +286,8 @@ class SearchYouTubeVideosHandler(ToolHandler):
                 {"videos": videos, "count": len(videos)},
                 display_output=f"Found {len(videos)} video(s) for '{query}'",
             )
+        except IntegrationHttpError as e:
+            return integration_error_result("YouTube", e)
         except Exception as e:
             return ToolResult.error_result(f"YouTube API error: {e}")
 

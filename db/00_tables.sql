@@ -455,6 +455,16 @@ CREATE TABLE IF NOT EXISTS worker_task_runs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS worker_start_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mode TEXT NOT NULL,
+    instance_name TEXT,
+    process_id INTEGER,
+    host_name TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ============================================================================
 -- UNIFIED CONFIG
 -- ============================================================================

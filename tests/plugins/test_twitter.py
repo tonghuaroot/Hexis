@@ -181,8 +181,7 @@ class TestTwitterNoAuthRequired:
     @pytest.mark.asyncio
     async def test_xquik_request_and_response_mapping(self):
         handler = SearchTwitterHandler()
-        response = MagicMock()
-        response.json.return_value = {
+        payload = {
             "tweets": [
                 {
                     "id": "4",
@@ -197,11 +196,9 @@ class TestTwitterNoAuthRequired:
             "has_next_page": False,
             "next_cursor": "",
         }
-        response.raise_for_status = MagicMock()
-        client = MagicMock()
-        client.get = AsyncMock(return_value=response)
 
-        tweets = await handler._search_xquik(client, "from:dave", 25, "xquik-key")
+        with patch("plugins.installed.twitter.tools.request_json", AsyncMock(return_value=payload)) as request_json:
+            tweets = await handler._search_xquik("from:dave", 25, "xquik-key")
 
         assert tweets == [
             {
@@ -212,8 +209,8 @@ class TestTwitterNoAuthRequired:
                 "metrics": {"likes": 4, "retweets": 2, "replies": 1},
             }
         ]
-        client.get.assert_awaited_once()
-        _, kwargs = client.get.await_args
+        request_json.assert_awaited_once()
+        _, kwargs = request_json.await_args
         assert kwargs["headers"]["x-api-key"] == "xquik-key"
         assert kwargs["headers"]["xquik-api-contract"] == "2026-04-29"
         assert kwargs["params"] == {

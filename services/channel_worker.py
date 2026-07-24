@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import signal
+import socket
 from typing import Any
 
 import asyncpg
@@ -33,6 +34,9 @@ logging.basicConfig(
 logger = logging.getLogger("channel_worker")
 
 CHANNEL_CONFIG_POLL_INTERVAL_S = float(os.getenv("HEXIS_CHANNEL_CONFIG_POLL_INTERVAL_S", "15"))
+WORKER_STORM_MAX_STARTS = int(os.getenv("WORKER_STORM_MAX_STARTS", 5))
+WORKER_STORM_WINDOW_SECONDS = int(os.getenv("WORKER_STORM_WINDOW_SECONDS", 120))
+WORKER_STORM_BACKOFF_CAP_SECONDS = int(os.getenv("WORKER_STORM_BACKOFF_CAP_SECONDS", 300))
 SUPPORTED_CHANNEL_TYPES = [
     "discord",
     "telegram",
@@ -42,6 +46,85 @@ SUPPORTED_CHANNEL_TYPES = [
     "imessage",
     "matrix",
 ]
+
+
+def _worker_metadata() -> dict[str, Any]:
+    return {
+        "process_id": os.getpid(),
+        "host_name": socket.gethostname(),
+        "command": "hexis-channels",
+    }
+
+
+async def _register_channel_worker(pool: asyncpg.Pool, instance: str | None) -> str | None:
+    metadata = _worker_metadata()
+    try:
+        async with pool.acquire() as conn:
+            raw = await conn.fetchval(
+                """
+                SELECT record_worker_start_and_check_storm(
+                    'channel', $1, $2::jsonb, $3, $4, $5
+                )
+                """,
+                instance,
+                json.dumps(metadata),
+                WORKER_STORM_MAX_STARTS,
+                WORKER_STORM_WINDOW_SECONDS,
+                WORKER_STORM_BACKOFF_CAP_SECONDS,
+            )
+        storm = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        metadata["start_storm"] = storm
+        backoff_s = float(storm.get("backoff_seconds") or 0)
+        if backoff_s > 0:
+            logger.warning(
+                "Channel worker start storm detected: %s starts in %ss; backing off %.1fs",
+                storm.get("count"),
+                storm.get("window_seconds"),
+                backoff_s,
+            )
+            await asyncio.sleep(backoff_s)
+    except Exception:
+        logger.debug("channel worker start storm check unavailable", exc_info=True)
+
+    try:
+        async with pool.acquire() as conn:
+            worker_id = await conn.fetchval(
+                "SELECT register_worker_instance('channel', $1, $2::jsonb)",
+                instance,
+                json.dumps(metadata),
+            )
+        return str(worker_id) if worker_id else None
+    except Exception:
+        logger.warning("channel worker runtime registration failed", exc_info=True)
+        return None
+
+
+async def _mark_channel_worker_seen(pool: asyncpg.Pool, worker_id: str | None) -> None:
+    if not worker_id:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT mark_worker_instance_seen($1::uuid, 'running')", worker_id)
+    except Exception:
+        logger.debug("channel worker liveness update failed", exc_info=True)
+
+
+async def _mark_channel_worker_stopped(
+    pool: asyncpg.Pool,
+    worker_id: str | None,
+    reason: str = "shutdown",
+) -> None:
+    if not worker_id:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT mark_worker_instance_stopped($1::uuid, $2)",
+                worker_id,
+                reason,
+            )
+    except Exception:
+        logger.debug("channel worker stopped update failed", exc_info=True)
 
 
 async def _load_channel_config(conn: asyncpg.Connection, channel_type: str) -> dict:
@@ -361,6 +444,7 @@ async def run_channel_worker(
     dsn = db_dsn_from_env(instance)
     pool = await asyncpg.create_pool(dsn=dsn, min_size=2, max_size=10)
     logger.info("Connected to database")
+    worker_id = await _register_channel_worker(pool, instance)
 
     manager = ChannelManager(pool)
 
@@ -413,6 +497,7 @@ async def run_channel_worker(
     async def _config_watch_loop() -> None:
         while not stop_event.is_set():
             try:
+                await _mark_channel_worker_seen(pool, worker_id)
                 async with pool.acquire() as conn:
                     started = await _ensure_configured_adapters_running(manager, conn, channels)
                     if started:
@@ -448,6 +533,7 @@ async def run_channel_worker(
         except asyncio.CancelledError:
             pass
     await manager.stop_all()
+    await _mark_channel_worker_stopped(pool, worker_id)
     await pool.close()
     logger.info("Channel worker stopped")
 

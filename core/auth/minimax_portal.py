@@ -6,9 +6,12 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from core.auth.utils import advisory_lock_key, create_state, generate_pkce, now_ms
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
 
 # Constants (from OpenClaw extensions/minimax-portal-auth/oauth.ts)
 MINIMAX_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"
@@ -58,11 +61,13 @@ async def start_user_code_flow(region: str = MINIMAX_DEFAULT_REGION) -> tuple[Us
     state = create_state()
     base = _base_url(region)
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post(
+    try:
+        data = await request_json(
+            "minimax_oauth",
+            "POST",
             f"{base}/oauth/code",
             headers={"Content-Type": "application/json"},
-            json={
+            json_body={
                 "client_id": MINIMAX_CLIENT_ID,
                 "scope": MINIMAX_SCOPE,
                 "response_type": "code",
@@ -70,11 +75,13 @@ async def start_user_code_flow(region: str = MINIMAX_DEFAULT_REGION) -> tuple[Us
                 "code_challenge_method": "S256",
                 "state": state,
             },
+            timeout=30.0,
+            attempts=3,
+            max_delay=10.0,
+            retry_unsafe_methods=True,
         )
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(f"MiniMax code request failed: HTTP {resp.status_code}: {resp.text}")
-
-    data = resp.json()
+    except IntegrationHttpError as exc:
+        raise RuntimeError(format_provider_error("MiniMax code request", exc)) from exc
     resp_state = data.get("state", "")
     if resp_state != state:
         raise RuntimeError("MiniMax state mismatch (CSRF check failed).")
@@ -103,18 +110,25 @@ async def poll_for_token(
     interval_ms = max(1000, interval_seconds * 1000)
 
     while now_ms() < deadline:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
+        try:
+            data = await request_json(
+                "minimax_oauth",
+                "POST",
                 f"{base}/oauth/token",
                 headers={"Content-Type": "application/json"},
-                json={
+                json_body={
                     "client_id": MINIMAX_CLIENT_ID,
                     "grant_type": MINIMAX_GRANT_TYPE,
                     "user_code": user_code,
                     "code_verifier": verifier,
                 },
+                timeout=30.0,
+                attempts=3,
+                max_delay=10.0,
+                retry_unsafe_methods=True,
             )
-        data = resp.json()
+        except IntegrationHttpError as exc:
+            raise RuntimeError(format_provider_error("MiniMax auth flow", exc)) from exc
 
         status = data.get("status", "")
         if status == "success" or isinstance(data.get("access_token"), str):

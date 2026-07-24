@@ -10,6 +10,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
+from core.integration_reliability import (
+    IntegrationHttpError,
+    format_provider_error,
+    request_json,
+)
+
 from .base import (
     ToolCategory,
     ToolContext,
@@ -70,14 +76,6 @@ class BraveSearchHandler(ToolHandler):
                 ToolErrorType.AUTH_FAILED,
             )
 
-        try:
-            import httpx
-        except ImportError:
-            return ToolResult.error_result(
-                "httpx not installed. Run: pip install httpx",
-                ToolErrorType.MISSING_DEPENDENCY,
-            )
-
         query = arguments["query"]
         count = arguments.get("count", 5)
 
@@ -87,15 +85,21 @@ class BraveSearchHandler(ToolHandler):
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{_BASE_URL}/res/v1/web/search",
-                    headers=headers,
-                    params={"q": query, "count": count},
-                    timeout=15,
+            data = await request_json(
+                "brave_search",
+                "GET",
+                f"{_BASE_URL}/res/v1/web/search",
+                headers=headers,
+                params={"q": query, "count": count},
+                timeout=15.0,
+                attempts=3,
+                max_delay=15.0,
+            )
+            if not isinstance(data, dict):
+                return ToolResult.error_result(
+                    "Brave Search returned an invalid payload.",
+                    ToolErrorType.HTTP_ERROR,
                 )
-                resp.raise_for_status()
-                data = resp.json()
 
             results = []
             for r in data.get("web", {}).get("results", []):
@@ -109,6 +113,15 @@ class BraveSearchHandler(ToolHandler):
                 {"results": results, "count": len(results)},
                 display_output=f"Found {len(results)} result(s) for '{query}'",
             )
+        except IntegrationHttpError as e:
+            kind = (
+                ToolErrorType.AUTH_FAILED if e.error_kind == "auth_failed"
+                else ToolErrorType.RATE_LIMITED if e.error_kind == "rate_limited"
+                else ToolErrorType.NETWORK_ERROR if e.error_kind == "network"
+                else ToolErrorType.FETCH_TIMEOUT if e.error_kind == "timeout"
+                else ToolErrorType.HTTP_ERROR
+            )
+            return ToolResult.error_result(format_provider_error("Brave Search", e), kind)
         except Exception as e:
             return ToolResult.error_result(f"Brave Search API error: {e}")
 

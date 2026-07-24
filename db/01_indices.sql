@@ -123,6 +123,8 @@ CREATE INDEX IF NOT EXISTS idx_worker_task_runs_status_started
     ON worker_task_runs (status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_worker_task_runs_worker_started
     ON worker_task_runs (worker_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_worker_start_events_mode_started
+    ON worker_start_events (mode, instance_name, started_at DESC);
 CREATE INDEX idx_consent_log_model_endpoint ON consent_log (provider, model, endpoint);
 CREATE UNIQUE INDEX idx_emotional_triggers_pattern ON emotional_triggers (trigger_pattern);
 CREATE INDEX idx_emotional_triggers_embedding ON emotional_triggers USING hnsw (trigger_embedding vector_cosine_ops);

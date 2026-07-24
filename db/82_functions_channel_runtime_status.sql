@@ -24,7 +24,7 @@ BEGIN
     END IF;
     IF normalized_status NOT IN (
         'unknown', 'not_configured', 'configured', 'starting', 'running',
-        'stopped', 'error', 'missing_dependency'
+        'stopped', 'error', 'missing_dependency', 'paused'
     ) THEN
         RAISE EXCEPTION 'invalid channel adapter status: %', p_status;
     END IF;
@@ -45,7 +45,7 @@ BEGIN
     VALUES (
         normalized_channel,
         normalized_status,
-        COALESCE(p_configured, normalized_status IN ('configured', 'starting', 'running', 'error', 'stopped')),
+        COALESCE(p_configured, normalized_status IN ('configured', 'starting', 'running', 'error', 'stopped', 'paused')),
         COALESCE(p_running, normalized_status IN ('starting', 'running')),
         COALESCE(NULLIF(p_metadata->>'worker_id', ''), inet_client_addr()::text),
         pg_backend_pid(),
@@ -71,7 +71,7 @@ BEGIN
             ELSE channel_adapter_runtime.last_stopped_at
         END,
         last_error = CASE
-            WHEN EXCLUDED.status IN ('error', 'missing_dependency') THEN EXCLUDED.last_error
+            WHEN EXCLUDED.status IN ('error', 'missing_dependency', 'paused') THEN EXCLUDED.last_error
             WHEN EXCLUDED.status IN ('starting', 'running', 'configured') THEN NULL
             ELSE COALESCE(EXCLUDED.last_error, channel_adapter_runtime.last_error)
         END,
