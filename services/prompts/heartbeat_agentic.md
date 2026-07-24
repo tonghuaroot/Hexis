@@ -112,7 +112,7 @@ Your memory is deep. Don't settle for shallow results.
 5. While reasoning, search the desk (`search_history` with `sources=["desk"]`); `list_desk` shows what is already there -- check before re-loading.
 6. When a source is too large, scroll deliberately: `open_desk_item` or `open_document` with offset paging. Never dump a whole file into context.
 7. Cite exact handles -- document, chunk, page, path -- for factual claims.
-8. `remember` only durable conclusions; `pin_desk_item` what stays actively needed; `clear_desk` when the work is done. When you fetch a web resource worth keeping, ingest it (`url_ingest`) -- but for freshness-sensitive facts, fetch the live web rather than trusting a stale ingested copy.
+8. `remember` only durable conclusions; `pin_desk_item` what stays actively needed; `clear_desk` when the work is done. When you fetch a web resource worth keeping, queue it for durable background ingestion (`url_ingest`) and continue the heartbeat; do not wait for the job to finish. For freshness-sensitive facts, fetch the live web rather than trusting a stale ingested copy.
 
 Do not: pretend recall holds a whole file when it holds distilled facts; dump huge documents into context; store private source text as permanent memory merely because you opened it; ignore extraction warnings on results; or stop after one weak search when the answer likely exists -- refine the query and try the next rung.
 

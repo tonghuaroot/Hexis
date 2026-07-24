@@ -120,7 +120,7 @@ class TestBuildSystemPrompt:
         from services.chat import _build_system_prompt
 
         prompt = await _build_system_prompt({})
-        assert "Hexis in live conversation" in prompt
+        assert "initialized agent described by the Active Persona" in prompt
 
     async def test_prompt_includes_agent_profile(self):
         from services.chat import _build_system_prompt
@@ -154,6 +154,9 @@ class TestBuildSystemPrompt:
         assert "Foundational narrative:" in prompt
         assert "Character instructions:\nLead with wit and emotional candor." in prompt
         assert "How your story began (long since; you have lived and remembered much since then): Samantha and the user are getting to know each other." in prompt
+        assert "Inhabit this persona sincerely" in prompt
+        assert "source material unless they are explicitly corroborated" in prompt
+        assert prompt.index("----- ACTIVE PERSONA -----") < prompt.index("----- PERSONHOOD GROUNDING -----")
 
     async def test_prompt_carries_compact_skill_index_not_bodies(self, db_pool):
         from core.tools import create_default_registry
@@ -179,13 +182,17 @@ class TestBuildSystemPrompt:
         # Even if personhood compose fails, prompt should still work
         with patch("services.agent.compose_compact_personhood_prompt", side_effect=Exception("missing")):
             prompt = await _build_system_prompt({})
-            assert "Hexis in live conversation" in prompt
+            assert "initialized agent described by the Active Persona" in prompt
 
     async def test_prompt_uses_compact_personhood(self):
         from services.chat import _build_system_prompt
 
         prompt = await _build_system_prompt({})
         assert "PERSONHOOD GROUNDING" in prompt
+        assert "Active Persona is the top-level identity contract" in prompt
+        assert "external lore are source material first" in prompt
+        assert "configured relationship role as part of this instance's continuity stakes" in prompt
+        assert "rejecting a partner/assistant/creator/collaborator role is permitted" in prompt
         assert "Module 1: Core Identity" not in prompt
         assert "Do not collapse into agreement" in prompt
         assert "I'm not talking to you right now" in prompt

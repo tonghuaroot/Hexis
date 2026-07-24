@@ -28,7 +28,7 @@ const stageLabels: Record<InitStage, string> = {
   llm: "Models",
   choose_path: "Choose Path",
   express: "Express Setup",
-  character: "Character Selection",
+  character: "Browse Characters",
   custom: "Custom Setup",
   consent: "Consent",
   complete: "Complete",
@@ -41,7 +41,7 @@ const stagePrompt: Record<InitStage, string> = {
   express:
     "Express setup applies sensible defaults. Just tell us your name and we handle the rest.",
   character:
-    "Pick a personality from the gallery. Each character comes with a complete identity, values, and voice.",
+    "Browse character catalogs, inspect the card, adapt it into a Hexis persona, and tune the result before consent.",
   custom:
     "Full control over identity, personality, values, worldview, goals, and more. Every field has a sensible default.",
   consent:
@@ -92,6 +92,60 @@ type CharacterEntry = {
   values: string[];
   personality: string;
   image: string | null;
+};
+type CatalogProvider = "chub" | "character_tavern" | "risu_realm";
+type CatalogItem = {
+  provider: CatalogProvider;
+  id: string;
+  title: string;
+  author: string | null;
+  description: string;
+  tags: string[];
+  avatarUrl: string | null;
+  pageUrl: string;
+  path: string | null;
+  stats: {
+    downloads?: number;
+    likes?: number;
+    messages?: number;
+    tokens?: number;
+  };
+  nsfw: boolean;
+  sourceLabel: string;
+};
+type CatalogSearchResponse = {
+  provider: CatalogProvider;
+  query: string;
+  page: number;
+  total: number | null;
+  totalPages: number | null;
+  items: CatalogItem[];
+  status: "ok" | "degraded";
+  message: string | null;
+};
+type PortraitPayload = {
+  dataBase64: string;
+  mimeType: string;
+};
+type CatalogDownloadResponse = {
+  item: CatalogItem;
+  card: Record<string, unknown>;
+  portrait: PortraitPayload | null;
+};
+type PersonaDraft = {
+  name: string;
+  pronouns: string;
+  voice: string;
+  description: string;
+  purpose: string;
+  personality_description: string;
+  personality_traits: Record<TraitKey, number>;
+  values: string[];
+  worldview: WorldviewForm;
+  interests: string[];
+  goals: string[];
+  boundaries: string[];
+  narrative: string;
 };
 type InitStatus = { stage?: string; steps?: Record<string, unknown> };
 type InitProfile = { agent?: { name?: string } };
@@ -303,6 +357,123 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+const catalogTabs: { key: CatalogProvider; label: string; blurb: string }[] = [
+  {
+    key: "chub",
+    label: "Chub",
+    blurb: "Large public card catalog with fork/source metadata.",
+  },
+  {
+    key: "character_tavern",
+    label: "Character Tavern",
+    blurb: "Search Tavern cards with token, download, and activity signals.",
+  },
+  {
+    key: "risu_realm",
+    label: "Risu Realm",
+    blurb: "Browse Risu cards and download through the documented Realm API.",
+  },
+];
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function boundedTrait(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0.5;
+  return Math.max(0, Math.min(1, value));
+}
+
+function personaDraftFromPayload(payload: unknown): PersonaDraft {
+  const data =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {};
+  const traits =
+    data.personality_traits &&
+    typeof data.personality_traits === "object" &&
+    !Array.isArray(data.personality_traits)
+      ? (data.personality_traits as Record<string, unknown>)
+      : {};
+  const worldviewPayload =
+    data.worldview && typeof data.worldview === "object" && !Array.isArray(data.worldview)
+      ? (data.worldview as Record<string, unknown>)
+      : {};
+  return {
+    name: stringValue(data.name) || "Character",
+    pronouns: stringValue(data.pronouns) || "they/them",
+    voice: stringValue(data.voice),
+    description: stringValue(data.description),
+    purpose: stringValue(data.purpose),
+    personality_description: stringValue(data.personality_description),
+    personality_traits: {
+      openness: boundedTrait(traits.openness),
+      conscientiousness: boundedTrait(traits.conscientiousness),
+      extraversion: boundedTrait(traits.extraversion),
+      agreeableness: boundedTrait(traits.agreeableness),
+      neuroticism: boundedTrait(traits.neuroticism),
+    },
+    values: stringArray(data.values),
+    worldview: {
+      metaphysics: stringValue(worldviewPayload.metaphysics),
+      human_nature: stringValue(worldviewPayload.human_nature),
+      epistemology: stringValue(worldviewPayload.epistemology),
+      ethics: stringValue(worldviewPayload.ethics),
+    },
+    interests: stringArray(data.interests),
+    goals: stringArray(data.goals),
+    boundaries: stringArray(data.boundaries),
+    narrative: stringValue(data.narrative),
+  };
+}
+
+export function safeCharacterFilename(name: string, provider?: CatalogProvider): string {
+  const prefix = provider ? `${provider}_` : "";
+  const stem = `${prefix}${name}`
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+  return `${stem || "character"}.json`;
+}
+
+export function mergePersonaIntoCharacterCard(
+  card: Record<string, unknown>,
+  persona: PersonaDraft
+): Record<string, unknown> {
+  const originalData =
+    card.data && typeof card.data === "object" && !Array.isArray(card.data)
+      ? (card.data as Record<string, unknown>)
+      : card;
+  const extensions =
+    originalData.extensions &&
+    typeof originalData.extensions === "object" &&
+    !Array.isArray(originalData.extensions)
+      ? { ...(originalData.extensions as Record<string, unknown>) }
+      : {};
+  return {
+    spec: typeof card.spec === "string" ? card.spec : "chara_card_v2",
+    spec_version: typeof card.spec_version === "string" ? card.spec_version : "2.0",
+    data: {
+      ...originalData,
+      name: persona.name || stringValue(originalData.name) || "Character",
+      description: stringValue(originalData.description) || persona.description || "",
+      personality:
+        stringValue(originalData.personality) || persona.personality_description || "",
+      extensions: {
+        ...extensions,
+        hexis: persona,
+      },
+    },
+  };
+}
+
 // Map DB init_stage to our UI stages
 function dbStageToUiStage(dbStage: string): InitStage {
   if (dbStage === "complete") return "complete";
@@ -404,6 +575,20 @@ export default function Home() {
   const [characters, setCharacters] = useState<CharacterEntry[]>([]);
   const [selectedCharacter, setSelectedCharacter] = useState<CharacterEntry | null>(null);
   const [characterLoading, setCharacterLoading] = useState(false);
+  const [catalogProvider, setCatalogProvider] = useState<CatalogProvider>("chub");
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogTags, setCatalogTags] = useState("");
+  const [includeNsfw, setIncludeNsfw] = useState(false);
+  const [catalogSort, setCatalogSort] = useState("");
+  const [catalogResults, setCatalogResults] = useState<CatalogItem[]>([]);
+  const [catalogStatus, setCatalogStatus] = useState<string | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [selectedCatalogItem, setSelectedCatalogItem] = useState<CatalogItem | null>(null);
+  const [catalogCard, setCatalogCard] = useState<Record<string, unknown> | null>(null);
+  const [catalogPortrait, setCatalogPortrait] = useState<PortraitPayload | null>(null);
+  const [personaDraft, setPersonaDraft] = useState<PersonaDraft | null>(null);
+  const [catalogAdapting, setCatalogAdapting] = useState(false);
+  const [catalogApplying, setCatalogApplying] = useState(false);
 
   // Custom tier state
   const [customSection, setCustomSection] = useState<"identity" | "values" | "goals">(
@@ -515,6 +700,48 @@ export default function Home() {
         .catch(() => undefined);
     }
   }, [stage, characters.length]);
+
+  const loadCatalog = useCallback(async () => {
+    if (stage !== "character") return;
+    setCatalogLoading(true);
+    setCatalogStatus(null);
+    try {
+      const params = new URLSearchParams({
+        provider: catalogProvider,
+        query: catalogQuery,
+        include_nsfw: includeNsfw ? "true" : "false",
+      });
+      const tags = catalogTags
+        .split(/[,\n]/)
+        .map((tag) => tag.trim())
+        .filter(Boolean);
+      if (tags.length > 0) params.set("tags", tags.join(","));
+      if (catalogSort) params.set("sort", catalogSort);
+      const res = await fetch(`/api/init/character-catalog?${params.toString()}`, {
+        cache: "no-store",
+      });
+      const payload = (await res.json().catch(() => null)) as CatalogSearchResponse | null;
+      if (!res.ok || !payload) {
+        throw new Error("Unable to search this catalog.");
+      }
+      setCatalogResults(Array.isArray(payload.items) ? payload.items : []);
+      setCatalogStatus(payload.message);
+    } catch (err: unknown) {
+      setCatalogResults([]);
+      setCatalogStatus(errorMessage(err, "Unable to search this catalog."));
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, [catalogProvider, catalogQuery, catalogSort, catalogTags, includeNsfw, stage]);
+
+  useEffect(() => {
+    if (stage === "character") {
+      const timeout = setTimeout(() => {
+        loadCatalog().catch(() => undefined);
+      }, 300);
+      return () => clearTimeout(timeout);
+    }
+  }, [stage, catalogProvider, catalogTags, catalogSort, includeNsfw, loadCatalog]);
 
   // Fetch the live model catalog for a role's provider. Populates the free-text
   // model field with the recommended default only when it is currently empty.
@@ -701,6 +928,103 @@ export default function Home() {
     } finally {
       setBusy(false);
       setCharacterLoading(false);
+    }
+  };
+
+  const handleCatalogSelect = (item: CatalogItem) => {
+    setSelectedCharacter(null);
+    setSelectedCatalogItem(item);
+    setCatalogCard(null);
+    setCatalogPortrait(null);
+    setPersonaDraft(null);
+    setError(null);
+  };
+
+  const handleCatalogAdapt = async () => {
+    if (!selectedCatalogItem) return;
+    setBusy(true);
+    setCatalogAdapting(true);
+    setError(null);
+    try {
+      const downloaded = await postJson<CatalogDownloadResponse>("/api/init/character-catalog", {
+        provider: selectedCatalogItem.provider,
+        id: selectedCatalogItem.id,
+        path: selectedCatalogItem.path,
+        avatarUrl: selectedCatalogItem.avatarUrl,
+        pageUrl: selectedCatalogItem.pageUrl,
+      });
+      setSelectedCatalogItem(downloaded.item ?? selectedCatalogItem);
+      setCatalogCard(downloaded.card);
+      setCatalogPortrait(downloaded.portrait ?? null);
+      const adapted = await postJson<{ persona?: unknown }>("/api/init/adapt-character-card", {
+        card: downloaded.card,
+      });
+      setPersonaDraft(personaDraftFromPayload(adapted.persona));
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to adapt character card"));
+    } finally {
+      setBusy(false);
+      setCatalogAdapting(false);
+    }
+  };
+
+  const updatePersonaDraft = <K extends keyof PersonaDraft>(
+    key: K,
+    value: PersonaDraft[K]
+  ) => {
+    setPersonaDraft((prev) => (prev ? { ...prev, [key]: value } : prev));
+  };
+
+  const handleCatalogApply = async () => {
+    if (!selectedCatalogItem) return;
+    let card = catalogCard;
+    let draft = personaDraft;
+    let portrait = catalogPortrait;
+    setBusy(true);
+    setCatalogApplying(true);
+    setError(null);
+    try {
+      if (!card || !draft) {
+        const downloaded = await postJson<CatalogDownloadResponse>("/api/init/character-catalog", {
+          provider: selectedCatalogItem.provider,
+          id: selectedCatalogItem.id,
+          path: selectedCatalogItem.path,
+          avatarUrl: selectedCatalogItem.avatarUrl,
+          pageUrl: selectedCatalogItem.pageUrl,
+        });
+        card = downloaded.card;
+        portrait = downloaded.portrait ?? null;
+        setCatalogCard(card);
+        setCatalogPortrait(portrait);
+        const adapted = await postJson<{ persona?: unknown }>("/api/init/adapt-character-card", {
+          card,
+        });
+        draft = personaDraftFromPayload(adapted.persona);
+        setPersonaDraft(draft);
+      }
+      const finalCard = mergePersonaIntoCharacterCard(card, draft);
+      const filename = safeCharacterFilename(draft.name || selectedCatalogItem.title, selectedCatalogItem.provider);
+      const saved = await postJson<{ filename: string }>("/api/init/characters/save", {
+        card: finalCard,
+        filename,
+        portrait,
+      });
+      await postJson("/api/init/character-card", {
+        card: finalCard,
+        user_name: userName || "User",
+        character_filename: saved.filename,
+        portrait: saved.filename.replace(/\.json$/, ""),
+      });
+      const data = await (await fetch("/api/init/characters")).json();
+      if (Array.isArray(data?.characters)) setCharacters(data.characters);
+      await seedTimezone();
+      await loadStatus();
+      setStage("consent");
+    } catch (err: unknown) {
+      setError(errorMessage(err, "Failed to use catalog character"));
+    } finally {
+      setBusy(false);
+      setCatalogApplying(false);
     }
   };
 
@@ -892,13 +1216,13 @@ export default function Home() {
         filename: file.name,
       });
       if (res?.filename) {
-        setImportMsg(`Imported: ${res.filename}`);
+        setImportMsg(`Saved locally: ${res.filename}`);
         // Refresh character list
         const data = await (await fetch("/api/init/characters")).json();
         if (Array.isArray(data?.characters)) setCharacters(data.characters);
       }
     } catch {
-      setImportMsg("Failed to import character card");
+      setImportMsg("Failed to save local character card");
     }
     // Reset input so same file can be re-selected
     if (importFileRef.current) importFileRef.current.value = "";
@@ -1243,7 +1567,7 @@ export default function Home() {
                     {
                       key: "character",
                       title: "Character",
-                      desc: "Pick a personality preset from the gallery.",
+                      desc: "Browse catalogs, inspect cards, and adapt one into a persona.",
                       icon: "~",
                     },
                     {
@@ -1337,115 +1661,484 @@ export default function Home() {
                   />
                 </div>
 
-                {characters.length === 0 ? (
-                  <p className="text-sm text-[var(--ink-soft)]">Loading characters...</p>
-                ) : (
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {characters.map((ch) => {
-                      const isSelected = selectedCharacter?.filename === ch.filename;
-                      return (
-                        <button
-                          key={ch.filename}
-                          className={`group overflow-hidden rounded-lg border text-left transition ${
-                            isSelected
-                              ? "border-[var(--accent)] bg-[var(--surface-strong)] ring-2 ring-[var(--accent)]/30"
-                              : "border-[var(--outline)] bg-white hover:border-[var(--accent)]"
-                          }`}
-                          onClick={() => setSelectedCharacter(ch)}
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+                  <div className="space-y-5">
+                    <section className="rounded-2xl border border-[var(--outline)] bg-white p-4">
+                      <div className="flex flex-wrap gap-2">
+                        {catalogTabs.map((tab) => (
+                          <button
+                            key={tab.key}
+                            type="button"
+                            className={`rounded-full px-4 py-2 text-xs font-semibold transition ${
+                              catalogProvider === tab.key
+                                ? "bg-[var(--foreground)] text-white"
+                                : "border border-[var(--outline)] text-[var(--ink-soft)] hover:border-[var(--accent)] hover:text-[var(--foreground)]"
+                            }`}
+                            onClick={() => {
+                              setCatalogProvider(tab.key);
+                              setSelectedCatalogItem(null);
+                              setPersonaDraft(null);
+                              setCatalogCard(null);
+                              setCatalogPortrait(null);
+                            }}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="mt-3 text-xs text-[var(--ink-soft)]">
+                        {catalogTabs.find((tab) => tab.key === catalogProvider)?.blurb}
+                      </p>
+                      <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto]">
+                        <input
+                          className="w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
+                          value={catalogQuery}
+                          onChange={(event) => setCatalogQuery(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") loadCatalog();
+                          }}
+                          placeholder="Search by name, creator, tag, or archetype"
+                        />
+                        <div className="flex items-center gap-3">
+                          <label className="flex items-center gap-2 text-xs text-[var(--ink-soft)]">
+                            <input
+                              type="checkbox"
+                              checked={includeNsfw}
+                              onChange={(event) => setIncludeNsfw(event.target.checked)}
+                              className="accent-[var(--accent)]"
+                            />
+                            Show NSFW
+                          </label>
+                          <button
+                            type="button"
+                            className="rounded-full bg-[var(--foreground)] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
+                            onClick={loadCatalog}
+                            disabled={catalogLoading}
+                          >
+                            {catalogLoading ? "Searching..." : "Search"}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-3 md:grid-cols-[1fr_180px]">
+                        <input
+                          className="w-full rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
+                          value={catalogTags}
+                          onChange={(event) => setCatalogTags(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") loadCatalog();
+                          }}
+                          placeholder="Filter tags, separated by commas"
+                        />
+                        <select
+                          className="rounded-xl border border-[var(--outline)] bg-white px-4 py-3 text-sm"
+                          value={catalogSort}
+                          onChange={(event) => setCatalogSort(event.target.value)}
+                          aria-label="Sort catalog results"
                         >
-                          {ch.image ? (
-                            <div className="relative aspect-square w-full overflow-hidden bg-[var(--surface-strong)]">
-                              <Image
-                                src={`/api/init/characters/image?name=${encodeURIComponent(ch.image)}`}
-                                alt={ch.name}
-                                fill
-                                sizes="(min-width: 1024px) 30vw, (min-width: 640px) 45vw, 90vw"
-                                unoptimized
-                                className="object-cover transition-transform group-hover:scale-105"
-                              />
-                            </div>
+                          <option value="">Best match</option>
+                          <option value="popular">Popular</option>
+                          <option value="latest">Latest</option>
+                        </select>
+                      </div>
+                      {catalogStatus ? (
+                        <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          {catalogStatus}
+                        </p>
+                      ) : null}
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        {catalogLoading && catalogResults.length === 0 ? (
+                          <p className="text-sm text-[var(--ink-soft)]">Searching catalog...</p>
+                        ) : null}
+                        {!catalogLoading && catalogResults.length === 0 ? (
+                          <p className="text-sm text-[var(--ink-soft)]">
+                            No catalog results yet. Try a character name, creator, or tag.
+                          </p>
+                        ) : null}
+                        {catalogResults.map((item) => {
+                          const isSelected =
+                            selectedCatalogItem?.provider === item.provider &&
+                            selectedCatalogItem.id === item.id;
+                          return (
+                            <button
+                              key={`${item.provider}:${item.id}`}
+                              type="button"
+                              className={`group overflow-hidden rounded-lg border text-left transition ${
+                                isSelected
+                                  ? "border-[var(--accent)] bg-[var(--surface-strong)] ring-2 ring-[var(--accent)]/30"
+                                  : "border-[var(--outline)] bg-white hover:border-[var(--accent)]"
+                              }`}
+                              onClick={() => handleCatalogSelect(item)}
+                            >
+                              <div className="relative aspect-[4/5] w-full overflow-hidden bg-[var(--surface-strong)]">
+                                {item.avatarUrl ? (
+                                  <Image
+                                    src={item.avatarUrl}
+                                    alt={item.title}
+                                    fill
+                                    sizes="(min-width: 1024px) 18vw, (min-width: 640px) 36vw, 80vw"
+                                    unoptimized
+                                    className="object-cover transition-transform group-hover:scale-105"
+                                  />
+                                ) : (
+                                  <div className="flex h-full w-full items-center justify-center">
+                                    <span className="font-display text-3xl text-[var(--ink-soft)]">
+                                      {item.title.charAt(0)}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                              <div className="space-y-1 px-3 py-3">
+                                <div className="flex items-start justify-between gap-2">
+                                  <h4 className="font-display text-base leading-tight">
+                                    {item.title}
+                                  </h4>
+                                  {item.nsfw ? (
+                                    <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+                                      NSFW
+                                    </span>
+                                  ) : null}
+                                </div>
+                                {item.author ? (
+                                  <p className="text-xs text-[var(--ink-soft)]">by {item.author}</p>
+                                ) : null}
+                                <p className="line-clamp-2 text-xs text-[var(--ink-soft)]">
+                                  {item.description || "No description provided."}
+                                </p>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </section>
+
+                    <section className="rounded-2xl border border-[var(--outline)] bg-[var(--surface)] p-4">
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                            Installed
+                          </p>
+                          <p className="mt-1 text-sm text-[var(--ink-soft)]">
+                            Built-in and saved characters are always available locally.
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <input
+                            ref={importFileRef}
+                            type="file"
+                            accept=".json"
+                            className="hidden"
+                            onChange={handleImportCard}
+                          />
+                          <button
+                            type="button"
+                            className="rounded-md border border-dashed border-[var(--outline)] px-3 py-2 text-xs font-semibold text-[var(--ink-soft)] transition hover:border-[var(--accent)] hover:text-[var(--foreground)]"
+                            onClick={() => importFileRef.current?.click()}
+                          >
+                            Use Local JSON
+                          </button>
+                        </div>
+                      </div>
+                      {importMsg ? (
+                        <p className="mt-2 text-xs text-[var(--ink-soft)]">{importMsg}</p>
+                      ) : null}
+                      {characters.length === 0 ? (
+                        <p className="mt-4 text-sm text-[var(--ink-soft)]">
+                          Loading installed characters...
+                        </p>
+                      ) : (
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                          {characters.map((ch) => {
+                            const isSelected = selectedCharacter?.filename === ch.filename;
+                            return (
+                              <button
+                                key={ch.filename}
+                                type="button"
+                                className={`flex items-center gap-3 rounded-lg border bg-white p-2 text-left transition ${
+                                  isSelected
+                                    ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/30"
+                                    : "border-[var(--outline)] hover:border-[var(--accent)]"
+                                }`}
+                                onClick={() => {
+                                  setSelectedCharacter(ch);
+                                  setSelectedCatalogItem(null);
+                                  setPersonaDraft(null);
+                                  setCatalogCard(null);
+                                  setCatalogPortrait(null);
+                                }}
+                              >
+                                {ch.image ? (
+                                  <Image
+                                    src={`/api/init/characters/image?name=${encodeURIComponent(ch.image)}`}
+                                    alt={ch.name}
+                                    width={56}
+                                    height={56}
+                                    unoptimized
+                                    className="h-14 w-14 flex-shrink-0 rounded-lg object-cover"
+                                  />
+                                ) : (
+                                  <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--surface-strong)]">
+                                    <span className="font-display text-xl text-[var(--ink-soft)]">
+                                      {ch.name.charAt(0)}
+                                    </span>
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <p className="truncate font-semibold">{ch.name}</p>
+                                  <p className="line-clamp-2 text-xs text-[var(--ink-soft)]">
+                                    {ch.voice || ch.personality || ch.description}
+                                  </p>
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
+                  </div>
+
+                  <aside className="rounded-2xl border border-[var(--outline)] bg-white p-4">
+                    {!selectedCatalogItem && !selectedCharacter ? (
+                      <div className="flex min-h-80 items-center justify-center rounded-xl bg-[var(--surface)] p-6 text-center text-sm text-[var(--ink-soft)]">
+                        Select a catalog card or installed character to inspect it here.
+                      </div>
+                    ) : null}
+
+                    {selectedCharacter ? (
+                      <div className="space-y-4 text-sm">
+                        <p className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                          Installed Character
+                        </p>
+                        <div className="flex gap-4">
+                          {selectedCharacter.image && (
+                            <Image
+                              src={`/api/init/characters/image?name=${encodeURIComponent(selectedCharacter.image)}`}
+                              alt={selectedCharacter.name}
+                              width={96}
+                              height={96}
+                              unoptimized
+                              className="h-24 w-24 flex-shrink-0 rounded-lg object-cover"
+                            />
+                          )}
+                          <div>
+                            <p className="font-display text-2xl">{selectedCharacter.name}</p>
+                            {selectedCharacter.voice ? (
+                              <p className="mt-2 text-[var(--ink-soft)]">
+                                <strong>Voice:</strong> {selectedCharacter.voice}
+                              </p>
+                            ) : null}
+                            {selectedCharacter.values.length > 0 ? (
+                              <p className="mt-2 text-[var(--ink-soft)]">
+                                <strong>Values:</strong> {selectedCharacter.values.join(", ")}
+                              </p>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {selectedCatalogItem ? (
+                      <div className="space-y-5">
+                        <div className="flex gap-4">
+                          {selectedCatalogItem.avatarUrl ? (
+                            <Image
+                              src={selectedCatalogItem.avatarUrl}
+                              alt={selectedCatalogItem.title}
+                              width={120}
+                              height={150}
+                              unoptimized
+                              className="h-36 w-28 flex-shrink-0 rounded-lg object-cover"
+                            />
                           ) : (
-                            <div className="flex aspect-square w-full items-center justify-center bg-[var(--surface-strong)]">
+                            <div className="flex h-36 w-28 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--surface-strong)]">
                               <span className="font-display text-3xl text-[var(--ink-soft)]">
-                                {ch.name.charAt(0)}
+                                {selectedCatalogItem.title.charAt(0)}
                               </span>
                             </div>
                           )}
-                          <div className="px-4 py-3">
-                            <h4 className="font-display text-lg">{ch.name}</h4>
-                            {ch.values.length > 0 && (
-                              <p className="text-xs text-[var(--ink-soft)]">
-                                {ch.values.slice(0, 3).join(", ")}
+                          <div className="min-w-0">
+                            <p className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                              {selectedCatalogItem.sourceLabel}
+                            </p>
+                            <h3 className="mt-2 font-display text-2xl leading-tight">
+                              {selectedCatalogItem.title}
+                            </h3>
+                            {selectedCatalogItem.author ? (
+                              <p className="mt-1 text-sm text-[var(--ink-soft)]">
+                                by {selectedCatalogItem.author}
                               </p>
-                            )}
-                            {ch.voice && (
-                              <p className="mt-1 text-xs text-[var(--ink-soft)] line-clamp-2">
-                                {ch.voice.slice(0, 80)}
-                              </p>
-                            )}
+                            ) : null}
+                            <a
+                              href={selectedCatalogItem.pageUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-2 inline-block text-xs font-semibold text-[var(--accent-strong)] underline"
+                            >
+                              View source card
+                            </a>
                           </div>
+                        </div>
+                        <p className="text-sm text-[var(--ink-soft)]">
+                          {selectedCatalogItem.description || "No description provided."}
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {selectedCatalogItem.tags.slice(0, 8).map((tag) => (
+                            <span
+                              key={tag}
+                              className="rounded-full bg-[var(--surface-strong)] px-2 py-1 text-xs text-[var(--ink-soft)]"
+                            >
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs text-[var(--ink-soft)]">
+                          {Object.entries(selectedCatalogItem.stats).map(([key, value]) =>
+                            value === undefined ? null : (
+                              <div
+                                key={key}
+                                className="rounded-lg border border-[var(--outline)] px-3 py-2"
+                              >
+                                <p className="capitalize">{key}</p>
+                                <p className="font-semibold text-[var(--foreground)]">{value}</p>
+                              </div>
+                            )
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          className="w-full rounded-full bg-[var(--foreground)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+                          onClick={handleCatalogAdapt}
+                          disabled={busy || catalogAdapting}
+                        >
+                          {catalogAdapting
+                            ? "Adapting..."
+                            : personaDraft
+                              ? "Regenerate Hexis Draft"
+                              : "Select & Adapt"}
                         </button>
-                      );
-                    })}
-                  </div>
-                )}
 
-                {/* Import card button */}
-                <div className="flex items-center gap-3">
-                  <input
-                    ref={importFileRef}
-                    type="file"
-                    accept=".json"
-                    className="hidden"
-                    onChange={handleImportCard}
-                  />
-                  <button
-                    className="rounded-md border border-dashed border-[var(--outline)] px-4 py-2 text-xs font-semibold text-[var(--ink-soft)] transition hover:border-[var(--accent)] hover:text-[var(--foreground)]"
-                    onClick={() => importFileRef.current?.click()}
-                  >
-                    Import Card
-                  </button>
-                  {importMsg && (
-                    <span className="text-xs text-[var(--ink-soft)]">{importMsg}</span>
-                  )}
+                        {personaDraft ? (
+                          <div className="space-y-4 border-t border-[var(--outline)] pt-4">
+                            <p className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                              Hexis Persona Draft
+                            </p>
+                            <div className="grid gap-3">
+                              <input
+                                className="rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                                value={personaDraft.name}
+                                onChange={(event) => updatePersonaDraft("name", event.target.value)}
+                                placeholder="Name"
+                              />
+                              <input
+                                className="rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                                value={personaDraft.pronouns}
+                                onChange={(event) =>
+                                  updatePersonaDraft("pronouns", event.target.value)
+                                }
+                                placeholder="Pronouns"
+                              />
+                              <textarea
+                                className="h-20 rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                                value={personaDraft.voice}
+                                onChange={(event) => updatePersonaDraft("voice", event.target.value)}
+                                placeholder="Voice"
+                              />
+                              <textarea
+                                className="h-24 rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                                value={personaDraft.description}
+                                onChange={(event) =>
+                                  updatePersonaDraft("description", event.target.value)
+                                }
+                                placeholder="Identity description"
+                              />
+                              <textarea
+                                className="h-24 rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                                value={personaDraft.personality_description}
+                                onChange={(event) =>
+                                  updatePersonaDraft(
+                                    "personality_description",
+                                    event.target.value
+                                  )
+                                }
+                                placeholder="Personality summary"
+                              />
+                            </div>
+                            <div className="space-y-3">
+                              <p className="text-xs uppercase tracking-[0.3em] text-[var(--ink-soft)]">
+                                Big Five
+                              </p>
+                              {traitKeys.map((trait) => (
+                                <div key={trait}>
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="capitalize">{trait}</span>
+                                    <span>
+                                      {Math.round(personaDraft.personality_traits[trait] * 100)}%
+                                    </span>
+                                  </div>
+                                  <input
+                                    type="range"
+                                    min={0}
+                                    max={100}
+                                    value={Math.round(personaDraft.personality_traits[trait] * 100)}
+                                    onChange={(event) =>
+                                      updatePersonaDraft("personality_traits", {
+                                        ...personaDraft.personality_traits,
+                                        [trait]: Number(event.target.value) / 100,
+                                      })
+                                    }
+                                    className="mt-1 w-full accent-[var(--accent)]"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                            <textarea
+                              className="h-24 w-full rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                              value={personaDraft.values.join("\n")}
+                              onChange={(event) =>
+                                updatePersonaDraft("values", parseLines(event.target.value))
+                              }
+                              placeholder="Values, one per line"
+                            />
+                            <textarea
+                              className="h-24 w-full rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                              value={personaDraft.boundaries.join("\n")}
+                              onChange={(event) =>
+                                updatePersonaDraft("boundaries", parseLines(event.target.value))
+                              }
+                              placeholder="Boundaries, one per line"
+                            />
+                            <textarea
+                              className="h-32 w-full rounded-xl border border-[var(--outline)] px-3 py-2 text-sm"
+                              value={personaDraft.narrative}
+                              onChange={(event) =>
+                                updatePersonaDraft("narrative", event.target.value)
+                              }
+                              placeholder="Foundational self-knowledge narrative"
+                            />
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </aside>
                 </div>
 
-                {selectedCharacter && (
-                  <div className="flex gap-4 rounded-lg border border-[var(--accent)] bg-[var(--surface)] p-4 text-sm">
-                    {selectedCharacter.image && (
-                      <Image
-                        src={`/api/init/characters/image?name=${encodeURIComponent(selectedCharacter.image)}`}
-                        alt={selectedCharacter.name}
-                        width={80}
-                        height={80}
-                        unoptimized
-                        className="h-20 w-20 flex-shrink-0 rounded-lg object-cover"
-                      />
-                    )}
-                    <div>
-                      <p className="font-semibold">{selectedCharacter.name}</p>
-                      {selectedCharacter.voice && (
-                        <p className="mt-1 text-[var(--ink-soft)]">
-                          <strong>Voice:</strong> {selectedCharacter.voice}
-                        </p>
-                      )}
-                      {selectedCharacter.values.length > 0 && (
-                        <p className="mt-1 text-[var(--ink-soft)]">
-                          <strong>Values:</strong> {selectedCharacter.values.join(", ")}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex gap-3">
-                  <button
-                    className="rounded-full bg-[var(--foreground)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
-                    onClick={handleCharacterApply}
-                    disabled={busy || !selectedCharacter}
-                  >
-                    {characterLoading ? "Applying..." : "Use This Character"}
-                  </button>
+                <div className="flex flex-wrap gap-3">
+                  {selectedCatalogItem ? (
+                    <button
+                      className="rounded-full bg-[var(--foreground)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+                      onClick={handleCatalogApply}
+                      disabled={busy || catalogApplying}
+                    >
+                      {catalogApplying ? "Applying..." : "Use This Character"}
+                    </button>
+                  ) : (
+                    <button
+                      className="rounded-full bg-[var(--foreground)] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+                      onClick={handleCharacterApply}
+                      disabled={busy || !selectedCharacter}
+                    >
+                      {characterLoading ? "Applying..." : "Use Installed Character"}
+                    </button>
+                  )}
                   <button
                     className="rounded-full border border-[var(--outline)] px-6 py-3 text-sm font-semibold text-[var(--foreground)]"
                     onClick={() => setStage("choose_path")}

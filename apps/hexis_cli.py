@@ -3754,16 +3754,41 @@ def _start_local_embedding_service(wait_seconds: float = 90.0) -> bool:
 
     _LOCAL_EMBEDDING_LOG.parent.mkdir(parents=True, exist_ok=True)
     console.print(f"[muted]Starting local embedding service: {binary}[/muted]")
+    proc: subprocess.Popen[Any] | None = None
+    launch_detail = str(binary)
     try:
-        with _LOCAL_EMBEDDING_LOG.open("ab") as log_f:
+        screen_bin = shutil.which("screen") if sys.platform == "darwin" else None
+        if screen_bin:
+            # The Metal build currently requires a live tty on macOS. Detached
+            # screen keeps that invariant while still giving `hexis up/ui` a
+            # background sidecar derived from the installed binary.
+            session_name = f"hexis-embeddinggemma-{os.getpid()}"
+            launch_detail = f"{screen_bin} session {session_name}"
             proc = subprocess.Popen(
-                [str(binary)],
+                [
+                    screen_bin,
+                    "-L",
+                    "-Logfile",
+                    str(_LOCAL_EMBEDDING_LOG),
+                    "-dmS",
+                    session_name,
+                    str(binary),
+                ],
                 stdin=subprocess.DEVNULL,
-                stdout=log_f,
-                stderr=subprocess.STDOUT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 env=os.environ.copy(),
-                start_new_session=True,
             )
+        else:
+            with _LOCAL_EMBEDDING_LOG.open("ab") as log_f:
+                proc = subprocess.Popen(
+                    [str(binary)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    env=os.environ.copy(),
+                    start_new_session=True,
+                )
     except Exception as exc:
         console.print(
             f"[warn]Couldn't start local embedding service: {exc}[/warn]\n"
@@ -3776,7 +3801,7 @@ def _start_local_embedding_service(wait_seconds: float = 90.0) -> bool:
         if _port_ready(_LOCAL_EMBEDDING_PORT):
             console.print(f"[ok]Embedding service is ready on port {_LOCAL_EMBEDDING_PORT}.[/ok]")
             return True
-        if proc.poll() is not None:
+        if proc is not None and proc.poll() is not None and sys.platform != "darwin":
             console.print(
                 f"[warn]Embedding service exited with code {proc.returncode}.[/warn]\n"
                 f"  See log: [accent]{_LOCAL_EMBEDDING_LOG}[/accent]\n"
@@ -3787,7 +3812,8 @@ def _start_local_embedding_service(wait_seconds: float = 90.0) -> bool:
 
     console.print(
         f"[warn]Embedding service did not become ready within {int(wait_seconds)} seconds.[/warn]\n"
-        f"  It may still be downloading/loading the model. See log: [accent]{_LOCAL_EMBEDDING_LOG}[/accent]"
+        f"  It may still be downloading/loading the model. See log: [accent]{_LOCAL_EMBEDDING_LOG}[/accent]\n"
+        f"  Launcher: [accent]{launch_detail}[/accent]"
     )
     return False
 

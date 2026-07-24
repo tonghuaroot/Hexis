@@ -122,35 +122,39 @@ class TestURLIngestHandler:
     """Unit tests for URLIngestHandler."""
 
     @pytest.mark.asyncio(loop_scope="session")
-    async def test_passes_url_as_source_path_to_pipeline(self, monkeypatch):
-        import core.tools.ingest as ingest_tools
-        import services.ingest as ingest_pkg
+    async def test_queues_url_ingestion_with_url_as_source_path(self):
         from core.tools.ingest import URLIngestHandler
-        from services.ingest import Config
 
         url = "https://example.com/with/specification"
-        calls: list[dict] = []
 
-        async def fake_build_ingest_config(pool, **overrides):
-            return Config(llm_config={"provider": "openai", "model": "stub"}, verbose=False, **overrides)
+        class FakeAcquire:
+            def __init__(self, conn):
+                self.conn = conn
 
-        class FakePipeline:
-            def __init__(self, config):
-                self.config = config
+            async def __aenter__(self):
+                return self.conn
 
-            async def ingest_text(self, content, **kwargs):
-                calls.append({"content": content, **kwargs})
-                return 7
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
 
-            async def close(self):
-                calls.append({"closed": True})
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
 
-        monkeypatch.setattr(ingest_tools, "_fetch_url_content", lambda _url, _source_type: ("Exact URL text", "web"))
-        monkeypatch.setattr(ingest_tools, "_build_ingest_config", fake_build_ingest_config)
-        monkeypatch.setattr(ingest_pkg, "IngestionPipeline", FakePipeline)
+            async def fetchval(self, query, *args):
+                self.calls.append((query, args))
+                return "11111111-1111-4111-8111-111111111111"
 
+        class FakePool:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def acquire(self):
+                return FakeAcquire(self.conn)
+
+        conn = FakeConn()
         registry = MagicMock()
-        registry.pool = MagicMock()
+        registry.pool = FakePool(conn)
         context = ToolExecutionContext(
             tool_context=ToolContext.CHAT,
             call_id="url-ingest-test",
@@ -160,13 +164,15 @@ class TestURLIngestHandler:
         result = await URLIngestHandler().execute({"url": url, "mode": "fast"}, context)
 
         assert result.success, result.error
-        assert result.output["memories_created"] == 7
-        assert calls[0]["content"] == "Exact URL text"
-        assert calls[0]["title"] == url
-        assert calls[0]["source_type"] == "web"
-        assert calls[0]["path"] == url
-        assert calls[0]["file_type"] == ".html"
-        assert calls[-1] == {"closed": True}
+        assert result.output["accepted"] is True
+        assert result.output["url"] == url
+        assert len(conn.calls) == 1
+
+        payload = json.loads(conn.calls[0][1][0])
+        assert payload["url"] == url
+        assert payload["mode"] == "fast"
+        assert payload["source_type"] == "web"
+        assert payload["acquisition"] == "user"
 
 
 # ---------------------------------------------------------------------------

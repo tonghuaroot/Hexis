@@ -1,155 +1,24 @@
--- Hexis schema: helper functions.
+-- Keep embedding requests within the published embeddinggemma sidecar's
+-- documented/request-enforced batch limit.
+
 SET search_path = public, ag_catalog, "$user";
-SET check_function_bodies = off;
 
-CREATE OR REPLACE FUNCTION age_in_days(ts TIMESTAMPTZ) 
-RETURNS FLOAT
-LANGUAGE sql
-STABLE
-AS $$
-    SELECT EXTRACT(EPOCH FROM (NOW() - ts)) / 86400.0;
-$$;
-CREATE OR REPLACE FUNCTION calculate_relevance(
-    p_importance FLOAT,
-    p_decay_rate FLOAT,
-    p_created_at TIMESTAMPTZ,
-    p_last_accessed TIMESTAMPTZ
-) RETURNS FLOAT
-LANGUAGE sql
-STABLE
-AS $$
-    SELECT p_importance * EXP(
-        -p_decay_rate * LEAST(
-            age_in_days(p_created_at),
-            COALESCE(age_in_days(p_last_accessed), age_in_days(p_created_at)) * 0.5
-        )
-    );
-$$;
--- Memory strength in (0, 1] for the compression-native substrate
--- (docs/memory_retention_design.md §2). Encoded/grown importance decayed by the
--- time SINCE LAST REINFORCEMENT -- recall/attention resets the clock, so
--- reinforcement moves strength UP; an un-reinforced memory decays from creation
--- and fades. Generalizes calculate_relevance; STRENGTH IS COMPUTED ON READ,
--- never stored or mass-written. (The rehearsal "ceiling raise" is already
--- supplied by update_memory_importance on access; reinforcement_count is tracked
--- on the row for telemetry / later phases, not double-counted here.)
-CREATE OR REPLACE FUNCTION calculate_strength(
-    p_importance FLOAT,
-    p_decay_rate FLOAT,
-    p_created_at TIMESTAMPTZ,
-    p_last_reinforced TIMESTAMPTZ
-) RETURNS FLOAT
-LANGUAGE sql
-STABLE
-AS $$
-    SELECT GREATEST(0.0, LEAST(1.0,
-        COALESCE(p_importance, 0.5) * EXP(
-            -GREATEST(COALESCE(p_decay_rate, 0.01), 0.0)
-            * GREATEST(COALESCE(age_in_days(p_last_reinforced), age_in_days(p_created_at)), 0.0)
-        )
-    ));
-$$;
--- Current FELT emotional intensity in [0, encoded] (docs/memory_retention_design.md §8/§9).
--- Distinct from the immutable encoded PEAK (emotional_context.intensity) that drives
--- persistence/protection. Asymmetric + computed-on-read:
---   * base decays by AGE (created_at, never reset by recall) toward a floor -> a positive
---     memory keeps a permanent EMBER (floor > 0); a negative one heals toward CALM (floor 0);
---   * a transient RE-KINDLE keyed to last_reinforced recency stirs it back up on recall,
---     bounded by the encoded peak; negative re-kindle is weighted down so rumination can't
---     hold a wound hot while the base keeps healing.
-CREATE OR REPLACE FUNCTION current_emotional_intensity(
-    p_encoded_intensity FLOAT,
-    p_valence FLOAT,
-    p_created_at TIMESTAMPTZ,
-    p_last_reinforced TIMESTAMPTZ
-) RETURNS FLOAT
-LANGUAGE sql STABLE
-AS $$
-    WITH p AS (
-        SELECT
-            GREATEST(0.0, LEAST(1.0, COALESCE(p_encoded_intensity, 0.0))) AS enc,
-            COALESCE(p_valence, 0.0) AS val,
-            COALESCE(get_config_float('memory.intensity_ember_factor'), 0.5) AS ember,
-            COALESCE(get_config_float('memory.intensity_decay_rate'), 0.02) AS drate,
-            COALESCE(get_config_float('memory.intensity_rekindle_rate'), 0.5) AS rrate,
-            COALESCE(get_config_float('memory.intensity_negative_rekindle_weight'), 0.4) AS nrw
-    ),
-    b AS (
-        SELECT enc, val, rrate, nrw,
-               (GREATEST(0.0, val) * enc * ember) AS floor,
-               (GREATEST(0.0, val) * enc * ember)
-                 + (enc - GREATEST(0.0, val) * enc * ember)
-                   * EXP(GREATEST(-700.0, -drate * GREATEST(age_in_days(p_created_at), 0.0))) AS base
-        FROM p
-    )
-    SELECT LEAST(b.enc, GREATEST(b.floor,
-        b.base
-        + (CASE WHEN b.val >= 0 THEN 1.0 ELSE b.nrw END)
-          * (b.enc - b.base)
-          * EXP(GREATEST(-700.0, -b.rrate * GREATEST(age_in_days(COALESCE(p_last_reinforced, p_created_at)), 0.0)))
-    ))
-    FROM b;
-$$;
-CREATE OR REPLACE FUNCTION sync_embedding_service_config()
-RETURNS VOID AS $$
-DECLARE
-    configured_url TEXT;
-    configured_model TEXT;
-    current_url TEXT;
-    current_model TEXT;
-BEGIN
-    configured_url := NULLIF(current_setting('app.embedding_service_url', true), '');
-    IF configured_url IS NOT NULL THEN
-        SELECT value #>> '{}' INTO current_url
-        FROM config
-        WHERE key = 'embedding.service_url';
-        IF current_url IS DISTINCT FROM configured_url THEN
-            INSERT INTO config (key, value, description, updated_at)
-            VALUES ('embedding.service_url', to_jsonb(configured_url), 'URL of the embedding service', CURRENT_TIMESTAMP)
-            ON CONFLICT (key) DO UPDATE
-                SET value = EXCLUDED.value,
-                    description = EXCLUDED.description,
-                    updated_at = CURRENT_TIMESTAMP;
-        END IF;
-    END IF;
+INSERT INTO config (key, value, description, updated_at)
+VALUES (
+    'embedding.max_batch_size',
+    '32'::jsonb,
+    'Maximum texts sent to the embedding service in one HTTP request; embeddinggemma accepts up to 32',
+    CURRENT_TIMESTAMP
+)
+ON CONFLICT (key) DO UPDATE
+SET value = CASE
+        WHEN config.value IS NULL OR (config.value #>> '{}')::int <= 0 THEN EXCLUDED.value
+        WHEN (config.value #>> '{}')::int > 32 THEN EXCLUDED.value
+        ELSE config.value
+    END,
+    description = EXCLUDED.description,
+    updated_at = CURRENT_TIMESTAMP;
 
-    configured_model := NULLIF(current_setting('app.embedding_model_id', true), '');
-    IF configured_model IS NOT NULL THEN
-        SELECT value #>> '{}' INTO current_model
-        FROM config
-        WHERE key = 'embedding.model_id';
-        IF current_model IS DISTINCT FROM configured_model THEN
-            INSERT INTO config (key, value, description, updated_at)
-            VALUES ('embedding.model_id', to_jsonb(configured_model), 'Embedding model id for local / custom embedding services', CURRENT_TIMESTAMP)
-            ON CONFLICT (key) DO UPDATE
-                SET value = EXCLUDED.value,
-                    description = EXCLUDED.description,
-                    updated_at = CURRENT_TIMESTAMP;
-        END IF;
-    END IF;
-END;
-$$ LANGUAGE plpgsql;
-CREATE OR REPLACE FUNCTION ensure_embedding_prefix(
-    p_text TEXT,
-    p_prefix TEXT DEFAULT 'search_document'
-) RETURNS TEXT AS $$
-DECLARE
-    normalized_prefix TEXT;
-BEGIN
-    IF p_text IS NULL THEN
-        RETURN NULL;
-    END IF;
-    IF p_text ~* '^\s*(search_document|search_query|clustering|classification)\s*:' THEN
-        RETURN ltrim(p_text);
-    END IF;
-    normalized_prefix := NULLIF(btrim(p_prefix), '');
-    IF normalized_prefix IS NULL THEN
-        RETURN p_text;
-    END IF;
-    RETURN normalized_prefix || ': ' || p_text;
-END;
-$$ LANGUAGE plpgsql IMMUTABLE;
-DROP FUNCTION IF EXISTS get_embeddings(TEXT[]);
 DROP FUNCTION IF EXISTS get_embedding(TEXT);
 CREATE OR REPLACE FUNCTION get_embedding(text_contents TEXT[])
 RETURNS vector[] AS $$
@@ -378,39 +247,3 @@ RETURNS vector[] AS $$
 	        RAISE EXCEPTION 'Failed to get embeddings: %', SQLERRM;
 	END;
 $$ LANGUAGE plpgsql;
-
-CREATE OR REPLACE FUNCTION prefetch_embeddings(text_contents TEXT[])
-RETURNS INT AS $$
-DECLARE
-    embeddings vector[];
-BEGIN
-    embeddings := get_embedding(text_contents);
-    RETURN COALESCE(array_length(embeddings, 1), 0);
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE OR REPLACE FUNCTION check_embedding_service_health()
-RETURNS BOOLEAN AS $$
-DECLARE
-    service_url TEXT;
-    health_url TEXT;
-    response http_response;
-BEGIN
-    PERFORM sync_embedding_service_config();
-    service_url := (SELECT CASE WHEN jsonb_typeof(value) = 'string' THEN value #>> '{}' ELSE value::text END FROM config WHERE key = 'embedding.service_url');
-    IF service_url ~ '/api/embed$' THEN
-        health_url := regexp_replace(service_url, '/api/embed$', '/api/tags');
-    ELSE
-        health_url := regexp_replace(service_url, '^(https?://[^/]+).*$', '\1/health');
-    END IF;
-
-    SELECT * INTO response FROM http_get(health_url);
-
-    RETURN response.status = 200;
-EXCEPTION
-    WHEN OTHERS THEN
-        RETURN FALSE;
-END;
-$$ LANGUAGE plpgsql;
-
-SET check_function_bodies = on;

@@ -61,3 +61,43 @@ def test_local_embedding_sidecar_rejects_legacy_port(monkeypatch, tmp_path):
 
     assert hexis_cli._uses_local_embedding_sidecar(env_file) is False
     assert hexis_cli._uses_legacy_embedding_sidecar_port(env_file) is True
+
+
+def test_start_local_embedding_uses_screen_on_macos(monkeypatch, tmp_path):
+    from apps import hexis_cli
+
+    binary = tmp_path / "embeddinggemma"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    log_path = tmp_path / "embeddinggemma.log"
+    launched: list[list[str]] = []
+
+    class FakeProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    def fake_which(name: str):
+        if name == "embeddinggemma":
+            return str(binary)
+        if name == "screen":
+            return "/usr/bin/screen"
+        return None
+
+    def fake_popen(args, **_kwargs):
+        launched.append(list(args))
+        return FakeProc()
+
+    port_checks = iter([False, True])
+
+    monkeypatch.setattr(hexis_cli.sys, "platform", "darwin")
+    monkeypatch.setattr(hexis_cli.shutil, "which", fake_which)
+    monkeypatch.setattr(hexis_cli.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(hexis_cli, "_LOCAL_EMBEDDING_LOG", log_path)
+    monkeypatch.setattr(hexis_cli, "_port_ready", lambda _port: next(port_checks))
+
+    assert hexis_cli._start_local_embedding_service(wait_seconds=1) is True
+    assert launched
+    assert launched[0][:4] == ["/usr/bin/screen", "-L", "-Logfile", str(log_path)]
+    assert str(binary) in launched[0]

@@ -125,6 +125,8 @@ if _API_KEY:
 # ---------------------------------------------------------------------------
 
 class ChatVisualAttachment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     mime_type: str
     data_url: str
@@ -132,6 +134,8 @@ class ChatVisualAttachment(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     message: str
     history: list[dict[str, Any]] | None = None
     prompt_addenda: list[str] | None = None
@@ -1496,6 +1500,16 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
         conscious_started = False
         active_stream_phase = "conscious_final"
         done_sent = False
+        visual_attachment_count = len(req.visual_attachments or [])
+
+        if visual_attachment_count:
+            plural = "image" if visual_attachment_count == 1 else "images"
+            yield _sse_event("log", {
+                "id": str(uuid.uuid4()),
+                "kind": "visual_attachment",
+                "title": "Visual Attachment",
+                "detail": f"{visual_attachment_count} {plural} attached to this model request",
+            })
 
         def build_done_payload() -> dict[str, Any]:
             payload: dict[str, Any] = {"assistant": full_text, "session_id": session_id}
@@ -1514,7 +1528,7 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
             gateway_source_id=f"chat:api:{session_id}",
             gateway_payload={
                 "message": user_message[:500],
-                "visual_attachment_count": len(req.visual_attachments or []),
+                "visual_attachment_count": visual_attachment_count,
             },
             visual_attachments=[
                 attachment.model_dump()
@@ -1525,6 +1539,11 @@ async def _stream_chat(req: ChatRequest) -> AsyncIterator[str]:
                 phase = event.data.get("phase", "")
                 status = event.data.get("status", "")
                 if phase == "memory_recall":
+                    if status == "start":
+                        yield _sse_event("phase_start", {"phase": "memory_recall"})
+                        continue
+                    if status and status != "end":
+                        continue
                     count = event.data.get("count", 0)
                     yield _sse_event("log", {
                         "id": str(uuid.uuid4()),

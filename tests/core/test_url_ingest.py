@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -122,6 +122,9 @@ class TestDetectURLSourceType:
     def test_pdf_url_case_insensitive(self):
         assert _detect_url_source_type("https://example.com/paper.PDF") == "pdf"
 
+    def test_arxiv_pdf_path(self):
+        assert _detect_url_source_type("https://arxiv.org/pdf/2509.25149") == "pdf"
+
     def test_rss_url(self):
         assert _detect_url_source_type("https://example.com/feed.rss") == "rss"
 
@@ -169,115 +172,94 @@ class TestYouTubeTranscriptReader:
 # ---------------------------------------------------------------------------
 
 class TestURLIngestExecution:
+    class _FakeAcquire:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def __aenter__(self):
+            return self.conn
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakePool:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def acquire(self):
+            return TestURLIngestExecution._FakeAcquire(self.conn)
+
+    class _FakeConn:
+        def __init__(self, job_id="11111111-1111-4111-8111-111111111111", exc=None):
+            self.job_id = job_id
+            self.exc = exc
+            self.calls = []
+
+        async def fetchval(self, query, *args):
+            self.calls.append((query, args))
+            if self.exc is not None:
+                raise self.exc
+            return self.job_id
+
     @pytest.mark.asyncio
-    async def test_fetch_failure(self):
+    async def test_enqueue_failure(self):
         handler = URLIngestHandler()
+        conn = self._FakeConn(exc=RuntimeError("database unavailable"))
         ctx = _make_context()
+        ctx.registry.pool = self._FakePool(conn)
 
-        with patch("core.tools.ingest.asyncio") as mock_asyncio, \
-             patch("core.tools.ingest._detect_url_source_type", return_value="web"):
-            mock_loop = MagicMock()
-            mock_asyncio.get_running_loop.return_value = mock_loop
-            mock_loop.run_in_executor = AsyncMock(
-                side_effect=RuntimeError("Connection refused")
-            )
-
-            result = await handler.execute(
-                {"url": "https://example.com/article"}, ctx
-            )
+        result = await handler.execute({"url": "https://example.com/article"}, ctx)
 
         assert not result.success
-        assert result.error_type == ToolErrorType.NETWORK_ERROR
+        assert result.error_type == ToolErrorType.EXECUTION_FAILED
+        assert "could not be queued" in result.error
 
     @pytest.mark.asyncio
-    async def test_empty_content(self):
+    async def test_successful_enqueue(self):
         handler = URLIngestHandler()
+        conn = self._FakeConn()
         ctx = _make_context()
+        ctx.registry.pool = self._FakePool(conn)
 
-        with patch("core.tools.ingest.asyncio") as mock_asyncio, \
-             patch("core.tools.ingest._detect_url_source_type", return_value="web"):
-            mock_loop = MagicMock()
-            mock_asyncio.get_running_loop.return_value = mock_loop
-            mock_loop.run_in_executor = AsyncMock(return_value=("", "web"))
-
-            result = await handler.execute(
-                {"url": "https://example.com/empty"}, ctx
-            )
-
-        assert not result.success
-        assert "No extractable content" in result.error
-
-    @pytest.mark.asyncio
-    async def test_successful_ingest(self):
-        handler = URLIngestHandler()
-        ctx = _make_context()
-
-        content = "[Source: https://example.com/article]\n\nUseful content."
-
-        call_count = 0
-
-        async def mock_run_in_executor(executor, fn, *args):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return (content, "web")
-            return 5
-
-        with patch("core.tools.ingest.asyncio") as mock_asyncio, \
-             patch("core.tools.ingest._build_ingest_config") as mock_config, \
-             patch("core.tools.ingest._detect_url_source_type", return_value="web"), \
-             patch("services.ingest.IngestionPipeline") as mock_pipeline_cls:
-            mock_loop = MagicMock()
-            mock_asyncio.get_running_loop.return_value = mock_loop
-            mock_loop.run_in_executor = mock_run_in_executor
-            mock_config.return_value = MagicMock()
-            pipeline = MagicMock()
-            pipeline.ingest_text = AsyncMock(return_value=5)
-            pipeline.close = AsyncMock()
-            mock_pipeline_cls.return_value = pipeline
-
-            result = await handler.execute(
-                {"url": "https://example.com/article", "mode": "fast"}, ctx
-            )
+        result = await handler.execute(
+            {
+                "url": "https://example.com/article",
+                "mode": "fast",
+                "title": "Example Article",
+                "keep_reason": "Useful technical background",
+                "sensitivity": "private",
+            },
+            ctx,
+        )
 
         assert result.success
-        assert result.output["memories_created"] == 5
+        assert result.output["accepted"] is True
+        assert result.output["job_id"] == "11111111-1111-4111-8111-111111111111"
         assert result.output["url"] == "https://example.com/article"
         assert result.output["mode"] == "fast"
         assert result.output["source_type"] == "web"
+        assert "Queued URL ingestion" in result.display_output
+        assert len(conn.calls) == 1
+        query, args = conn.calls[0]
+        assert "enqueue_ingestion_job('url'" in query
+        import json
+
+        payload = json.loads(args[0])
+        assert payload["title"] == "Example Article"
+        assert payload["sensitivity"] == "private"
+        assert payload["acquired_reason"] == "Useful technical background"
+        assert args[1].startswith("url:")
 
     @pytest.mark.asyncio
     async def test_youtube_source_type_in_output(self):
         handler = URLIngestHandler()
+        conn = self._FakeConn()
         ctx = _make_context()
+        ctx.registry.pool = self._FakePool(conn)
 
-        transcript = "[Source: YouTube]\n\nHello world transcript."
-
-        call_count = 0
-
-        async def mock_run_in_executor(executor, fn, *args):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return (transcript, "youtube")
-            return 3
-
-        with patch("core.tools.ingest.asyncio") as mock_asyncio, \
-             patch("core.tools.ingest._build_ingest_config") as mock_config, \
-             patch("core.tools.ingest._detect_url_source_type", return_value="youtube"), \
-             patch("services.ingest.IngestionPipeline") as mock_pipeline_cls:
-            mock_loop = MagicMock()
-            mock_asyncio.get_running_loop.return_value = mock_loop
-            mock_loop.run_in_executor = mock_run_in_executor
-            mock_config.return_value = MagicMock()
-            pipeline = MagicMock()
-            pipeline.ingest_text = AsyncMock(return_value=3)
-            pipeline.close = AsyncMock()
-            mock_pipeline_cls.return_value = pipeline
-
-            result = await handler.execute(
-                {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, ctx
-            )
+        result = await handler.execute(
+            {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, ctx
+        )
 
         assert result.success
         assert result.output["source_type"] == "youtube"

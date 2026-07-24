@@ -136,6 +136,94 @@ async def test_chat_sends_done_before_post_loop_memory_events(client):
     assert done_index < memory_index
 
 
+async def test_chat_memory_recall_start_does_not_log_fake_zero(client):
+    """The memory recall start event has no count; only the end event should log."""
+    async def fake_stream(*args, **kwargs):
+        yield AgentEventData(
+            event=AgentEvent.PHASE_CHANGE,
+            data={"phase": "memory_recall", "status": "start"},
+        )
+        yield AgentEventData(
+            event=AgentEvent.PHASE_CHANGE,
+            data={"phase": "memory_recall", "status": "end", "count": 7},
+        )
+        yield AgentEventData(event=AgentEvent.LOOP_START)
+        yield AgentEventData(event=AgentEvent.TEXT_DELTA, data={"text": "I remember."})
+        yield AgentEventData(
+            event=AgentEvent.LOOP_END,
+            data={"stopped_reason": "completed"},
+        )
+
+    with patch.object(web_module, "stream_chat_events", fake_stream):
+        resp = await client.post("/api/chat", json={"message": "what do you remember"})
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    logs = [
+        json.loads(event["data"])
+        for event in events
+        if event["event"] == "log"
+        and json.loads(event["data"]).get("kind") == "memory_recall"
+    ]
+    assert [log["detail"] for log in logs] == ["Retrieved 7 relevant memories"]
+
+
+async def test_chat_forwards_visual_attachments_and_logs_model_context(client):
+    """Image attachments must reach the Python API as visual model context."""
+    captured: dict[str, object] = {}
+
+    async def fake_stream(*args, **kwargs):
+        captured.update(kwargs)
+        yield AgentEventData(event=AgentEvent.LOOP_START)
+        yield AgentEventData(event=AgentEvent.TEXT_DELTA, data={"text": "I can see it."})
+        yield AgentEventData(
+            event=AgentEvent.LOOP_END,
+            data={"stopped_reason": "completed"},
+        )
+
+    data_url = "data:image/png;base64,aW1hZ2U="
+    with patch.object(web_module, "stream_chat_events", fake_stream):
+        resp = await client.post(
+            "/api/chat",
+            json={
+                "message": "[Attached image \"face.png\" - visible in this turn.]",
+                "visual_attachments": [
+                    {
+                        "name": "face.png",
+                        "mime_type": "image/png",
+                        "data_url": data_url,
+                        "byte_size": 5,
+                    }
+                ],
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["gateway_payload"] == {
+        "message": "[Attached image \"face.png\" - visible in this turn.]",
+        "visual_attachment_count": 1,
+    }
+    assert captured["visual_attachments"] == [
+        {
+            "name": "face.png",
+            "mime_type": "image/png",
+            "data_url": data_url,
+            "byte_size": 5,
+        }
+    ]
+    events = _parse_sse(resp.text)
+    logs = [
+        json.loads(event["data"])
+        for event in events
+        if event["event"] == "log"
+    ]
+    assert any(
+        log.get("kind") == "visual_attachment"
+        and log.get("detail") == "1 image attached to this model request"
+        for log in logs
+    )
+
+
 async def test_chat_missing_message(client):
     """Chat endpoint rejects requests without a message."""
     resp = await client.post("/api/chat", json={})

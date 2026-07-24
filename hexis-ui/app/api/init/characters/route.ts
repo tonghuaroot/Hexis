@@ -1,4 +1,4 @@
-import { readdir, readFile, access } from "fs/promises";
+import { readdir, readFile } from "fs/promises";
 import path from "path";
 import os from "os";
 
@@ -23,7 +23,10 @@ function characterSearchDirs(): string[] {
  * Scan all search dirs and return merged file lists (first-seen filename wins).
  * Returns map of filename -> { dir, filename }.
  */
-async function mergedFiles(): Promise<Map<string, { dir: string; filename: string }>> {
+async function mergedFiles(): Promise<{
+  files: Map<string, { dir: string; filename: string }>;
+  allFileSets: Map<string, Set<string>>;
+}> {
   const seen = new Map<string, { dir: string; filename: string }>();
   const allFiles = new Map<string, Set<string>>(); // dir -> set of all files
 
@@ -41,9 +44,7 @@ async function mergedFiles(): Promise<Map<string, { dir: string; filename: strin
     }
   }
 
-  // Attach the allFiles info so callers can check for images
-  (seen as any).__allFiles = allFiles;
-  return seen;
+  return { files: seen, allFileSets: allFiles };
 }
 
 export async function GET(request: Request) {
@@ -70,8 +71,7 @@ export async function GET(request: Request) {
 
   // List available characters (merged from all dirs)
   try {
-    const files = await mergedFiles();
-    const allFileSets = (files as any).__allFiles as Map<string, Set<string>>;
+    const { files, allFileSets } = await mergedFiles();
 
     const characters = await Promise.all(
       Array.from(files.values()).map(async ({ dir, filename }) => {
@@ -91,8 +91,13 @@ export async function GET(request: Request) {
 
           // Check for image in any search dir
           let hasImage = false;
-          for (const [d, fileSet] of allFileSets) {
-            if (fileSet.has(`${stem}.jpg`)) {
+          for (const fileSet of allFileSets.values()) {
+            if (
+              fileSet.has(`${stem}.jpg`) ||
+              fileSet.has(`${stem}.jpeg`) ||
+              fileSet.has(`${stem}.png`) ||
+              fileSet.has(`${stem}.webp`)
+            ) {
               hasImage = true;
               break;
             }

@@ -690,6 +690,18 @@ def _image_url_from_part(part: dict[str, Any]) -> str | None:
     return str(url) if url else None
 
 
+def _image_detail_from_part(part: dict[str, Any]) -> str:
+    raw = part.get("detail")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    raw_image_url = part.get("image_url")
+    if isinstance(raw_image_url, dict):
+        raw = raw_image_url.get("detail")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return "auto"
+
+
 def _data_url_parts(url: str) -> tuple[str | None, str | None]:
     if not url.startswith("data:") or "," not in url:
         return None, None
@@ -714,7 +726,13 @@ def _content_to_openai_chat(content: Any) -> Any:
         if ptype in {"image_url", "input_image"}:
             url = _image_url_from_part(part)
             if url:
-                parts.append({"type": "image_url", "image_url": {"url": url}})
+                parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": url,
+                        "detail": _image_detail_from_part(part),
+                    },
+                })
     return parts or _content_text(content)
 
 
@@ -734,7 +752,11 @@ def _content_to_responses(content: Any, *, assistant: bool = False) -> Any:
         if not assistant and ptype in {"image_url", "input_image"}:
             url = _image_url_from_part(part)
             if url:
-                parts.append({"type": "input_image", "image_url": url})
+                parts.append({
+                    "type": "input_image",
+                    "image_url": url,
+                    "detail": _image_detail_from_part(part),
+                })
     return parts or _content_text(content)
 
 

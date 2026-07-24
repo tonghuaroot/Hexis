@@ -5,6 +5,12 @@ import os from "os";
 export const runtime = "nodejs";
 
 const USER_CHARACTERS_DIR = path.join(os.homedir(), ".hexis", "characters");
+const IMAGE_EXTENSION_BY_MIME: Record<string, string> = {
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+};
 
 export async function POST(request: Request) {
   try {
@@ -37,16 +43,28 @@ export async function POST(request: Request) {
     const destPath = path.join(USER_CHARACTERS_DIR, safeName);
     await writeFile(destPath, JSON.stringify(card, null, 2), "utf-8");
 
-    // Write portrait if provided (base64)
-    if (portrait && typeof portrait === "string") {
-      const imgName = safeName.replace(/\.json$/, ".jpg");
+    // Write portrait if provided (base64 string legacy shape, or typed payload).
+    const portraitData =
+      typeof portrait === "string"
+        ? portrait
+        : typeof portrait?.dataBase64 === "string"
+          ? portrait.dataBase64
+          : "";
+    const portraitMime =
+      typeof portrait === "object" && typeof portrait?.mimeType === "string"
+        ? portrait.mimeType.toLowerCase()
+        : "image/jpeg";
+    if (portraitData) {
+      const extension = IMAGE_EXTENSION_BY_MIME[portraitMime] ?? ".jpg";
+      const imgName = safeName.replace(/\.json$/, extension);
       const imgPath = path.join(USER_CHARACTERS_DIR, imgName);
-      const buffer = Buffer.from(portrait, "base64");
+      const buffer = Buffer.from(portraitData, "base64");
       await writeFile(imgPath, buffer);
     }
 
     return Response.json({ filename: safeName, path: destPath });
-  } catch (err: any) {
-    return Response.json({ error: err.message ?? "Failed to save character" }, { status: 500 });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to save character";
+    return Response.json({ error: message }, { status: 500 });
   }
 }

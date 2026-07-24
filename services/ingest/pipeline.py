@@ -47,6 +47,7 @@ from .readers import (
     ImageReader,
     LatexReader,
     NotebookReader,
+    PDFReader,
     PptxReader,
     ReaderResult,
     RssReader,
@@ -54,6 +55,7 @@ from .readers import (
     VideoReader,
     WebReader,
     XlsxReader,
+    YouTubeTranscriptReader,
     get_reader,
 )
 from .sectioning import CHUNKER_VERSION, Sectioner
@@ -98,6 +100,58 @@ class IngestionPipeline:
         self.last_result: dict[str, Any] = {}
         # DB-owned spreadsheet row cap; capping always warns (readers.py).
         XlsxReader.MAX_ROWS_PER_SHEET = max(1, int(config.xlsx_max_rows_per_sheet or 5000))
+
+    def _detect_url_source_type(self, url: str) -> str:
+        """Route URL ingestion to the reader that will preserve useful shape."""
+        if YouTubeTranscriptReader.can_handle(url):
+            return "youtube"
+
+        from urllib.parse import urlparse
+
+        path_lower = urlparse(url).path.lower()
+        if path_lower.endswith(".pdf") or path_lower.startswith("/pdf/"):
+            return "pdf"
+        if path_lower.endswith((".rss", ".atom", ".xml")):
+            return "rss"
+        return "web"
+
+    def _read_pdf_url_result(self, url: str) -> tuple[ReaderResult, dict[str, Any]]:
+        import tempfile
+        import urllib.request
+        from urllib.parse import urlparse
+
+        request = urllib.request.Request(url, headers={"User-Agent": "Hexis/1.0"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read()
+            mime_type = response.headers.get("Content-Type") or "application/pdf"
+
+        original_filename = Path(urlparse(url).path).name or "download.pdf"
+        if not original_filename.lower().endswith(".pdf"):
+            original_filename = f"{original_filename}.pdf"
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
+            tmp.write(raw)
+            tmp.flush()
+            reader_result = PDFReader.read_result(Path(tmp.name))
+
+        header = f"[Source: {url}]\n[Format: PDF]\n\n"
+        reader_result.text = header + reader_result.text
+        for anchor in reader_result.anchors:
+            anchor.char_offset += len(header)
+        reader_result.metadata.update({"url": url})
+
+        artifact_info = self._prepare_artifact(
+            raw,
+            original_filename=original_filename,
+            mime_type=mime_type,
+            storage_kind="url",
+            metadata={
+                "url": url,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        artifact_info["storage_ref"] = artifact_info.get("storage_ref") or url
+        return reader_result, artifact_info
 
     async def ingest_file(self, file_path: Path) -> int:
         self.last_result = {}
@@ -282,43 +336,73 @@ class IngestionPipeline:
         if self.config.verbose:
             _emit(self.config, f"\nFetching: {url}")
 
+        source_type = self._detect_url_source_type(url)
         reader_result: ReaderResult | None = None
         artifact_info: dict[str, Any] | None = None
         try:
-            reader_result = WebReader.read_result(url)
-            content = reader_result.text
-            metrics.source_size_bytes = len(content.encode("utf-8"))
-            if reader_result.artifact_bytes:
-                # The fetched HTML is the original artifact for a web source.
-                try:
-                    artifact_info = self._prepare_artifact(
-                        reader_result.artifact_bytes,
-                        original_filename=None,
-                        mime_type=reader_result.artifact_mime or "text/html",
-                        storage_kind="url",
-                        metadata={
-                            "url": url,
-                            "fetched_at": reader_result.metadata.get("fetched_at"),
-                        },
-                    )
-                    artifact_info["storage_ref"] = artifact_info.get("storage_ref") or url
-                except Exception as exc:
-                    _emit(self.config, f"  Warning: could not capture web artifact: {exc}")
-        except Exception:
-            # Fallback: try as RSS/Atom feed
-            try:
+            if source_type == "youtube":
+                content = YouTubeTranscriptReader.read(url)
+                reader_result = ReaderResult(
+                    text=content,
+                    extractor_name="YouTubeTranscriptReader",
+                    metadata={"url": url},
+                )
+            elif source_type == "pdf":
+                reader_result, artifact_info = self._read_pdf_url_result(url)
+                content = reader_result.text
+            elif source_type == "rss":
                 content = RssReader.read(url)
-                if content:
-                    metrics.source_size_bytes = len(content.encode("utf-8"))
-                    if self.config.verbose:
-                        _emit(self.config, "  Fetched as RSS/Atom feed")
-                else:
+                if not content:
                     raise RuntimeError("No RSS entries found")
-            except Exception as exc2:
-                _emit(self.config, f"  Error fetching URL: {exc2}")
-                self.stats["errors"] += 1
-                metrics.errors.append(str(exc2))
-                return 0
+                reader_result = ReaderResult(
+                    text=content,
+                    extractor_name="RssReader",
+                    metadata={"url": url},
+                )
+            else:
+                reader_result = WebReader.read_result(url)
+                content = reader_result.text
+                if reader_result.artifact_bytes:
+                    # The fetched HTML is the original artifact for a web source.
+                    try:
+                        artifact_info = self._prepare_artifact(
+                            reader_result.artifact_bytes,
+                            original_filename=None,
+                            mime_type=reader_result.artifact_mime or "text/html",
+                            storage_kind="url",
+                            metadata={
+                                "url": url,
+                                "fetched_at": reader_result.metadata.get("fetched_at"),
+                            },
+                        )
+                        artifact_info["storage_ref"] = artifact_info.get("storage_ref") or url
+                    except Exception as exc:
+                        _emit(self.config, f"  Warning: could not capture web artifact: {exc}")
+            metrics.source_size_bytes = len(content.encode("utf-8"))
+        except Exception:
+            if source_type == "web":
+                # Fallback: try as RSS/Atom feed
+                try:
+                    content = RssReader.read(url)
+                    if content:
+                        source_type = "rss"
+                        reader_result = ReaderResult(
+                            text=content,
+                            extractor_name="RssReader",
+                            metadata={"url": url},
+                        )
+                        metrics.source_size_bytes = len(content.encode("utf-8"))
+                        if self.config.verbose:
+                            _emit(self.config, "  Fetched as RSS/Atom feed")
+                    else:
+                        raise RuntimeError("No RSS entries found")
+                except Exception as exc2:
+                    _emit(self.config, f"  Error fetching URL: {exc2}")
+                    self.stats["errors"] += 1
+                    metrics.errors.append(str(exc2))
+                    return 0
+            else:
+                raise
 
         if not title:
             title_match = re.search(r"\[Title: (.+?)\]", content)
@@ -329,11 +413,11 @@ class IngestionPipeline:
 
         doc = DocumentInfo(
             title=title,
-            source_type="web",
+            source_type=source_type,
             content_hash=_hash_text(content),
             word_count=_word_count(content),
             path=url,
-            file_type=".html",
+            file_type=".html" if source_type == "web" else f".{source_type}",
         )
         return await self._ingest_content(
             content, doc, metrics, section_path=Path("web_content.md"),

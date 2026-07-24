@@ -6,6 +6,12 @@ export const runtime = "nodejs";
 
 const PACKAGE_CHARACTERS_DIR = path.resolve(process.cwd(), "..", "characters");
 const USER_CHARACTERS_DIR = path.join(os.homedir(), ".hexis", "characters");
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+};
 
 function characterSearchDirs(): string[] {
   const dirs: string[] = [];
@@ -31,18 +37,20 @@ export async function GET(request: Request) {
 
   // Search all character dirs for the image
   for (const dir of characterSearchDirs()) {
-    const filePath = path.join(dir, `${safeName}.jpg`);
-    try {
-      await access(filePath);
-      const buffer = await readFile(filePath);
-      return new Response(buffer, {
-        headers: {
-          "Content-Type": "image/jpeg",
-          "Cache-Control": "public, max-age=86400, immutable",
-        },
-      });
-    } catch {
-      continue;
+    for (const [extension, contentType] of Object.entries(IMAGE_EXTENSIONS)) {
+      const filePath = path.join(dir, `${safeName}${extension}`);
+      try {
+        await access(filePath);
+        const buffer = await readFile(filePath);
+        return new Response(buffer, {
+          headers: {
+            "Content-Type": contentType,
+            "Cache-Control": "public, max-age=86400, immutable",
+          },
+        });
+      } catch {
+        continue;
+      }
     }
   }
 

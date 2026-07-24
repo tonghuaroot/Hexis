@@ -207,7 +207,7 @@ class TestMessagesToResponsesInput:
                 "role": "user",
                 "content": [
                     {"type": "input_text", "text": "What do you see?"},
-                    {"type": "input_image", "image_url": image_url},
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"},
                 ],
             }
         ]
@@ -230,7 +230,7 @@ class TestMessagesToResponsesInput:
                 "role": "user",
                 "content": [
                     {"type": "input_text", "text": "Describe this image."},
-                    {"type": "input_image", "image_url": image_url},
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"},
                 ],
             }
         ]

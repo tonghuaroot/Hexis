@@ -7,6 +7,8 @@ Tools for content ingestion: fast (shallow), slow (conscious RLM), hybrid.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -485,7 +487,7 @@ def _detect_url_source_type(url: str) -> str:
     from urllib.parse import urlparse
     parsed = urlparse(url)
     path_lower = parsed.path.lower()
-    if path_lower.endswith(".pdf"):
+    if path_lower.endswith(".pdf") or path_lower.startswith("/pdf/"):
         return "pdf"
     if path_lower.endswith((".rss", ".atom", ".xml")):
         # Heuristic: RSS/Atom feeds often have these extensions
@@ -494,50 +496,11 @@ def _detect_url_source_type(url: str) -> str:
     return "web"
 
 
-def _fetch_url_content(url: str, source_type: str) -> tuple[str, str]:
-    """Fetch and extract content based on detected source type.
-
-    Returns (content, actual_source_type) — source_type may be refined
-    (e.g. if XML turns out not to be RSS).
-    """
-    if source_type == "youtube":
-        from services.ingest import YouTubeTranscriptReader
-        return YouTubeTranscriptReader.read(url), "youtube"
-
-    if source_type == "pdf":
-        import tempfile
-        import urllib.request
-        # Download PDF to temp file, then use PDFReader
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            urllib.request.urlretrieve(url, tmp.name)
-            from services.ingest import PDFReader
-            content = PDFReader.read(Path(tmp.name))
-            import os
-            os.unlink(tmp.name)
-            header = f"[Source: {url}]\n[Format: PDF]\n\n"
-            return header + content, "pdf"
-
-    if source_type == "rss":
-        try:
-            from services.ingest import RssReader
-            content = RssReader.read(url)
-            if content.strip():
-                return content, "rss"
-        except Exception:
-            pass
-        # Fall back to web extraction if RSS parsing fails
-        source_type = "web"
-
-    # Default: web (HTML extraction via trafilatura)
-    from services.ingest import WebReader
-    return WebReader.read(url), "web"
-
-
 class URLIngestHandler(ToolHandler):
-    """Ingest web content from a URL into memory.
+    """Queue web content from a URL for durable background ingestion.
 
-    Detects source type (HTML, PDF, YouTube, RSS) from the URL and routes
-    to the appropriate extractor, then runs through the ingestion pipeline.
+    The worker performs extraction and memory creation. Keeping this tool fast
+    prevents chat/heartbeat turns from blocking on large PDFs or slow sites.
     """
 
     @property
@@ -545,10 +508,12 @@ class URLIngestHandler(ToolHandler):
         return ToolSpec(
             name="url_ingest",
             description=(
-                "Fetch a URL and ingest its content into memory. Automatically "
-                "detects the source type: web pages (HTML), PDFs, YouTube videos "
-                "(transcripts), and RSS/Atom feeds. Extracts readable text, "
-                "then processes through the ingestion pipeline."
+                "Queue a URL for background ingestion into memory. Use after "
+                "you have fetched/read a web source worth keeping; do not use "
+                "this for immediate analysis. The worker later fetches web pages "
+                "(HTML), PDFs, YouTube transcripts, and RSS/Atom feeds, preserves "
+                "the source, creates memories, and loads single-source intake to "
+                "the RecMem desk."
             ),
             parameters={
                 "type": "object",
@@ -604,73 +569,63 @@ class URLIngestHandler(ToolHandler):
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> ToolResult:
-        from services.ingest import IngestionMode, IngestionPipeline
-
         url = str(arguments["url"]).strip()
-        mode_str = arguments.get("mode", "fast")
-        mode_map = {
-            "fast": IngestionMode.FAST,
-            "slow": IngestionMode.SLOW,
-            "hybrid": IngestionMode.HYBRID,
-        }
-        mode = mode_map.get(mode_str, IngestionMode.FAST)
+        mode_str = str(arguments.get("mode") or "fast").lower()
+        if mode_str not in ("fast", "slow", "hybrid"):
+            return ToolResult.error_result(
+                "mode must be fast, slow, or hybrid",
+                ToolErrorType.INVALID_PARAMS,
+            )
 
-        # Detect source type and fetch content
+        registry = getattr(context, "registry", None)
+        pool = getattr(registry, "pool", None)
+        if pool is None:
+            return ToolResult.error_result(
+                "URL ingestion queue is unavailable: database pool is not configured",
+                ToolErrorType.MISSING_CONFIG,
+            )
+
         source_type = _detect_url_source_type(url)
+        payload: dict[str, Any] = {
+            "url": url,
+            "title": str(arguments.get("title") or "").strip() or None,
+            "mode": mode_str,
+            "source_type": source_type,
+        }
+        payload.update(_acquisition_override(arguments, context))
+        payload.update(_sensitivity_override(arguments))
 
+        content_hash = f"url:{hashlib.sha256(url.encode('utf-8')).hexdigest()}"
         try:
-            content, source_type = await asyncio.get_running_loop().run_in_executor(
-                None, _fetch_url_content, url, source_type
-            )
+            async with pool.acquire() as conn:
+                job_id = await conn.fetchval(
+                    "SELECT enqueue_ingestion_job('url', $1::jsonb, NULL, $2)",
+                    json.dumps(payload),
+                    content_hash,
+                )
         except Exception as e:
+            logger.error("url_ingest enqueue failed: %s", e)
             return ToolResult.error_result(
-                f"Failed to fetch URL ({source_type}): {e}",
-                ToolErrorType.NETWORK_ERROR,
-            )
-
-        if not content or not content.strip():
-            return ToolResult.error_result(
-                f"No extractable content from {url}",
+                f"URL ingestion could not be queued: {e}",
                 ToolErrorType.EXECUTION_FAILED,
             )
 
-        # The pipeline ingests text directly now (#89) — no temp-file dance.
-        pool = context.registry.pool
-        config = await _build_ingest_config(pool, mode=mode, **_sensitivity_override(arguments), **_acquisition_override(arguments, context))
-        pipeline = IngestionPipeline(config)
-        try:
-            count = await pipeline.ingest_text(
-                content,
-                title=arguments.get("title") or url,
-                source_type=source_type,
-                path=url,
-                file_type=".html" if source_type == "web" else f".{source_type}",
-            )
-            details = _pipeline_result(pipeline)
-
-            output = {
-                "memories_created": count,
-                "url": url,
-                "mode": mode_str,
-                "source_type": source_type,
-                "content_chars": len(content),
-                **details,
-            }
-            return ToolResult.success_result(
-                output,
-                display_output=(
-                    f"Ingested {url} ({source_type}, {mode_str}): {count} memories "
-                    f"created from {len(content):,} chars."
-                ),
-            )
-        except Exception as e:
-            logger.error("url_ingest pipeline failed: %s", e)
-            return ToolResult.error_result(
-                f"URL ingestion failed: {e}",
-                ToolErrorType.EXECUTION_FAILED,
-            )
-        finally:
-            await pipeline.close()
+        output = {
+            "accepted": True,
+            "job_id": str(job_id),
+            "url": url,
+            "mode": mode_str,
+            "source_type": source_type,
+            "content_hash": content_hash,
+        }
+        return ToolResult.success_result(
+            output,
+            display_output=(
+                f"Queued URL ingestion for {url} ({source_type}, {mode_str}); "
+                f"job {job_id}. The maintenance worker will fetch, preserve, "
+                "ingest, and desk-load the source."
+            ),
+        )
 
 
 def create_ingest_tools() -> list[ToolHandler]:

@@ -1252,6 +1252,8 @@ export default function ChatPage() {
     setSearchConfigNotice(null);
     setSessionNotice(null);
 
+    let receivedDone = false;
+
     try {
       const currentSessionId = sessionId || loadSessionId();
       const chatBody: {
@@ -1432,6 +1434,7 @@ export default function ChatPage() {
             }
           }
           if (eventType === "done") {
+            receivedDone = true;
             setAssistantPresentation(assistantMessage.id, payload.presentation);
             if (typeof payload.session_id === "string" && payload.session_id) {
               saveSessionId(payload.session_id);
@@ -1443,6 +1446,9 @@ export default function ChatPage() {
         }
       }
     } catch (err: unknown) {
+      if (receivedDone) {
+        return;
+      }
       appendLog({
         id: crypto.randomUUID(),
         category: "error",

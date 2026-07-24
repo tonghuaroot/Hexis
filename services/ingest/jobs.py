@@ -63,6 +63,11 @@ async def _process_job(pool, job: dict[str, Any], *, config_override=None) -> No
     acquisition = _infer_acquisition(payload)
     if acquisition:
         config.acquisition = acquisition
+    acquired_reason = str(
+        payload.get("acquired_reason") or payload.get("keep_reason") or ""
+    ).strip()
+    if acquired_reason:
+        config.acquired_reason = acquired_reason
     pipeline = IngestionPipeline(config)
 
     async def _ingest_artifact() -> int:

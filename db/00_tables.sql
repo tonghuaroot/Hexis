@@ -479,7 +479,8 @@ INSERT INTO config (key, value, description) VALUES
     ('embedding.dimension', to_jsonb(COALESCE(NULLIF(current_setting('app.embedding_dimension', true), ''), '768')::int), 'Embedding vector dimension'),
     ('embedding.retry_seconds', '30'::jsonb, 'Total seconds to retry embedding requests'),
     ('embedding.retry_interval_seconds', '1.0'::jsonb, 'Seconds between retry attempts'),
-    ('embedding.http_timeout_ms', '9000'::jsonb, 'Per-request HTTP timeout (ms) for embedding calls; must exceed the server cold model-load time so a request rides through a cold load instead of aborting it')
+    ('embedding.http_timeout_ms', '9000'::jsonb, 'Per-request HTTP timeout (ms) for embedding calls; must exceed the server cold model-load time so a request rides through a cold load instead of aborting it'),
+    ('embedding.max_batch_size', '32'::jsonb, 'Maximum texts sent to the embedding service in one HTTP request; embeddinggemma accepts up to 32')
 ON CONFLICT (key) DO NOTHING;
 
 -- HMX: stable identity lineage id — established at birth, propagated on

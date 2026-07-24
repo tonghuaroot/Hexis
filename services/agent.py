@@ -47,8 +47,8 @@ _SUBCONSCIOUS_TOTAL_CONTEXT_CHARS = 7000
 _MAX_VISUAL_ATTACHMENTS_PER_TURN = 8
 
 
-def _visual_attachment_parts(visual_attachments: list[dict[str, Any]] | None) -> list[dict[str, str]]:
-    parts: list[dict[str, str]] = []
+def _visual_attachment_parts(visual_attachments: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
     for index, attachment in enumerate((visual_attachments or [])[:_MAX_VISUAL_ATTACHMENTS_PER_TURN], start=1):
         if not isinstance(attachment, dict):
             continue
@@ -60,14 +60,14 @@ def _visual_attachment_parts(visual_attachments: list[dict[str, Any]] | None) ->
             continue
         name = str(attachment.get("name") or f"image-{index}").strip() or f"image-{index}"
         parts.append({"type": "input_text", "text": f"\n[Attached image {index}: {name}]\n"})
-        parts.append({"type": "input_image", "image_url": data_url})
+        parts.append({"type": "input_image", "image_url": data_url, "detail": "auto"})
     return parts
 
 
 def _user_content_with_visuals(
     text: str,
     visual_attachments: list[dict[str, Any]] | None,
-) -> str | list[dict[str, str]]:
+) -> str | list[dict[str, Any]]:
     image_parts = _visual_attachment_parts(visual_attachments)
     if not image_parts:
         return text
@@ -568,6 +568,19 @@ async def build_system_prompt(
         except Exception:
             logger.debug("Temporal context unavailable for prompt", exc_info=True)
 
+    # Active persona comes before generic substrate/personhood grounding: the
+    # shared cognition modules should be interpreted through the selected
+    # character/persona, not compete with it as a higher-priority identity.
+    if agent_profile:
+        persona = agent_profile.get("persona")
+        if isinstance(persona, dict) and persona and registry is not None and getattr(registry, "pool", None) is not None:
+            async with registry.pool.acquire() as conn:
+                persona_block = await conn.fetchval(
+                    "SELECT render_active_persona($1::jsonb)", json.dumps(persona)
+                )
+            if persona_block:
+                prompt += "\n\n----- ACTIVE PERSONA -----\n\n" + persona_block
+
     # Skill-first capability surface. Tool schemas ride the structured
     # tool-calling API and full skill instructions come from `use_skill` on
     # demand, so the prompt carries only usage guidance plus a compact skill
@@ -602,16 +615,8 @@ async def build_system_prompt(
     except Exception:
         logger.debug("Failed to compose personhood prompt", exc_info=True)
 
-    # Agent profile
+    # Runtime profile
     if agent_profile:
-        persona = agent_profile.get("persona")
-        if isinstance(persona, dict) and persona and registry is not None and getattr(registry, "pool", None) is not None:
-            async with registry.pool.acquire() as conn:
-                persona_block = await conn.fetchval(
-                    "SELECT render_active_persona($1::jsonb)", json.dumps(persona)
-                )
-            if persona_block:
-                prompt += "\n\n----- ACTIVE PERSONA -----\n\n" + persona_block
         # The offered tool list is the source of truth for capabilities (#66);
         # the profile's stale tool inventory and empty fields are noise.
         runtime_profile = {
